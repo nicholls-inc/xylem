@@ -56,6 +56,11 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 // ErrInvalidTransition is returned when a state transition is not allowed.
 var ErrInvalidTransition = errors.New("invalid state transition")
 
+// IsTerminal reports whether s is a terminal vessel state.
+func (s VesselState) IsTerminal() bool {
+	return s == StateCompleted || s == StateFailed || s == StateCancelled || s == StateTimedOut
+}
+
 type Vessel struct {
 	ID        string            `json:"id"`
 	Source    string            `json:"source"`
@@ -292,6 +297,61 @@ func (q *Queue) Cancel(id string) error {
 
 		return fmt.Errorf("vessel %s not found", id)
 	})
+}
+
+// Compact rewrites the queue file keeping only the latest record per vessel ID.
+// Non-terminal records (pending, running, waiting) are always preserved.
+// For terminal records (completed, failed, cancelled, timed_out), only the
+// latest one per vessel ID is retained. Returns the number of records removed.
+func (q *Queue) Compact() (int, error) {
+	var removed int
+	err := q.withLock(func() error {
+		vessels, err := q.readAllVessels()
+		if err != nil {
+			return err
+		}
+		compacted, n := compactVessels(vessels)
+		removed = n
+		return q.writeAllVessels(compacted)
+	})
+	return removed, err
+}
+
+// CompactDryRun reports how many records would be removed by Compact without
+// modifying the queue file.
+func (q *Queue) CompactDryRun() (int, error) {
+	var removable int
+	err := q.withRLock(func() error {
+		vessels, err := q.readAllVessels()
+		if err != nil {
+			return err
+		}
+		_, removable = compactVessels(vessels)
+		return nil
+	})
+	return removable, err
+}
+
+// compactVessels returns the compacted vessel slice and the number of records
+// removed. For each vessel ID, only the latest record is kept; non-terminal
+// records are always preserved.
+func compactVessels(vessels []Vessel) ([]Vessel, int) {
+	seen := make(map[string]int, len(vessels)) // ID → index of latest record
+	for i, v := range vessels {
+		seen[v.ID] = i
+	}
+	var (
+		compacted []Vessel
+		removed   int
+	)
+	for i, v := range vessels {
+		if v.State.IsTerminal() && seen[v.ID] != i {
+			removed++
+		} else {
+			compacted = append(compacted, v)
+		}
+	}
+	return compacted, removed
 }
 
 func (q *Queue) HasRef(ref string) bool {

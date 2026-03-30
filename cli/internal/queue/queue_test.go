@@ -1385,3 +1385,197 @@ func TestCancelWaitingVessel(t *testing.T) {
 	}
 }
 
+// --- Compaction tests ---
+
+func TestCompact(t *testing.T) {
+	t.Run("removes stale terminal records", func(t *testing.T) {
+		q, path := newTestQueue(t)
+
+		// Enqueue 3 vessels, complete 2, then re-enqueue them.
+		for _, id := range []int{1, 2, 3} {
+			if err := q.Enqueue(testVessel(id)); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+		}
+		// Complete vessel 1 and 2.
+		for _, id := range []int{1, 2} {
+			helperCompleteVessel(t, q, fmt.Sprintf("issue-%d", id))
+		}
+		// Re-enqueue vessel 1 and 2.
+		for _, id := range []int{1, 2} {
+			if err := q.Enqueue(testVessel(id)); err != nil {
+				t.Fatalf("re-enqueue: %v", err)
+			}
+		}
+
+		// Before compaction: 5 records (completed-1, completed-2, pending-3, pending-1, pending-2).
+		linesBefore := readNonEmptyLines(t, path)
+		if len(linesBefore) != 5 {
+			t.Fatalf("expected 5 records before compaction, got %d", len(linesBefore))
+		}
+
+		removed, err := q.Compact()
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		if removed != 2 {
+			t.Fatalf("expected 2 removed, got %d", removed)
+		}
+
+		// After compaction: 3 records (pending-3, pending-1, pending-2).
+		// The old completed records for vessel 1 and 2 are gone because
+		// the latest record for each is the re-enqueued pending one.
+		linesAfter := readNonEmptyLines(t, path)
+		if len(linesAfter) != 3 {
+			t.Fatalf("expected 3 records after compaction, got %d", len(linesAfter))
+		}
+	})
+
+	t.Run("preserves non-terminal records", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+
+		// Enqueue vessels in various non-terminal states.
+		pending := testVessel(10)
+		running := testVessel(11)
+		running.State = StateRunning
+		waiting := testVessel(12)
+		waiting.State = StateWaiting
+
+		for _, v := range []Vessel{pending, running, waiting} {
+			if err := q.Enqueue(v); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+		}
+
+		removed, err := q.Compact()
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		if removed != 0 {
+			t.Fatalf("expected 0 removed (all non-terminal), got %d", removed)
+		}
+
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(vessels) != 3 {
+			t.Fatalf("expected 3 vessels preserved, got %d", len(vessels))
+		}
+	})
+
+	t.Run("retains latest terminal record per ID", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+
+		// Enqueue a vessel, complete it, re-enqueue, fail it.
+		if err := q.Enqueue(testVessel(20)); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		helperCompleteVessel(t, q, "issue-20")
+		if err := q.Enqueue(testVessel(20)); err != nil {
+			t.Fatalf("re-enqueue: %v", err)
+		}
+		// Dequeue and fail the re-enqueued vessel.
+		if _, err := q.Dequeue(); err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		if err := q.Update("issue-20", StateFailed, "boom"); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+
+		// Before: completed-20 + failed-20 = 2 records.
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(vessels) != 2 {
+			t.Fatalf("expected 2 records before compaction, got %d", len(vessels))
+		}
+
+		removed, err := q.Compact()
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		if removed != 1 {
+			t.Fatalf("expected 1 removed, got %d", removed)
+		}
+
+		// After: only the latest (failed) record remains.
+		vessels, err = q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(vessels) != 1 {
+			t.Fatalf("expected 1 vessel after compaction, got %d", len(vessels))
+		}
+		if vessels[0].State != StateFailed {
+			t.Fatalf("expected latest terminal record (failed), got %s", vessels[0].State)
+		}
+	})
+
+	t.Run("empty queue is a no-op", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+
+		removed, err := q.Compact()
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		if removed != 0 {
+			t.Fatalf("expected 0 removed on empty queue, got %d", removed)
+		}
+	})
+
+	t.Run("single terminal record is preserved", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+		if err := q.Enqueue(testVessel(30)); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		helperCompleteVessel(t, q, "issue-30")
+
+		removed, err := q.Compact()
+		if err != nil {
+			t.Fatalf("compact: %v", err)
+		}
+		if removed != 0 {
+			t.Fatalf("expected 0 removed (only one record per ID), got %d", removed)
+		}
+
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(vessels) != 1 {
+			t.Fatalf("expected 1 vessel preserved, got %d", len(vessels))
+		}
+	})
+}
+
+func TestCompactDryRun(t *testing.T) {
+	q, path := newTestQueue(t)
+
+	// Enqueue, complete, and re-enqueue a vessel.
+	if err := q.Enqueue(testVessel(1)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	helperCompleteVessel(t, q, "issue-1")
+	if err := q.Enqueue(testVessel(1)); err != nil {
+		t.Fatalf("re-enqueue: %v", err)
+	}
+
+	linesBefore := readNonEmptyLines(t, path)
+
+	removable, err := q.CompactDryRun()
+	if err != nil {
+		t.Fatalf("compact dry run: %v", err)
+	}
+	if removable != 1 {
+		t.Fatalf("expected 1 removable, got %d", removable)
+	}
+
+	// File should be unchanged.
+	linesAfter := readNonEmptyLines(t, path)
+	if len(linesAfter) != len(linesBefore) {
+		t.Fatalf("dry run modified the file: before=%d lines, after=%d lines", len(linesBefore), len(linesAfter))
+	}
+}
+

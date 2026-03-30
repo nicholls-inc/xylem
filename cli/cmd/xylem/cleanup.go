@@ -34,8 +34,32 @@ func cmdCleanup(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun
 	}
 
 	cleanupPhaseOutputs(cfg, q, dryRun)
+	compactQueue(q, dryRun)
 
 	return nil
+}
+
+func compactQueue(q *queue.Queue, dryRun bool) {
+	if dryRun {
+		removed, err := q.CompactDryRun()
+		if err != nil {
+			log.Printf("warn: could not check queue for compaction: %v", err)
+			return
+		}
+		if removed > 0 {
+			fmt.Printf("Would remove %d stale queue record(s) (dry-run — no changes made)\n", removed)
+		}
+		return
+	}
+
+	removed, err := q.Compact()
+	if err != nil {
+		log.Printf("warn: queue compaction failed: %v", err)
+		return
+	}
+	if removed > 0 {
+		fmt.Printf("Compacted queue: removed %d stale record(s)\n", removed)
+	}
 }
 
 func cleanupWorktrees(wt *worktree.Manager, dryRun bool) error {
@@ -89,9 +113,7 @@ func cleanupPhaseOutputs(cfg *config.Config, q *queue.Queue, dryRun bool) {
 	// Build set of terminal vessel IDs older than cutoff
 	terminalIDs := make(map[string]bool)
 	for _, v := range vessels {
-		isTerminal := v.State == queue.StateCompleted || v.State == queue.StateFailed ||
-			v.State == queue.StateCancelled || v.State == queue.StateTimedOut
-		if isTerminal && v.EndedAt != nil && v.EndedAt.Before(cutoff) {
+		if v.State.IsTerminal() && v.EndedAt != nil && v.EndedAt.Before(cutoff) {
 			terminalIDs[v.ID] = true
 		}
 	}
