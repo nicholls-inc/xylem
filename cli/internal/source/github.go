@@ -44,47 +44,52 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	}
 
 	var vessels []queue.Vessel
+	seen := make(map[int]bool)
+
 	for _, task := range g.Tasks {
-		args := []string{
-			"search", "issues",
-			"--repo", g.Repo,
-			"--state", "open",
-			"--json", "number,title,url,labels",
-			"--limit", "20",
-		}
 		for _, label := range task.Labels {
-			args = append(args, "--label", label)
-		}
-
-		out, err := g.CmdRunner.Run(ctx, "gh", args...)
-		if err != nil {
-			return vessels, fmt.Errorf("gh search issues: %w", err)
-		}
-
-		var issues []ghIssue
-		if err := json.Unmarshal(out, &issues); err != nil {
-			return vessels, fmt.Errorf("parse gh search output: %w", err)
-		}
-
-		for _, issue := range issues {
-			if g.hasExcludedLabel(issue, excludeSet) ||
-				g.Queue.HasRef(issue.URL) ||
-				g.hasBranch(ctx, issue.Number) ||
-				g.hasOpenPR(ctx, issue.Number) {
-				continue
+			args := []string{
+				"search", "issues",
+				"--repo", g.Repo,
+				"--state", "open",
+				"--json", "number,title,url,labels",
+				"--limit", "20",
+				"--label", label,
 			}
 
-			vessels = append(vessels, queue.Vessel{
-				ID:     fmt.Sprintf("issue-%d", issue.Number),
-				Source: "github-issue",
-				Ref:    issue.URL,
-				Workflow:  task.Workflow,
-				Meta: map[string]string{
-					"issue_num": strconv.Itoa(issue.Number),
-				},
-				State:     queue.StatePending,
-				CreatedAt: time.Now().UTC(),
-			})
+			out, err := g.CmdRunner.Run(ctx, "gh", args...)
+			if err != nil {
+				return vessels, fmt.Errorf("gh search issues: %w", err)
+			}
+
+			var issues []ghIssue
+			if err := json.Unmarshal(out, &issues); err != nil {
+				return vessels, fmt.Errorf("parse gh search output: %w", err)
+			}
+
+			for _, issue := range issues {
+				if seen[issue.Number] {
+					continue
+				}
+				if g.hasExcludedLabel(issue, excludeSet) ||
+					g.Queue.HasRef(issue.URL) ||
+					g.hasBranch(ctx, issue.Number) ||
+					g.hasOpenPR(ctx, issue.Number) {
+					continue
+				}
+				seen[issue.Number] = true
+				vessels = append(vessels, queue.Vessel{
+					ID:     fmt.Sprintf("issue-%d", issue.Number),
+					Source: "github-issue",
+					Ref:    issue.URL,
+					Workflow:  task.Workflow,
+					Meta: map[string]string{
+						"issue_num": strconv.Itoa(issue.Number),
+					},
+					State:     queue.StatePending,
+					CreatedAt: time.Now().UTC(),
+				})
+			}
 		}
 	}
 	return vessels, nil
