@@ -4,11 +4,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// validPhaseName matches names starting with a lowercase letter, followed by
+// lowercase letters, digits, or underscores. Names must start with a letter so
+// they work as Go template identifiers in dot notation (e.g. .PreviousOutputs.analyze).
+var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // Workflow defines a multi-phase execution plan loaded from a YAML file.
 type Workflow struct {
@@ -84,6 +90,10 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			return fmt.Errorf("duplicate phase name %q", p.Name)
 		}
 		seen[p.Name] = true
+
+		if !validPhaseName.MatchString(p.Name) {
+			return fmt.Errorf("phase name %q is invalid; must start with a lowercase letter and contain only lowercase letters, digits, and underscores", p.Name)
+		}
 
 		if p.PromptFile == "" {
 			return fmt.Errorf("phase %q: prompt_file is required", p.Name)

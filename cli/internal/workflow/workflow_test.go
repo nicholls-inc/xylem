@@ -624,6 +624,64 @@ func TestValidate(t *testing.T) {
 			prompts: []string{"prompt.md"},
 			wantErr: `workflow name "wrong-name" does not match filename "test.yaml"`,
 		},
+		{
+			name:          "phase name with hyphens is rejected",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "create-issues", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `phase name "create-issues" is invalid; must start with a lowercase letter and contain only lowercase letters, digits, and underscores`,
+		},
+		{
+			name:          "phase name with uppercase is rejected",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "CreateIssues", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `phase name "CreateIssues" is invalid`,
+		},
+		{
+			name:          "phase name with underscores is accepted",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "create_issues", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+		},
+		{
+			name:          "phase name starting with digit is rejected",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "2step", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `phase name "2step" is invalid`,
+		},
+		{
+			name:          "phase name with digits is accepted",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "step2", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+		},
 	}
 
 	for _, tt := range tests {
