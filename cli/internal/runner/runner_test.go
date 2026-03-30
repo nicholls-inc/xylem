@@ -1212,7 +1212,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 			Claude: config.ClaudeConfig{Command: "claude"},
 		}
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
-		args := buildPhaseArgs(cfg, p, "")
+		args := buildPhaseArgs(cfg, nil, p, "")
 
 		if args[0] != "-p" {
 			t.Errorf("expected -p, got %s", args[0])
@@ -1227,7 +1227,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 			Claude: config.ClaudeConfig{Command: "claude", Flags: "--bare --dangerously-skip-permissions"},
 		}
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
-		args := buildPhaseArgs(cfg, p, "")
+		args := buildPhaseArgs(cfg, nil, p, "")
 
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, "--bare") {
@@ -1244,7 +1244,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 		}
 		allowedTools := "Read,Edit"
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5, AllowedTools: &allowedTools}
-		args := buildPhaseArgs(cfg, p, "")
+		args := buildPhaseArgs(cfg, nil, p, "")
 
 		// Should have both phase-level and config-level tools
 		toolCount := 0
@@ -1263,7 +1263,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 			Claude: config.ClaudeConfig{Command: "claude"},
 		}
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
-		args := buildPhaseArgs(cfg, p, "harness content")
+		args := buildPhaseArgs(cfg, nil, p, "harness content")
 
 		found := false
 		for i, a := range args {
@@ -1275,6 +1275,126 @@ func TestBuildPhaseArgs(t *testing.T) {
 			t.Errorf("expected --append-system-prompt with harness, got: %v", args)
 		}
 	})
+}
+
+func strPtr(s string) *string {
+	return &s
+}
+
+func TestBuildPhaseArgsModelResolution(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       *config.Config
+		wf        *workflow.Workflow
+		phase     *workflow.Phase
+		wantModel string // expected --model value; empty means no --model flag
+	}{
+		{
+			name: "phase model takes priority",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
+			},
+			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5, Model: strPtr("phase-model")},
+			wantModel: "phase-model",
+		},
+		{
+			name: "workflow model when phase has no model",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
+			},
+			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			wantModel: "workflow-model",
+		},
+		{
+			name: "config default model when neither phase nor workflow set",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
+			},
+			wf:        &workflow.Workflow{},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			wantModel: "config-model",
+		},
+		{
+			name: "no model when nothing set",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude"},
+			},
+			wf:        &workflow.Workflow{},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			wantModel: "",
+		},
+		{
+			name: "nil workflow still falls back to config",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
+			},
+			wf:        nil,
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			wantModel: "config-model",
+		},
+		{
+			name: "flags --model stripped when hierarchy resolves model",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude", Flags: "--bare --model old-model --dangerously-skip-permissions"},
+			},
+			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			wantModel: "workflow-model",
+		},
+		{
+			name: "flags --model preserved when hierarchy does not resolve",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude", Flags: "--bare --model flags-model"},
+			},
+			wf:        &workflow.Workflow{},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			wantModel: "flags-model",
+		},
+		{
+			name: "empty string phase model falls through to workflow",
+			cfg: &config.Config{
+				Claude: config.ClaudeConfig{Command: "claude"},
+			},
+			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5, Model: strPtr("")},
+			wantModel: "workflow-model",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := buildPhaseArgs(tt.cfg, tt.wf, tt.phase, "")
+
+			// Find --model in args
+			foundModel := ""
+			for i, a := range args {
+				if a == "--model" && i+1 < len(args) {
+					foundModel = args[i+1]
+					break
+				}
+			}
+
+			if foundModel != tt.wantModel {
+				t.Errorf("model = %q, want %q (args: %v)", foundModel, tt.wantModel, args)
+			}
+
+			// When hierarchy resolves a model, --model from flags should be stripped
+			if tt.wantModel != "" && strings.Contains(tt.cfg.Claude.Flags, "--model") {
+				// Count --model occurrences; should be exactly 1
+				count := 0
+				for _, a := range args {
+					if a == "--model" {
+						count++
+					}
+				}
+				if count != 1 {
+					t.Errorf("expected exactly 1 --model flag, got %d (args: %v)", count, args)
+				}
+			}
+		})
+	}
 }
 
 func TestDrainTimeoutV2Phase(t *testing.T) {

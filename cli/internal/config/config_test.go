@@ -536,6 +536,59 @@ claude:
 	requireErrorContains(t, err, "claude.allowed_tools is no longer supported")
 }
 
+func TestLoadDefaultModel(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-20250514"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Claude.DefaultModel != "claude-sonnet-4-20250514" {
+		t.Fatalf("Claude.DefaultModel = %q, want claude-sonnet-4-20250514", cfg.Claude.DefaultModel)
+	}
+}
+
+func TestLoadDefaultModelEmpty(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Claude.DefaultModel != "" {
+		t.Fatalf("Claude.DefaultModel = %q, want empty", cfg.Claude.DefaultModel)
+	}
+}
+
 func TestLoadDaemonConfig(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:

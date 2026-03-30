@@ -279,7 +279,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 			}
 
 			// Construct claude args
-			args := buildPhaseArgs(r.Config, &p, harnessContent)
+			args := buildPhaseArgs(r.Config, sk, &p, harnessContent)
 
 			// Run phase via stdin
 			output, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), r.Config.Claude.Command, args...)
@@ -636,12 +636,30 @@ func vesselLabel(v queue.Vessel) string {
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
-func buildPhaseArgs(cfg *config.Config, p *workflow.Phase, harnessContent string) []string {
+func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
 	args := []string{"-p"}
 	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
 
+	// Resolve model: Phase > Workflow > Config default
+	model := ""
+	if p.Model != nil && *p.Model != "" {
+		model = *p.Model
+	} else if wf != nil && wf.Model != nil && *wf.Model != "" {
+		model = *wf.Model
+	} else if cfg.Claude.DefaultModel != "" {
+		model = cfg.Claude.DefaultModel
+	}
+
 	if cfg.Claude.Flags != "" {
-		args = append(args, strings.Fields(cfg.Claude.Flags)...)
+		fields := strings.Fields(cfg.Claude.Flags)
+		if model != "" {
+			fields = stripModelFlag(fields)
+		}
+		args = append(args, fields...)
+	}
+
+	if model != "" {
+		args = append(args, "--model", model)
 	}
 
 	if p.AllowedTools != nil && *p.AllowedTools != "" {
@@ -657,4 +675,17 @@ func buildPhaseArgs(cfg *config.Config, p *workflow.Phase, harnessContent string
 	}
 
 	return args
+}
+
+// stripModelFlag removes --model and its value from a slice of CLI args.
+func stripModelFlag(fields []string) []string {
+	var out []string
+	for i := 0; i < len(fields); i++ {
+		if fields[i] == "--model" {
+			i++ // skip the value
+			continue
+		}
+		out = append(out, fields[i])
+	}
+	return out
 }
