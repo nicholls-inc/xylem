@@ -2046,11 +2046,25 @@ func TestDrainCommandPhase(t *testing.T) {
 	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 		t.Errorf("expected output file %s to exist", outputPath)
 	}
+	outputData, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("read output file: %v", err)
+	}
+	if !strings.Contains(string(outputData), "build complete") {
+		t.Errorf("output file content = %q, want to contain 'build complete'", string(outputData))
+	}
 
 	// Verify command file was written
 	commandPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "build.command")
 	if _, err := os.Stat(commandPath); os.IsNotExist(err) {
 		t.Errorf("expected command file %s to exist", commandPath)
+	}
+	commandData, err := os.ReadFile(commandPath)
+	if err != nil {
+		t.Fatalf("read command file: %v", err)
+	}
+	if !strings.Contains(string(commandData), "echo building") {
+		t.Errorf("command file content = %q, want to contain 'echo building'", string(commandData))
 	}
 
 	vessels, _ := q.List()
@@ -2117,15 +2131,12 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 	os.Chdir(dir)
 	defer os.Chdir(oldWd)
 
-	// Track call index to distinguish command phase from gate
-	callIdx := int32(0)
 	cmdRunner := &mockCmdRunner{
 		gateCallResults: []gateCallResult{
 			{output: []byte("build ok\n"), err: nil},   // command phase execution
 			{output: []byte("tests pass\n"), err: nil},  // gate execution
 		},
 	}
-	_ = callIdx // suppress unused
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 	r.Sources = map[string]source.Source{
@@ -2138,6 +2149,11 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 	}
 	if result.Completed != 1 {
 		t.Errorf("expected 1 completed, got %d", result.Completed)
+	}
+
+	// Verify both command phase and gate were called via RunOutput
+	if cmdRunner.gateCallCount != 2 {
+		t.Errorf("expected 2 RunOutput calls (command + gate), got %d", cmdRunner.gateCallCount)
 	}
 
 	// Second phase (pr) should have been invoked via RunPhase
