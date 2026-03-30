@@ -31,9 +31,17 @@ type mockCmdRunner struct {
 	started      int32
 	gateOutput   []byte
 	gateErr      error
+	// Per-call gate results; when non-nil, overrides gateOutput/gateErr by call index
+	gateCallResults []gateCallResult
+	gateCallCount   int32
 	// Track calls for assertion
 	phaseCalls []phaseCall
 	outputArgs [][]string
+}
+
+type gateCallResult struct {
+	output []byte
+	err    error
 }
 
 type phaseCall struct {
@@ -45,13 +53,22 @@ type phaseCall struct {
 
 func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string) ([]byte, error) {
 	m.outputArgs = append(m.outputArgs, append([]string{name}, args...))
-	if m.gateOutput != nil {
-		// If the command looks like a gate command (sh -c), return gate output
-		for _, a := range args {
-			if strings.Contains(a, "cd ") {
-				return m.gateOutput, m.gateErr
-			}
+	// Detect gate commands by matching the exact shape produced by gate.RunCommandGate:
+	// RunOutput("sh", "-c", "cd <dir> && <cmd>")
+	isGate := false
+	if name == "sh" && len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "cd ") {
+		isGate = true
+	}
+	if isGate && m.gateCallResults != nil {
+		idx := int(atomic.AddInt32(&m.gateCallCount, 1) - 1)
+		if idx < len(m.gateCallResults) {
+			return m.gateCallResults[idx].output, m.gateCallResults[idx].err
 		}
+		last := m.gateCallResults[len(m.gateCallResults)-1]
+		return last.output, last.err
+	}
+	if m.gateOutput != nil && isGate {
+		return m.gateOutput, m.gateErr
 	}
 	if m.outputData != nil {
 		return m.outputData, m.outputErr
@@ -695,6 +712,62 @@ func TestDrainCommandGateFailsNoRetries(t *testing.T) {
 	// Only 1 phase call (gate failed, no retry, phase 2 not invoked)
 	if len(cmdRunner.phaseCalls) != 1 {
 		t.Errorf("expected 1 phase call, got %d", len(cmdRunner.phaseCalls))
+	}
+}
+
+func TestDrainGateRetriesNotBleedBetweenPhases(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	// Phase A has retries:2 but its gate passes on the first attempt.
+	// Phase B has retries:0 and its gate always fails.
+	// Without the fix, Phase A's leftover GateRetries bleeds into Phase B,
+	// giving it phantom retries and causing Phase B to run 3 times instead of once.
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "implement", promptContent: "Implement fix", maxTurns: 10,
+			gate: "      type: command\n      run: \"make test\"\n      retries: 2\n      retry_delay: \"1ms\"",
+		},
+		{
+			name: "pr", promptContent: "Create PR", maxTurns: 3,
+			gate: "      type: command\n      run: \"make lint\"\n      retries: 0",
+		},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		// First gate call (Phase A): passes. Second gate call (Phase B): fails with a
+		// non-zero exit code. Use mockExitError so RunCommandGate returns (output, false, nil)
+		// and the retry-check path (vessel.GateRetries <= 0) is exercised.
+		// errors.New("exit status 1") would NOT satisfy the exitCoder interface, causing
+		// a system error that bypasses the retry check entirely and masking the bleed bug.
+		gateCallResults: []gateCallResult{
+			{output: []byte("ok"), err: nil},
+			{output: []byte("FAIL: lint"), err: &mockExitError{code: 1}},
+		},
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("expected 1 failed, got %d", result.Failed)
+	}
+	// Phase A ran once, Phase B ran once — no phantom retries from bleed.
+	if len(cmdRunner.phaseCalls) != 2 {
+		t.Errorf("expected 2 phase calls (one per phase, no phantom retries), got %d", len(cmdRunner.phaseCalls))
 	}
 }
 
