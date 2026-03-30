@@ -73,6 +73,19 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				CmdRunner: cmdRunner,
 			}
 			sources[gh.Name()] = gh
+		case "github-pr":
+			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				tasks[name] = source.GitHubTaskFromConfig(t)
+			}
+			pr := &source.GitHubPR{
+				Repo:      srcCfg.Repo,
+				Tasks:     tasks,
+				Exclude:   srcCfg.Exclude,
+				Queue:     q,
+				CmdRunner: cmdRunner,
+			}
+			sources[pr.Name()] = pr
 		case "github-pr-events":
 			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
