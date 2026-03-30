@@ -280,8 +280,11 @@ func (q *Queue) HasRef(ref string) bool {
 	}
 
 	for _, vessel := range vessels {
-		if vessel.Ref == ref && vessel.State != StateCancelled {
-			return true
+		if vessel.Ref == ref {
+			switch vessel.State {
+			case StatePending, StateRunning, StateWaiting:
+				return true
+			}
 		}
 	}
 	return false
