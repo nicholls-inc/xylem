@@ -41,8 +41,8 @@ type Task struct {
 type ClaudeConfig struct {
 	Command      string            `yaml:"command"`
 	Flags        string            `yaml:"flags,omitempty"`
-	Env          map[string]string `yaml:"env,omitempty"`
 	DefaultModel string            `yaml:"default_model,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
 	// Template is kept for deserialization so we can detect and reject it.
 	Template     string   `yaml:"template,omitempty"`
 	AllowedTools []string `yaml:"allowed_tools,omitempty"`

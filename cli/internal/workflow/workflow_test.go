@@ -742,6 +742,68 @@ func TestValidate(t *testing.T) {
 	}
 }
 
+func TestLoadWorkflowWithModel(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+
+	createPromptFile(t, dir, "prompts/analyze.md")
+	createPromptFile(t, dir, "prompts/implement.md")
+
+	path := writeWorkflowFile(t, dir, "fix-bug", `name: fix-bug
+description: Fix a bug
+model: claude-sonnet-4-20250514
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    model: claude-opus-4-20250514
+  - name: implement
+    prompt_file: prompts/implement.md
+    max_turns: 20
+`)
+
+	s, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+
+	if s.Model == nil || *s.Model != "claude-sonnet-4-20250514" {
+		t.Fatalf("Workflow.Model = %v, want claude-sonnet-4-20250514", s.Model)
+	}
+	if s.Phases[0].Model == nil || *s.Phases[0].Model != "claude-opus-4-20250514" {
+		t.Fatalf("Phases[0].Model = %v, want claude-opus-4-20250514", s.Phases[0].Model)
+	}
+	if s.Phases[1].Model != nil {
+		t.Fatalf("Phases[1].Model = %v, want nil", s.Phases[1].Model)
+	}
+}
+
+func TestLoadWorkflowWithoutModel(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "fix-bug", `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	s, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned unexpected error: %v", err)
+	}
+
+	if s.Model != nil {
+		t.Fatalf("Workflow.Model = %v, want nil", s.Model)
+	}
+	if s.Phases[0].Model != nil {
+		t.Fatalf("Phases[0].Model = %v, want nil", s.Phases[0].Model)
+	}
+}
+
 func strPtr(s string) *string {
 	return &s
 }

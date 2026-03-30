@@ -123,7 +123,7 @@ func TestGitHubPRScanExcludedLabel(t *testing.T) {
 func TestGitHubPRScanAlreadyQueued(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(dir + "/queue.jsonl")
-	_ = q.Enqueue(queue.Vessel{
+	_, _ = q.Enqueue(queue.Vessel{
 		ID: "pr-10", Source: "github-pr",
 		Ref: "https://github.com/owner/repo/pull/10", Workflow: "review-pr",
 		Meta: map[string]string{"pr_num": "10"},

@@ -1393,7 +1393,7 @@ func TestCompact(t *testing.T) {
 
 		// Enqueue 3 vessels, complete 2, then re-enqueue them.
 		for _, id := range []int{1, 2, 3} {
-			if err := q.Enqueue(testVessel(id)); err != nil {
+			if _, err := q.Enqueue(testVessel(id)); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
 		}
@@ -1403,7 +1403,7 @@ func TestCompact(t *testing.T) {
 		}
 		// Re-enqueue vessel 1 and 2.
 		for _, id := range []int{1, 2} {
-			if err := q.Enqueue(testVessel(id)); err != nil {
+			if _, err := q.Enqueue(testVessel(id)); err != nil {
 				t.Fatalf("re-enqueue: %v", err)
 			}
 		}
@@ -1442,7 +1442,7 @@ func TestCompact(t *testing.T) {
 		waiting.State = StateWaiting
 
 		for _, v := range []Vessel{pending, running, waiting} {
-			if err := q.Enqueue(v); err != nil {
+			if _, err := q.Enqueue(v); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
 		}
@@ -1468,11 +1468,11 @@ func TestCompact(t *testing.T) {
 		q, _ := newTestQueue(t)
 
 		// Enqueue a vessel, complete it, re-enqueue, fail it.
-		if err := q.Enqueue(testVessel(20)); err != nil {
+		if _, err := q.Enqueue(testVessel(20)); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 		helperCompleteVessel(t, q, "issue-20")
-		if err := q.Enqueue(testVessel(20)); err != nil {
+		if _, err := q.Enqueue(testVessel(20)); err != nil {
 			t.Fatalf("re-enqueue: %v", err)
 		}
 		// Dequeue and fail the re-enqueued vessel.
@@ -1527,7 +1527,7 @@ func TestCompact(t *testing.T) {
 
 	t.Run("single terminal record is preserved", func(t *testing.T) {
 		q, _ := newTestQueue(t)
-		if err := q.Enqueue(testVessel(30)); err != nil {
+		if _, err := q.Enqueue(testVessel(30)); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 		helperCompleteVessel(t, q, "issue-30")
@@ -1554,11 +1554,11 @@ func TestCompactDryRun(t *testing.T) {
 	q, path := newTestQueue(t)
 
 	// Enqueue, complete, and re-enqueue a vessel.
-	if err := q.Enqueue(testVessel(1)); err != nil {
+	if _, err := q.Enqueue(testVessel(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	helperCompleteVessel(t, q, "issue-1")
-	if err := q.Enqueue(testVessel(1)); err != nil {
+	if _, err := q.Enqueue(testVessel(1)); err != nil {
 		t.Fatalf("re-enqueue: %v", err)
 	}
 

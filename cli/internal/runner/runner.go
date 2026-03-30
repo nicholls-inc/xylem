@@ -655,11 +655,13 @@ func vesselLabel(v queue.Vessel) string {
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
+// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > ClaudeConfig.DefaultModel.
+// When a model is resolved from the hierarchy, any --model flag in Claude.Flags is stripped to avoid duplication.
 func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
 	args := []string{"-p"}
 	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
 
-	// Resolve model: Phase > Workflow > Config default
+	// Resolve model: Phase > Workflow > DefaultModel
 	model := ""
 	if p.Model != nil && *p.Model != "" {
 		model = *p.Model
@@ -669,6 +671,7 @@ func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase
 		model = cfg.Claude.DefaultModel
 	}
 
+	// Add flags, stripping --model if we resolved one from the hierarchy
 	if cfg.Claude.Flags != "" {
 		fields := strings.Fields(cfg.Claude.Flags)
 		if model != "" {
@@ -696,12 +699,12 @@ func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase
 	return args
 }
 
-// stripModelFlag removes --model and its value from a slice of CLI args.
+// stripModelFlag removes --model and its value from a slice of CLI flag tokens.
 func stripModelFlag(fields []string) []string {
 	var out []string
 	for i := 0; i < len(fields); i++ {
-		if fields[i] == "--model" {
-			i++ // skip the value
+		if fields[i] == "--model" && i+1 < len(fields) {
+			i++ // skip the value too
 			continue
 		}
 		out = append(out, fields[i])
