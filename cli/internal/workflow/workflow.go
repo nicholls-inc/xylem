@@ -4,11 +4,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 )
+
+// validPhaseName matches lowercase alphanumeric names with underscores only.
+var validPhaseName = regexp.MustCompile(`^[a-z0-9_]+$`)
 
 // Workflow defines a multi-phase execution plan loaded from a YAML file.
 type Workflow struct {
@@ -84,6 +88,10 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			return fmt.Errorf("duplicate phase name %q", p.Name)
 		}
 		seen[p.Name] = true
+
+		if !validPhaseName.MatchString(p.Name) {
+			return fmt.Errorf("phase name %q contains invalid characters; use only lowercase letters, digits, and underscores", p.Name)
+		}
 
 		if p.PromptFile == "" {
 			return fmt.Errorf("phase %q: prompt_file is required", p.Name)

@@ -299,6 +299,38 @@ func TestPrepareDataDoesNotMutateOriginal(t *testing.T) {
 	}
 }
 
+func TestRenderPromptHyphenatedKeys(t *testing.T) {
+	t.Run("index syntax accesses hyphenated PreviousOutputs key", func(t *testing.T) {
+		data := TemplateData{
+			PreviousOutputs: map[string]string{
+				"create-issues": "created 3 issues",
+			},
+		}
+		got, err := RenderPrompt(`Result: {{index .PreviousOutputs "create-issues"}}`, data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "Result: created 3 issues" {
+			t.Fatalf("got %q, want %q", got, "Result: created 3 issues")
+		}
+	})
+
+	t.Run("index syntax returns empty for nonexistent hyphenated key", func(t *testing.T) {
+		data := TemplateData{
+			PreviousOutputs: map[string]string{
+				"analyze": "analysis result",
+			},
+		}
+		got, err := RenderPrompt(`Result: [{{index .PreviousOutputs "no-such-phase"}}]`, data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != "Result: []" {
+			t.Fatalf("got %q, want %q", got, "Result: []")
+		}
+	})
+}
+
 func TestRenderPromptNilPreviousOutputs(t *testing.T) {
 	data := TemplateData{
 		PreviousOutputs: nil,
