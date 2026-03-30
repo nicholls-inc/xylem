@@ -1,0 +1,27 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths: ["cli/**"]
+  pull_request:
+    branches: [main]
+    paths: ["cli/**"]
+
+jobs:
+  go-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - run: go vet ./...
+      - run: go build ./cmd/xylem
+      - run: go test ./...
