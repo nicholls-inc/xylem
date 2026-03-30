@@ -115,7 +115,7 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 	if hasOrigin {
 		startPoint = "origin/" + defaultBranch
 	}
-	if _, err := m.Runner.Run(ctx, "git", "worktree", "add", worktreePath, "-b", branchName, startPoint); err != nil {
+	if _, err := m.Runner.Run(ctx, "git", "worktree", "add", worktreePath, "-B", branchName, startPoint); err != nil {
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 
