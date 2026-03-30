@@ -491,24 +491,37 @@ func (r *Runner) readHarness() string {
 }
 
 func (r *Runner) fetchIssueData(ctx context.Context, vessel *queue.Vessel) phase.IssueData {
+	switch vessel.Source {
+	case "github-issue":
+		return r.fetchGitHubData(ctx, vessel, "issue", "issue")
+	case "github-pr":
+		return r.fetchGitHubData(ctx, vessel, "pr", "pr")
+	default:
+		return phase.IssueData{}
+	}
+}
+
+// fetchGitHubData fetches title/body/labels for an issue or PR.
+// ghCmd is the gh subcommand ("issue" or "pr"), metaPrefix is the Meta key prefix ("issue" or "pr").
+func (r *Runner) fetchGitHubData(ctx context.Context, vessel *queue.Vessel, ghCmd, metaPrefix string) phase.IssueData {
 	data := phase.IssueData{}
 
-	if vessel.Source != "github-issue" {
+	num := r.parseIssueNum(*vessel)
+	if num == 0 {
 		return data
 	}
 
-	issueNum := r.parseIssueNum(*vessel)
-	if issueNum == 0 {
-		return data
-	}
+	titleKey := metaPrefix + "_title"
+	bodyKey := metaPrefix + "_body"
+	labelsKey := metaPrefix + "_labels"
 
 	// Check if already cached in Meta
-	if vessel.Meta != nil && vessel.Meta["issue_title"] != "" {
-		data.Number = issueNum
-		data.Title = vessel.Meta["issue_title"]
-		data.Body = vessel.Meta["issue_body"]
+	if vessel.Meta != nil && vessel.Meta[titleKey] != "" {
+		data.Number = num
+		data.Title = vessel.Meta[titleKey]
+		data.Body = vessel.Meta[bodyKey]
 		data.URL = vessel.Ref
-		if labelsStr, ok := vessel.Meta["issue_labels"]; ok {
+		if labelsStr, ok := vessel.Meta[labelsKey]; ok {
 			data.Labels = strings.Split(labelsStr, ",")
 		}
 		return data
@@ -519,13 +532,13 @@ func (r *Runner) fetchIssueData(ctx context.Context, vessel *queue.Vessel) phase
 		return data
 	}
 
-	out, err := r.Runner.RunOutput(ctx, "gh", "issue", "view",
-		fmt.Sprintf("%d", issueNum),
+	out, err := r.Runner.RunOutput(ctx, "gh", ghCmd, "view",
+		fmt.Sprintf("%d", num),
 		"--repo", repo,
 		"--json", "title,body,labels,url",
 	)
 	if err != nil {
-		log.Printf("warn: fetch issue data for vessel %s: %v", vessel.ID, err)
+		log.Printf("warn: fetch %s data for vessel %s: %v", ghCmd, vessel.ID, err)
 		return data
 	}
 
@@ -538,11 +551,11 @@ func (r *Runner) fetchIssueData(ctx context.Context, vessel *queue.Vessel) phase
 		} `json:"labels"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
-		log.Printf("warn: parse issue data for vessel %s: %v", vessel.ID, err)
+		log.Printf("warn: parse %s data for vessel %s: %v", ghCmd, vessel.ID, err)
 		return data
 	}
 
-	data.Number = issueNum
+	data.Number = num
 	data.Title = resp.Title
 	data.Body = resp.Body
 	data.URL = resp.URL
@@ -554,9 +567,9 @@ func (r *Runner) fetchIssueData(ctx context.Context, vessel *queue.Vessel) phase
 	if vessel.Meta == nil {
 		vessel.Meta = make(map[string]string)
 	}
-	vessel.Meta["issue_title"] = resp.Title
-	vessel.Meta["issue_body"] = resp.Body
-	vessel.Meta["issue_labels"] = strings.Join(data.Labels, ",")
+	vessel.Meta[titleKey] = resp.Title
+	vessel.Meta[bodyKey] = resp.Body
+	vessel.Meta[labelsKey] = strings.Join(data.Labels, ",")
 
 	return data
 }
@@ -580,7 +593,10 @@ func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 	}
 	numStr, ok := vessel.Meta["issue_num"]
 	if !ok {
-		return 0
+		numStr, ok = vessel.Meta["pr_num"]
+		if !ok {
+			return 0
+		}
 	}
 	n, err := strconv.Atoi(numStr)
 	if err != nil {
@@ -597,16 +613,22 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 	if !ok {
 		return ""
 	}
-	gh, ok := src.(*source.GitHub)
-	if !ok {
+	switch s := src.(type) {
+	case *source.GitHub:
+		return s.Repo
+	case *source.GitHubPR:
+		return s.Repo
+	default:
 		return ""
 	}
-	return gh.Repo
 }
 
 func vesselLabel(v queue.Vessel) string {
 	if v.Meta != nil {
 		if title := v.Meta["issue_title"]; title != "" {
+			return fmt.Sprintf("[%s] ", title)
+		}
+		if title := v.Meta["pr_title"]; title != "" {
 			return fmt.Sprintf("[%s] ", title)
 		}
 	}
