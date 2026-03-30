@@ -401,13 +401,18 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 		// This is only reached after the inner loop exits via break (gate passed or no gate),
 		// never after a retry continue or early return.
 		//
-		// Also persist the reset: the UpdateVessel inside the inner loop may have written a
-		// non-zero GateRetries from this phase (e.g. retries:2 that passed on the first
-		// attempt). Without this write, a daemon restart during the next phase's RunPhase
-		// execution would load the stale non-zero count and give that phase phantom retries.
+		// Also persist the reset when needed: the UpdateVessel inside the inner loop may have
+		// written a non-zero GateRetries from this phase (e.g. retries:2 that passed on the
+		// first attempt). Without this write, a daemon restart during the next phase's
+		// RunPhase execution would load the stale non-zero count and give that phase
+		// phantom retries. If GateRetries is already zero, skip the write to avoid an
+		// unnecessary full queue rewrite under lock.
+		prevRetries := vessel.GateRetries
 		vessel.GateRetries = 0
-		if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
-			log.Printf("warn: persist gate retry reset for %s: %v", vessel.ID, updateErr)
+		if prevRetries != 0 {
+			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+				log.Printf("warn: persist gate retry reset for %s: %v", vessel.ID, updateErr)
+			}
 		}
 	}
 

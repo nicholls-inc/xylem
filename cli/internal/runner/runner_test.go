@@ -53,13 +53,11 @@ type phaseCall struct {
 
 func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string) ([]byte, error) {
 	m.outputArgs = append(m.outputArgs, append([]string{name}, args...))
-	// If the command looks like a gate command (sh -c), check for per-call results first
+	// Detect gate commands by matching the exact shape produced by gate.RunCommandGate:
+	// RunOutput("sh", "-c", "cd <dir> && <cmd>")
 	isGate := false
-	for _, a := range args {
-		if strings.Contains(a, "cd ") {
-			isGate = true
-			break
-		}
+	if name == "sh" && len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "cd ") {
+		isGate = true
 	}
 	if isGate && m.gateCallResults != nil {
 		idx := int(atomic.AddInt32(&m.gateCallCount, 1) - 1)
