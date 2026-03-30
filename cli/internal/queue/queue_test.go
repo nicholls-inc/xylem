@@ -291,6 +291,54 @@ func TestHasRefCancelled(t *testing.T) {
 	}
 }
 
+func TestHasRefTerminalStates(t *testing.T) {
+	tests := []struct {
+		state       VesselState
+		transitions []VesselState
+	}{
+		{StateCompleted, []VesselState{StateRunning, StateCompleted}},
+		{StateFailed, []VesselState{StateRunning, StateFailed}},
+		{StateTimedOut, []VesselState{StateRunning, StateWaiting, StateTimedOut}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			q, _ := newTestQueue(t)
+			vessel := testVessel(42)
+			if err := q.Enqueue(vessel); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			for _, s := range tt.transitions {
+				if err := q.Update(vessel.ID, s, ""); err != nil {
+					t.Fatalf("update to %s: %v", s, err)
+				}
+			}
+			if q.HasRef("https://github.com/example/repo/issues/42") {
+				t.Fatalf("expected %s vessel to not block re-enqueueing", tt.state)
+			}
+		})
+	}
+}
+
+func TestHasRefActiveStates(t *testing.T) {
+	transitions := []VesselState{StatePending, StateRunning, StateWaiting}
+	q, _ := newTestQueue(t)
+	vessel := testVessel(42)
+	if err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	for _, state := range transitions {
+		if state != StatePending {
+			if err := q.Update(vessel.ID, state, ""); err != nil {
+				t.Fatalf("update to %s: %v", state, err)
+			}
+		}
+		if !q.HasRef("https://github.com/example/repo/issues/42") {
+			t.Fatalf("expected %s vessel to block re-enqueueing", state)
+		}
+	}
+}
+
 func TestCorruption(t *testing.T) {
 	q, path := newTestQueue(t)
 	j1 := testVessel(7)
