@@ -28,8 +28,10 @@ type Workflow struct {
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
 	Name         string  `yaml:"name"`
+	Type         string  `yaml:"type,omitempty"`
 	PromptFile   string  `yaml:"prompt_file"`
 	MaxTurns     int     `yaml:"max_turns"`
+	Run          string  `yaml:"run,omitempty"`
 	LLM          *string `yaml:"llm,omitempty"`
 	Model        *string `yaml:"model,omitempty"`
 	NoOp         *NoOp   `yaml:"noop,omitempty"`
@@ -109,16 +111,23 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			return fmt.Errorf("phase name %q is invalid; must start with a lowercase letter and contain only lowercase letters, digits, and underscores", p.Name)
 		}
 
-		if p.PromptFile == "" {
-			return fmt.Errorf("phase %q: prompt_file is required", p.Name)
-		}
-
-		if _, err := os.Stat(p.PromptFile); err != nil {
-			return fmt.Errorf("phase %q: prompt_file not found: %s", p.Name, p.PromptFile)
-		}
-
-		if p.MaxTurns <= 0 {
-			return fmt.Errorf("phase %q: max_turns must be greater than 0", p.Name)
+		switch p.Type {
+		case "", "prompt":
+			if p.PromptFile == "" {
+				return fmt.Errorf("phase %q: prompt_file is required", p.Name)
+			}
+			if _, err := os.Stat(p.PromptFile); err != nil {
+				return fmt.Errorf("phase %q: prompt_file not found: %s", p.Name, p.PromptFile)
+			}
+			if p.MaxTurns <= 0 {
+				return fmt.Errorf("phase %q: max_turns must be greater than 0", p.Name)
+			}
+		case "command":
+			if strings.TrimSpace(p.Run) == "" {
+				return fmt.Errorf("phase %q: run is required for command phase", p.Name)
+			}
+		default:
+			return fmt.Errorf("phase %q: type must be \"prompt\" or \"command\", got %q", p.Name, p.Type)
 		}
 
 		if p.Gate != nil {

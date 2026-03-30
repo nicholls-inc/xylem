@@ -281,13 +281,19 @@ func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
 
 	var phaseYAML strings.Builder
 	for _, p := range phases {
-		promptPath := filepath.Join(dir, ".xylem", "prompts", name, p.name+".md")
-		os.MkdirAll(filepath.Dir(promptPath), 0o755)
-		os.WriteFile(promptPath, []byte(p.promptContent), 0o644)
-
 		phaseYAML.WriteString(fmt.Sprintf("  - name: %s\n", p.name))
-		phaseYAML.WriteString(fmt.Sprintf("    prompt_file: %s\n", promptPath))
-		phaseYAML.WriteString(fmt.Sprintf("    max_turns: %d\n", p.maxTurns))
+
+		if p.phaseType == "command" {
+			phaseYAML.WriteString("    type: command\n")
+			phaseYAML.WriteString(fmt.Sprintf("    run: %q\n", p.run))
+		} else {
+			promptPath := filepath.Join(dir, ".xylem", "prompts", name, p.name+".md")
+			os.MkdirAll(filepath.Dir(promptPath), 0o755)
+			os.WriteFile(promptPath, []byte(p.promptContent), 0o644)
+			phaseYAML.WriteString(fmt.Sprintf("    prompt_file: %s\n", promptPath))
+			phaseYAML.WriteString(fmt.Sprintf("    max_turns: %d\n", p.maxTurns))
+		}
+
 		if p.noopMatch != "" {
 			phaseYAML.WriteString("    noop:\n")
 			phaseYAML.WriteString(fmt.Sprintf("      match: %q\n", p.noopMatch))
@@ -411,6 +417,8 @@ type testPhase struct {
 	noopMatch     string
 	gate          string
 	allowedTools  string
+	phaseType     string // "command" or empty for prompt
+	run           string // shell command for type=command
 }
 
 // --- Tests ---
@@ -1990,6 +1998,184 @@ func TestBuildPromptOnlyCmdArgsHeadlessDedup(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected --verbose in args, got: %v", args)
+	}
+}
+
+func TestDrainCommandPhase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "build", phaseType: "command", run: "go build ./..."},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("build succeeded\n"),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got %d", result.Completed)
+	}
+
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateCompleted {
+		t.Errorf("expected vessel completed, got %s", vessels[0].State)
+	}
+
+	// Verify output file was written
+	outputPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "build.output")
+	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
+		t.Errorf("expected output file %s to exist", outputPath)
+	}
+
+	// Verify command file was written
+	commandPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "build.command")
+	if _, err := os.Stat(commandPath); os.IsNotExist(err) {
+		t.Errorf("expected command file %s to exist", commandPath)
+	}
+}
+
+func TestDrainCommandPhaseFailure(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "build", phaseType: "command", run: "go build ./..."},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("build failed\n"),
+		gateErr:    errors.New("exit status 1"),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("expected 1 failed, got %d", result.Failed)
+	}
+
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateFailed {
+		t.Errorf("expected vessel failed, got %s", vessels[0].State)
+	}
+}
+
+func TestDrainCommandPhaseWithGate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "build", phaseType: "command", run: "make build",
+			gate: "      type: command\n      run: \"make test\"",
+		},
+		{name: "pr", promptContent: "Create PR", maxTurns: 3},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("all passed\n"),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got %d", result.Completed)
+	}
+
+	// Command phase + LLM phase = 1 RunPhase call (only the pr phase uses RunPhase)
+	if len(cmdRunner.phaseCalls) != 1 {
+		t.Errorf("expected 1 RunPhase call (only LLM phase), got %d", len(cmdRunner.phaseCalls))
+	}
+}
+
+func TestDrainCommandPhaseWithNoOp(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "check", phaseType: "command", run: "echo already done",
+			noopMatch: "XYLEM_NOOP",
+		},
+		{name: "implement", promptContent: "Implement", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("XYLEM_NOOP\n"),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got %d", result.Completed)
+	}
+
+	// No RunPhase calls because the command phase triggers noop before the LLM phase
+	if len(cmdRunner.phaseCalls) != 0 {
+		t.Errorf("expected 0 RunPhase calls (noop before LLM phase), got %d", len(cmdRunner.phaseCalls))
+	}
+
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateCompleted {
+		t.Errorf("expected vessel completed, got %s", vessels[0].State)
 	}
 }
 

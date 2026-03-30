@@ -83,6 +83,33 @@ func TestRunCommandGateShellQuotesDir(t *testing.T) {
 	}
 }
 
+// --- RunCommand tests ---
+
+func TestRunCommandSuccess(t *testing.T) {
+	r := &mockRunner{output: []byte("build ok\n")}
+	out, err := RunCommand(context.Background(), r, "/tmp/work", "make build")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "build ok\n" {
+		t.Errorf("expected output %q, got %q", "build ok\n", out)
+	}
+}
+
+func TestRunCommandNonZeroExit(t *testing.T) {
+	r := &mockRunner{
+		output: []byte("error: compilation failed\n"),
+		err:    &exitError{code: 1},
+	}
+	out, err := RunCommand(context.Background(), r, "/tmp/work", "make build")
+	if err == nil {
+		t.Fatal("expected error for non-zero exit, got nil")
+	}
+	if out != "error: compilation failed\n" {
+		t.Errorf("expected output %q, got %q", "error: compilation failed\n", out)
+	}
+}
+
 // --- CheckLabel tests ---
 
 func TestCheckLabelPresent(t *testing.T) {

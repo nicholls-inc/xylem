@@ -32,6 +32,13 @@ func RunCommandGate(ctx context.Context, r Runner, dir string, command string) (
 	return string(output), true, nil
 }
 
+// RunCommand executes a shell command in the given directory and returns its
+// output. Unlike RunCommandGate, a non-zero exit code IS returned as an error.
+func RunCommand(ctx context.Context, r Runner, dir string, command string) (string, error) {
+	output, err := r.RunOutput(ctx, "sh", "-c", fmt.Sprintf("cd %s && %s", shellQuote(dir), command))
+	return string(output), err
+}
+
 // ghLabelsResponse is the JSON shape returned by `gh issue view --json labels`.
 type ghLabelsResponse struct {
 	Labels []struct {

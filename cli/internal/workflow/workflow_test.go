@@ -283,6 +283,45 @@ phases:
 			wantErr: `invalid retry_delay "not-a-duration"`,
 		},
 		{
+			name:         "command phase valid via yaml",
+			workflowName: "test-workflow",
+			yaml: `name: test-workflow
+phases:
+  - name: build
+    type: command
+    run: "go build ./..."
+`,
+			checkFunc: func(t *testing.T, s *Workflow) {
+				t.Helper()
+				if s.Phases[0].Type != "command" {
+					t.Fatalf("Type = %q, want command", s.Phases[0].Type)
+				}
+				if s.Phases[0].Run != "go build ./..." {
+					t.Fatalf("Run = %q, want 'go build ./...'", s.Phases[0].Run)
+				}
+			},
+		},
+		{
+			name:         "command phase missing run via yaml",
+			workflowName: "test-workflow",
+			yaml: `name: test-workflow
+phases:
+  - name: build
+    type: command
+`,
+			wantErr: "run is required for command phase",
+		},
+		{
+			name:         "unknown phase type via yaml",
+			workflowName: "test-workflow",
+			yaml: `name: test-workflow
+phases:
+  - name: notify
+    type: webhook
+`,
+			wantErr: "type must be",
+		},
+		{
 			name:         "max_turns zero",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
@@ -751,6 +790,73 @@ func TestValidate(t *testing.T) {
 				Name: "test",
 				Phases: []Phase{
 					{Name: "step2", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+		},
+		{
+			name:             "command phase valid",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "command", Run: "go build ./..."},
+				},
+			},
+		},
+		{
+			name:             "command phase missing run",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "command"},
+				},
+			},
+			wantErr: "run is required for command phase",
+		},
+		{
+			name:             "command phase empty run",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "command", Run: "   "},
+				},
+			},
+			wantErr: "run is required for command phase",
+		},
+		{
+			name:             "unknown phase type",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "notify", Type: "webhook"},
+				},
+			},
+			wantErr: "type must be",
+		},
+		{
+			name:             "command phase with gate",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{
+						Name: "build", Type: "command", Run: "make build",
+						Gate: &Gate{Type: "command", Run: "make test"},
+					},
+				},
+			},
+		},
+		{
+			name:             "prompt phase default",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5},
 				},
 			},
 			prompts: []string{"prompt.md"},

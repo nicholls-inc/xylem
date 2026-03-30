@@ -259,34 +259,43 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				},
 			}
 
-			// Read prompt template
-			promptContent, err := os.ReadFile(p.PromptFile)
-			if err != nil {
-				r.failVessel(vessel.ID, fmt.Sprintf("read prompt file %s: %v", p.PromptFile, err))
-				return "failed"
-			}
-
-			// Render prompt
-			rendered, err := phase.RenderPrompt(string(promptContent), td)
-			if err != nil {
-				r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
-				return "failed"
-			}
-
-			// Write prompt to file for debugging
 			phasesDir := filepath.Join(r.Config.StateDir, "phases", vessel.ID)
 			os.MkdirAll(phasesDir, 0o755)
-			promptPath := filepath.Join(phasesDir, p.Name+".prompt")
-			if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
-				log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
+
+			var output []byte
+			var runErr error
+
+			if p.Type == "command" {
+				rendered, err := phase.RenderPrompt(p.Run, td)
+				if err != nil {
+					r.failVessel(vessel.ID, fmt.Sprintf("render command for phase %s: %v", p.Name, err))
+					return "failed"
+				}
+				if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
+					log.Printf("warn: write command file: %v", wErr)
+				}
+				cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
+				output = []byte(cmdOut)
+				runErr = cmdErr
+			} else {
+				promptContent, err := os.ReadFile(p.PromptFile)
+				if err != nil {
+					r.failVessel(vessel.ID, fmt.Sprintf("read prompt file %s: %v", p.PromptFile, err))
+					return "failed"
+				}
+				rendered, err := phase.RenderPrompt(string(promptContent), td)
+				if err != nil {
+					r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
+					return "failed"
+				}
+				promptPath := filepath.Join(phasesDir, p.Name+".prompt")
+				if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
+					log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
+				}
+				provider := resolveProvider(r.Config, sk, &p)
+				cmd, args := buildProviderPhaseArgs(r.Config, sk, &p, harnessContent, provider)
+				output, runErr = r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), cmd, args...)
 			}
-
-			// Resolve provider and build args
-			provider := resolveProvider(r.Config, sk, &p)
-			cmd, args := buildProviderPhaseArgs(r.Config, sk, &p, harnessContent, provider)
-
-			// Run phase via stdin
-			output, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), cmd, args...)
 
 			// Write phase output
 			outputPath := filepath.Join(phasesDir, p.Name+".output")
