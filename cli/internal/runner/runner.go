@@ -286,6 +286,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 			if wErr := os.WriteFile(outputPath, output, 0o644); wErr != nil {
 				log.Printf("warn: write output file %s: %v", outputPath, wErr)
 			}
+			fmt.Printf("Phase %s complete: %s\n", p.Name, outputPath)
 
 			phaseDuration := time.Since(phaseStart)
 
