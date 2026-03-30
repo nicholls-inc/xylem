@@ -2167,6 +2167,76 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 	}
 }
 
+func TestDrainPREventsVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	// Create a github-pr-events vessel with pr_num in Meta
+	vessel := queue.Vessel{
+		ID:        "pr-42-label-review",
+		Source:    "github-pr-events",
+		Ref:       "https://github.com/owner/repo/pull/42#label-review",
+		Workflow:  "fix-bug",
+		Meta:      map[string]string{"pr_num": "42", "event_type": "label"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "analyze", promptContent: "Analyze: {{.Issue.Title}}", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	// Mock gh pr view to return PR data
+	prJSON := `{"title":"Fix widget","body":"Fixes the widget bug","url":"https://github.com/owner/repo/pull/42","labels":[{"name":"review"}]}`
+	cmdRunner := &mockCmdRunner{
+		outputData: []byte(prJSON),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-pr-events": &source.GitHubPREvents{Repo: "owner/repo"},
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got %d", result.Completed)
+	}
+	if result.Failed != 0 {
+		t.Errorf("expected 0 failed, got %d", result.Failed)
+	}
+
+	// Verify gh pr view was called (RunOutput should have been invoked with "gh pr view")
+	foundPRView := false
+	for _, call := range cmdRunner.outputArgs {
+		if len(call) >= 3 && call[0] == "gh" && call[1] == "pr" && call[2] == "view" {
+			foundPRView = true
+			break
+		}
+	}
+	if !foundPRView {
+		t.Errorf("expected gh pr view call, got output calls: %v", cmdRunner.outputArgs)
+	}
+
+	// Verify PR data was cached in vessel Meta
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateCompleted {
+		t.Errorf("expected vessel completed, got %s", vessels[0].State)
+	}
+	if vessels[0].Meta["pr_title"] != "Fix widget" {
+		t.Errorf("expected pr_title cached in Meta, got %q", vessels[0].Meta["pr_title"])
+	}
+}
+
 func TestDrainCommandPhaseWithNoOp(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
