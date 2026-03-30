@@ -20,6 +20,7 @@ var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 type Workflow struct {
 	Name        string  `yaml:"name"`
 	Description string  `yaml:"description,omitempty"`
+	LLM         *string `yaml:"llm,omitempty"`
 	Model       *string `yaml:"model,omitempty"`
 	Phases      []Phase `yaml:"phases"`
 }
@@ -29,6 +30,7 @@ type Phase struct {
 	Name         string  `yaml:"name"`
 	PromptFile   string  `yaml:"prompt_file"`
 	MaxTurns     int     `yaml:"max_turns"`
+	LLM          *string `yaml:"llm,omitempty"`
 	Model        *string `yaml:"model,omitempty"`
 	Gate         *Gate   `yaml:"gate,omitempty"`
 	AllowedTools *string `yaml:"allowed_tools,omitempty"`
@@ -82,6 +84,10 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 		return fmt.Errorf(`"phases" is required`)
 	}
 
+	if err := validateLLM(s.LLM, "workflow"); err != nil {
+		return err
+	}
+
 	seen := make(map[string]bool, len(s.Phases))
 	for _, p := range s.Phases {
 		if p.Name == "" {
@@ -118,6 +124,10 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 		if p.AllowedTools != nil && *p.AllowedTools == "" {
 			return fmt.Errorf("phase %q: allowed_tools must not be empty when specified", p.Name)
 		}
+
+		if err := validateLLM(p.LLM, fmt.Sprintf("phase %q", p.Name)); err != nil {
+			return err
+		}
 	}
 
 	return nil
@@ -152,4 +162,18 @@ func validateGate(phaseName string, g *Gate) error {
 	}
 
 	return nil
+}
+
+// validateLLM checks that the llm field, if set, is a known provider.
+// context is a human-readable location string used in error messages (e.g. "workflow" or `phase "analyze"`).
+func validateLLM(llm *string, context string) error {
+	if llm == nil || *llm == "" {
+		return nil
+	}
+	switch *llm {
+	case "claude", "copilot":
+		return nil
+	default:
+		return fmt.Errorf("%s: llm must be \"claude\" or \"copilot\", got %q", context, *llm)
+	}
 }

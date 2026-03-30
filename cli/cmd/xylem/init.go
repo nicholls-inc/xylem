@@ -131,6 +131,9 @@ max_turns: 50
 timeout: "30m"
 state_dir: ".xylem"
 
+# llm selects the global default LLM provider: "claude" (default) or "copilot"
+llm: claude
+
 claude:
   command: "claude"
   flags: "--bare --dangerously-skip-permissions"
@@ -140,6 +143,12 @@ claude:
   #   - "Bash(gh issue view *)"
   #   - "Bash(gh pr create *)"
   #   - "WebFetch"
+
+# copilot:
+#   command: "copilot"
+#   flags: ""
+#   default_model: ""
+#   env: {}
 `, repo, repo)
 
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {

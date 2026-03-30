@@ -1441,3 +1441,217 @@ func TestDrainTimeoutV2Phase(t *testing.T) {
 		t.Errorf("expected timed-out vessel to be marked failed, got completed=%d failed=%d", result.Completed, result.Failed)
 	}
 }
+
+func TestResolveProvider(t *testing.T) {
+claude := "claude"
+copilot := "copilot"
+
+tests := []struct {
+name     string
+cfgLLM   string
+wfLLM    *string
+phaseLLM *string
+want     string
+}{
+{"all nil defaults to claude", "", nil, nil, "claude"},
+{"config claude", "claude", nil, nil, "claude"},
+{"config copilot", "copilot", nil, nil, "copilot"},
+{"workflow overrides config", "claude", &copilot, nil, "copilot"},
+{"phase overrides workflow", "claude", &claude, &copilot, "copilot"},
+{"phase overrides config", "claude", nil, &copilot, "copilot"},
+{"empty config falls back to claude", "", &copilot, nil, "copilot"},
+}
+
+for _, tt := range tests {
+t.Run(tt.name, func(t *testing.T) {
+cfg := &config.Config{LLM: tt.cfgLLM}
+var wf *workflow.Workflow
+if tt.wfLLM != nil {
+wf = &workflow.Workflow{LLM: tt.wfLLM}
+}
+var p *workflow.Phase
+if tt.phaseLLM != nil {
+p = &workflow.Phase{LLM: tt.phaseLLM}
+}
+got := resolveProvider(cfg, wf, p)
+if got != tt.want {
+t.Errorf("resolveProvider() = %q, want %q", got, tt.want)
+}
+})
+}
+}
+
+func TestResolveModel(t *testing.T) {
+cfg := &config.Config{
+Claude:  config.ClaudeConfig{DefaultModel: "claude-default"},
+Copilot: config.CopilotConfig{DefaultModel: "copilot-default"},
+}
+
+phaseModel := "phase-model"
+wfModel := "wf-model"
+
+tests := []struct {
+name       string
+wfModel    *string
+phaseModel *string
+provider   string
+want       string
+}{
+{"phase model wins", &wfModel, &phaseModel, "claude", "phase-model"},
+{"workflow model wins over default", &wfModel, nil, "claude", "wf-model"},
+{"claude default when no override", nil, nil, "claude", "claude-default"},
+{"copilot default when provider copilot", nil, nil, "copilot", "copilot-default"},
+{"workflow model wins for copilot", &wfModel, nil, "copilot", "wf-model"},
+{"phase model wins for copilot", &wfModel, &phaseModel, "copilot", "phase-model"},
+}
+
+for _, tt := range tests {
+t.Run(tt.name, func(t *testing.T) {
+var wf *workflow.Workflow
+if tt.wfModel != nil {
+wf = &workflow.Workflow{Model: tt.wfModel}
+}
+var p *workflow.Phase
+if tt.phaseModel != nil {
+p = &workflow.Phase{Model: tt.phaseModel}
+}
+got := resolveModel(cfg, wf, p, tt.provider)
+if got != tt.want {
+t.Errorf("resolveModel() = %q, want %q", got, tt.want)
+}
+})
+}
+}
+
+func TestBuildCopilotPhaseArgs(t *testing.T) {
+maxTurns := 10
+
+tests := []struct {
+name           string
+cfg            *config.Config
+wf             *workflow.Workflow
+phase          *workflow.Phase
+harness        string
+wantContains   []string
+wantNotContain []string
+}{
+{
+name: "basic copilot args",
+cfg:  &config.Config{Copilot: config.CopilotConfig{Command: "copilot"}},
+phase: &workflow.Phase{MaxTurns: maxTurns},
+wantContains: []string{"--headless", "--max-turns", "10"},
+},
+{
+name: "copilot with model from config default",
+cfg: &config.Config{
+Copilot: config.CopilotConfig{Command: "copilot", DefaultModel: "gpt-4o"},
+},
+phase:        &workflow.Phase{MaxTurns: maxTurns},
+wantContains: []string{"--model", "gpt-4o"},
+},
+{
+name: "copilot with model from phase overrides default",
+cfg: &config.Config{
+Copilot: config.CopilotConfig{Command: "copilot", DefaultModel: "gpt-4o"},
+},
+phase:          &workflow.Phase{MaxTurns: maxTurns, Model: strPtrRunner("phase-model")},
+wantContains:   []string{"--model", "phase-model"},
+wantNotContain: []string{"gpt-4o"},
+},
+{
+name: "copilot with extra flags",
+cfg: &config.Config{
+Copilot: config.CopilotConfig{Command: "copilot", Flags: "--verbose"},
+},
+phase:        &workflow.Phase{MaxTurns: maxTurns},
+wantContains: []string{"--verbose"},
+},
+{
+name: "copilot with allowed_tools",
+cfg:  &config.Config{Copilot: config.CopilotConfig{Command: "copilot"}},
+phase: &workflow.Phase{MaxTurns: maxTurns, AllowedTools: strPtrRunner("Bash,Read")},
+wantContains: []string{"--allowed-tools", "Bash,Read"},
+},
+{
+name:         "copilot with harness",
+cfg:          &config.Config{Copilot: config.CopilotConfig{Command: "copilot"}},
+phase:        &workflow.Phase{MaxTurns: maxTurns},
+harness:      "harness instructions",
+wantContains: []string{"--system-prompt", "harness instructions"},
+},
+{
+name: "copilot strips --model from flags when model resolved",
+cfg: &config.Config{
+Copilot: config.CopilotConfig{
+Command: "copilot",
+Flags:   "--headless --model old-model",
+DefaultModel: "new-model",
+},
+},
+phase:          &workflow.Phase{MaxTurns: maxTurns},
+wantContains:   []string{"--model", "new-model"},
+wantNotContain: []string{"old-model"},
+},
+}
+
+for _, tt := range tests {
+t.Run(tt.name, func(t *testing.T) {
+args := buildCopilotPhaseArgs(tt.cfg, tt.wf, tt.phase, tt.harness)
+for _, want := range tt.wantContains {
+found := false
+for _, a := range args {
+if a == want {
+found = true
+break
+}
+}
+if !found {
+t.Errorf("args %v: expected to contain %q", args, want)
+}
+}
+for _, notWant := range tt.wantNotContain {
+for _, a := range args {
+if a == notWant {
+t.Errorf("args %v: expected NOT to contain %q", args, notWant)
+break
+}
+}
+}
+})
+}
+}
+
+func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
+claudeCmd := "claude"
+copilotCmd := "copilot"
+
+cfg := &config.Config{
+Claude:  config.ClaudeConfig{Command: claudeCmd},
+Copilot: config.CopilotConfig{Command: copilotCmd},
+}
+phase := &workflow.Phase{MaxTurns: 5}
+
+t.Run("claude provider returns claude command", func(t *testing.T) {
+cmd, args := buildProviderPhaseArgs(cfg, nil, phase, "", "claude")
+if cmd != claudeCmd {
+t.Errorf("cmd = %q, want %q", cmd, claudeCmd)
+}
+// claude args should start with -p
+if len(args) == 0 || args[0] != "-p" {
+t.Errorf("claude args[0] = %q, want -p (args: %v)", args[0], args)
+}
+})
+
+t.Run("copilot provider returns copilot command", func(t *testing.T) {
+cmd, args := buildProviderPhaseArgs(cfg, nil, phase, "", "copilot")
+if cmd != copilotCmd {
+t.Errorf("cmd = %q, want %q", cmd, copilotCmd)
+}
+// copilot args should start with --headless
+if len(args) == 0 || args[0] != "--headless" {
+t.Errorf("copilot args[0] = %q, want --headless (args: %v)", args[0], args)
+}
+})
+}
+
+func strPtrRunner(s string) *string { return &s }

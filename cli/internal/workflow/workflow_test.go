@@ -807,3 +807,161 @@ phases:
 func strPtr(s string) *string {
 	return &s
 }
+
+func TestWorkflowLLMField(t *testing.T) {
+	tests := []struct {
+		name         string
+		workflowYAML string
+		prompts      []string
+		wantErr      string
+		checkFunc    func(t *testing.T, wf *Workflow)
+	}{
+		{
+			name: "workflow llm claude",
+			workflowYAML: `name: test-workflow
+llm: claude
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 5
+`,
+			prompts: []string{"prompts/analyze.md"},
+			checkFunc: func(t *testing.T, wf *Workflow) {
+				t.Helper()
+				if wf.LLM == nil || *wf.LLM != "claude" {
+					t.Fatalf("Workflow.LLM = %v, want claude", wf.LLM)
+				}
+			},
+		},
+		{
+			name: "workflow llm copilot",
+			workflowYAML: `name: test-workflow
+llm: copilot
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 5
+`,
+			prompts: []string{"prompts/analyze.md"},
+			checkFunc: func(t *testing.T, wf *Workflow) {
+				t.Helper()
+				if wf.LLM == nil || *wf.LLM != "copilot" {
+					t.Fatalf("Workflow.LLM = %v, want copilot", wf.LLM)
+				}
+			},
+		},
+		{
+			name: "workflow llm absent means nil",
+			workflowYAML: `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 5
+`,
+			prompts: []string{"prompts/analyze.md"},
+			checkFunc: func(t *testing.T, wf *Workflow) {
+				t.Helper()
+				if wf.LLM != nil {
+					t.Fatalf("Workflow.LLM = %v, want nil", wf.LLM)
+				}
+			},
+		},
+		{
+			name: "workflow llm invalid",
+			workflowYAML: `name: test-workflow
+llm: gpt4
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 5
+`,
+			prompts:  []string{"prompts/analyze.md"},
+			wantErr: `workflow: llm must be "claude" or "copilot"`,
+		},
+		{
+			name: "phase llm copilot",
+			workflowYAML: `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 5
+    llm: copilot
+`,
+			prompts: []string{"prompts/analyze.md"},
+			checkFunc: func(t *testing.T, wf *Workflow) {
+				t.Helper()
+				if wf.Phases[0].LLM == nil || *wf.Phases[0].LLM != "copilot" {
+					t.Fatalf("Phase.LLM = %v, want copilot", wf.Phases[0].LLM)
+				}
+			},
+		},
+		{
+			name: "phase llm invalid",
+			workflowYAML: `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 5
+    llm: openai
+`,
+			prompts: []string{"prompts/analyze.md"},
+			wantErr: `phase "analyze": llm must be "claude" or "copilot"`,
+		},
+		{
+			name: "workflow and phase llm with model",
+			workflowYAML: `name: test-workflow
+llm: copilot
+model: gpt-4o
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 5
+    llm: claude
+    model: claude-sonnet-4-5
+`,
+			prompts: []string{"prompts/analyze.md"},
+			checkFunc: func(t *testing.T, wf *Workflow) {
+				t.Helper()
+				if wf.LLM == nil || *wf.LLM != "copilot" {
+					t.Fatalf("Workflow.LLM = %v, want copilot", wf.LLM)
+				}
+				if wf.Model == nil || *wf.Model != "gpt-4o" {
+					t.Fatalf("Workflow.Model = %v, want gpt-4o", wf.Model)
+				}
+				if wf.Phases[0].LLM == nil || *wf.Phases[0].LLM != "claude" {
+					t.Fatalf("Phase.LLM = %v, want claude", wf.Phases[0].LLM)
+				}
+				if wf.Phases[0].Model == nil || *wf.Phases[0].Model != "claude-sonnet-4-5" {
+					t.Fatalf("Phase.Model = %v, want claude-sonnet-4-5", wf.Phases[0].Model)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+
+			for _, p := range tt.prompts {
+				createPromptFile(t, dir, p)
+			}
+
+			path := writeWorkflowFile(t, dir, "test-workflow", tt.workflowYAML)
+			wf, err := Load(path)
+
+			if tt.wantErr != "" {
+				requireErrorContains(t, err, tt.wantErr)
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("Load returned unexpected error: %v", err)
+			}
+
+			if tt.checkFunc != nil {
+				tt.checkFunc(t, wf)
+			}
+		})
+	}
+}

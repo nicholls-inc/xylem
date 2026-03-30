@@ -281,11 +281,12 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
 			}
 
-			// Construct claude args
-			args := buildPhaseArgs(r.Config, sk, &p, harnessContent)
+			// Resolve provider and build args
+			provider := resolveProvider(r.Config, sk, &p)
+			cmd, args := buildProviderPhaseArgs(r.Config, sk, &p, harnessContent, provider)
 
 			// Run phase via stdin
-			output, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), r.Config.Claude.Command, args...)
+			output, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), cmd, args...)
 
 			// Write phase output
 			outputPath := filepath.Join(phasesDir, p.Name+".output")
@@ -423,15 +424,28 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
 	}
 
-	args := []string{"-p", "--max-turns", fmt.Sprintf("%d", r.Config.MaxTurns)}
-	if r.Config.Claude.Flags != "" {
-		args = append(args, strings.Fields(r.Config.Claude.Flags)...)
-	}
-	for _, tool := range r.Config.Claude.AllowedTools {
-		args = append(args, "--allowedTools", tool)
+	provider := resolveProvider(r.Config, nil, nil)
+	var cmd string
+	var args []string
+	switch provider {
+	case "copilot":
+		cmd = r.Config.Copilot.Command
+		args = []string{"--headless", "--max-turns", fmt.Sprintf("%d", r.Config.MaxTurns)}
+		if r.Config.Copilot.Flags != "" {
+			args = append(args, strings.Fields(r.Config.Copilot.Flags)...)
+		}
+	default: // "claude"
+		cmd = r.Config.Claude.Command
+		args = []string{"-p", "--max-turns", fmt.Sprintf("%d", r.Config.MaxTurns)}
+		if r.Config.Claude.Flags != "" {
+			args = append(args, strings.Fields(r.Config.Claude.Flags)...)
+		}
+		for _, tool := range r.Config.Claude.AllowedTools {
+			args = append(args, "--allowedTools", tool)
+		}
 	}
 
-	_, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(prompt), r.Config.Claude.Command, args...)
+	_, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(prompt), cmd, args...)
 
 	if runErr != nil {
 		r.failVessel(vessel.ID, runErr.Error())
@@ -457,28 +471,48 @@ func (r *Runner) resolveSource(name string) source.Source {
 	return &source.Manual{}
 }
 
-// buildCommand constructs the claude command and args from config and vessel.
+// buildCommand constructs the LLM command and args from config and vessel.
 func buildCommand(cfg *config.Config, vessel *queue.Vessel) (string, []string, error) {
+	provider := resolveProvider(cfg, nil, nil)
+
 	// Direct prompt mode
 	if vessel.Prompt != "" {
 		prompt := vessel.Prompt
 		if vessel.Ref != "" {
 			prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
 		}
-		args := []string{"-p", prompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
+		switch provider {
+		case "copilot":
+			args := []string{"--headless", prompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
+			if cfg.Copilot.Flags != "" {
+				args = append(args, strings.Fields(cfg.Copilot.Flags)...)
+			}
+			return cfg.Copilot.Command, args, nil
+		default: // "claude"
+			args := []string{"-p", prompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
+			if cfg.Claude.Flags != "" {
+				args = append(args, strings.Fields(cfg.Claude.Flags)...)
+			}
+			return cfg.Claude.Command, args, nil
+		}
+	}
+
+	// Workflow-based mode: build command from flags (v2 phase-based execution will replace this)
+	wfPrompt := fmt.Sprintf("/%s %s", vessel.Workflow, vessel.Ref)
+	switch provider {
+	case "copilot":
+		args := []string{"--headless", wfPrompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
+		if cfg.Copilot.Flags != "" {
+			args = append(args, strings.Fields(cfg.Copilot.Flags)...)
+		}
+		return cfg.Copilot.Command, args, nil
+	default: // "claude"
+		args := []string{"-p", wfPrompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
 		if cfg.Claude.Flags != "" {
 			args = append(args, strings.Fields(cfg.Claude.Flags)...)
 		}
 		return cfg.Claude.Command, args, nil
 	}
-
-	// Workflow-based mode: build command from flags (v2 phase-based execution will replace this)
-	prompt := fmt.Sprintf("/%s %s", vessel.Workflow, vessel.Ref)
-	args := []string{"-p", prompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
-	if cfg.Claude.Flags != "" {
-		args = append(args, strings.Fields(cfg.Claude.Flags)...)
-	}
-	return cfg.Claude.Command, args, nil
 }
 
 func (r *Runner) removeWorktree(worktreePath, vesselID string) {
@@ -661,15 +695,7 @@ func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase
 	args := []string{"-p"}
 	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
 
-	// Resolve model: Phase > Workflow > DefaultModel
-	model := ""
-	if p.Model != nil && *p.Model != "" {
-		model = *p.Model
-	} else if wf != nil && wf.Model != nil && *wf.Model != "" {
-		model = *wf.Model
-	} else if cfg.Claude.DefaultModel != "" {
-		model = cfg.Claude.DefaultModel
-	}
+	model := resolveModel(cfg, wf, p, "claude")
 
 	// Add flags, stripping --model if we resolved one from the hierarchy
 	if cfg.Claude.Flags != "" {
@@ -697,6 +723,84 @@ func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase
 	}
 
 	return args
+}
+
+// buildCopilotPhaseArgs constructs the GitHub Copilot CLI arguments for a phase invocation.
+// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > CopilotConfig.DefaultModel.
+func buildCopilotPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
+	args := []string{"--headless"}
+	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
+
+	model := resolveModel(cfg, wf, p, "copilot")
+
+	// Add flags, stripping --model if we resolved one from the hierarchy
+	if cfg.Copilot.Flags != "" {
+		fields := strings.Fields(cfg.Copilot.Flags)
+		if model != "" {
+			fields = stripModelFlag(fields)
+		}
+		args = append(args, fields...)
+	}
+
+	if model != "" {
+		args = append(args, "--model", model)
+	}
+
+	if p.AllowedTools != nil && *p.AllowedTools != "" {
+		args = append(args, "--allowed-tools", *p.AllowedTools)
+	}
+
+	if harnessContent != "" {
+		args = append(args, "--system-prompt", harnessContent)
+	}
+
+	return args
+}
+
+// buildProviderPhaseArgs dispatches to the correct arg builder based on the resolved provider,
+// and returns the command binary and argument slice for the phase invocation.
+func buildProviderPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider string) (string, []string) {
+	switch provider {
+	case "copilot":
+		return cfg.Copilot.Command, buildCopilotPhaseArgs(cfg, wf, p, harnessContent)
+	default: // "claude"
+		return cfg.Claude.Command, buildPhaseArgs(cfg, wf, p, harnessContent)
+	}
+}
+
+// resolveProvider determines which LLM provider to use for a phase invocation.
+// Resolution order: Phase.LLM > Workflow.LLM > Config.LLM, defaulting to "claude".
+func resolveProvider(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase) string {
+	if p != nil && p.LLM != nil && *p.LLM != "" {
+		return *p.LLM
+	}
+	if wf != nil && wf.LLM != nil && *wf.LLM != "" {
+		return *wf.LLM
+	}
+	if cfg != nil && cfg.LLM != "" {
+		return cfg.LLM
+	}
+	return "claude"
+}
+
+// resolveModel determines the model string for a phase invocation.
+// Resolution order: Phase.Model > Workflow.Model > provider's DefaultModel from config.
+func resolveModel(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, provider string) string {
+	if p != nil && p.Model != nil && *p.Model != "" {
+		return *p.Model
+	}
+	if wf != nil && wf.Model != nil && *wf.Model != "" {
+		return *wf.Model
+	}
+	if cfg == nil {
+		return ""
+	}
+	switch provider {
+	case "copilot":
+		return cfg.Copilot.DefaultModel
+	default:
+		return cfg.Claude.DefaultModel
+	}
 }
 
 // stripModelFlag removes --model and its value from a slice of CLI flag tokens.

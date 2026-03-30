@@ -620,3 +620,133 @@ daemon:
 		t.Fatalf("Daemon.DrainInterval = %q, want 45s", cfg.Daemon.DrainInterval)
 	}
 }
+
+func TestValidateLLMClaudeExplicit(t *testing.T) {
+	cfg := validConfig()
+	cfg.LLM = "claude"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config with llm=claude, got: %v", err)
+	}
+}
+
+func TestValidateLLMCopilotExplicit(t *testing.T) {
+	cfg := validConfig()
+	cfg.LLM = "copilot"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config with llm=copilot, got: %v", err)
+	}
+}
+
+func TestValidateLLMEmptyDefaultsClaude(t *testing.T) {
+	cfg := validConfig()
+	cfg.LLM = ""
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config with empty llm (defaults to claude), got: %v", err)
+	}
+}
+
+func TestValidateLLMInvalidValue(t *testing.T) {
+	cfg := validConfig()
+	cfg.LLM = "gpt4"
+	err := cfg.Validate()
+	requireErrorContains(t, err, `llm must be "claude" or "copilot"`)
+}
+
+func TestLoadCopilotConfig(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+llm: copilot
+copilot:
+  command: "copilot"
+  flags: "--headless"
+  default_model: "gpt-4o"
+  env:
+    GITHUB_TOKEN: "ghp-test"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.LLM != "copilot" {
+		t.Fatalf("LLM = %q, want copilot", cfg.LLM)
+	}
+	if cfg.Copilot.Command != "copilot" {
+		t.Fatalf("Copilot.Command = %q, want copilot", cfg.Copilot.Command)
+	}
+	if cfg.Copilot.Flags != "--headless" {
+		t.Fatalf("Copilot.Flags = %q, want --headless", cfg.Copilot.Flags)
+	}
+	if cfg.Copilot.DefaultModel != "gpt-4o" {
+		t.Fatalf("Copilot.DefaultModel = %q, want gpt-4o", cfg.Copilot.DefaultModel)
+	}
+	if cfg.Copilot.Env["GITHUB_TOKEN"] != "ghp-test" {
+		t.Fatalf("Copilot.Env[GITHUB_TOKEN] = %q, want ghp-test", cfg.Copilot.Env["GITHUB_TOKEN"])
+	}
+}
+
+func TestLoadCopilotDefaultCommand(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	// Default copilot command should be set even when copilot block is absent
+	if cfg.Copilot.Command != "copilot" {
+		t.Fatalf("Copilot.Command default = %q, want copilot", cfg.Copilot.Command)
+	}
+}
+
+func TestLoadLLMAbsentDefaultsClaude(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.LLM != "" {
+		t.Fatalf("LLM = %q, want empty (defaults to claude at runtime)", cfg.LLM)
+	}
+}
+

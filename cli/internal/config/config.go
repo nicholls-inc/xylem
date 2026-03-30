@@ -22,7 +22,9 @@ type Config struct {
 	Exclude       []string                `yaml:"exclude,omitempty"`
 	DefaultBranch string                  `yaml:"default_branch,omitempty"`
 	CleanupAfter  string                  `yaml:"cleanup_after,omitempty"`
+	LLM           string                  `yaml:"llm,omitempty"`
 	Claude        ClaudeConfig            `yaml:"claude"`
+	Copilot       CopilotConfig           `yaml:"copilot,omitempty"`
 	Daemon        DaemonConfig            `yaml:"daemon,omitempty"`
 }
 
@@ -48,6 +50,14 @@ type ClaudeConfig struct {
 	AllowedTools []string `yaml:"allowed_tools,omitempty"`
 }
 
+// CopilotConfig holds configuration for the GitHub Copilot CLI provider.
+type CopilotConfig struct {
+	Command      string            `yaml:"command"`
+	Flags        string            `yaml:"flags,omitempty"`
+	DefaultModel string            `yaml:"default_model,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
+}
+
 type DaemonConfig struct {
 	ScanInterval  string `yaml:"scan_interval,omitempty"`
 	DrainInterval string `yaml:"drain_interval,omitempty"`
@@ -68,6 +78,9 @@ func Load(path string) (*Config, error) {
 		Exclude:      []string{"wontfix", "duplicate", "in-progress", "no-bot"},
 		Claude: ClaudeConfig{
 			Command: "claude",
+		},
+		Copilot: CopilotConfig{
+			Command: "copilot",
 		},
 		Daemon: DaemonConfig{
 			ScanInterval:  "60s",
@@ -124,6 +137,13 @@ func (c *Config) Validate() error {
 		if _, err := time.ParseDuration(c.CleanupAfter); err != nil {
 			return fmt.Errorf("cleanup_after must be a valid duration: %w", err)
 		}
+	}
+
+	switch c.LLM {
+	case "", "claude", "copilot":
+		// valid
+	default:
+		return fmt.Errorf("llm must be \"claude\" or \"copilot\", got %q", c.LLM)
 	}
 
 	if c.Claude.Template != "" {
