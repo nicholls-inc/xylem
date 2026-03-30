@@ -621,35 +621,42 @@ daemon:
 	}
 }
 
-func TestValidateLLMClaudeExplicit(t *testing.T) {
-	cfg := validConfig()
-	cfg.LLM = "claude"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected valid config with llm=claude, got: %v", err)
+func TestValidateLLM(t *testing.T) {
+	tests := []struct {
+		name    string
+		llm     string
+		wantErr string
+	}{
+		{"claude explicit", "claude", ""},
+		{"copilot explicit", "copilot", ""},
+		{"empty defaults to claude", "", ""},
+		{"invalid value", "gpt4", `llm must be "claude" or "copilot"`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.LLM = tt.llm
+			// Ensure copilot command is set for "copilot" to avoid command validation failure
+			if tt.llm == "copilot" {
+				cfg.Copilot = CopilotConfig{Command: "copilot"}
+			}
+			err := cfg.Validate()
+			if tt.wantErr != "" {
+				requireErrorContains(t, err, tt.wantErr)
+			} else if err != nil {
+				t.Fatalf("expected valid config with llm=%q, got: %v", tt.llm, err)
+			}
+		})
 	}
 }
 
-func TestValidateLLMCopilotExplicit(t *testing.T) {
+func TestValidateCopilotEmptyCommand(t *testing.T) {
 	cfg := validConfig()
 	cfg.LLM = "copilot"
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected valid config with llm=copilot, got: %v", err)
-	}
-}
-
-func TestValidateLLMEmptyDefaultsClaude(t *testing.T) {
-	cfg := validConfig()
-	cfg.LLM = ""
-	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected valid config with empty llm (defaults to claude), got: %v", err)
-	}
-}
-
-func TestValidateLLMInvalidValue(t *testing.T) {
-	cfg := validConfig()
-	cfg.LLM = "gpt4"
+	cfg.Copilot = CopilotConfig{Command: ""}
 	err := cfg.Validate()
-	requireErrorContains(t, err, `llm must be "claude" or "copilot"`)
+	requireErrorContains(t, err, "copilot.command must be non-empty")
 }
 
 func TestLoadCopilotConfig(t *testing.T) {
@@ -749,4 +756,3 @@ claude:
 		t.Fatalf("LLM = %q, want empty (defaults to claude at runtime)", cfg.LLM)
 	}
 }
-
