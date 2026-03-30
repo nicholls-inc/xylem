@@ -59,7 +59,8 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {
 	sources := make(map[string]source.Source)
 	for _, srcCfg := range cfg.Sources {
-		if srcCfg.Type == "github" {
+		switch srcCfg.Type {
+		case "github":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
 				tasks[name] = source.GitHubTaskFromConfig(t)
@@ -72,16 +73,55 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				CmdRunner: cmdRunner,
 			}
 			sources[gh.Name()] = gh
+		case "github-pr-events":
+			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				task := source.PREventsTask{
+					Workflow: t.Workflow,
+				}
+				if t.On != nil {
+					task.Labels = t.On.Labels
+					task.ReviewSubmitted = t.On.ReviewSubmitted
+					task.ChecksFailed = t.On.ChecksFailed
+					task.Commented = t.On.Commented
+				}
+				prEventsTasks[name] = task
+			}
+			pre := &source.GitHubPREvents{
+				Repo:      srcCfg.Repo,
+				Tasks:     prEventsTasks,
+				Exclude:   srcCfg.Exclude,
+				Queue:     q,
+				CmdRunner: cmdRunner,
+			}
+			sources[pre.Name()] = pre
+		case "github-merge":
+			mergeTasks := make(map[string]source.MergeTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				mergeTasks[name] = source.MergeTask{
+					Workflow: t.Workflow,
+				}
+			}
+			gm := &source.GitHubMerge{
+				Repo:      srcCfg.Repo,
+				Tasks:     mergeTasks,
+				Queue:     q,
+				CmdRunner: cmdRunner,
+			}
+			sources[gm.Name()] = gm
 		}
 	}
 	return sources
 }
 
 func buildReporter(cfg *config.Config, cmdRunner reporter.Runner) *reporter.Reporter {
-	// Find the first GitHub source repo for reporting
+	// Find the first GitHub-based source repo for reporting
 	for _, srcCfg := range cfg.Sources {
-		if srcCfg.Type == "github" && srcCfg.Repo != "" {
-			return &reporter.Reporter{Runner: cmdRunner, Repo: srcCfg.Repo}
+		switch srcCfg.Type {
+		case "github", "github-pr", "github-pr-events", "github-merge":
+			if srcCfg.Repo != "" {
+				return &reporter.Reporter{Runner: cmdRunner, Repo: srcCfg.Repo}
+			}
 		}
 	}
 	return nil

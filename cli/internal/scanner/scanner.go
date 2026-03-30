@@ -72,9 +72,9 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 func (s *Scanner) buildSources() []source.Source {
 	var sources []source.Source
 	for _, srcCfg := range s.Config.Sources {
-		tasks := convertTasks(srcCfg.Tasks)
 		switch srcCfg.Type {
 		case "github":
+			tasks := convertTasks(srcCfg.Tasks)
 			sources = append(sources, &source.GitHub{
 				Repo:      srcCfg.Repo,
 				Tasks:     tasks,
@@ -83,10 +83,28 @@ func (s *Scanner) buildSources() []source.Source {
 				CmdRunner: s.CmdRunner,
 			})
 		case "github-pr":
+			tasks := convertTasks(srcCfg.Tasks)
 			sources = append(sources, &source.GitHubPR{
 				Repo:      srcCfg.Repo,
 				Tasks:     tasks,
 				Exclude:   srcCfg.Exclude,
+				Queue:     s.Queue,
+				CmdRunner: s.CmdRunner,
+			})
+		case "github-pr-events":
+			prEventsTasks := convertPREventsTasks(srcCfg.Tasks)
+			sources = append(sources, &source.GitHubPREvents{
+				Repo:      srcCfg.Repo,
+				Tasks:     prEventsTasks,
+				Exclude:   srcCfg.Exclude,
+				Queue:     s.Queue,
+				CmdRunner: s.CmdRunner,
+			})
+		case "github-merge":
+			mergeTasks := convertMergeTasks(srcCfg.Tasks)
+			sources = append(sources, &source.GitHubMerge{
+				Repo:      srcCfg.Repo,
+				Tasks:     mergeTasks,
 				Queue:     s.Queue,
 				CmdRunner: s.CmdRunner,
 			})
@@ -99,6 +117,33 @@ func convertTasks(cfgTasks map[string]config.Task) map[string]source.GitHubTask 
 	tasks := make(map[string]source.GitHubTask, len(cfgTasks))
 	for name, t := range cfgTasks {
 		tasks[name] = source.GitHubTaskFromConfig(t)
+	}
+	return tasks
+}
+
+func convertPREventsTasks(cfgTasks map[string]config.Task) map[string]source.PREventsTask {
+	tasks := make(map[string]source.PREventsTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		task := source.PREventsTask{
+			Workflow: t.Workflow,
+		}
+		if t.On != nil {
+			task.Labels = t.On.Labels
+			task.ReviewSubmitted = t.On.ReviewSubmitted
+			task.ChecksFailed = t.On.ChecksFailed
+			task.Commented = t.On.Commented
+		}
+		tasks[name] = task
+	}
+	return tasks
+}
+
+func convertMergeTasks(cfgTasks map[string]config.Task) map[string]source.MergeTask {
+	tasks := make(map[string]source.MergeTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		tasks[name] = source.MergeTask{
+			Workflow: t.Workflow,
+		}
 	}
 	return tasks
 }

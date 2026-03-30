@@ -354,6 +354,74 @@ func TestHasRefActiveStates(t *testing.T) {
 	}
 }
 
+func TestHasRefAny(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(42)
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if !q.HasRefAny("https://github.com/example/repo/issues/42") {
+		t.Fatal("expected HasRefAny to be true for enqueued ref")
+	}
+	if q.HasRefAny("https://github.com/example/repo/issues/99") {
+		t.Fatal("expected HasRefAny to be false for unknown ref")
+	}
+}
+
+func TestHasRefAnyFindsTerminalStates(t *testing.T) {
+	tests := []struct {
+		state       VesselState
+		transitions []VesselState
+	}{
+		{StateCompleted, []VesselState{StateRunning, StateCompleted}},
+		{StateFailed, []VesselState{StateRunning, StateFailed}},
+		{StateTimedOut, []VesselState{StateRunning, StateWaiting, StateTimedOut}},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.state), func(t *testing.T) {
+			q, _ := newTestQueue(t)
+			vessel := testVessel(42)
+			if _, err := q.Enqueue(vessel); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			for _, s := range tt.transitions {
+				if err := q.Update(vessel.ID, s, ""); err != nil {
+					t.Fatalf("update to %s: %v", s, err)
+				}
+			}
+			// HasRefAny should still find vessels in terminal states
+			if !q.HasRefAny("https://github.com/example/repo/issues/42") {
+				t.Fatalf("expected HasRefAny to find %s vessel", tt.state)
+			}
+			// HasRef should NOT find vessels in terminal states
+			if q.HasRef("https://github.com/example/repo/issues/42") {
+				t.Fatalf("expected HasRef to NOT find %s vessel", tt.state)
+			}
+		})
+	}
+}
+
+func TestHasRefAnyCancelled(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(42)
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if err := q.Cancel(vessel.ID); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	// HasRefAny should find cancelled vessels too
+	if !q.HasRefAny("https://github.com/example/repo/issues/42") {
+		t.Fatal("expected HasRefAny to find cancelled vessel")
+	}
+	// HasRef should NOT find cancelled vessels
+	if q.HasRef("https://github.com/example/repo/issues/42") {
+		t.Fatal("expected HasRef to NOT find cancelled vessel")
+	}
+}
+
 func TestEnqueueIdempotentDuplicateRef(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(42)

@@ -371,6 +371,20 @@ func (q *Queue) HasRef(ref string) bool {
 	return false
 }
 
+// HasRefAny reports whether any vessel (in any state) has the given ref.
+func (q *Queue) HasRefAny(ref string) bool {
+	vessels, err := q.List()
+	if err != nil {
+		return false
+	}
+	for _, vessel := range vessels {
+		if vessel.Ref == ref {
+			return true
+		}
+	}
+	return false
+}
+
 func (q *Queue) withLock(fn func() error) error {
 	lock := flock.New(q.lockPath)
 	if err := lock.Lock(); err != nil {

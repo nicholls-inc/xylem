@@ -43,10 +43,19 @@ type StatusLabels struct {
 	TimedOut  string `yaml:"timed_out,omitempty"`
 }
 
+// PREventsConfig defines which PR events trigger a workflow.
+type PREventsConfig struct {
+	Labels          []string `yaml:"labels,omitempty"`
+	ReviewSubmitted bool     `yaml:"review_submitted,omitempty"`
+	ChecksFailed    bool     `yaml:"checks_failed,omitempty"`
+	Commented       bool     `yaml:"commented,omitempty"`
+}
+
 type Task struct {
-	Labels       []string      `yaml:"labels,omitempty"`
-	Workflow     string        `yaml:"workflow"`
-	StatusLabels *StatusLabels `yaml:"status_labels,omitempty"`
+	Labels       []string        `yaml:"labels,omitempty"`
+	Workflow     string          `yaml:"workflow"`
+	StatusLabels *StatusLabels   `yaml:"status_labels,omitempty"`
+	On           *PREventsConfig `yaml:"on,omitempty"`
 }
 
 type ClaudeConfig struct {
@@ -192,8 +201,18 @@ func (c *Config) Validate() error {
 			if err := validateGitHubSource(name, src); err != nil {
 				return err
 			}
+		case "github-pr-events":
+			if err := validateGitHubPREventsSource(name, src); err != nil {
+				return err
+			}
+		case "github-merge":
+			if err := validateGitHubMergeSource(name, src); err != nil {
+				return err
+			}
 		case "":
 			return fmt.Errorf("source %q must specify a type", name)
+		default:
+			return fmt.Errorf("source %q: unknown type %q", name, src.Type)
 		}
 	}
 
@@ -248,6 +267,52 @@ func validateGitHubSource(name string, src SourceConfig) error {
 		if len(task.Labels) == 0 {
 			return fmt.Errorf("source %q task %q: must include at least one labels entry", name, tname)
 		}
+		if strings.TrimSpace(task.Workflow) == "" {
+			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
+		}
+	}
+	return nil
+}
+
+func validateGitHubPREventsSource(name string, src SourceConfig) error {
+	repo := strings.TrimSpace(src.Repo)
+	if repo == "" {
+		return fmt.Errorf("source %q (github-pr-events): repo is required", name)
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("source %q (github-pr-events): repo must be in owner/name format", name)
+	}
+	if len(src.Tasks) == 0 {
+		return fmt.Errorf("source %q (github-pr-events): at least one task is required", name)
+	}
+	for tname, task := range src.Tasks {
+		if strings.TrimSpace(task.Workflow) == "" {
+			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
+		}
+		if task.On == nil {
+			return fmt.Errorf("source %q task %q: must include an 'on' block with at least one trigger", name, tname)
+		}
+		if len(task.On.Labels) == 0 && !task.On.ReviewSubmitted && !task.On.ChecksFailed && !task.On.Commented {
+			return fmt.Errorf("source %q task %q: 'on' block must specify at least one trigger (labels, review_submitted, checks_failed, or commented)", name, tname)
+		}
+	}
+	return nil
+}
+
+func validateGitHubMergeSource(name string, src SourceConfig) error {
+	repo := strings.TrimSpace(src.Repo)
+	if repo == "" {
+		return fmt.Errorf("source %q (github-merge): repo is required", name)
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("source %q (github-merge): repo must be in owner/name format", name)
+	}
+	if len(src.Tasks) == 0 {
+		return fmt.Errorf("source %q (github-merge): at least one task is required", name)
+	}
+	for tname, task := range src.Tasks {
 		if strings.TrimSpace(task.Workflow) == "" {
 			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
 		}

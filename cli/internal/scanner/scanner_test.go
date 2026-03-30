@@ -586,3 +586,147 @@ func TestScanEmptyIssuesList(t *testing.T) {
 		t.Errorf("expected 0 added, got %d", result.Added)
 	}
 }
+
+// ghPRForScanner mirrors the GitHub PR JSON structure for test helpers.
+type ghPRForScanner struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	HeadRefName string `json:"headRefName"`
+	Labels      []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+func prJSON(prs []ghPRForScanner) []byte {
+	b, _ := json.Marshal(prs)
+	return b
+}
+
+func TestScanPREvents(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Sources: map[string]config.SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"review": {
+						Workflow: "handle-review",
+						On: &config.PREventsConfig{
+							Labels: []string{"needs-review"},
+						},
+					},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPRForScanner{
+		{
+			Number:      10,
+			Title:       "test PR",
+			URL:         "https://github.com/owner/repo/pull/10",
+			HeadRefName: "feature-branch",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "needs-review"}},
+		},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Errorf("expected 1 added, got %d", result.Added)
+	}
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel in queue, got %d", len(vessels))
+	}
+	if vessels[0].Source != "github-pr-events" {
+		t.Errorf("expected source github-pr-events, got %q", vessels[0].Source)
+	}
+	if vessels[0].Workflow != "handle-review" {
+		t.Errorf("expected workflow handle-review, got %q", vessels[0].Workflow)
+	}
+}
+
+type ghMergeCommitForScanner struct {
+	OID string `json:"oid"`
+}
+
+type ghMergedPRForScanner struct {
+	Number      int                     `json:"number"`
+	Title       string                  `json:"title"`
+	URL         string                  `json:"url"`
+	MergeCommit ghMergeCommitForScanner `json:"mergeCommit"`
+	HeadRefName string                  `json:"headRefName"`
+}
+
+func mergedPRJSON(prs []ghMergedPRForScanner) []byte {
+	b, _ := json.Marshal(prs)
+	return b
+}
+
+func TestScanMerge(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Sources: map[string]config.SourceConfig{
+			"merge": {
+				Type: "github-merge",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"deploy": {Workflow: "post-merge"},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghMergedPRForScanner{
+		{
+			Number:      20,
+			Title:       "merged PR",
+			URL:         "https://github.com/owner/repo/pull/20",
+			MergeCommit: ghMergeCommitForScanner{OID: "abcdef1234567890"},
+			HeadRefName: "feature-x",
+		},
+	}
+	r.set(mergedPRJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Errorf("expected 1 added, got %d", result.Added)
+	}
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel in queue, got %d", len(vessels))
+	}
+	if vessels[0].Source != "github-merge" {
+		t.Errorf("expected source github-merge, got %q", vessels[0].Source)
+	}
+	if vessels[0].Workflow != "post-merge" {
+		t.Errorf("expected workflow post-merge, got %q", vessels[0].Workflow)
+	}
+}
