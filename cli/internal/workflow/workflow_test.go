@@ -755,6 +755,70 @@ func TestValidate(t *testing.T) {
 			},
 			prompts: []string{"prompt.md"},
 		},
+		{
+			name:             "command phase valid",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "command", Run: "echo hello"},
+				},
+			},
+		},
+		{
+			name:             "command phase missing run",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "command"},
+				},
+			},
+			wantErr: "run is required",
+		},
+		{
+			name:             "command phase empty run",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "command", Run: "   "},
+				},
+			},
+			wantErr: "run is required",
+		},
+		{
+			name:             "unknown phase type",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "webhook"},
+				},
+			},
+			wantErr: "type must be",
+		},
+		{
+			name:             "command phase with gate",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "build", Type: "command", Run: "make build", Gate: &Gate{Type: "command", Run: "make test"}},
+				},
+			},
+		},
+		{
+			name:             "prompt phase default",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+		},
 	}
 
 	for _, tt := range tests {
