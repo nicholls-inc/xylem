@@ -31,7 +31,7 @@ The CLI includes an internal library implementing foundational agent harness com
 | `phase` | Prompt template rendering with issue data, previous outputs, and gate results |
 | `reporter` | Phase result collection and output management |
 | `signal` | Behavioral heuristics (repetition, tool failure rate, context thrash, efficiency, task stall) with health levels |
-| `skill` | Workflow definition loading and validation from YAML |
+| `workflow` | Workflow definition loading and validation from YAML |
 
 ## Prerequisites
 
@@ -151,7 +151,7 @@ state_dir: ".xylem"
 exclude: [wontfix, duplicate, in-progress, no-bot]
 ```
 
-Note: `claude.template` is no longer supported. Migrate to phase-based workflows in `.xylem/skills/`.
+Note: `claude.template` is no longer supported. Migrate to phase-based workflows in `.xylem/workflows/`.
 
 ## Workflows
 

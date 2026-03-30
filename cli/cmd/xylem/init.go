@@ -314,7 +314,7 @@ gh pr create --title "<descriptive title>" --body "<summary of changes, linking 
 `
 
 func promptContent(workflow, phase string) string {
-	_ = workflow // All skills share the same prompt templates per phase.
+	_ = workflow // All workflows share the same prompt templates per phase.
 	switch phase {
 	case "analyze":
 		return analyzePrompt
