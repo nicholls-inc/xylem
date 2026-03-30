@@ -3,3 +3,4 @@ cli/xylem
 .xylem/
 .xylem.yml
 field-reports/
+.claude/worktrees
