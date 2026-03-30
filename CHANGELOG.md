@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.0](https://github.com/nicholls-inc/xylem/compare/xylem-v1.1.0...xylem-v1.2.0) (2026-03-30)
+
+
+### Features
+
+* migrate to standalone repository ([2b5254e](https://github.com/nicholls-inc/xylem/commit/2b5254e6a7ecd8b20aa4f6af99dda9757c13022e))
+
 ## [1.1.0](https://github.com/nicholls-inc/claude-code-marketplace/compare/xylem-v1.0.1...xylem-v1.1.0) (2026-03-29)
 
 
