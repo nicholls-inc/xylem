@@ -18,8 +18,8 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
-	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
+	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
 
 // CommandRunner abstracts subprocess execution for testing.
@@ -424,26 +424,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
 	}
 
-	provider := resolveProvider(r.Config, nil, nil)
-	var cmd string
-	var args []string
-	switch provider {
-	case "copilot":
-		cmd = r.Config.Copilot.Command
-		args = []string{"--headless", "--max-turns", fmt.Sprintf("%d", r.Config.MaxTurns)}
-		if r.Config.Copilot.Flags != "" {
-			args = append(args, strings.Fields(r.Config.Copilot.Flags)...)
-		}
-	default: // "claude"
-		cmd = r.Config.Claude.Command
-		args = []string{"-p", "--max-turns", fmt.Sprintf("%d", r.Config.MaxTurns)}
-		if r.Config.Claude.Flags != "" {
-			args = append(args, strings.Fields(r.Config.Claude.Flags)...)
-		}
-		for _, tool := range r.Config.Claude.AllowedTools {
-			args = append(args, "--allowedTools", tool)
-		}
-	}
+	cmd, args := buildPromptOnlyCmdArgs(r.Config, "")
 
 	_, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(prompt), cmd, args...)
 
@@ -473,46 +454,20 @@ func (r *Runner) resolveSource(name string) source.Source {
 
 // buildCommand constructs the LLM command and args from config and vessel.
 func buildCommand(cfg *config.Config, vessel *queue.Vessel) (string, []string, error) {
-	provider := resolveProvider(cfg, nil, nil)
-
 	// Direct prompt mode
 	if vessel.Prompt != "" {
 		prompt := vessel.Prompt
 		if vessel.Ref != "" {
 			prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
 		}
-		switch provider {
-		case "copilot":
-			args := []string{"--headless", prompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
-			if cfg.Copilot.Flags != "" {
-				args = append(args, strings.Fields(cfg.Copilot.Flags)...)
-			}
-			return cfg.Copilot.Command, args, nil
-		default: // "claude"
-			args := []string{"-p", prompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
-			if cfg.Claude.Flags != "" {
-				args = append(args, strings.Fields(cfg.Claude.Flags)...)
-			}
-			return cfg.Claude.Command, args, nil
-		}
+		cmd, args := buildPromptOnlyCmdArgs(cfg, prompt)
+		return cmd, args, nil
 	}
 
 	// Workflow-based mode: build command from flags (v2 phase-based execution will replace this)
 	wfPrompt := fmt.Sprintf("/%s %s", vessel.Workflow, vessel.Ref)
-	switch provider {
-	case "copilot":
-		args := []string{"--headless", wfPrompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
-		if cfg.Copilot.Flags != "" {
-			args = append(args, strings.Fields(cfg.Copilot.Flags)...)
-		}
-		return cfg.Copilot.Command, args, nil
-	default: // "claude"
-		args := []string{"-p", wfPrompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
-		if cfg.Claude.Flags != "" {
-			args = append(args, strings.Fields(cfg.Claude.Flags)...)
-		}
-		return cfg.Claude.Command, args, nil
-	}
+	cmd, args := buildPromptOnlyCmdArgs(cfg, wfPrompt)
+	return cmd, args, nil
 }
 
 func (r *Runner) removeWorktree(worktreePath, vesselID string) {
@@ -710,6 +665,7 @@ func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase
 		args = append(args, "--model", model)
 	}
 
+	// Claude CLI uses --allowedTools (camelCase), unlike Copilot's --allowed-tools (kebab-case)
 	if p.AllowedTools != nil && *p.AllowedTools != "" {
 		args = append(args, "--allowedTools", *p.AllowedTools)
 	}
@@ -718,6 +674,7 @@ func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase
 		args = append(args, "--allowedTools", tool)
 	}
 
+	// Claude CLI uses --append-system-prompt, unlike Copilot's --system-prompt
 	if harnessContent != "" {
 		args = append(args, "--append-system-prompt", harnessContent)
 	}
@@ -733,9 +690,11 @@ func buildCopilotPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflo
 
 	model := resolveModel(cfg, wf, p, "copilot")
 
-	// Add flags, stripping --model if we resolved one from the hierarchy
+	// Add flags, stripping --headless (always prepended) and --model (resolved from hierarchy)
+	// to avoid duplication
 	if cfg.Copilot.Flags != "" {
 		fields := strings.Fields(cfg.Copilot.Flags)
+		fields = stripBoolFlag(fields, "--headless")
 		if model != "" {
 			fields = stripModelFlag(fields)
 		}
@@ -746,10 +705,12 @@ func buildCopilotPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflo
 		args = append(args, "--model", model)
 	}
 
+	// Copilot CLI uses kebab-case flags, unlike Claude's --allowedTools (camelCase)
 	if p.AllowedTools != nil && *p.AllowedTools != "" {
 		args = append(args, "--allowed-tools", *p.AllowedTools)
 	}
 
+	// Copilot CLI uses --system-prompt, unlike Claude's --append-system-prompt
 	if harnessContent != "" {
 		args = append(args, "--system-prompt", harnessContent)
 	}
@@ -800,6 +761,53 @@ func resolveModel(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, 
 		return cfg.Copilot.DefaultModel
 	default:
 		return cfg.Claude.DefaultModel
+	}
+}
+
+// stripBoolFlag removes all occurrences of a boolean flag (no value) from a slice of CLI tokens.
+func stripBoolFlag(fields []string, flag string) []string {
+	var out []string
+	for _, f := range fields {
+		if f != flag {
+			out = append(out, f)
+		}
+	}
+	return out
+}
+
+// buildPromptOnlyCmdArgs returns the command and args for a prompt-only invocation.
+// If prompt is non-empty, it is included as a positional argument (for buildCommand).
+// If prompt is empty, the caller supplies it via stdin (for runPromptOnly).
+func buildPromptOnlyCmdArgs(cfg *config.Config, prompt string) (string, []string) {
+	provider := resolveProvider(cfg, nil, nil)
+	switch provider {
+	case "copilot":
+		cmd := cfg.Copilot.Command
+		args := []string{"--headless"}
+		if prompt != "" {
+			args = append(args, prompt)
+		}
+		args = append(args, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns))
+		if cfg.Copilot.Flags != "" {
+			// Strip --headless (always prepended) to avoid duplication
+			fields := stripBoolFlag(strings.Fields(cfg.Copilot.Flags), "--headless")
+			args = append(args, fields...)
+		}
+		return cmd, args
+	default: // "claude"
+		cmd := cfg.Claude.Command
+		args := []string{"-p"}
+		if prompt != "" {
+			args = append(args, prompt)
+		}
+		args = append(args, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns))
+		if cfg.Claude.Flags != "" {
+			args = append(args, strings.Fields(cfg.Claude.Flags)...)
+		}
+		for _, tool := range cfg.Claude.AllowedTools {
+			args = append(args, "--allowedTools", tool)
+		}
+		return cmd, args
 	}
 }
 

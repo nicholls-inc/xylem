@@ -36,8 +36,8 @@ type SourceConfig struct {
 }
 
 type Task struct {
-	Labels []string `yaml:"labels,omitempty"`
-	Workflow  string   `yaml:"workflow"`
+	Labels   []string `yaml:"labels,omitempty"`
+	Workflow string   `yaml:"workflow"`
 }
 
 type ClaudeConfig struct {
@@ -144,6 +144,11 @@ func (c *Config) Validate() error {
 		// valid
 	default:
 		return fmt.Errorf("llm must be \"claude\" or \"copilot\", got %q", c.LLM)
+	}
+
+	// Validate copilot config when copilot is the selected provider
+	if c.LLM == "copilot" && c.Copilot.Command == "" {
+		return fmt.Errorf("copilot.command must be non-empty when llm is \"copilot\"")
 	}
 
 	if c.Claude.Template != "" {
