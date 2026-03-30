@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os/signal"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -62,6 +63,7 @@ func daemonLoop(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *wor
 	}
 
 	var lastScan, lastDrain time.Time
+	var draining int32 // 0=idle, 1=running
 
 	log.Printf("daemon started: scan_interval=%s drain_interval=%s", scanInterval, drainInterval)
 
@@ -86,13 +88,18 @@ func daemonLoop(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *wor
 		}
 
 		if now.Sub(lastDrain) >= drainInterval {
-			drainResult, err := runDrain(ctx, cfg, q, wt)
-			if err != nil {
-				log.Printf("daemon: drain error: %v", err)
-			} else {
+			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
-				log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
-					drainResult.Completed, drainResult.Failed, drainResult.Skipped)
+				go func() {
+					defer atomic.StoreInt32(&draining, 0)
+					drainResult, err := runDrain(ctx, cfg, q, wt)
+					if err != nil {
+						log.Printf("daemon: drain error: %v", err)
+						return
+					}
+					log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
+						drainResult.Completed, drainResult.Failed, drainResult.Skipped)
+				}()
 			}
 		}
 

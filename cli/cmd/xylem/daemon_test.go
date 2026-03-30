@@ -74,6 +74,35 @@ func TestParseDaemonIntervals(t *testing.T) {
 	}
 }
 
+func TestDaemonNonBlockingDrain(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDaemonConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	wt := worktree.New(dir, &emptyWorktreeRunner{})
+
+	now := time.Now().UTC()
+	q.Enqueue(queue.Vessel{ID: "v1", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
+
+	// drainInterval=1ms ensures the drain fires immediately. The loop should
+	// return promptly when the context is cancelled — it must NOT block waiting
+	// for the drain to finish.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := daemonLoop(ctx, cfg, q, wt, time.Hour, time.Millisecond)
+	elapsed := time.Since(start)
+
+	if err != nil {
+		t.Fatalf("expected nil error on shutdown, got: %v", err)
+	}
+	// If drain were blocking, this would hang for the full vessel timeout.
+	// 500ms is generous: the loop should return well within the 200ms ctx timeout.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("daemonLoop blocked for %s — drain is not running in background", elapsed)
+	}
+}
+
 func TestLogTickSummary(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))

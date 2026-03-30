@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -37,11 +38,14 @@ func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reade
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = stdin
-	cmd.Stderr = os.Stderr
 
-	var stdout bytes.Buffer
+	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	err := cmd.Run()
+	if err != nil && stderr.Len() > 0 {
+		return stdout.Bytes(), fmt.Errorf("%w\nstderr: %s", err, stderr.String())
+	}
 	return stdout.Bytes(), err
 }
