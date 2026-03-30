@@ -100,7 +100,7 @@ func TestCreateIssuesCorrectCommands(t *testing.T) {
 	if !r.called("git", "fetch", "origin", "main") {
 		t.Error("expected 'git fetch origin main' to be called")
 	}
-	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/issue-42-null-response", "-b", "fix/issue-42-null-response", "origin/main") {
+	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/issue-42-null-response", "-B", "fix/issue-42-null-response", "origin/main") {
 		t.Errorf("expected 'git worktree add' to be called, calls were: %v", r.calls)
 	}
 }
@@ -418,7 +418,7 @@ func TestDefaultBranchGHReturnsEmptyName(t *testing.T) {
 func TestCreateWorktreeAddFails(t *testing.T) {
 	r := newMock()
 	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
-	r.setErr("git worktree add .claude/worktrees/fix/issue-1-test -b fix/issue-1-test origin/main",
+	r.setErr("git worktree add .claude/worktrees/fix/issue-1-test -B fix/issue-1-test origin/main",
 		errors.New("fatal: 'fix/issue-1-test' is already checked out"))
 
 	m := New("/repo", r)
@@ -428,6 +428,29 @@ func TestCreateWorktreeAddFails(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "git worktree add") {
 		t.Errorf("expected worktree-add error, got: %v", err)
+	}
+}
+
+// TestCreateExistingBranchResets verifies that Create uses -B (not -b) so that
+// retries succeed when the branch already exists from a previous failed attempt.
+// -B creates the branch if it doesn't exist, or resets it to the start point if it does.
+func TestCreateExistingBranchResets(t *testing.T) {
+	r := newMock()
+	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
+
+	m := New("/repo", r)
+	_, err := m.Create(context.Background(), "fix/retry-branch")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Must use -B (force-create/reset) not -b (create-only) to handle retries
+	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/retry-branch", "-B", "fix/retry-branch", "origin/main") {
+		t.Errorf("expected 'git worktree add' with -B flag for retry safety, got calls: %v", r.calls)
+	}
+	// Verify -b is NOT used (guards against regression)
+	if r.called("git", "worktree", "add", ".claude/worktrees/fix/retry-branch", "-b", "fix/retry-branch", "origin/main") {
+		t.Error("must use -B (not -b) so retries work when branch already exists")
 	}
 }
 
@@ -641,7 +664,7 @@ func TestCreateNoOriginRemote(t *testing.T) {
 		t.Error("should not call git fetch when no origin remote")
 	}
 	// Should use local branch as start point (not origin/main)
-	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/local-only", "-b", "fix/local-only", "main") {
+	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/local-only", "-B", "fix/local-only", "main") {
 		t.Errorf("expected worktree add with local start point 'main', got calls: %v", r.calls)
 	}
 }
@@ -662,7 +685,7 @@ func TestCreateWithOriginRemote(t *testing.T) {
 		t.Error("expected git fetch origin main when origin exists")
 	}
 	// Should use origin/main as start point
-	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/has-origin", "-b", "fix/has-origin", "origin/main") {
+	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/has-origin", "-B", "fix/has-origin", "origin/main") {
 		t.Errorf("expected worktree add with 'origin/main' start point, got calls: %v", r.calls)
 	}
 }
