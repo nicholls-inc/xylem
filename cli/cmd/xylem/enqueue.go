@@ -3,6 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -21,7 +24,7 @@ func newEnqueueCmd() *cobra.Command {
 			promptFile, _ := cmd.Flags().GetString("prompt-file")
 			srcName, _ := cmd.Flags().GetString("source")
 			id, _ := cmd.Flags().GetString("id")
-			return cmdEnqueue(deps.q, wf, ref, prompt, promptFile, srcName, id)
+			return cmdEnqueue(deps.q, deps.cfg.StateDir, wf, ref, prompt, promptFile, srcName, id)
 		},
 	}
 	cmd.Flags().String("workflow", "", "Workflow to invoke (e.g., fix-bug, implement-feature)")
@@ -33,7 +36,7 @@ func newEnqueueCmd() *cobra.Command {
 	return cmd
 }
 
-func cmdEnqueue(q *queue.Queue, workflow, ref, prompt, promptFile, srcName, id string) error {
+func cmdEnqueue(q *queue.Queue, stateDir, workflow, ref, prompt, promptFile, srcName, id string) error {
 	if prompt != "" && promptFile != "" {
 		return fmt.Errorf("--prompt and --prompt-file are mutually exclusive")
 	}
@@ -48,6 +51,12 @@ func cmdEnqueue(q *queue.Queue, workflow, ref, prompt, promptFile, srcName, id s
 
 	if workflow == "" && prompt == "" {
 		return fmt.Errorf("at least one of --workflow or --prompt/--prompt-file is required")
+	}
+
+	if workflow != "" {
+		if err := validateWorkflow(stateDir, workflow); err != nil {
+			return err
+		}
 	}
 
 	if id == "" {
@@ -68,4 +77,33 @@ func cmdEnqueue(q *queue.Queue, workflow, ref, prompt, promptFile, srcName, id s
 	}
 	fmt.Printf("Enqueued vessel %s (workflow=%s, source=%s)\n", vessel.ID, vessel.Workflow, vessel.Source)
 	return nil
+}
+
+func validateWorkflow(stateDir, name string) error {
+	path := filepath.Join(stateDir, "workflows", name+".yaml")
+	if _, err := os.Stat(path); err == nil {
+		return nil
+	}
+
+	available := listWorkflows(stateDir)
+	if len(available) > 0 {
+		return fmt.Errorf("workflow %q not found at %s\navailable workflows: %s",
+			name, path, strings.Join(available, ", "))
+	}
+	return fmt.Errorf("workflow %q not found at %s", name, path)
+}
+
+func listWorkflows(stateDir string) []string {
+	pattern := filepath.Join(stateDir, "workflows", "*.yaml")
+	matches, err := filepath.Glob(pattern)
+	if err != nil {
+		return nil
+	}
+	var names []string
+	for _, m := range matches {
+		name := strings.TrimSuffix(filepath.Base(m), ".yaml")
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
