@@ -40,7 +40,7 @@ func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reade
 	cmd.Stderr = os.Stderr
 
 	var stdout bytes.Buffer
-	cmd.Stdout = io.MultiWriter(os.Stdout, &stdout)
+	cmd.Stdout = &stdout
 
 	err := cmd.Run()
 	return stdout.Bytes(), err
