@@ -634,7 +634,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
-			wantErr: `phase name "create-issues" contains invalid characters; use only lowercase letters, digits, and underscores`,
+			wantErr: `phase name "create-issues" is invalid; must start with a lowercase letter and contain only lowercase letters, digits, and underscores`,
 		},
 		{
 			name:          "phase name with uppercase is rejected",
@@ -646,7 +646,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
-			wantErr: `phase name "CreateIssues" contains invalid characters`,
+			wantErr: `phase name "CreateIssues" is invalid`,
 		},
 		{
 			name:          "phase name with underscores is accepted",
@@ -658,6 +658,18 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
+		},
+		{
+			name:          "phase name starting with digit is rejected",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "2step", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `phase name "2step" is invalid`,
 		},
 		{
 			name:          "phase name with digits is accepted",
