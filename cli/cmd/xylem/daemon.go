@@ -4,6 +4,8 @@ import (
 	"context"
 	"log"
 	"os/signal"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -15,6 +17,10 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
+
+// drainShutdownTimeout is how long the daemon waits for an in-flight drain to
+// finish after receiving a shutdown signal before returning anyway.
+const drainShutdownTimeout = 30 * time.Second
 
 func newDaemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -33,7 +39,14 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	return daemonLoop(ctx, cfg, q, wt, scanInterval, drainInterval)
+	scan := func(ctx context.Context) (scanner.ScanResult, error) {
+		return runScan(ctx, cfg, q)
+	}
+	drain := func(ctx context.Context) (runner.DrainResult, error) {
+		return runDrain(ctx, cfg, q, wt)
+	}
+
+	return daemonLoop(ctx, q, scan, drain, scanInterval, drainInterval)
 }
 
 func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
@@ -53,22 +66,37 @@ func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
 	return scan, drain
 }
 
+// scanFunc and drainFunc abstract scan/drain for testability.
+type scanFunc func(ctx context.Context) (scanner.ScanResult, error)
+type drainFunc func(ctx context.Context) (runner.DrainResult, error)
+
 // daemonLoop is the core loop extracted for testability. It accepts an
-// externally-controlled context so tests can cancel it without signals.
-func daemonLoop(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, scanInterval, drainInterval time.Duration) error {
+// externally-controlled context so tests can cancel it without signals,
+// and injectable scan/drain functions so tests can use stubs.
+func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, scanInterval, drainInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
 	}
 
 	var lastScan, lastDrain time.Time
+	var draining int32 // 0=idle, 1=running
+	var drainWg sync.WaitGroup
 
 	log.Printf("daemon started: scan_interval=%s drain_interval=%s", scanInterval, drainInterval)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("daemon: received shutdown signal")
+			log.Println("daemon: received shutdown signal, waiting for in-flight drain")
+			waitDone := make(chan struct{})
+			go func() { drainWg.Wait(); close(waitDone) }()
+			select {
+			case <-waitDone:
+				log.Println("daemon: in-flight drain finished")
+			case <-time.After(drainShutdownTimeout):
+				log.Println("daemon: drain shutdown timeout exceeded, exiting")
+			}
 			return nil
 		default:
 		}
@@ -76,7 +104,7 @@ func daemonLoop(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *wor
 		now := time.Now()
 
 		if now.Sub(lastScan) >= scanInterval {
-			scanResult, err := runScan(ctx, cfg, q)
+			scanResult, err := scan(ctx)
 			if err != nil {
 				log.Printf("daemon: scan error: %v", err)
 			} else {
@@ -86,13 +114,20 @@ func daemonLoop(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *wor
 		}
 
 		if now.Sub(lastDrain) >= drainInterval {
-			drainResult, err := runDrain(ctx, cfg, q, wt)
-			if err != nil {
-				log.Printf("daemon: drain error: %v", err)
-			} else {
+			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
-				log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
-					drainResult.Completed, drainResult.Failed, drainResult.Skipped)
+				drainWg.Add(1)
+				go func() {
+					defer drainWg.Done()
+					defer atomic.StoreInt32(&draining, 0)
+					drainResult, err := drain(ctx)
+					if err != nil {
+						log.Printf("daemon: drain error: %v", err)
+						return
+					}
+					log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
+						drainResult.Completed, drainResult.Failed, drainResult.Skipped)
+				}()
 			}
 		}
 
@@ -100,7 +135,15 @@ func daemonLoop(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *wor
 
 		select {
 		case <-ctx.Done():
-			log.Println("daemon: shutting down gracefully")
+			log.Println("daemon: received shutdown signal, waiting for in-flight drain")
+			waitDone := make(chan struct{})
+			go func() { drainWg.Wait(); close(waitDone) }()
+			select {
+			case <-waitDone:
+				log.Println("daemon: in-flight drain finished")
+			case <-time.After(drainShutdownTimeout):
+				log.Println("daemon: drain shutdown timeout exceeded, exiting")
+			}
 			return nil
 		case <-time.After(tickInterval):
 		}
