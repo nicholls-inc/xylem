@@ -227,8 +227,19 @@ func TestCancelRunning(t *testing.T) {
 		t.Fatalf("dequeue: %v", err)
 	}
 
-	if err := q.Cancel(vessel.ID); err == nil {
-		t.Fatal("expected error cancelling running vessel")
+	if err := q.Cancel(vessel.ID); err != nil {
+		t.Fatalf("cancel running vessel: %v", err)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if vessels[0].State != StateCancelled {
+		t.Fatalf("expected cancelled, got %q", vessels[0].State)
+	}
+	if vessels[0].EndedAt == nil {
+		t.Fatal("expected EndedAt to be set")
 	}
 }
 
