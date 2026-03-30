@@ -50,15 +50,15 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 			return result, err
 		}
 		for _, vessel := range vessels {
-			// Dedup: skip if already enqueued (from another source or task)
-			if s.Queue.HasRef(vessel.Ref) {
-				result.Skipped++
-				continue
-			}
-			if err := s.Queue.Enqueue(vessel); err != nil {
+			enqueued, err := s.Queue.Enqueue(vessel)
+			if err != nil {
 				return result, err
 			}
-			result.Added++
+			if enqueued {
+				result.Added++
+			} else {
+				result.Skipped++
+			}
 		}
 	}
 	return result, nil

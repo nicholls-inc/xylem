@@ -165,7 +165,7 @@ func TestScanAlreadyQueued(t *testing.T) {
 	r := newMock()
 
 	// Pre-enqueue using new format
-	_ = q.Enqueue(queue.Vessel{
+	_, _ = q.Enqueue(queue.Vessel{
 		ID: "issue-1", Source: "github-issue",
 		Ref: "https://github.com/owner/repo/issues/1", Workflow: "fix-bug",
 		Meta: map[string]string{"issue_num": "1"},

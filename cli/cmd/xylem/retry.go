@@ -64,7 +64,7 @@ func cmdRetry(q *queue.Queue, id string) error {
 		GateOutput:  vessel.GateOutput,
 	}
 
-	if err := q.Enqueue(newVessel); err != nil {
+	if _, err := q.Enqueue(newVessel); err != nil {
 		return fmt.Errorf("enqueue retry: %w", err)
 	}
 	fmt.Printf("Created retry vessel %s (retrying %s)\n", newVessel.ID, vessel.ID)

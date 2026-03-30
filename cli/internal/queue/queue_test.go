@@ -66,8 +66,12 @@ func TestEnqueue(t *testing.T) {
 	q, path := newTestQueue(t)
 	vessel := testVessel(42)
 
-	if err := q.Enqueue(vessel); err != nil {
+	enqueued, err := q.Enqueue(vessel)
+	if err != nil {
 		t.Fatalf("enqueue: %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected enqueued=true for new vessel")
 	}
 
 	lines := readNonEmptyLines(t, path)
@@ -96,7 +100,7 @@ func TestEnqueue(t *testing.T) {
 func TestDequeue(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(1)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -129,7 +133,7 @@ func TestDequeueEmpty(t *testing.T) {
 func TestUpdate(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(2)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	got, err := q.Dequeue()
@@ -162,7 +166,7 @@ func TestUpdate(t *testing.T) {
 func TestUpdateFailed(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(3)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -200,7 +204,7 @@ func TestUpdateFailed(t *testing.T) {
 func TestCancel(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(4)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -220,7 +224,7 @@ func TestCancel(t *testing.T) {
 func TestCancelRunning(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(5)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := q.Dequeue(); err != nil {
@@ -235,7 +239,7 @@ func TestCancelRunning(t *testing.T) {
 func TestCancelCompleted(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(6)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	// Must go through pending -> running -> completed.
@@ -264,7 +268,7 @@ func TestCancelNotFound(t *testing.T) {
 
 func TestHasRef(t *testing.T) {
 	q, _ := newTestQueue(t)
-	if err := q.Enqueue(testVessel(42)); err != nil {
+	if _, err := q.Enqueue(testVessel(42)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -279,7 +283,7 @@ func TestHasRef(t *testing.T) {
 func TestHasRefCancelled(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(42)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if err := q.Cancel(vessel.ID); err != nil {
@@ -304,7 +308,7 @@ func TestHasRefTerminalStates(t *testing.T) {
 		t.Run(string(tt.state), func(t *testing.T) {
 			q, _ := newTestQueue(t)
 			vessel := testVessel(42)
-			if err := q.Enqueue(vessel); err != nil {
+			if _, err := q.Enqueue(vessel); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
 			for _, s := range tt.transitions {
@@ -323,7 +327,7 @@ func TestHasRefActiveStates(t *testing.T) {
 	transitions := []VesselState{StatePending, StateRunning, StateWaiting}
 	q, _ := newTestQueue(t)
 	vessel := testVessel(42)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -336,6 +340,130 @@ func TestHasRefActiveStates(t *testing.T) {
 		if !q.HasRef("https://github.com/example/repo/issues/42") {
 			t.Fatalf("expected %s vessel to block re-enqueueing", state)
 		}
+	}
+}
+
+func TestEnqueueIdempotentDuplicateRef(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(42)
+
+	enqueued, err := q.Enqueue(vessel)
+	if err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected first enqueue to succeed")
+	}
+
+	// Second enqueue with the same ref should be a no-op.
+	vessel2 := testVessel(42)
+	vessel2.ID = "issue-42-dup"
+	enqueued, err = q.Enqueue(vessel2)
+	if err != nil {
+		t.Fatalf("second enqueue: %v", err)
+	}
+	if enqueued {
+		t.Fatal("expected second enqueue to be skipped (duplicate active ref)")
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel in queue, got %d", len(vessels))
+	}
+}
+
+func TestEnqueueAfterTerminalState(t *testing.T) {
+	tests := []struct {
+		name        string
+		transitions []VesselState
+	}{
+		{"after completed", []VesselState{StateRunning, StateCompleted}},
+		{"after failed", []VesselState{StateRunning, StateFailed}},
+		{"after cancelled", []VesselState{StateCancelled}},
+		{"after timed_out", []VesselState{StateRunning, StateWaiting, StateTimedOut}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q, _ := newTestQueue(t)
+			vessel := testVessel(42)
+			if _, err := q.Enqueue(vessel); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			for _, s := range tt.transitions {
+				if err := q.Update(vessel.ID, s, ""); err != nil {
+					t.Fatalf("update to %s: %v", s, err)
+				}
+			}
+
+			// Re-enqueue with the same ref should succeed since the original
+			// vessel is in a terminal state.
+			vessel2 := testVessel(42)
+			vessel2.ID = "issue-42-retry"
+			enqueued, err := q.Enqueue(vessel2)
+			if err != nil {
+				t.Fatalf("re-enqueue: %v", err)
+			}
+			if !enqueued {
+				t.Fatal("expected re-enqueue to succeed after terminal state")
+			}
+
+			vessels, err := q.List()
+			if err != nil {
+				t.Fatalf("list: %v", err)
+			}
+			if len(vessels) != 2 {
+				t.Fatalf("expected 2 vessels in queue, got %d", len(vessels))
+			}
+		})
+	}
+}
+
+func TestEnqueueEmptyRefAlwaysSucceeds(t *testing.T) {
+	q, _ := newTestQueue(t)
+
+	v1 := Vessel{
+		ID:        "task-1",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		Prompt:    "do something",
+		State:     StatePending,
+		CreatedAt: time.Now().UTC(),
+	}
+	v2 := Vessel{
+		ID:        "task-2",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		Prompt:    "do something else",
+		State:     StatePending,
+		CreatedAt: time.Now().UTC(),
+	}
+
+	enqueued, err := q.Enqueue(v1)
+	if err != nil {
+		t.Fatalf("first enqueue: %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected first enqueue with empty ref to succeed")
+	}
+
+	enqueued, err = q.Enqueue(v2)
+	if err != nil {
+		t.Fatalf("second enqueue: %v", err)
+	}
+	if !enqueued {
+		t.Fatal("expected second enqueue with empty ref to succeed")
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 2 {
+		t.Fatalf("expected 2 vessels, got %d", len(vessels))
 	}
 }
 
@@ -383,7 +511,7 @@ func TestConcurrentEnqueue(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			vessel := testVessel(100 + i)
-			if err := q.Enqueue(vessel); err != nil {
+			if _, err := q.Enqueue(vessel); err != nil {
 				t.Errorf("enqueue %d: %v", i, err)
 			}
 		}()
@@ -406,7 +534,7 @@ func TestListByState(t *testing.T) {
 	vessels[2].State = StateCompleted
 
 	for _, vessel := range vessels {
-		if err := q.Enqueue(vessel); err != nil {
+		if _, err := q.Enqueue(vessel); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
@@ -425,7 +553,7 @@ func TestListByState(t *testing.T) {
 func TestUpdateInvalidTransitionCompletedToPending(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(10)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := q.Dequeue(); err != nil {
@@ -447,7 +575,7 @@ func TestUpdateInvalidTransitionCompletedToPending(t *testing.T) {
 func TestUpdateInvalidTransitionPendingToCompleted(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(11)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -463,7 +591,7 @@ func TestUpdateInvalidTransitionPendingToCompleted(t *testing.T) {
 func TestUpdateInvalidTransitionPendingToFailed(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(12)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -479,7 +607,7 @@ func TestUpdateInvalidTransitionPendingToFailed(t *testing.T) {
 func TestUpdateInvalidTransitionCancelledToRunning(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(13)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if err := q.Cancel(vessel.ID); err != nil {
@@ -498,7 +626,7 @@ func TestUpdateInvalidTransitionCancelledToRunning(t *testing.T) {
 func TestUpdateValidTransitionFailedToPending(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(14)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := q.Dequeue(); err != nil {
@@ -525,7 +653,7 @@ func TestUpdateValidTransitionFailedToPending(t *testing.T) {
 func TestUpdateRunningToCancelled(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(16)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	if _, err := q.Dequeue(); err != nil {
@@ -551,7 +679,7 @@ func TestConcurrentUpdateAndList(t *testing.T) {
 
 	// Enqueue and dequeue to get vessels into running state.
 	for i := 0; i < numVessels; i++ {
-		if err := q.Enqueue(testVessel(800 + i)); err != nil {
+		if _, err := q.Enqueue(testVessel(800 + i)); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
@@ -603,7 +731,7 @@ func TestConcurrentUpdateAndList(t *testing.T) {
 
 func TestUpdateNonExistentVessel(t *testing.T) {
 	q, _ := newTestQueue(t)
-	if err := q.Enqueue(testVessel(1)); err != nil {
+	if _, err := q.Enqueue(testVessel(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -621,7 +749,7 @@ func TestUpdateRunningBranchSetsTimestamps(t *testing.T) {
 	// clears EndedAt and Error.
 	q, _ := newTestQueue(t)
 	vessel := testVessel(20)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -658,7 +786,7 @@ func TestDequeueSkipsNonPending(t *testing.T) {
 	j3 := testVessel(32) // pending
 
 	for _, j := range []Vessel{j1, j2, j3} {
-		if err := q.Enqueue(j); err != nil {
+		if _, err := q.Enqueue(j); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 	}
@@ -760,7 +888,7 @@ func TestWaitingState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			q, _ := newTestQueue(t)
 			vessel := testVessel(500)
-			if err := q.Enqueue(vessel); err != nil {
+			if _, err := q.Enqueue(vessel); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
 
@@ -798,7 +926,7 @@ func TestWaitingState(t *testing.T) {
 	t.Run("waiting to completed is invalid", func(t *testing.T) {
 		q, _ := newTestQueue(t)
 		vessel := testVessel(501)
-		if err := q.Enqueue(vessel); err != nil {
+		if _, err := q.Enqueue(vessel); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 		helperTransitionToWaiting(t, q, vessel.ID)
@@ -815,7 +943,7 @@ func TestWaitingState(t *testing.T) {
 	t.Run("waiting to failed is invalid", func(t *testing.T) {
 		q, _ := newTestQueue(t)
 		vessel := testVessel(502)
-		if err := q.Enqueue(vessel); err != nil {
+		if _, err := q.Enqueue(vessel); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 		helperTransitionToWaiting(t, q, vessel.ID)
@@ -833,7 +961,7 @@ func TestWaitingState(t *testing.T) {
 func TestWaitingStateDoesNotSetEndedAt(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(503)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	helperTransitionToWaiting(t, q, vessel.ID)
@@ -850,7 +978,7 @@ func TestWaitingStateDoesNotSetEndedAt(t *testing.T) {
 func TestTimedOutState(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(510)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	helperTransitionToWaiting(t, q, vessel.ID)
@@ -906,7 +1034,7 @@ func TestV2VesselFields(t *testing.T) {
 		RetryOf:      "v2-test-0",
 	}
 
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 
@@ -1011,7 +1139,7 @@ func TestUpdateVessel(t *testing.T) {
 	t.Run("update phase tracking fields", func(t *testing.T) {
 		q, _ := newTestQueue(t)
 		vessel := testVessel(600)
-		if err := q.Enqueue(vessel); err != nil {
+		if _, err := q.Enqueue(vessel); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 
@@ -1061,7 +1189,7 @@ func TestFindByID(t *testing.T) {
 	t.Run("find existing vessel", func(t *testing.T) {
 		q, _ := newTestQueue(t)
 		vessel := testVessel(700)
-		if err := q.Enqueue(vessel); err != nil {
+		if _, err := q.Enqueue(vessel); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 
@@ -1108,11 +1236,11 @@ func helperEnqueueCompleteThenReenqueue(t *testing.T) (*Queue, Vessel) {
 	t.Helper()
 	q, _ := newTestQueue(t)
 	vessel := testVessel(42)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	helperCompleteVessel(t, q, vessel.ID)
-	if err := q.Enqueue(testVessel(42)); err != nil {
+	if _, err := q.Enqueue(testVessel(42)); err != nil {
 		t.Fatalf("re-enqueue: %v", err)
 	}
 	return q, vessel
@@ -1224,7 +1352,7 @@ func TestDuplicateID(t *testing.T) {
 func TestCancelWaitingVessel(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(900)
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	helperTransitionToWaiting(t, q, vessel.ID)
