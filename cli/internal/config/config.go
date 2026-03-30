@@ -22,7 +22,9 @@ type Config struct {
 	Exclude       []string                `yaml:"exclude,omitempty"`
 	DefaultBranch string                  `yaml:"default_branch,omitempty"`
 	CleanupAfter  string                  `yaml:"cleanup_after,omitempty"`
+	LLM           string                  `yaml:"llm,omitempty"`
 	Claude        ClaudeConfig            `yaml:"claude"`
+	Copilot       CopilotConfig           `yaml:"copilot,omitempty"`
 	Daemon        DaemonConfig            `yaml:"daemon,omitempty"`
 }
 
@@ -34,8 +36,8 @@ type SourceConfig struct {
 }
 
 type Task struct {
-	Labels []string `yaml:"labels,omitempty"`
-	Workflow  string   `yaml:"workflow"`
+	Labels   []string `yaml:"labels,omitempty"`
+	Workflow string   `yaml:"workflow"`
 }
 
 type ClaudeConfig struct {
@@ -46,6 +48,14 @@ type ClaudeConfig struct {
 	// Template is kept for deserialization so we can detect and reject it.
 	Template     string   `yaml:"template,omitempty"`
 	AllowedTools []string `yaml:"allowed_tools,omitempty"`
+}
+
+// CopilotConfig holds configuration for the GitHub Copilot CLI provider.
+type CopilotConfig struct {
+	Command      string            `yaml:"command"`
+	Flags        string            `yaml:"flags,omitempty"`
+	DefaultModel string            `yaml:"default_model,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
 }
 
 type DaemonConfig struct {
@@ -68,6 +78,9 @@ func Load(path string) (*Config, error) {
 		Exclude:      []string{"wontfix", "duplicate", "in-progress", "no-bot"},
 		Claude: ClaudeConfig{
 			Command: "claude",
+		},
+		Copilot: CopilotConfig{
+			Command: "copilot",
 		},
 		Daemon: DaemonConfig{
 			ScanInterval:  "60s",
@@ -124,6 +137,18 @@ func (c *Config) Validate() error {
 		if _, err := time.ParseDuration(c.CleanupAfter); err != nil {
 			return fmt.Errorf("cleanup_after must be a valid duration: %w", err)
 		}
+	}
+
+	switch c.LLM {
+	case "", "claude", "copilot":
+		// valid
+	default:
+		return fmt.Errorf("llm must be \"claude\" or \"copilot\", got %q", c.LLM)
+	}
+
+	// Validate copilot config: command must be set when copilot is the active provider.
+	if c.LLM == "copilot" && c.Copilot.Command == "" {
+		return fmt.Errorf("copilot.command must be non-empty")
 	}
 
 	if c.Claude.Template != "" {

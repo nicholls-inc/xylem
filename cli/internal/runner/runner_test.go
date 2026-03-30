@@ -16,8 +16,8 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
-	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
+	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
 
 // --- Mock types ---
@@ -105,8 +105,8 @@ type mockExitError struct {
 	code int
 }
 
-func (e *mockExitError) Error() string    { return fmt.Sprintf("exit status %d", e.code) }
-func (e *mockExitError) ExitCode() int    { return e.code }
+func (e *mockExitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+func (e *mockExitError) ExitCode() int { return e.code }
 
 type countingCmdRunner struct {
 	concurrent int32
@@ -216,22 +216,22 @@ func makeTestConfig(dir string, concurrency int) *config.Config {
 
 func makeVessel(num int, workflow string) queue.Vessel {
 	return queue.Vessel{
-		ID:     fmt.Sprintf("issue-%d", num),
-		Source: "github-issue",
-		Ref:    fmt.Sprintf("https://github.com/owner/repo/issues/%d", num),
+		ID:        fmt.Sprintf("issue-%d", num),
+		Source:    "github-issue",
+		Ref:       fmt.Sprintf("https://github.com/owner/repo/issues/%d", num),
 		Workflow:  workflow,
-		Meta:   map[string]string{"issue_num": strconv.Itoa(num)},
-		State:  queue.StatePending,
+		Meta:      map[string]string{"issue_num": strconv.Itoa(num)},
+		State:     queue.StatePending,
 		CreatedAt: time.Now().UTC(),
 	}
 }
 
 func makePromptVessel(num int, prompt string) queue.Vessel {
 	return queue.Vessel{
-		ID:     fmt.Sprintf("prompt-%d", num),
-		Source: "manual",
-		Prompt: prompt,
-		State:  queue.StatePending,
+		ID:        fmt.Sprintf("prompt-%d", num),
+		Source:    "manual",
+		Prompt:    prompt,
+		State:     queue.StatePending,
 		CreatedAt: time.Now().UTC(),
 	}
 }
@@ -250,9 +250,9 @@ func TestBuildCommand(t *testing.T) {
 		},
 	}
 	vessel := &queue.Vessel{
-		Source: "github-issue",
-		Workflow:  "fix-bug",
-		Ref:    "https://github.com/owner/repo/issues/42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      "https://github.com/owner/repo/issues/42",
 	}
 	cmd, args, err := buildCommand(cfg, vessel)
 	if err != nil {
@@ -377,9 +377,9 @@ func TestBuildCommandWorkflowBased(t *testing.T) {
 		},
 	}
 	vessel := &queue.Vessel{
-		Source: "github-issue",
-		Workflow:  "fix-bug",
-		Ref:    "https://github.com/owner/repo/issues/42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      "https://github.com/owner/repo/issues/42",
 	}
 	cmd, args, err := buildCommand(cfg, vessel)
 	if err != nil {
@@ -1166,7 +1166,7 @@ func TestDrainPreviousOutputsAvailable(t *testing.T) {
 
 func TestBranchPrefixSelection(t *testing.T) {
 	tests := []struct {
-		workflow      string
+		workflow   string
 		wantPrefix string
 	}{
 		{"fix-bug", "fix"},
@@ -1223,9 +1223,9 @@ func TestBuildCommandWithFlags(t *testing.T) {
 		},
 	}
 	vessel := &queue.Vessel{
-		Source: "github-issue",
-		Workflow:  "fix-bug",
-		Ref:    "https://github.com/owner/repo/issues/42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      "https://github.com/owner/repo/issues/42",
 	}
 	_, args, err := buildCommand(cfg, vessel)
 	if err != nil {
@@ -1514,3 +1514,401 @@ func TestDrainTimeoutV2Phase(t *testing.T) {
 		t.Errorf("expected timed-out vessel to be marked failed, got completed=%d failed=%d", result.Completed, result.Failed)
 	}
 }
+
+func TestResolveProvider(t *testing.T) {
+	claude := "claude"
+	copilot := "copilot"
+
+	tests := []struct {
+		name     string
+		cfgLLM   string
+		wfLLM    *string
+		phaseLLM *string
+		want     string
+	}{
+		{"all nil defaults to claude", "", nil, nil, "claude"},
+		{"config claude", "claude", nil, nil, "claude"},
+		{"config copilot", "copilot", nil, nil, "copilot"},
+		{"workflow overrides config", "claude", &copilot, nil, "copilot"},
+		{"phase overrides workflow", "claude", &claude, &copilot, "copilot"},
+		{"phase overrides config", "claude", nil, &copilot, "copilot"},
+		{"workflow override wins when config empty", "", &copilot, nil, "copilot"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &config.Config{LLM: tt.cfgLLM}
+			var wf *workflow.Workflow
+			if tt.wfLLM != nil {
+				wf = &workflow.Workflow{LLM: tt.wfLLM}
+			}
+			var p *workflow.Phase
+			if tt.phaseLLM != nil {
+				p = &workflow.Phase{LLM: tt.phaseLLM}
+			}
+			got := resolveProvider(cfg, wf, p)
+			if got != tt.want {
+				t.Errorf("resolveProvider() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveModel(t *testing.T) {
+	cfg := &config.Config{
+		Claude:  config.ClaudeConfig{DefaultModel: "claude-default"},
+		Copilot: config.CopilotConfig{DefaultModel: "copilot-default"},
+	}
+
+	phaseModel := "phase-model"
+	wfModel := "wf-model"
+
+	tests := []struct {
+		name       string
+		wfModel    *string
+		phaseModel *string
+		provider   string
+		want       string
+	}{
+		{"phase model wins", &wfModel, &phaseModel, "claude", "phase-model"},
+		{"workflow model wins over default", &wfModel, nil, "claude", "wf-model"},
+		{"claude default when no override", nil, nil, "claude", "claude-default"},
+		{"copilot default when provider copilot", nil, nil, "copilot", "copilot-default"},
+		{"workflow model wins for copilot", &wfModel, nil, "copilot", "wf-model"},
+		{"phase model wins for copilot", &wfModel, &phaseModel, "copilot", "phase-model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var wf *workflow.Workflow
+			if tt.wfModel != nil {
+				wf = &workflow.Workflow{Model: tt.wfModel}
+			}
+			var p *workflow.Phase
+			if tt.phaseModel != nil {
+				p = &workflow.Phase{Model: tt.phaseModel}
+			}
+			got := resolveModel(cfg, wf, p, tt.provider)
+			if got != tt.want {
+				t.Errorf("resolveModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildCopilotPhaseArgs(t *testing.T) {
+	maxTurns := 10
+
+	tests := []struct {
+		name           string
+		cfg            *config.Config
+		wf             *workflow.Workflow
+		phase          *workflow.Phase
+		harness        string
+		wantContains   []string
+		wantNotContain []string
+		wantPairs      [][2]string // [flag, value] pairs that must be adjacent
+	}{
+		{
+			name:         "basic copilot args",
+			cfg:          &config.Config{Copilot: config.CopilotConfig{Command: "copilot"}},
+			phase:        &workflow.Phase{MaxTurns: maxTurns},
+			wantContains: []string{"--headless"},
+			wantPairs:    [][2]string{{"--max-turns", "10"}},
+		},
+		{
+			name: "copilot with model from config default",
+			cfg: &config.Config{
+				Copilot: config.CopilotConfig{Command: "copilot", DefaultModel: "gpt-4o"},
+			},
+			phase:     &workflow.Phase{MaxTurns: maxTurns},
+			wantPairs: [][2]string{{"--model", "gpt-4o"}},
+		},
+		{
+			name: "copilot with model from phase overrides default",
+			cfg: &config.Config{
+				Copilot: config.CopilotConfig{Command: "copilot", DefaultModel: "gpt-4o"},
+			},
+			phase:          &workflow.Phase{MaxTurns: maxTurns, Model: strPtrRunner("phase-model")},
+			wantPairs:      [][2]string{{"--model", "phase-model"}},
+			wantNotContain: []string{"gpt-4o"},
+		},
+		{
+			name: "copilot with extra flags",
+			cfg: &config.Config{
+				Copilot: config.CopilotConfig{Command: "copilot", Flags: "--verbose"},
+			},
+			phase:        &workflow.Phase{MaxTurns: maxTurns},
+			wantContains: []string{"--verbose"},
+		},
+		{
+			name:      "copilot with allowed_tools",
+			cfg:       &config.Config{Copilot: config.CopilotConfig{Command: "copilot"}},
+			phase:     &workflow.Phase{MaxTurns: maxTurns, AllowedTools: strPtrRunner("Bash,Read")},
+			wantPairs: [][2]string{{"--allowed-tools", "Bash,Read"}},
+		},
+		{
+			name:      "copilot with harness",
+			cfg:       &config.Config{Copilot: config.CopilotConfig{Command: "copilot"}},
+			phase:     &workflow.Phase{MaxTurns: maxTurns},
+			harness:   "harness instructions",
+			wantPairs: [][2]string{{"--system-prompt", "harness instructions"}},
+		},
+		{
+			name: "copilot strips --model from flags when model resolved",
+			cfg: &config.Config{
+				Copilot: config.CopilotConfig{
+					Command:      "copilot",
+					Flags:        "--headless --model old-model",
+					DefaultModel: "new-model",
+				},
+			},
+			phase:          &workflow.Phase{MaxTurns: maxTurns},
+			wantPairs:      [][2]string{{"--model", "new-model"}},
+			wantNotContain: []string{"old-model"},
+		},
+		{
+			name: "copilot strips duplicate --headless from flags",
+			cfg: &config.Config{
+				Copilot: config.CopilotConfig{
+					Command: "copilot",
+					Flags:   "--headless --verbose",
+				},
+			},
+			phase:        &workflow.Phase{MaxTurns: maxTurns},
+			wantContains: []string{"--verbose"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := buildCopilotPhaseArgs(tt.cfg, tt.wf, tt.phase, tt.harness)
+
+			for _, want := range tt.wantContains {
+				found := false
+				for _, a := range args {
+					if a == want {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("args %v: expected to contain %q", args, want)
+				}
+			}
+
+			for _, notWant := range tt.wantNotContain {
+				for _, a := range args {
+					if a == notWant {
+						t.Errorf("args %v: expected NOT to contain %q", args, notWant)
+						break
+					}
+				}
+			}
+
+			for _, pair := range tt.wantPairs {
+				flag, value := pair[0], pair[1]
+				found := false
+				for i := 0; i < len(args)-1; i++ {
+					if args[i] == flag && args[i+1] == value {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("args %v: expected adjacent pair [%q, %q]", args, flag, value)
+				}
+			}
+
+			// Verify --headless appears exactly once
+			headlessCount := 0
+			for _, a := range args {
+				if a == "--headless" {
+					headlessCount++
+				}
+			}
+			if headlessCount != 1 {
+				t.Errorf("expected exactly 1 --headless, got %d (args: %v)", headlessCount, args)
+			}
+		})
+	}
+}
+
+func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
+	claudeCmd := "claude"
+	copilotCmd := "copilot"
+
+	cfg := &config.Config{
+		Claude:  config.ClaudeConfig{Command: claudeCmd},
+		Copilot: config.CopilotConfig{Command: copilotCmd},
+	}
+	phase := &workflow.Phase{MaxTurns: 5}
+
+	t.Run("claude provider returns claude command", func(t *testing.T) {
+		cmd, args := buildProviderPhaseArgs(cfg, nil, phase, "", "claude")
+		if cmd != claudeCmd {
+			t.Errorf("cmd = %q, want %q", cmd, claudeCmd)
+		}
+		if len(args) == 0 || args[0] != "-p" {
+			t.Errorf("claude args[0] = %q, want -p (args: %v)", args[0], args)
+		}
+		// Claude args must NOT contain copilot-specific flags
+		for _, a := range args {
+			if a == "--headless" || a == "--system-prompt" || a == "--allowed-tools" {
+				t.Errorf("claude args contain copilot-specific flag %q (args: %v)", a, args)
+			}
+		}
+	})
+
+	t.Run("copilot provider returns copilot command", func(t *testing.T) {
+		cmd, args := buildProviderPhaseArgs(cfg, nil, phase, "", "copilot")
+		if cmd != copilotCmd {
+			t.Errorf("cmd = %q, want %q", cmd, copilotCmd)
+		}
+		if len(args) == 0 || args[0] != "--headless" {
+			t.Errorf("copilot args[0] = %q, want --headless (args: %v)", args[0], args)
+		}
+		// Copilot args must NOT contain claude-specific flags
+		for _, a := range args {
+			if a == "-p" || a == "--append-system-prompt" || a == "--allowedTools" {
+				t.Errorf("copilot args contain claude-specific flag %q (args: %v)", a, args)
+			}
+		}
+	})
+}
+
+func TestBuildCommandCopilotDirect(t *testing.T) {
+	cfg := &config.Config{
+		LLM:      "copilot",
+		MaxTurns: 50,
+		Copilot: config.CopilotConfig{
+			Command: "copilot",
+		},
+	}
+	vessel := &queue.Vessel{
+		Source: "manual",
+		Prompt: "Fix the null pointer in handler.go",
+	}
+	cmd, args, err := buildCommand(cfg, vessel)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "copilot" {
+		t.Errorf("expected cmd 'copilot', got %q", cmd)
+	}
+	if len(args) < 4 {
+		t.Fatalf("expected at least 4 args, got %d: %v", len(args), args)
+	}
+	if args[0] != "--headless" {
+		t.Errorf("expected --headless flag, got %q", args[0])
+	}
+	if args[1] != "Fix the null pointer in handler.go" {
+		t.Errorf("expected prompt text, got %q", args[1])
+	}
+	// Must NOT contain claude-specific flags
+	for _, a := range args {
+		if a == "-p" {
+			t.Errorf("copilot buildCommand should not contain -p (args: %v)", args)
+		}
+	}
+}
+
+func TestBuildCommandCopilotWorkflow(t *testing.T) {
+	cfg := &config.Config{
+		LLM:      "copilot",
+		MaxTurns: 50,
+		Copilot: config.CopilotConfig{
+			Command: "copilot",
+			Flags:   "--verbose",
+		},
+	}
+	vessel := &queue.Vessel{
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      "https://github.com/owner/repo/issues/42",
+	}
+	cmd, args, err := buildCommand(cfg, vessel)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "copilot" {
+		t.Errorf("expected cmd 'copilot', got %q", cmd)
+	}
+	if args[0] != "--headless" {
+		t.Errorf("expected --headless flag, got %q", args[0])
+	}
+	if !strings.Contains(args[1], "/fix-bug") {
+		t.Errorf("expected workflow in prompt, got %q", args[1])
+	}
+	// Flags should be appended
+	found := false
+	for _, a := range args {
+		if a == "--verbose" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected --verbose in args, got: %v", args)
+	}
+}
+
+func TestBuildCommandCopilotDirectWithRef(t *testing.T) {
+	cfg := &config.Config{
+		LLM:      "copilot",
+		MaxTurns: 50,
+		Copilot: config.CopilotConfig{
+			Command: "copilot",
+		},
+	}
+	vessel := &queue.Vessel{
+		Source: "manual",
+		Prompt: "Fix the null pointer in handler.go",
+		Ref:    "https://github.com/owner/repo/issues/99",
+	}
+	cmd, args, err := buildCommand(cfg, vessel)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cmd != "copilot" {
+		t.Errorf("expected cmd 'copilot', got %q", cmd)
+	}
+	if !strings.Contains(args[1], "Ref: https://github.com/owner/repo/issues/99") {
+		t.Errorf("expected ref URL in prompt, got %q", args[1])
+	}
+	if !strings.Contains(args[1], "Fix the null pointer in handler.go") {
+		t.Errorf("expected original prompt text, got %q", args[1])
+	}
+}
+
+func TestBuildPromptOnlyCmdArgsHeadlessDedup(t *testing.T) {
+	cfg := &config.Config{
+		LLM:      "copilot",
+		MaxTurns: 50,
+		Copilot: config.CopilotConfig{
+			Command: "copilot",
+			Flags:   "--headless --verbose",
+		},
+	}
+	_, args := buildPromptOnlyCmdArgs(cfg, "")
+	headlessCount := 0
+	for _, a := range args {
+		if a == "--headless" {
+			headlessCount++
+		}
+	}
+	if headlessCount != 1 {
+		t.Errorf("expected exactly 1 --headless, got %d (args: %v)", headlessCount, args)
+	}
+	// --verbose should still be present
+	found := false
+	for _, a := range args {
+		if a == "--verbose" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected --verbose in args, got: %v", args)
+	}
+}
+
+func strPtrRunner(s string) *string { return &s }
