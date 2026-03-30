@@ -18,7 +18,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
-	"github.com/nicholls-inc/xylem/cli/internal/skill"
+	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 )
 
@@ -125,8 +125,8 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 		// Check timeout
 		if vessel.WaitingSince != nil {
 			timeoutDur := 24 * time.Hour // default
-			if vessel.Skill != "" {
-				if s, loadErr := r.loadSkill(vessel.Skill); loadErr == nil {
+			if vessel.Workflow != "" {
+				if s, loadErr := r.loadWorkflow(vessel.Workflow); loadErr == nil {
 					if int(vessel.CurrentPhase) > 0 && int(vessel.CurrentPhase) <= len(s.Phases) {
 						prevPhase := s.Phases[vessel.CurrentPhase-1]
 						if prevPhase.Gate != nil && prevPhase.Gate.Timeout != "" {
@@ -197,20 +197,20 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 		}
 	}
 
-	// Prompt-only vessel (no skill): single claude -p invocation
-	if vessel.Skill == "" && vessel.Prompt != "" {
+	// Prompt-only vessel (no workflow): single claude -p invocation
+	if vessel.Workflow == "" && vessel.Prompt != "" {
 		return r.runPromptOnly(ctx, vessel, worktreePath)
 	}
 
-	// Load skill definition
-	if vessel.Skill == "" {
-		r.failVessel(vessel.ID, "vessel has neither skill nor prompt")
+	// Load workflow definition
+	if vessel.Workflow == "" {
+		r.failVessel(vessel.ID, "vessel has neither workflow nor prompt")
 		return "failed"
 	}
 
-	sk, err := r.loadSkill(vessel.Skill)
+	sk, err := r.loadWorkflow(vessel.Workflow)
 	if err != nil {
-		r.failVessel(vessel.ID, fmt.Sprintf("load skill: %v", err))
+		r.failVessel(vessel.ID, fmt.Sprintf("load workflow: %v", err))
 		return "failed"
 	}
 
@@ -398,7 +398,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 	return "completed"
 }
 
-// runPromptOnly handles vessels with a prompt but no skill.
+// runPromptOnly handles vessels with a prompt but no workflow.
 func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktreePath string) string {
 	prompt := vessel.Prompt
 	if vessel.Ref != "" {
@@ -450,8 +450,8 @@ func buildCommand(cfg *config.Config, vessel *queue.Vessel) (string, []string, e
 		return cfg.Claude.Command, args, nil
 	}
 
-	// Skill-based mode: build command from flags (v2 phase-based execution will replace this)
-	prompt := fmt.Sprintf("/%s %s", vessel.Skill, vessel.Ref)
+	// Workflow-based mode: build command from flags (v2 phase-based execution will replace this)
+	prompt := fmt.Sprintf("/%s %s", vessel.Workflow, vessel.Ref)
 	args := []string{"-p", prompt, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns)}
 	if cfg.Claude.Flags != "" {
 		args = append(args, strings.Fields(cfg.Claude.Flags)...)
@@ -465,9 +465,9 @@ func (r *Runner) failVessel(id string, errMsg string) {
 	}
 }
 
-func (r *Runner) loadSkill(name string) (*skill.Skill, error) {
-	path := filepath.Join(".xylem", "skills", name+".yaml")
-	return skill.Load(path)
+func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, error) {
+	path := filepath.Join(".xylem", "workflows", name+".yaml")
+	return workflow.Load(path)
 }
 
 func (r *Runner) readHarness() string {
@@ -549,7 +549,7 @@ func (r *Runner) fetchIssueData(ctx context.Context, vessel *queue.Vessel) phase
 	return data
 }
 
-func (r *Runner) rebuildPreviousOutputs(vesselID string, sk *skill.Skill) map[string]string {
+func (r *Runner) rebuildPreviousOutputs(vesselID string, sk *workflow.Workflow) map[string]string {
 	outputs := make(map[string]string)
 	phasesDir := filepath.Join(r.Config.StateDir, "phases", vesselID)
 	for _, p := range sk.Phases {
@@ -593,7 +593,7 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
-func buildPhaseArgs(cfg *config.Config, p *skill.Phase, harnessContent string) []string {
+func buildPhaseArgs(cfg *config.Config, p *workflow.Phase, harnessContent string) []string {
 	args := []string{"-p"}
 	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
 
