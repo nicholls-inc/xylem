@@ -259,7 +259,8 @@ func (q *Queue) Cancel(id string) error {
 			if vessels[i].ID != id {
 				continue
 			}
-			if vessels[i].State != StatePending && vessels[i].State != StateWaiting {
+			allowed, knownState := validTransitions[vessels[i].State]
+			if !knownState || !allowed[StateCancelled] {
 				return fmt.Errorf("cannot cancel vessel %s in state %s", id, vessels[i].State)
 			}
 			now := time.Now().UTC()
