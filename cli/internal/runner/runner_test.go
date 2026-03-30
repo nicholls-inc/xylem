@@ -1459,7 +1459,7 @@ func TestResolveProvider(t *testing.T) {
 		{"workflow overrides config", "claude", &copilot, nil, "copilot"},
 		{"phase overrides workflow", "claude", &claude, &copilot, "copilot"},
 		{"phase overrides config", "claude", nil, &copilot, "copilot"},
-		{"empty config falls back to claude", "", &copilot, nil, "copilot"},
+		{"workflow override wins when config empty", "", &copilot, nil, "copilot"},
 	}
 
 	for _, tt := range tests {
