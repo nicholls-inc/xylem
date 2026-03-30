@@ -840,3 +840,155 @@ claude:
 		t.Fatalf("LLM = %q, want empty (defaults to claude at runtime)", cfg.LLM)
 	}
 }
+
+func TestValidateGitHubPREventsValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "handle-review",
+						On: &PREventsConfig{
+							Labels:          []string{"needs-review"},
+							ReviewSubmitted: true,
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config, got: %v", err)
+	}
+}
+
+func TestValidateGitHubPREventsMissingOn(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {Workflow: "handle-review"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "'on' block")
+}
+
+func TestValidateGitHubPREventsEmptyTriggers(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "handle-review",
+						On:       &PREventsConfig{},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "at least one trigger")
+}
+
+func TestValidateGitHubPREventsMissingRepo(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "handle-review",
+						On:       &PREventsConfig{ReviewSubmitted: true},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "repo is required")
+}
+
+func TestValidateGitHubMergeValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"merge": {
+				Type: "github-merge",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"deploy": {Workflow: "post-merge"},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config, got: %v", err)
+	}
+}
+
+func TestValidateGitHubMergeMissingRepo(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"merge": {
+				Type:  "github-merge",
+				Repo:  "",
+				Tasks: map[string]Task{"deploy": {Workflow: "post-merge"}},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "repo is required")
+}
+
+func TestValidateUnknownSourceType(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"unknown": {
+				Type: "bitbucket",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"test": {Workflow: "test-wf"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "unknown type")
+}
