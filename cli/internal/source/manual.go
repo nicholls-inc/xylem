@@ -18,9 +18,11 @@ func (m *Manual) Scan(_ context.Context) ([]queue.Vessel, error) {
 	return nil, nil // manual source doesn't auto-discover
 }
 
-func (m *Manual) OnStart(_ context.Context, _ queue.Vessel) error {
-	return nil // no side effects
-}
+func (m *Manual) OnEnqueue(_ context.Context, _ queue.Vessel) error  { return nil }
+func (m *Manual) OnStart(_ context.Context, _ queue.Vessel) error    { return nil }
+func (m *Manual) OnComplete(_ context.Context, _ queue.Vessel) error { return nil }
+func (m *Manual) OnFail(_ context.Context, _ queue.Vessel) error     { return nil }
+func (m *Manual) OnTimedOut(_ context.Context, _ queue.Vessel) error { return nil }
 
 func (m *Manual) BranchName(vessel queue.Vessel) string {
 	slug := slugify(vessel.Ref)

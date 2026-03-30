@@ -56,6 +56,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 			}
 			if enqueued {
 				result.Added++
+				_ = src.OnEnqueue(ctx, vessel) // best-effort
 			} else {
 				result.Skipped++
 			}
@@ -97,6 +98,13 @@ func convertTasks(cfgTasks map[string]config.Task) map[string]source.GitHubTask 
 		tasks[name] = source.GitHubTask{
 			Labels:   t.Labels,
 			Workflow: t.Workflow,
+			StatusLabels: source.StatusLabels{
+				Queued:    t.StatusLabels.Queued,
+				Running:   t.StatusLabels.Running,
+				Completed: t.StatusLabels.Completed,
+				Failed:    t.StatusLabels.Failed,
+				TimedOut:  t.StatusLabels.TimedOut,
+			},
 		}
 	}
 	return tasks

@@ -72,14 +72,23 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					continue
 				}
 				seen[pr.Number] = true
+				meta := map[string]string{
+					"pr_num": strconv.Itoa(pr.Number),
+				}
+				sl := task.StatusLabels
+				if sl.Queued != "" || sl.Running != "" || sl.Completed != "" || sl.Failed != "" || sl.TimedOut != "" {
+					meta["status_label_queued"] = sl.Queued
+					meta["status_label_running"] = sl.Running
+					meta["status_label_completed"] = sl.Completed
+					meta["status_label_failed"] = sl.Failed
+					meta["status_label_timed_out"] = sl.TimedOut
+				}
 				vessels = append(vessels, queue.Vessel{
-					ID:     fmt.Sprintf("pr-%d", pr.Number),
-					Source: "github-pr",
-					Ref:    pr.URL,
-					Workflow: task.Workflow,
-					Meta: map[string]string{
-						"pr_num": strconv.Itoa(pr.Number),
-					},
+					ID:        fmt.Sprintf("pr-%d", pr.Number),
+					Source:    "github-pr",
+					Ref:       pr.URL,
+					Workflow:  task.Workflow,
+					Meta:      meta,
 					State:     queue.StatePending,
 					CreatedAt: time.Now().UTC(),
 				})
@@ -87,6 +96,12 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 		}
 	}
 	return vessels, nil
+}
+
+func (g *GitHubPR) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
+		vessel.Meta["status_label_queued"], "")
+	return nil
 }
 
 func (g *GitHubPR) OnStart(ctx context.Context, vessel queue.Vessel) error {
@@ -97,12 +112,52 @@ func (g *GitHubPR) OnStart(ctx context.Context, vessel queue.Vessel) error {
 	if prNum == "" {
 		return nil
 	}
-	// Best-effort: add in-progress label
-	_, _ = g.CmdRunner.Run(ctx, "gh", "pr", "edit",
-		prNum,
-		"--repo", g.Repo,
-		"--add-label", "in-progress")
+	running, hasRunning := vessel.Meta["status_label_running"]
+	if !hasRunning {
+		running = "in-progress" // backward-compat: preserve old behaviour
+	}
+	g.applyPRLabel(ctx, prNum, running, vessel.Meta["status_label_queued"])
 	return nil
+}
+
+func (g *GitHubPR) OnComplete(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
+		vessel.Meta["status_label_completed"],
+		vessel.Meta["status_label_running"])
+	return nil
+}
+
+func (g *GitHubPR) OnFail(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
+		vessel.Meta["status_label_failed"],
+		vessel.Meta["status_label_running"])
+	return nil
+}
+
+func (g *GitHubPR) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
+		vessel.Meta["status_label_timed_out"],
+		vessel.Meta["status_label_running"])
+	return nil
+}
+
+// applyPRLabel runs gh pr edit to add and/or remove a label on the PR.
+// Both add and remove are optional — empty string means skip that operation.
+func (g *GitHubPR) applyPRLabel(ctx context.Context, prNum, add, remove string) {
+	if g.CmdRunner == nil || prNum == "" {
+		return
+	}
+	if add == "" && remove == "" {
+		return
+	}
+	args := []string{"pr", "edit", prNum, "--repo", g.Repo}
+	if add != "" {
+		args = append(args, "--add-label", add)
+	}
+	if remove != "" {
+		args = append(args, "--remove-label", remove)
+	}
+	_, _ = g.CmdRunner.Run(ctx, "gh", args...)
 }
 
 func (g *GitHubPR) BranchName(vessel queue.Vessel) string {
