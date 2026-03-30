@@ -146,9 +146,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("llm must be \"claude\" or \"copilot\", got %q", c.LLM)
 	}
 
-	// Validate copilot config: command must always be set, since workflows/phases
-	// can select copilot even when the global llm is not "copilot".
-	if c.Copilot.Command == "" {
+	// Validate copilot config: command must be set when copilot is the active provider.
+	if c.LLM == "copilot" && c.Copilot.Command == "" {
 		return fmt.Errorf("copilot.command must be non-empty")
 	}
 
