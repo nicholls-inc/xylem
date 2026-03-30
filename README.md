@@ -96,6 +96,8 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/fix-bug/analyze.md
     max_turns: 5
+    noop:
+      match: XYLEM_NOOP
   - name: implement
     prompt_file: .xylem/prompts/fix-bug/implement.md
     max_turns: 15
@@ -114,6 +116,8 @@ phases:
 |------|-------------|
 | `command` | Runs a shell command; phase retries if it fails |
 | `label` | Polls a GitHub issue for a label; blocks until found (human-in-the-loop approval) |
+
+Use `noop.match` on a phase to let that phase complete the workflow early when its output contains a configured marker such as `XYLEM_NOOP`.
 
 **Built-in workflows:**
 

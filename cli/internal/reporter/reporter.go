@@ -26,7 +26,7 @@ type Reporter struct {
 type PhaseResult struct {
 	Name     string
 	Duration time.Duration
-	Status   string // "completed" or "failed"
+	Status   string // "completed", "failed", or "no-op"
 }
 
 // PhaseComplete posts a comment on the GitHub issue when a phase completes successfully.
@@ -62,7 +62,12 @@ func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName str
 // VesselCompleted posts a summary comment when all phases complete.
 func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []PhaseResult) error {
 	var sb strings.Builder
-	sb.WriteString("**xylem — all phases completed**\n\n")
+	if workflowCompletedViaNoOp(phases) {
+		sb.WriteString("**xylem — workflow completed early via no-op**\n\n")
+		sb.WriteString("Remaining phases were skipped intentionally because a phase output matched its configured no-op marker.\n\n")
+	} else {
+		sb.WriteString("**xylem — all phases completed**\n\n")
+	}
 	sb.WriteString("| Phase | Duration | Status |\n")
 	sb.WriteString("|-------|----------|--------|\n")
 
@@ -78,6 +83,15 @@ func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []P
 		log.Printf("warn: failed to post vessel-completed comment for issue %d: %v", issueNum, err)
 	}
 	return nil
+}
+
+func workflowCompletedViaNoOp(phases []PhaseResult) bool {
+	for _, p := range phases {
+		if p.Status == "no-op" {
+			return true
+		}
+	}
+	return false
 }
 
 // LabelTimeout posts a timeout comment on the GitHub issue.

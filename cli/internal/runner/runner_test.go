@@ -16,8 +16,8 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
-	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
+	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
 
 // --- Mock types ---
@@ -88,8 +88,8 @@ type mockExitError struct {
 	code int
 }
 
-func (e *mockExitError) Error() string    { return fmt.Sprintf("exit status %d", e.code) }
-func (e *mockExitError) ExitCode() int    { return e.code }
+func (e *mockExitError) Error() string { return fmt.Sprintf("exit status %d", e.code) }
+func (e *mockExitError) ExitCode() int { return e.code }
 
 type countingCmdRunner struct {
 	concurrent int32
@@ -199,22 +199,22 @@ func makeTestConfig(dir string, concurrency int) *config.Config {
 
 func makeVessel(num int, workflow string) queue.Vessel {
 	return queue.Vessel{
-		ID:     fmt.Sprintf("issue-%d", num),
-		Source: "github-issue",
-		Ref:    fmt.Sprintf("https://github.com/owner/repo/issues/%d", num),
+		ID:        fmt.Sprintf("issue-%d", num),
+		Source:    "github-issue",
+		Ref:       fmt.Sprintf("https://github.com/owner/repo/issues/%d", num),
 		Workflow:  workflow,
-		Meta:   map[string]string{"issue_num": strconv.Itoa(num)},
-		State:  queue.StatePending,
+		Meta:      map[string]string{"issue_num": strconv.Itoa(num)},
+		State:     queue.StatePending,
 		CreatedAt: time.Now().UTC(),
 	}
 }
 
 func makePromptVessel(num int, prompt string) queue.Vessel {
 	return queue.Vessel{
-		ID:     fmt.Sprintf("prompt-%d", num),
-		Source: "manual",
-		Prompt: prompt,
-		State:  queue.StatePending,
+		ID:        fmt.Sprintf("prompt-%d", num),
+		Source:    "manual",
+		Prompt:    prompt,
+		State:     queue.StatePending,
 		CreatedAt: time.Now().UTC(),
 	}
 }
@@ -233,9 +233,9 @@ func TestBuildCommand(t *testing.T) {
 		},
 	}
 	vessel := &queue.Vessel{
-		Source: "github-issue",
-		Workflow:  "fix-bug",
-		Ref:    "https://github.com/owner/repo/issues/42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      "https://github.com/owner/repo/issues/42",
 	}
 	cmd, args, err := buildCommand(cfg, vessel)
 	if err != nil {
@@ -271,6 +271,10 @@ func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
 		phaseYAML.WriteString(fmt.Sprintf("  - name: %s\n", p.name))
 		phaseYAML.WriteString(fmt.Sprintf("    prompt_file: %s\n", promptPath))
 		phaseYAML.WriteString(fmt.Sprintf("    max_turns: %d\n", p.maxTurns))
+		if p.noopMatch != "" {
+			phaseYAML.WriteString("    noop:\n")
+			phaseYAML.WriteString(fmt.Sprintf("      match: %q\n", p.noopMatch))
+		}
 		if p.gate != "" {
 			phaseYAML.WriteString(fmt.Sprintf("    gate:\n%s\n", p.gate))
 		}
@@ -360,9 +364,9 @@ func TestBuildCommandWorkflowBased(t *testing.T) {
 		},
 	}
 	vessel := &queue.Vessel{
-		Source: "github-issue",
-		Workflow:  "fix-bug",
-		Ref:    "https://github.com/owner/repo/issues/42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      "https://github.com/owner/repo/issues/42",
 	}
 	cmd, args, err := buildCommand(cfg, vessel)
 	if err != nil {
@@ -387,6 +391,7 @@ type testPhase struct {
 	name          string
 	promptContent string
 	maxTurns      int
+	noopMatch     string
 	gate          string
 	allowedTools  string
 }
@@ -485,6 +490,83 @@ func TestDrainMultiPhaseWorkflow(t *testing.T) {
 		if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 			t.Errorf("expected output file %s to exist", outputPath)
 		}
+	}
+}
+
+func TestDrainPhaseNoOpCompletesWorkflowEarly(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name:          "analyze",
+			promptContent: "Analyze: {{.Issue.Title}}",
+			maxTurns:      5,
+			noopMatch:     "XYLEM_NOOP",
+			gate:          "      type: command\n      run: \"make test\"",
+		},
+		{name: "implement", promptContent: "Implement", maxTurns: 10},
+		{name: "pr", promptContent: "Create PR", maxTurns: 3},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("Already fixed in main.\n\nXYLEM_NOOP\n"),
+		},
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Fatalf("expected 1 completed, got %d", result.Completed)
+	}
+	if len(cmdRunner.phaseCalls) != 1 {
+		t.Fatalf("expected only the noop phase to run, got %d phase calls", len(cmdRunner.phaseCalls))
+	}
+	for _, args := range cmdRunner.outputArgs {
+		if strings.Contains(strings.Join(args, " "), "make test") {
+			t.Fatalf("expected noop to skip gate execution, got output args %v", cmdRunner.outputArgs)
+		}
+	}
+	if !wt.removeCalled {
+		t.Fatal("expected worktree cleanup after noop completion")
+	}
+
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateCompleted {
+		t.Fatalf("expected vessel completed, got %s", vessels[0].State)
+	}
+	if vessels[0].CurrentPhase != 1 {
+		t.Fatalf("expected CurrentPhase 1, got %d", vessels[0].CurrentPhase)
+	}
+	if len(vessels[0].PhaseOutputs) != 1 {
+		t.Fatalf("expected only one phase output, got %v", vessels[0].PhaseOutputs)
+	}
+	if _, ok := vessels[0].PhaseOutputs["analyze"]; !ok {
+		t.Fatalf("expected analyze output path to be persisted, got %v", vessels[0].PhaseOutputs)
+	}
+
+	analyzeOutputPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "analyze.output")
+	if _, err := os.Stat(analyzeOutputPath); err != nil {
+		t.Fatalf("expected analyze output file to exist: %v", err)
+	}
+	implementOutputPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "implement.output")
+	if _, err := os.Stat(implementOutputPath); !os.IsNotExist(err) {
+		t.Fatalf("expected implement output file not to exist, got err=%v", err)
 	}
 }
 
@@ -1093,7 +1175,7 @@ func TestDrainPreviousOutputsAvailable(t *testing.T) {
 
 func TestBranchPrefixSelection(t *testing.T) {
 	tests := []struct {
-		workflow      string
+		workflow   string
 		wantPrefix string
 	}{
 		{"fix-bug", "fix"},
@@ -1150,9 +1232,9 @@ func TestBuildCommandWithFlags(t *testing.T) {
 		},
 	}
 	vessel := &queue.Vessel{
-		Source: "github-issue",
-		Workflow:  "fix-bug",
-		Ref:    "https://github.com/owner/repo/issues/42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      "https://github.com/owner/repo/issues/42",
 	}
 	_, args, err := buildCommand(cfg, vessel)
 	if err != nil {

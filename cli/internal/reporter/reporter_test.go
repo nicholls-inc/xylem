@@ -177,6 +177,27 @@ func TestVesselCompleted(t *testing.T) {
 	}
 }
 
+func TestVesselCompletedNoOp(t *testing.T) {
+	mock := &mockRunner{}
+	r := &Reporter{Runner: mock, Repo: "owner/repo"}
+
+	phases := []PhaseResult{
+		{Name: "analyze", Duration: 2 * time.Second, Status: "no-op"},
+	}
+
+	err := r.VesselCompleted(context.Background(), 5, phases)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(mock.lastBody, "workflow completed early via no-op") {
+		t.Fatalf("expected no-op completion header, got: %s", mock.lastBody)
+	}
+	if !strings.Contains(mock.lastBody, "| analyze | 2s | no-op |") {
+		t.Fatalf("expected no-op row in table, got: %s", mock.lastBody)
+	}
+}
+
 func TestLabelTimeout(t *testing.T) {
 	mock := &mockRunner{}
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}

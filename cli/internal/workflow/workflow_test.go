@@ -58,15 +58,15 @@ func chdirTemp(t *testing.T, dir string) {
 
 func TestLoad(t *testing.T) {
 	tests := []struct {
-		name      string
+		name         string
 		workflowName string // filename stem; defaults to "fix-bug"
-		yaml      string
-		prompts   []string // prompt files to create relative to repo root (cwd)
-		wantErr   string   // empty means no error expected
-		checkFunc func(t *testing.T, s *Workflow)
+		yaml         string
+		prompts      []string // prompt files to create relative to repo root (cwd)
+		wantErr      string   // empty means no error expected
+		checkFunc    func(t *testing.T, s *Workflow)
 	}{
 		{
-			name:      "valid workflow file",
+			name:         "valid workflow file",
 			workflowName: "fix-bug",
 			yaml: `name: fix-bug
 description: Fix a bug
@@ -99,7 +99,7 @@ phases:
 			},
 		},
 		{
-			name:      "valid workflow with all features",
+			name:         "valid workflow with all features",
 			workflowName: "deploy",
 			yaml: `name: deploy
 description: Deploy with gates
@@ -172,13 +172,13 @@ phases:
 			},
 		},
 		{
-			name:      "missing phases key",
+			name:         "missing phases key",
 			workflowName: "test-workflow",
-			yaml:      "name: test-workflow\n",
-			wantErr:   `"phases" is required`,
+			yaml:         "name: test-workflow\n",
+			wantErr:      `"phases" is required`,
 		},
 		{
-			name:      "empty name",
+			name:         "empty name",
 			workflowName: "test-workflow",
 			yaml: `phases:
   - name: analyze
@@ -189,7 +189,7 @@ phases:
 			wantErr: `"name" is required`,
 		},
 		{
-			name:      "duplicate phase names",
+			name:         "duplicate phase names",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -204,7 +204,7 @@ phases:
 			wantErr: `duplicate phase name "implement"`,
 		},
 		{
-			name:      "missing prompt_file",
+			name:         "missing prompt_file",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -214,7 +214,7 @@ phases:
 			wantErr: "prompt_file is required",
 		},
 		{
-			name:      "non-existent prompt_file",
+			name:         "non-existent prompt_file",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -225,7 +225,7 @@ phases:
 			wantErr: "prompt_file not found: prompts/missing.md",
 		},
 		{
-			name:      "invalid gate type",
+			name:         "invalid gate type",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -239,7 +239,7 @@ phases:
 			wantErr: `type must be "command" or "label"`,
 		},
 		{
-			name:      "command gate missing run",
+			name:         "command gate missing run",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -253,7 +253,7 @@ phases:
 			wantErr: "run is required for command gate",
 		},
 		{
-			name:      "label gate missing wait_for",
+			name:         "label gate missing wait_for",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -267,7 +267,7 @@ phases:
 			wantErr: "wait_for is required for label gate",
 		},
 		{
-			name:      "invalid duration string",
+			name:         "invalid duration string",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -283,7 +283,7 @@ phases:
 			wantErr: `invalid retry_delay "not-a-duration"`,
 		},
 		{
-			name:      "max_turns zero",
+			name:         "max_turns zero",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -295,7 +295,7 @@ phases:
 			wantErr: "max_turns must be greater than 0",
 		},
 		{
-			name:      "allowed_tools empty string",
+			name:         "allowed_tools empty string",
 			workflowName: "test-workflow",
 			yaml: `name: test-workflow
 phases:
@@ -308,7 +308,7 @@ phases:
 			wantErr: "allowed_tools must not be empty when specified",
 		},
 		{
-			name:      "name does not match filename",
+			name:         "name does not match filename",
 			workflowName: "fix-bug",
 			yaml: `name: wrong-name
 phases:
@@ -370,16 +370,60 @@ func TestLoadMalformedYAML(t *testing.T) {
 	}
 }
 
+func TestLoadWorkflowWithNoOp(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "fix-bug", `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    noop:
+      match: XYLEM_NOOP
+`)
+
+	wf, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if wf.Phases[0].NoOp == nil {
+		t.Fatal("expected noop config to be loaded")
+	}
+	if wf.Phases[0].NoOp.Match != "XYLEM_NOOP" {
+		t.Fatalf("expected noop match XYLEM_NOOP, got %q", wf.Phases[0].NoOp.Match)
+	}
+}
+
+func TestLoadWorkflowNoOpRequiresMatch(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "fix-bug", `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    noop:
+      match: ""
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `phase "analyze": noop: match is required`)
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
-		name          string
+		name             string
 		workflowFileName string // filename stem for the workflow file (used for name validation)
-		wf         Workflow
-		prompts       []string // prompt files to create relative to cwd
-		wantErr       string
+		wf               Workflow
+		prompts          []string // prompt files to create relative to cwd
+		wantErr          string
 	}{
 		{
-			name:          "valid minimal workflow",
+			name:             "valid minimal workflow",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -390,7 +434,7 @@ func TestValidate(t *testing.T) {
 			prompts: []string{"prompt.md"},
 		},
 		{
-			name:          "empty name",
+			name:             "empty name",
 			workflowFileName: "test",
 			wf: Workflow{
 				Phases: []Phase{
@@ -401,7 +445,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `"name" is required`,
 		},
 		{
-			name:          "no phases",
+			name:             "no phases",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -409,7 +453,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `"phases" is required`,
 		},
 		{
-			name:          "phase with empty name",
+			name:             "phase with empty name",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -421,7 +465,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "each phase must have a non-empty name",
 		},
 		{
-			name:          "duplicate phase names",
+			name:             "duplicate phase names",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -434,7 +478,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `duplicate phase name "build"`,
 		},
 		{
-			name:          "missing prompt_file value",
+			name:             "missing prompt_file value",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -445,7 +489,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "prompt_file is required",
 		},
 		{
-			name:          "non-existent prompt_file",
+			name:             "non-existent prompt_file",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -456,7 +500,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "prompt_file not found: does-not-exist.md",
 		},
 		{
-			name:          "max_turns zero",
+			name:             "max_turns zero",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -468,7 +512,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "max_turns must be greater than 0",
 		},
 		{
-			name:          "max_turns negative",
+			name:             "max_turns negative",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -480,7 +524,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "max_turns must be greater than 0",
 		},
 		{
-			name:          "invalid gate type",
+			name:             "invalid gate type",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -495,7 +539,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `type must be "command" or "label"`,
 		},
 		{
-			name:          "command gate missing run",
+			name:             "command gate missing run",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -510,7 +554,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "run is required for command gate",
 		},
 		{
-			name:          "label gate missing wait_for",
+			name:             "label gate missing wait_for",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -525,7 +569,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "wait_for is required for label gate",
 		},
 		{
-			name:          "invalid retry_delay duration",
+			name:             "invalid retry_delay duration",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -540,7 +584,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `invalid retry_delay "bad"`,
 		},
 		{
-			name:          "invalid timeout duration",
+			name:             "invalid timeout duration",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -555,7 +599,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `invalid timeout "forever"`,
 		},
 		{
-			name:          "invalid poll_interval duration",
+			name:             "invalid poll_interval duration",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -570,7 +614,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `invalid poll_interval "nope"`,
 		},
 		{
-			name:          "allowed_tools empty string",
+			name:             "allowed_tools empty string",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -582,7 +626,7 @@ func TestValidate(t *testing.T) {
 			wantErr: "allowed_tools must not be empty when specified",
 		},
 		{
-			name:          "allowed_tools nil is valid",
+			name:             "allowed_tools nil is valid",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -593,7 +637,7 @@ func TestValidate(t *testing.T) {
 			prompts: []string{"prompt.md"},
 		},
 		{
-			name:          "allowed_tools with value is valid",
+			name:             "allowed_tools with value is valid",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -604,7 +648,7 @@ func TestValidate(t *testing.T) {
 			prompts: []string{"prompt.md"},
 		},
 		{
-			name:          "valid command gate with all fields",
+			name:             "valid command gate with all fields",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -623,7 +667,7 @@ func TestValidate(t *testing.T) {
 			prompts: []string{"prompt.md"},
 		},
 		{
-			name:          "valid label gate with all fields",
+			name:             "valid label gate with all fields",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -642,7 +686,7 @@ func TestValidate(t *testing.T) {
 			prompts: []string{"prompt.md"},
 		},
 		{
-			name:          "name does not match filename",
+			name:             "name does not match filename",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "wrong-name",
@@ -654,7 +698,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `workflow name "wrong-name" does not match filename "test.yaml"`,
 		},
 		{
-			name:          "phase name with hyphens is rejected",
+			name:             "phase name with hyphens is rejected",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -666,7 +710,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `phase name "create-issues" is invalid; must start with a lowercase letter and contain only lowercase letters, digits, and underscores`,
 		},
 		{
-			name:          "phase name with uppercase is rejected",
+			name:             "phase name with uppercase is rejected",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -678,7 +722,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `phase name "CreateIssues" is invalid`,
 		},
 		{
-			name:          "phase name with underscores is accepted",
+			name:             "phase name with underscores is accepted",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -689,7 +733,7 @@ func TestValidate(t *testing.T) {
 			prompts: []string{"prompt.md"},
 		},
 		{
-			name:          "phase name starting with digit is rejected",
+			name:             "phase name starting with digit is rejected",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",
@@ -701,7 +745,7 @@ func TestValidate(t *testing.T) {
 			wantErr: `phase name "2step" is invalid`,
 		},
 		{
-			name:          "phase name with digits is accepted",
+			name:             "phase name with digits is accepted",
 			workflowFileName: "test",
 			wf: Workflow{
 				Name: "test",

@@ -30,13 +30,19 @@ type Phase struct {
 	PromptFile   string  `yaml:"prompt_file"`
 	MaxTurns     int     `yaml:"max_turns"`
 	Model        *string `yaml:"model,omitempty"`
+	NoOp         *NoOp   `yaml:"noop,omitempty"`
 	Gate         *Gate   `yaml:"gate,omitempty"`
 	AllowedTools *string `yaml:"allowed_tools,omitempty"`
 }
 
+// NoOp defines an early-success completion rule for a phase.
+type NoOp struct {
+	Match string `yaml:"match"`
+}
+
 // Gate defines an inter-phase quality gate that must pass before the next phase begins.
 type Gate struct {
-	Type         string `yaml:"type"`                   // "command" or "label"
+	Type         string `yaml:"type"`                    // "command" or "label"
 	Run          string `yaml:"run,omitempty"`           // shell command (type=command)
 	Retries      int    `yaml:"retries,omitempty"`       // default 0
 	RetryDelay   string `yaml:"retry_delay,omitempty"`   // default "10s"
@@ -115,11 +121,24 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			}
 		}
 
+		if p.NoOp != nil {
+			if err := validateNoOp(p.Name, p.NoOp); err != nil {
+				return err
+			}
+		}
+
 		if p.AllowedTools != nil && *p.AllowedTools == "" {
 			return fmt.Errorf("phase %q: allowed_tools must not be empty when specified", p.Name)
 		}
 	}
 
+	return nil
+}
+
+func validateNoOp(phaseName string, n *NoOp) error {
+	if strings.TrimSpace(n.Match) == "" {
+		return fmt.Errorf("phase %q: noop: match is required", phaseName)
+	}
 	return nil
 }
 
