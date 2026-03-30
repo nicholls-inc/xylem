@@ -760,6 +760,92 @@ func TestCreateNoStaleWorktree(t *testing.T) {
 	}
 }
 
+// TestBranchForWorktreeRelativeRoot verifies that branchForWorktree correctly
+// matches worktree paths when RepoRoot is relative (e.g., "."), resolving the
+// relative path to absolute before comparing against porcelain output.
+func TestBranchForWorktreeRelativeRoot(t *testing.T) {
+	// Get the current working directory to build the expected absolute path
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	absWorktreePath := filepath.Join(cwd, ".claude", "worktrees", "feat", "issue-6-6")
+
+	r := newMock()
+	porcelain := "worktree " + absWorktreePath + "\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	// Use relative RepoRoot "." — this is the bug scenario
+	m := New(".", r)
+	branch := m.branchForWorktree(context.Background(), ".claude/worktrees/feat/issue-6-6")
+	if branch != "feat/issue-6-6" {
+		t.Errorf("expected branch 'feat/issue-6-6' with relative RepoRoot, got %q", branch)
+	}
+}
+
+// TestBranchForWorktreeAbsoluteRoot verifies no regression: branchForWorktree
+// still works when RepoRoot is already absolute.
+func TestBranchForWorktreeAbsoluteRoot(t *testing.T) {
+	r := newMock()
+	porcelain := "worktree /repo/.claude/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	m := New("/repo", r)
+	branch := m.branchForWorktree(context.Background(), ".claude/worktrees/feat/issue-6-6")
+	if branch != "feat/issue-6-6" {
+		t.Errorf("expected branch 'feat/issue-6-6' with absolute RepoRoot, got %q", branch)
+	}
+}
+
+// TestCreateRemovesStaleWorktreeRelativeRoot verifies that Create() detects and
+// removes stale worktrees when RepoRoot is relative (e.g., ".").
+func TestCreateRemovesStaleWorktreeRelativeRoot(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	absWorktreePath := filepath.Join(cwd, ".claude", "worktrees", "feat", "issue-6-6")
+
+	r := newMock()
+	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
+	porcelain := "worktree " + absWorktreePath + "\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	m := New(".", r)
+	_, err = m.Create(context.Background(), "feat/issue-6-6")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Must call remove for the stale worktree
+	if !r.called("git", "worktree", "remove", ".claude/worktrees/feat/issue-6-6", "--force") {
+		t.Errorf("expected stale worktree removal with relative root, got calls: %v", r.calls)
+	}
+}
+
+// TestRemoveResolvesRelativeRoot verifies that Remove() correctly resolves
+// branch names when RepoRoot is relative.
+func TestRemoveResolvesRelativeRoot(t *testing.T) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("os.Getwd: %v", err)
+	}
+	absWorktreePath := filepath.Join(cwd, ".claude", "worktrees", "fix", "issue-42-test")
+
+	r := newMock()
+	porcelain := "worktree " + absWorktreePath + "\nHEAD abc123\nbranch refs/heads/fix/issue-42-test\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	m := New(".", r)
+	err = m.Remove(context.Background(), ".claude/worktrees/fix/issue-42-test")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !r.called("git", "branch", "-d", "fix/issue-42-test") {
+		t.Errorf("expected branch deletion with relative root, got calls: %v", r.calls)
+	}
+}
+
 // TestCreateStaleRemoveFails verifies that Create() returns an error and does
 // NOT proceed to git worktree add when removing a stale worktree fails.
 func TestCreateStaleRemoveFails(t *testing.T) {
