@@ -82,6 +82,8 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			break
 		}
 
+		log.Printf("%sdequeued vessel workflow=%s", vesselLabel(*vessel), vessel.Workflow)
+
 		sem <- struct{}{}
 		wg.Add(1)
 		go func(j queue.Vessel) {
@@ -236,6 +238,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 
 		// Gate retry loop: may re-run the same phase with gate output appended
 		for {
+			log.Printf("%sphase %q starting (%d/%d)", vesselLabel(vessel), p.Name, i+1, len(sk.Phases))
 			phaseStart := time.Now()
 
 			// Build template data
@@ -291,6 +294,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 			phaseDuration := time.Since(phaseStart)
 
 			if runErr != nil {
+				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 				vessel.FailedPhase = p.Name
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
 				issueNum := r.parseIssueNum(vessel)
@@ -313,6 +317,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				log.Printf("warn: persist phase progress for %s: %v", vessel.ID, updateErr)
 			}
 
+			log.Printf("%sphase %q completed (%s)", vesselLabel(vessel), p.Name, phaseDuration.Truncate(time.Second))
+
 			// Report phase completion (non-fatal)
 			phaseResults = append(phaseResults, reporter.PhaseResult{Name: p.Name, Duration: phaseDuration})
 			issueNum := r.parseIssueNum(vessel)
@@ -333,6 +339,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 					return "failed"
 				}
 				if passed {
+					log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
 					break // gate passed, proceed to next phase
 				}
 
@@ -345,6 +352,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				}
 
 				if vessel.GateRetries <= 0 {
+					log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
 					vessel.FailedPhase = p.Name
 					vessel.GateOutput = gateOut
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
@@ -355,6 +363,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				}
 
 				vessel.GateRetries--
+				log.Printf("%sgate failed for phase %q, retries remaining=%d", vesselLabel(vessel), p.Name, vessel.GateRetries)
 				if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
 					log.Printf("warn: persist gate retries for %s: %v", vessel.ID, updateErr)
 				}
@@ -366,6 +375,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				continue // re-run same phase
 
 			case "label":
+				log.Printf("%swaiting for label %q after phase %q", vesselLabel(vessel), p.Gate.WaitFor, p.Name)
 				// Set vessel to waiting state
 				vessel.WaitingFor = p.Gate.WaitFor
 				now := time.Now().UTC()
@@ -386,6 +396,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 	}
 
 	// All phases complete
+	log.Printf("%scompleted all phases", vesselLabel(vessel))
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
 	}
@@ -591,6 +602,15 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 		return ""
 	}
 	return gh.Repo
+}
+
+func vesselLabel(v queue.Vessel) string {
+	if v.Meta != nil {
+		if title := v.Meta["issue_title"]; title != "" {
+			return fmt.Sprintf("[%s] ", title)
+		}
+	}
+	return fmt.Sprintf("[%s] ", v.ID)
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
