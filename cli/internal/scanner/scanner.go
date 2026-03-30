@@ -86,6 +86,23 @@ func (s *Scanner) buildSources() []source.Source {
 				Queue:     s.Queue,
 				CmdRunner: s.CmdRunner,
 			})
+		case "github-pr-events":
+			prEventsTasks := convertPREventsTasks(srcCfg.Tasks)
+			sources = append(sources, &source.GitHubPREvents{
+				Repo:      srcCfg.Repo,
+				Tasks:     prEventsTasks,
+				Exclude:   srcCfg.Exclude,
+				Queue:     s.Queue,
+				CmdRunner: s.CmdRunner,
+			})
+		case "github-merge":
+			mergeTasks := convertMergeTasks(srcCfg.Tasks)
+			sources = append(sources, &source.GitHubMerge{
+				Repo:      srcCfg.Repo,
+				Tasks:     mergeTasks,
+				Queue:     s.Queue,
+				CmdRunner: s.CmdRunner,
+			})
 		}
 	}
 	return sources
@@ -96,6 +113,33 @@ func convertTasks(cfgTasks map[string]config.Task) map[string]source.GitHubTask 
 	for name, t := range cfgTasks {
 		tasks[name] = source.GitHubTask{
 			Labels:   t.Labels,
+			Workflow: t.Workflow,
+		}
+	}
+	return tasks
+}
+
+func convertPREventsTasks(cfgTasks map[string]config.Task) map[string]source.PREventsTask {
+	tasks := make(map[string]source.PREventsTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		pet := source.PREventsTask{
+			Workflow: t.Workflow,
+		}
+		if t.On != nil {
+			pet.Labels = t.On.Labels
+			pet.ReviewSubmitted = t.On.ReviewSubmitted
+			pet.ChecksFailed = t.On.ChecksFailed
+			pet.Commented = t.On.Commented
+		}
+		tasks[name] = pet
+	}
+	return tasks
+}
+
+func convertMergeTasks(cfgTasks map[string]config.Task) map[string]source.MergeTask {
+	tasks := make(map[string]source.MergeTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		tasks[name] = source.MergeTask{
 			Workflow: t.Workflow,
 		}
 	}

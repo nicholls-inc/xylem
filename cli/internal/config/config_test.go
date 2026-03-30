@@ -731,6 +731,235 @@ claude:
 	}
 }
 
+func TestValidateGitHubPREventsAllTriggers(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"respond": {
+						Workflow: "respond-to-pr",
+						On: &PREventsConfig{
+							Labels:          []string{"needs-response"},
+							ReviewSubmitted: true,
+							ChecksFailed:    true,
+							Commented:       true,
+						},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected valid github-pr-events config, got: %v", err)
+	}
+}
+
+func TestValidateGitHubPREventsLabelsOnly(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"respond": {
+						Workflow: "respond-to-pr",
+						On: &PREventsConfig{
+							Labels: []string{"needs-response"},
+						},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected valid github-pr-events config with labels only, got: %v", err)
+	}
+}
+
+func TestValidateGitHubPREventsNoOnConfig(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"respond": {
+						Workflow: "respond-to-pr",
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "on is required for github-pr-events source")
+}
+
+func TestValidateGitHubPREventsEmptyOn(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"respond": {
+						Workflow: "respond-to-pr",
+						On:       &PREventsConfig{},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "at least one trigger must be configured")
+}
+
+func TestValidateGitHubPREventsMissingRepo(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "",
+				Tasks: map[string]Task{
+					"respond": {
+						Workflow: "respond-to-pr",
+						On:       &PREventsConfig{ReviewSubmitted: true},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "repo is required")
+}
+
+func TestValidateGitHubPREventsMissingWorkflow(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"respond": {
+						On: &PREventsConfig{ReviewSubmitted: true},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "must include a workflow")
+}
+
+func TestValidateGitHubMergeValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"merge": {
+				Type: "github-merge",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"post-merge": {Workflow: "post-merge-check"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected valid github-merge config, got: %v", err)
+	}
+}
+
+func TestValidateGitHubMergeMissingRepo(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"merge": {
+				Type: "github-merge",
+				Repo: "",
+				Tasks: map[string]Task{
+					"post-merge": {Workflow: "post-merge-check"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "repo is required")
+}
+
+func TestValidateGitHubMergeMissingWorkflow(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"merge": {
+				Type: "github-merge",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"post-merge": {},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "must include a workflow")
+}
+
+func TestValidateUnknownSourceType(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"custom": {
+				Type: "gitlab",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"task": {Workflow: "fix-bug"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "unknown type")
+}
+
 func TestLoadLLMAbsentDefaultsClaude(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:

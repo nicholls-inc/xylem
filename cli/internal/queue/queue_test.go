@@ -277,6 +277,59 @@ func TestCancelNotFound(t *testing.T) {
 	}
 }
 
+func TestHasRefAny(t *testing.T) {
+	ref := "https://github.com/example/repo/issues/42"
+
+	// HasRefAny should find refs in all states, not just active ones.
+	tests := []struct {
+		name        string
+		transitions []VesselState
+		want        bool
+	}{
+		{"pending", nil, true},
+		{"running", []VesselState{StateRunning}, true},
+		{"waiting", []VesselState{StateRunning, StateWaiting}, true},
+		{"completed", []VesselState{StateRunning, StateCompleted}, true},
+		{"failed", []VesselState{StateRunning, StateFailed}, true},
+		{"cancelled", []VesselState{StateCancelled}, true},
+		{"timed_out", []VesselState{StateRunning, StateWaiting, StateTimedOut}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			q, _ := newTestQueue(t)
+			vessel := testVessel(42)
+			if _, err := q.Enqueue(vessel); err != nil {
+				t.Fatalf("enqueue: %v", err)
+			}
+			for _, s := range tt.transitions {
+				if err := q.Update(vessel.ID, s, ""); err != nil {
+					t.Fatalf("update to %s: %v", s, err)
+				}
+			}
+			got := q.HasRefAny(ref)
+			if got != tt.want {
+				t.Fatalf("HasRefAny(%q) = %v in state %s, want %v", ref, got, tt.name, tt.want)
+			}
+
+			// Contrast with HasRef for terminal states
+			hasRef := q.HasRef(ref)
+			switch tt.name {
+			case "completed", "failed", "cancelled", "timed_out":
+				if hasRef {
+					t.Fatalf("HasRef should return false for terminal state %s", tt.name)
+				}
+			}
+		})
+	}
+
+	// HasRefAny for unknown ref should return false
+	q, _ := newTestQueue(t)
+	if q.HasRefAny("https://github.com/example/repo/issues/999") {
+		t.Fatal("expected HasRefAny to be false for unknown ref")
+	}
+}
+
 func TestHasRef(t *testing.T) {
 	q, _ := newTestQueue(t)
 	if _, err := q.Enqueue(testVessel(42)); err != nil {

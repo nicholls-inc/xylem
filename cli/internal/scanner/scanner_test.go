@@ -503,3 +503,118 @@ func TestScanEmptyIssuesList(t *testing.T) {
 		t.Errorf("expected 0 added, got %d", result.Added)
 	}
 }
+
+// ghPR mirrors the GitHub PR JSON structure for test helpers.
+type ghPR struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	HeadRefName string `json:"headRefName"`
+	Labels      []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+func TestScanGitHubPREvents(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Sources: map[string]config.SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"respond": {
+						Workflow: "respond-to-pr",
+						On: &config.PREventsConfig{
+							Labels: []string{"needs-response"},
+						},
+					},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "needs review", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix-bug",
+			Labels: []struct{ Name string `json:"name"` }{{Name: "needs-response"}}},
+	}
+	prData, _ := json.Marshal(prs)
+	r.set(prData, "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Errorf("expected 1 added, got %d", result.Added)
+	}
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel in queue, got %d", len(vessels))
+	}
+	if vessels[0].Source != "github-pr-events" {
+		t.Errorf("expected source github-pr-events, got %q", vessels[0].Source)
+	}
+}
+
+type ghMergedPR struct {
+	Number      int    `json:"number"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	MergeCommit struct {
+		Oid string `json:"oid"`
+	} `json:"mergeCommit"`
+}
+
+func TestScanGitHubMerge(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Sources: map[string]config.SourceConfig{
+			"merge": {
+				Type: "github-merge",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"post-merge": {Workflow: "post-merge-check"},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghMergedPR{
+		{Number: 10, Title: "merged fix", URL: "https://github.com/owner/repo/pull/10",
+			MergeCommit: struct{ Oid string `json:"oid"` }{Oid: "abc123def456"}},
+	}
+	prData, _ := json.Marshal(prs)
+	r.set(prData, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit", "--limit", "20")
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Errorf("expected 1 added, got %d", result.Added)
+	}
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel in queue, got %d", len(vessels))
+	}
+	if vessels[0].Source != "github-merge" {
+		t.Errorf("expected source github-merge, got %q", vessels[0].Source)
+	}
+}

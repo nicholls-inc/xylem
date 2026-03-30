@@ -354,6 +354,22 @@ func compactVessels(vessels []Vessel) ([]Vessel, int) {
 	return compacted, removed
 }
 
+// HasRefAny reports whether any vessel (in any state) has the given ref.
+// Unlike HasRef, this checks terminal states too, preventing re-processing
+// of already-handled events.
+func (q *Queue) HasRefAny(ref string) bool {
+	vessels, err := q.List()
+	if err != nil {
+		return false
+	}
+	for _, vessel := range vessels {
+		if vessel.Ref == ref {
+			return true
+		}
+	}
+	return false
+}
+
 func (q *Queue) HasRef(ref string) bool {
 	vessels, err := q.List()
 	if err != nil {

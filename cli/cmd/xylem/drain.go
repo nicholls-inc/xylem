@@ -63,8 +63,8 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
 				tasks[name] = source.GitHubTask{
-					Labels: t.Labels,
-					Workflow:  t.Workflow,
+					Labels:   t.Labels,
+					Workflow: t.Workflow,
 				}
 			}
 			gh := &source.GitHub{
@@ -76,15 +76,68 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 			}
 			sources[gh.Name()] = gh
 		}
+		if srcCfg.Type == "github-pr" {
+			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				tasks[name] = source.GitHubTask{
+					Labels:   t.Labels,
+					Workflow: t.Workflow,
+				}
+			}
+			pr := &source.GitHubPR{
+				Repo:      srcCfg.Repo,
+				Tasks:     tasks,
+				Exclude:   srcCfg.Exclude,
+				Queue:     q,
+				CmdRunner: cmdRunner,
+			}
+			sources[pr.Name()] = pr
+		}
+		if srcCfg.Type == "github-pr-events" {
+			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				pet := source.PREventsTask{Workflow: t.Workflow}
+				if t.On != nil {
+					pet.Labels = t.On.Labels
+					pet.ReviewSubmitted = t.On.ReviewSubmitted
+					pet.ChecksFailed = t.On.ChecksFailed
+					pet.Commented = t.On.Commented
+				}
+				prEventsTasks[name] = pet
+			}
+			pre := &source.GitHubPREvents{
+				Repo:      srcCfg.Repo,
+				Tasks:     prEventsTasks,
+				Exclude:   srcCfg.Exclude,
+				Queue:     q,
+				CmdRunner: cmdRunner,
+			}
+			sources[pre.Name()] = pre
+		}
+		if srcCfg.Type == "github-merge" {
+			mergeTasks := make(map[string]source.MergeTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				mergeTasks[name] = source.MergeTask{Workflow: t.Workflow}
+			}
+			m := &source.GitHubMerge{
+				Repo:      srcCfg.Repo,
+				Tasks:     mergeTasks,
+				Queue:     q,
+				CmdRunner: cmdRunner,
+			}
+			sources[m.Name()] = m
+		}
 	}
 	return sources
 }
 
 func buildReporter(cfg *config.Config, cmdRunner reporter.Runner) *reporter.Reporter {
-	// Find the first GitHub source repo for reporting
 	for _, srcCfg := range cfg.Sources {
-		if srcCfg.Type == "github" && srcCfg.Repo != "" {
-			return &reporter.Reporter{Runner: cmdRunner, Repo: srcCfg.Repo}
+		switch srcCfg.Type {
+		case "github", "github-pr", "github-pr-events", "github-merge":
+			if srcCfg.Repo != "" {
+				return &reporter.Reporter{Runner: cmdRunner, Repo: srcCfg.Repo}
+			}
 		}
 	}
 	return nil
