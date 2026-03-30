@@ -42,7 +42,7 @@ Everything else falls back to defaults. You can also run xylem with no sources a
 # ---------------------------------------------------------------------------
 sources:
   bugs:                                   # arbitrary name, used in logs
-    type: github                          # source type (currently only "github")
+    type: github                          # source type
     repo: owner/name                      # GitHub repo in owner/name format
     exclude: [wontfix, duplicate, no-bot] # issues with these labels are skipped
     tasks:
@@ -62,8 +62,8 @@ sources:
 # ---------------------------------------------------------------------------
 # Execution limits
 # ---------------------------------------------------------------------------
-concurrency: 2          # max simultaneous Claude sessions
-max_turns: 50           # max turns per Claude session
+concurrency: 2          # max simultaneous sessions
+max_turns: 50           # max turns per prompt phase or prompt-only run
 timeout: "30m"          # per-session timeout (Go duration string)
 
 # ---------------------------------------------------------------------------
@@ -74,13 +74,21 @@ default_branch: "main"  # branch to create worktrees from (auto-detected if omit
 cleanup_after: "168h"   # remove worktrees older than this (default: 7 days)
 
 # ---------------------------------------------------------------------------
-# Claude session settings
+# Session runner settings
 # ---------------------------------------------------------------------------
+llm: claude
+
 claude:
   command: "claude"                           # Claude CLI binary name or path
   flags: "--bare --dangerously-skip-permissions"  # flags passed to every session
-  env:                                        # environment variables for sessions
+  env:                                        # parsed config map for Claude-related environment values
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"  # supports shell variable substitution
+
+copilot:
+  command: "copilot"                          # Copilot CLI binary name or path
+  flags: ""                                   # flags passed to every session
+  default_model: ""                           # optional default model for Copilot phases
+  env: {}                                     # parsed config map for Copilot-related environment values
 
 # ---------------------------------------------------------------------------
 # Daemon mode intervals
@@ -97,13 +105,15 @@ daemon:
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
 | `sources` | map | -- | No | Map of source names to source configurations. Not required if you only use `xylem enqueue`. |
-| `concurrency` | integer | `2` | No | Maximum number of simultaneous Claude sessions. Must be greater than 0. |
-| `max_turns` | integer | `50` | No | Maximum turns per Claude session. Must be greater than 0. |
+| `concurrency` | integer | `2` | No | Maximum number of simultaneous sessions. Must be greater than 0. |
+| `max_turns` | integer | `50` | No | Maximum turns per prompt phase or prompt-only run. Must be greater than 0. |
 | `timeout` | string | `"30m"` | No | Per-session timeout. Must be a valid Go duration string and at least `30s`. |
 | `state_dir` | string | `".xylem"` | No | Directory for queue file, workflows, prompts, and phase outputs. |
 | `default_branch` | string | auto-detected | No | Git branch to create worktrees from. If omitted, xylem detects it from the repository. |
 | `cleanup_after` | string | `"168h"` | No | Age threshold for worktree cleanup. Must be a valid Go duration string. |
+| `llm` | string | `"claude"` | No | Default LLM provider. Valid values: `claude`, `copilot`. |
 | `claude` | object | see below | No | Claude CLI session settings. |
+| `copilot` | object | see below | No | GitHub Copilot CLI session settings. |
 | `daemon` | object | see below | No | Daemon mode polling intervals. |
 
 ### Sources
@@ -112,8 +122,8 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Currently only `"github"` is supported. |
-| `repo` | string | -- | Yes (github) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`. |
+| `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `tasks` | map | -- | Yes | Map of task names to task configurations. At least one task is required per source. |
 
@@ -123,8 +133,77 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `labels` | list of strings | -- | Yes | Labels that trigger this task. An issue must have all listed labels to match. At least one label is required. |
+| `labels` | list of strings | -- | Required for `github` and `github-pr` | Labels that trigger this task. The item must have all listed labels to match. |
 | `workflow` | string | -- | Yes | Name of the workflow to invoke (e.g., `fix-bug`, `implement-feature`). Must not be empty or whitespace-only. Corresponds to a YAML file in `<state_dir>/workflows/`. |
+| `status_labels` | object | omitted | No | Optional labels to apply as a vessel moves through queue states. Supported for `github` and `github-pr`. |
+| `on` | object | omitted | Required for `github-pr-events` | Event triggers for pull-request event scanning. Must include at least one trigger. |
+
+### Task fields by source type
+
+- `github`: requires `labels`, supports `status_labels`
+- `github-pr`: requires `labels`, supports `status_labels`
+- `github-pr-events`: requires `workflow` and `on`
+- `github-merge`: requires `workflow`
+
+### `status_labels`
+
+When `status_labels` is set, xylem records the configured labels in vessel metadata and applies them during source lifecycle hooks.
+
+```yaml
+tasks:
+  fix-bugs:
+    labels: [bug, ready-for-work]
+    workflow: fix-bug
+    status_labels:
+      queued: queued
+      running: in-progress
+      completed: done
+      failed: bot-failed
+      timed_out: timed-out
+```
+
+Behavior:
+
+- `queued` is added when the vessel is enqueued
+- `running` replaces `queued` when work starts
+- `completed`, `failed`, and `timed_out` replace `running` on terminal states
+- If `status_labels` is omitted entirely, `github` and `github-pr` keep the legacy fallback of adding `in-progress` on start
+- If the block is present and a field is empty, xylem skips that specific label operation
+
+### `on`
+
+`github-pr-events` tasks use an `on` block to declare which PR events create vessels:
+
+```yaml
+tasks:
+  review-followup:
+    workflow: review-followup
+    on:
+      labels: [needs-agent]
+      review_submitted: true
+      checks_failed: true
+      commented: true
+```
+
+Supported triggers:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `labels` | list of strings | Create a vessel when an open PR has any listed label. |
+| `review_submitted` | bool | Create a vessel for each submitted review, deduped by review ID. |
+| `checks_failed` | bool | Create a vessel when a PR has failed checks, deduped by head SHA. |
+| `commented` | bool | Create a vessel for each issue comment on the PR, deduped by comment ID. |
+
+### LLM provider settings
+
+`llm` selects the default provider for prompt phases and prompt-only runs. Resolution order is:
+
+1. phase-level `llm` in a workflow
+2. workflow-level `llm`
+3. top-level `.xylem.yml` `llm`
+4. default `claude`
+
+Valid values are `claude` and `copilot`.
 
 ### Claude session settings
 
@@ -134,13 +213,25 @@ The `claude` section controls how xylem invokes the Claude CLI for each session.
 |-------|------|---------|----------|-------------|
 | `claude.command` | string | `"claude"` | No | Claude CLI binary name or absolute path. |
 | `claude.flags` | string | `""` | No | Additional CLI flags passed to every session. Passed as a single string (e.g., `"--bare --dangerously-skip-permissions"`). |
-| `claude.env` | map of string to string | `{}` | No | Environment variables injected into every Claude session. Supports `${VAR}` syntax for shell variable substitution. |
+| `claude.default_model` | string | `""` | No | Default Claude model for prompt phases when no workflow or phase model overrides it. |
+| `claude.env` | map of string to string | `{}` | No | Claude-related environment map in config. `--bare` validation checks this map for `ANTHROPIC_API_KEY`. |
 
 **Validation rules:**
 
 - If `claude.flags` contains `--bare`, then `claude.env` must include a non-empty `ANTHROPIC_API_KEY`. The `--bare` flag disables Claude's built-in authentication, so you must provide your own API key.
 - `claude.template` is no longer supported and produces a hard error if present. Migrate to phase-based workflows in `<state_dir>/workflows/`.
 - `claude.allowed_tools` is no longer supported and produces a hard error if present. Define allowed tools in workflow phase definitions instead.
+
+### Copilot session settings
+
+The `copilot` section controls how xylem resolves the GitHub Copilot CLI command when the provider is `copilot`.
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `copilot.command` | string | `"copilot"` | No | Copilot CLI binary name or absolute path. Must be non-empty if `llm: copilot`. |
+| `copilot.flags` | string | `""` | No | Additional CLI flags passed to every Copilot session. |
+| `copilot.default_model` | string | `""` | No | Default Copilot model for prompt phases when no workflow or phase model overrides it. |
+| `copilot.env` | map of string to string | `{}` | No | Copilot-related environment map in config. |
 
 ### Daemon settings
 
@@ -168,7 +259,7 @@ You can combine units: `1h30m`, `2m30s`. There is no `d` (day) suffix -- use `24
 
 ## Environment variable substitution
 
-The `claude.env` map supports `${VAR}` syntax to reference shell environment variables at runtime:
+The config shape supports `${VAR}` placeholders in `claude.env` and `copilot.env` values:
 
 ```yaml
 claude:
@@ -178,7 +269,7 @@ claude:
     CUSTOM_FLAG: "static-value"
 ```
 
-This lets you keep secrets out of your config file. The substitution happens when the environment is passed to the Claude subprocess -- the literal `${VAR}` string is stored in the YAML and resolved at execution time.
+Use this pattern if you want config values to mirror environment-variable names rather than hard-coded secrets.
 
 ## Default branch detection
 
@@ -254,6 +345,55 @@ sources:
 
 Each source is scanned independently. Deduplication prevents the same issue from being queued twice.
 
+## Additional source examples
+
+### Scan pull requests by label
+
+```yaml
+sources:
+  review-queue:
+    type: github-pr
+    repo: myorg/myrepo
+    exclude: [no-bot]
+    tasks:
+      pr-followup:
+        labels: [needs-agent]
+        workflow: review-followup
+        status_labels:
+          queued: queued
+          running: in-progress
+          completed: done
+```
+
+### Scan PR events
+
+```yaml
+sources:
+  pr-events:
+    type: github-pr-events
+    repo: myorg/myrepo
+    tasks:
+      investigate:
+        workflow: investigate-pr
+        on:
+          labels: [needs-agent]
+          review_submitted: true
+          checks_failed: true
+          commented: true
+```
+
+### Scan merged pull requests
+
+```yaml
+sources:
+  post-merge:
+    type: github-merge
+    repo: myorg/myrepo
+    tasks:
+      followup:
+        workflow: post-merge-followup
+```
+
 ## Legacy config format
 
 xylem still supports an older flat format with top-level `repo`, `tasks`, and `exclude` fields. On load, this format is automatically normalized into a single `github` source named `"github"`.
@@ -317,13 +457,19 @@ The following rules are enforced when loading `.xylem.yml`. If any rule fails, `
 | `timeout` must be a valid Go duration | `timeout must be a valid duration: ...` |
 | `timeout` must be >= 30s | `timeout must be at least 30s` |
 | `cleanup_after`, if set, must be a valid Go duration | `cleanup_after must be a valid duration: ...` |
+| `llm`, if set, must be `claude` or `copilot` | `llm must be "claude" or "copilot"` |
+| `copilot.command` must be non-empty when `llm: copilot` | `copilot.command must be non-empty` |
 | `claude.template` must not be present | `claude.template is no longer supported...` |
 | `claude.allowed_tools` must not be present | `claude.allowed_tools is no longer supported...` |
 | `--bare` in flags requires `ANTHROPIC_API_KEY` in env | `--bare requires ANTHROPIC_API_KEY in claude.env` |
 | `daemon.scan_interval`, if set, must be a valid Go duration | `daemon.scan_interval must be a valid duration: ...` |
 | `daemon.drain_interval`, if set, must be a valid Go duration | `daemon.drain_interval must be a valid duration: ...` |
 | Each source must have a `type` | `source "<name>" must specify a type` |
-| GitHub sources must have a `repo` in `owner/name` format | `source "<name>" (github): repo must be in owner/name format` |
-| GitHub sources must have at least one task | `source "<name>" (github): at least one task is required` |
-| Each task must have at least one label | `source "<name>" task "<task>": must include at least one labels entry` |
-| Each task must have a non-empty workflow | `source "<name>" task "<task>": must include a workflow` |
+| `github` and `github-pr` sources must have a `repo` in `owner/name` format | `source "<name>" (github): repo must be in owner/name format` |
+| `github-pr-events` sources must have a `repo` in `owner/name` format | `source "<name>" (github-pr-events): repo must be in owner/name format` |
+| `github-merge` sources must have a `repo` in `owner/name` format | `source "<name>" (github-merge): repo must be in owner/name format` |
+| `github`, `github-pr`, `github-pr-events`, and `github-merge` sources must have at least one task | `source "<name>" ...: at least one task is required` |
+| `github` and `github-pr` tasks must have at least one label | `source "<name>" task "<task>": must include at least one labels entry` |
+| `github-pr-events` tasks must include an `on` block | `source "<name>" task "<task>": must include an 'on' block...` |
+| `github-pr-events` `on` blocks must include at least one trigger | `source "<name>" task "<task>": 'on' block must specify at least one trigger...` |
+| Every task must have a non-empty workflow | `source "<name>" task "<task>": must include a workflow` |

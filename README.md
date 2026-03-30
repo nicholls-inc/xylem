@@ -1,12 +1,12 @@
 # xylem
 
-Autonomous Claude Code session scheduler. Scans pluggable sources, queues work, and launches multi-phase workflows in isolated git worktrees with quality gates.
+Autonomous Claude Code and GitHub Copilot session scheduler. Scans pluggable sources, queues work, and launches multi-phase workflows in isolated git worktrees with quality gates.
 
 ## How it works
 
 xylem is a two-layer system:
 
-- **Go CLI** (`xylem`) -- control plane that scans sources for actionable tasks, manages a persistent work queue, and launches Claude Code sessions in isolated git worktrees
+- **Go CLI** (`xylem`) -- control plane that scans sources for actionable tasks, manages a persistent work queue, and launches isolated session runs in git worktrees
 - **Workflows** -- execution plane with multi-phase workflow definitions (e.g. `fix-bug`, `implement-feature`) that run inside each session with quality gates between phases
 
 ```
@@ -20,7 +20,7 @@ Sources              xylem CLI              Execution
                                             └──────────────────────────┘
 ```
 
-Sources are pluggable. The built-in `github` source scans issues by label. The `manual` source backs `xylem enqueue` for ad-hoc tasks. xylem handles scheduling, deduplication, concurrency, and worktree isolation across all sources.
+Sources are pluggable. Built-in source types cover GitHub issues (`github`), pull requests (`github-pr`), pull-request events (`github-pr-events`), merged pull requests (`github-merge`), and manual tasks via `xylem enqueue`. xylem handles scheduling, deduplication, concurrency, and worktree isolation across all sources.
 
 ## Quick start
 
@@ -71,11 +71,17 @@ max_turns: 50
 timeout: "30m"
 state_dir: ".xylem"
 
+llm: claude
+
 claude:
   command: "claude"
   flags: "--bare --dangerously-skip-permissions"
   env:
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+
+copilot:
+  command: "copilot"
+  flags: ""
 
 daemon:
   scan_interval: "60s"
@@ -86,7 +92,7 @@ See the [Configuration Reference](docs/configuration.md) for all fields, default
 
 ## Workflows
 
-Workflows are multi-phase execution plans defined in YAML. Each phase runs a prompt template against Claude, and phases can have quality gates that must pass before the next phase begins.
+Workflows are multi-phase execution plans defined in YAML. Prompt phases run against the configured LLM provider, and phases can have quality gates that must pass before the next phase begins.
 
 ```yaml
 # .xylem/workflows/fix-bug.yaml
@@ -132,14 +138,14 @@ See the [Workflows Guide](docs/workflows.md) for template variables, custom work
 |---------|-------------|
 | `xylem init` | Bootstrap config, workflows, prompts, and HARNESS.md |
 | `xylem scan` | Query sources and enqueue matching issues |
-| `xylem drain` | Dequeue pending vessels and launch Claude sessions |
+| `xylem drain` | Dequeue pending vessels and launch sessions |
 | `xylem daemon` | Continuous scan-drain loop |
 | `xylem enqueue` | Manually enqueue a task |
-| `xylem retry` | Retry a failed vessel with failure context |
+| `xylem retry` | Retry a failed vessel with failure context, or restart from scratch |
 | `xylem status` | Show queue state and vessel summary |
 | `xylem pause` / `resume` | Pause and resume scanning |
 | `xylem cancel` | Cancel a pending vessel |
-| `xylem cleanup` | Remove stale worktrees |
+| `xylem cleanup` | Remove stale worktrees, old phase outputs, and compact stale queue records |
 
 ```bash
 # Common patterns
@@ -191,8 +197,8 @@ See the [Architecture](docs/architecture.md) document for details on the control
 
 - **Go 1.22+** -- to build the CLI
 - **git** -- must be on PATH
-- **[claude](https://docs.anthropic.com/en/docs/claude-code)** -- Claude Code CLI
-- **[gh](https://cli.github.com/)** -- GitHub CLI, authenticated (`gh auth login`). Only required when a `github` source is configured.
+- **[claude](https://docs.anthropic.com/en/docs/claude-code)** or **GitHub Copilot CLI** -- at least one supported LLM CLI
+- **[gh](https://cli.github.com/)** -- GitHub CLI, authenticated (`gh auth login`). Required for GitHub-based sources and PR creation.
 
 ## Installation
 
@@ -212,7 +218,7 @@ go install github.com/nicholls-inc/xylem/cli/cmd/xylem@latest
 ## Known limitations
 
 - **Sequential correctness only** -- no concurrency modeling in the workflows themselves
-- **GitHub only** -- `github` is the only built-in scanning source; other integrations require manual enqueue
+- **GitHub only** -- built-in scanning sources target GitHub issues, PRs, PR events, and merged PRs; other integrations require manual enqueue
 - **Cancel does not kill sessions** -- only removes pending vessels; running sessions run to completion
 - **No priority queues** -- FIFO order only
 - **No webhooks** -- polling only (cron or daemon mode)

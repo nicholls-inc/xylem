@@ -6,10 +6,10 @@ This document describes the internal architecture of xylem for contributors work
 
 xylem is a two-layer system:
 
-- **Control plane** (Go CLI) -- schedules and runs autonomous Claude Code sessions. Handles source scanning, work queue management, concurrency control, worktree lifecycle, and phase-based execution.
-- **Execution plane** (YAML workflows + prompt templates) -- defines what each Claude session does. Multi-phase workflow definitions with quality gates between phases. Scaffolded into the target repository by `xylem init`.
+- **Control plane** (Go CLI) -- schedules and runs autonomous workflow execution. Handles source scanning, work queue management, concurrency control, worktree lifecycle, provider invocation, command phases, and phase-based execution.
+- **Execution plane** (YAML workflows + prompt templates) -- defines what each workflow phase does. Multi-phase workflow definitions with quality gates between phases. Scaffolded into the target repository by `xylem init`.
 
-The CLI never implements business logic itself. It orchestrates: it figures out what work exists, queues it, creates isolated environments, and drives Claude Code sessions through a sequence of phases. The Claude sessions do the actual implementation work.
+The CLI never implements business logic itself. It orchestrates: it figures out what work exists, queues it, creates isolated environments, and drives workflow phases through a sequence of steps. Prompt phases delegate implementation work to the configured LLM provider. Command phases run deterministic shell commands inside the worktree.
 
 ```
                           xylem
@@ -71,9 +71,9 @@ Sources                     xylem scan            Queue
 
 3. **Dequeue** -- The runner atomically reads the queue, finds the first `pending` vessel, transitions it to `running`, sets `StartedAt`, and returns it. The runner respects `Config.Concurrency` using a buffered channel as a semaphore.
 
-4. **Worktree creation** -- The runner asks the source for a branch name (e.g. `fix/issue-42-login-crash`), then creates an isolated git worktree at `.claude/worktrees/<branch>` branched from `origin/<default-branch>`. Claude Code config files (`.claude/settings.json`, rules) are copied into the worktree.
+4. **Worktree creation** -- The runner asks the source for a branch name (e.g. `fix/issue-42-login-crash`), then creates an isolated git worktree at `.claude/worktrees/<branch>` branched from `origin/<default-branch>`. Provider config files (`.claude/settings.json`, rules) are copied into the worktree.
 
-5. **Phase execution** -- The runner loads the workflow YAML, iterates through phases, renders each Go template prompt with issue data and previous phase outputs, then pipes the rendered prompt to `claude -p` via stdin. Phase outputs are persisted to `.xylem/phases/<vessel-id>/<phase>.output`.
+5. **Phase execution** -- The runner loads the workflow YAML, reads `.xylem/HARNESS.md`, then iterates through phases. Prompt phases render a Go template with issue data and previous phase outputs, then invoke the resolved provider (`claude` or `copilot`). Command phases render and run a shell command directly in the worktree. Phase outputs are persisted to `.xylem/phases/<vessel-id>/<phase>.output`.
 
 6. **Gate evaluation** -- After each phase, if a gate is defined:
    - **Command gate**: runs a shell command (e.g. `make test`). On failure, the same phase re-runs with gate output appended to the prompt, up to `retries` times.
@@ -164,7 +164,7 @@ The GitHub source applies several deduplication checks during scanning: excluded
 
 ### Workflow
 
-A workflow is a multi-phase execution plan loaded from a YAML file in `.xylem/workflows/`. Each phase runs a single Claude Code session with a prompt template and a configurable turn limit.
+A workflow is a multi-phase execution plan loaded from a YAML file in `.xylem/workflows/`. Phases can be prompt-driven LLM invocations or command phases that execute shell commands in the worktree.
 
 ```yaml
 name: fix-bug
@@ -173,6 +173,8 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/fix-bug/analyze.md
     max_turns: 5
+    noop:
+      match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/fix-bug/plan.md
     max_turns: 3
@@ -189,6 +191,8 @@ phases:
 ```
 
 The workflow name must match the YAML filename. Phase names must be unique within a workflow. Prompt files are Go templates rendered with issue data, previous phase outputs, and gate results.
+
+Prompt phases can also override the LLM provider and model at the workflow or phase level, and can set per-phase `allowed_tools` restrictions that the runner forwards to the selected provider CLI. Provider resolution is `phase.llm` -> `workflow.llm` -> `.xylem.yml llm`, with support for both `claude` and `copilot`. `xylem init` also scaffolds `.xylem/HARNESS.md`; the runner reads that file and passes it as a system prompt for prompt phases.
 
 **Built-in workflows:**
 
@@ -299,7 +303,7 @@ runner.runVessel(ctx, vessel)
   |     +-- Otherwise: source.BranchName(vessel) -> worktree.Create(ctx, branch)
   |     +-- Persist WorktreePath to queue
   |
-  +-- If vessel has Prompt but no Workflow -> runPromptOnly (single claude -p call)
+  +-- If vessel has Prompt but no Workflow -> runPromptOnly (single provider invocation)
   |
   +-- loadWorkflow(vessel.Workflow) -> parse .xylem/workflows/<name>.yaml
   +-- fetchIssueData(ctx, vessel) -> gh issue view (cached in Meta)
@@ -308,10 +312,15 @@ runner.runVessel(ctx, vessel)
   |
   +-- For each phase (starting from vessel.CurrentPhase):
         |
-        +-- Render prompt template with issue data, previous outputs, gate result
-        +-- Write rendered prompt to .xylem/phases/<id>/<phase>.prompt
-        +-- Build claude CLI args (max_turns, flags, harness, allowed_tools)
-        +-- runner.RunPhase(ctx, worktreePath, stdin, "claude", args...)
+        +-- If prompt phase:
+        |     +-- Render prompt template with issue data, previous outputs, gate result
+        |     +-- Write rendered prompt to .xylem/phases/<id>/<phase>.prompt
+        |     +-- Resolve provider + model, add harness + allowed_tools
+        |     +-- runner.RunPhase(ctx, worktreePath, stdin, <provider-cmd>, args...)
+        +-- If command phase:
+        |     +-- Render phase.run as a template
+        |     +-- Write rendered command to .xylem/phases/<id>/<phase>.command
+        |     +-- Run shell command in worktree
         +-- Write output to .xylem/phases/<id>/<phase>.output
         +-- Persist CurrentPhase + PhaseOutputs to queue
         |
@@ -348,15 +357,15 @@ daemon.Run(ctx)
 
 ## Isolation model
 
-Every vessel runs in its own git worktree. This provides filesystem isolation between concurrent Claude sessions -- each session works on a separate branch in a separate directory, so there is no risk of file conflicts.
+Every vessel runs in its own git worktree. This provides filesystem isolation between concurrent workflow runs -- each vessel works on a separate branch in a separate directory, so there is no risk of file conflicts.
 
 **Worktree lifecycle:**
 
 1. **Create** -- `git fetch origin <default-branch>` then `git worktree add .claude/worktrees/<branch> -b <branch> origin/<default-branch>`. The worktree starts from a clean copy of the default branch.
 
-2. **Config copy** -- `.claude/settings.json`, `.claude/settings.local.json`, and `.claude/rules/` are copied from the main repo into the worktree so Claude Code sessions have the correct tool permissions and rules.
+2. **Config copy** -- `.claude/settings.json`, `.claude/settings.local.json`, and `.claude/rules/` are copied from the main repo into the worktree so provider-backed prompt phases have the correct tool permissions and rules.
 
-3. **Execution** -- Claude sessions run inside the worktree directory. All file changes are isolated to the worktree's branch.
+3. **Execution** -- Prompt phases and command phases both run inside the worktree directory. All file changes are isolated to the worktree's branch.
 
 4. **Cleanup** -- `xylem cleanup` removes worktrees older than `cleanup_after` (default 7 days) using `git worktree remove --force` followed by best-effort branch deletion.
 
@@ -385,7 +394,7 @@ The distinction matters for contributors:
 
 The CLI today executes a linear sequence of phases per vessel. The harness packages provide primitives for more sophisticated orchestration:
 
-**Multi-agent coordination** (`orchestrator`) -- Instead of a single Claude session per phase, an orchestrator can dispatch sub-agents in parallel, sequential, orchestrator-workers, or handoff topologies. Sub-agents have context firewalls (they only see their task and results from upstream agents, not the full orchestrator context). The orchestrator tracks agent status, token usage, wall clock time, and dependency edges with cycle detection.
+**Multi-agent coordination** (`orchestrator`) -- Instead of a single prompt-driven agent session per phase, an orchestrator can dispatch sub-agents in parallel, sequential, orchestrator-workers, or handoff topologies. Sub-agents have context firewalls (they only see their task and results from upstream agents, not the full orchestrator context). The orchestrator tracks agent status, token usage, wall clock time, and dependency edges with cycle detection.
 
 **Mission decomposition** (`mission`) -- A mission (the harness equivalent of a vessel) can be analyzed for complexity (simple/moderate/complex based on file count, domain count, and description length) and decomposed into sub-tasks with dependency ordering. Constraints enforce token budgets, time budgets, and blast radius (glob patterns that restrict which files an agent may modify).
 

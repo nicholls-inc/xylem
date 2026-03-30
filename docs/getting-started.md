@@ -1,6 +1,6 @@
 # Getting Started with xylem
 
-This guide walks you through installing xylem, configuring it for your repository, and running your first autonomous Claude Code sessions. By the end, you will have xylem scanning GitHub issues and launching multi-phase workflows in isolated git worktrees.
+This guide walks you through installing xylem, configuring it for your repository, and running your first autonomous sessions. By the end, you will have xylem scanning GitHub work sources and launching multi-phase workflows in isolated git worktrees.
 
 ## Prerequisites
 
@@ -10,29 +10,31 @@ You need the following tools installed and available on your PATH:
 |------|---------|---------|
 | [Go](https://go.dev/dl/) | 1.22+ | Build the xylem CLI |
 | [git](https://git-scm.com/) | any recent | Worktree creation and branch management |
-| [claude](https://docs.anthropic.com/en/docs/claude-code) | latest | Claude Code CLI, runs the autonomous sessions |
-| [gh](https://cli.github.com/) | any recent | GitHub CLI, used to scan issues and create PRs |
+| [claude](https://docs.anthropic.com/en/docs/claude-code) or GitHub Copilot CLI | latest | Session runner for LLM phases |
+| [gh](https://cli.github.com/) | any recent | GitHub CLI, used by GitHub-based sources and PR creation |
 
-The `gh` CLI must be authenticated before xylem can scan GitHub issues:
+The `gh` CLI must be authenticated before xylem can scan GitHub sources:
 
 ```bash
 gh auth login
 ```
 
-You also need an Anthropic API key. Set it in your environment or pass it through the xylem config (covered below).
+If you use Claude with `--bare`, you also need an Anthropic API key. Set it in your environment or pass it through the xylem config.
 
 ## Installation
 
-Install xylem in two steps: the Claude Code plugin and the Go CLI binary.
+Install xylem in two steps: install the LLM CLI you want to use, then install the Go CLI binary.
 
 ```bash
-# 1. Add the marketplace and install the plugin
+# 1. If you use Claude, add the marketplace and install the plugin
 claude plugin marketplace add nicholls-inc/claude-code-marketplace
 claude plugin install xylem@nicholls
 
 # 2. Install the Go CLI
 go install github.com/nicholls-inc/xylem/cli/cmd/xylem@latest
 ```
+
+If you use GitHub Copilot instead, install the Copilot CLI separately and make sure the `copilot` binary is on your PATH before running xylem.
 
 Verify the installation:
 
@@ -54,7 +56,7 @@ This creates the following files and directories:
 ```
 .xylem.yml                                  # Main config file
 .xylem/                                     # State directory (queue, outputs, workflows)
-  HARNESS.md                                # Project context for Claude sessions
+  HARNESS.md                                # Project context for launched sessions
   workflows/
     fix-bug.yaml                            # Bug-fixing workflow definition
     implement-feature.yaml                  # Feature implementation workflow definition
@@ -84,17 +86,25 @@ sources:
         labels: [bug, ready-for-work]       # Issues with BOTH labels are picked up
         workflow: fix-bug                    # Maps to .xylem/workflows/fix-bug.yaml
 
-concurrency: 2          # Max simultaneous Claude sessions
-max_turns: 50           # Max turns per Claude session
+concurrency: 2          # Max simultaneous sessions
+max_turns: 50           # Max turns per session
 timeout: "30m"          # Per-session timeout
 
 state_dir: ".xylem"     # Where queue and state files live
+
+llm: claude             # Global default provider: claude or copilot
 
 claude:
   command: "claude"
   flags: "--bare --dangerously-skip-permissions"
   env:
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+
+# copilot:
+#   command: "copilot"
+#   flags: ""
+#   default_model: ""
+#   env: {}
 ```
 
 ### What to change
@@ -103,8 +113,10 @@ claude:
 2. **`labels`** -- Match the label names you use in your issue tracker. An issue must have *all* listed labels to be picked up by that task.
 3. **`exclude`** -- Labels that prevent an issue from being queued, even if it matches a task's labels.
 4. **`workflow`** -- The workflow name to execute. Must match a file in `.xylem/workflows/`.
-5. **`claude.flags`** -- Adjust as needed. Remove `--dangerously-skip-permissions` if you want Claude to ask for confirmation before running commands.
-6. **`claude.env`** -- Set your `ANTHROPIC_API_KEY` here, or ensure it is in your shell environment.
+5. **`llm`** -- Set the default provider to `claude` or `copilot`. If omitted, xylem defaults to `claude`.
+6. **`claude.flags`** -- Adjust as needed. Remove `--dangerously-skip-permissions` if you want Claude to ask for confirmation before running commands.
+7. **`claude.env`** -- Set your `ANTHROPIC_API_KEY` here if you use Claude with `--bare`.
+8. **`copilot`** -- Configure the Copilot CLI command, flags, optional default model, and environment if you use `llm: copilot`.
 
 ### Adding a second source
 
@@ -132,9 +144,37 @@ sources:
 
 Each source scans independently. xylem deduplicates across sources so the same issue is never queued twice.
 
+### Other built-in GitHub source types
+
+In addition to issue scanning, xylem supports these GitHub source types:
+
+- `github-pr` — scans open pull requests by label
+- `github-pr-events` — scans open pull requests for event triggers
+- `github-merge` — scans merged pull requests
+
+For `github-pr-events`, tasks use an `on` block instead of `labels`:
+
+```yaml
+sources:
+  review-events:
+    type: github-pr-events
+    repo: myorg/myapp
+    exclude: [no-bot]
+    tasks:
+      respond-to-pr-events:
+        workflow: review-followup
+        on:
+          labels: [needs-agent]
+          review_submitted: true
+          checks_failed: true
+          commented: true
+```
+
+At least one trigger is required in the `on` block.
+
 ## Write a HARNESS.md
 
-The harness file at `.xylem/HARNESS.md` is appended to Claude's system prompt for every session xylem launches. It gives Claude the project context it needs to work autonomously: what the project does, how to build and test it, and what rules to follow.
+The harness file at `.xylem/HARNESS.md` is appended to the session runner's system prompt for every session xylem launches. It gives the agent the project context it needs to work autonomously: what the project does, how to build and test it, and what rules to follow.
 
 Open `.xylem/HARNESS.md` and fill in each section:
 
@@ -150,7 +190,7 @@ Open `.xylem/HARNESS.md` and fill in each section:
 <!-- List the exact commands to build, test, and lint. Be specific:
      cd api && go test ./...
      npm run lint
-     These commands are what Claude will run. -->
+      These commands are what the session runner will run. -->
 
 # Golden Principles
 <!-- Rules the agent must always follow. Examples:
@@ -196,7 +236,7 @@ Once you are satisfied with the dry-run output, scan for real and then drain the
 # Enqueue matching issues
 xylem scan
 
-# Launch Claude sessions for pending vessels
+# Launch sessions for pending vessels
 xylem drain
 ```
 
@@ -215,7 +255,7 @@ Here is what happens during drain:
 5. If a command gate fails, the phase retries up to the configured limit.
 6. Phase outputs are persisted to `.xylem/phases/<vessel-id>/`.
 
-Drain respects the `concurrency` setting. If you set `concurrency: 2`, at most two Claude sessions run in parallel.
+Drain respects the `concurrency` setting. If you set `concurrency: 2`, at most two sessions run in parallel.
 
 Drain handles SIGINT and SIGTERM gracefully: running sessions finish, but no new vessels are started.
 
@@ -282,7 +322,7 @@ This runs the full `fix-bug` workflow, with the issue URL passed to prompt templ
 xylem enqueue --prompt "Refactor the auth middleware to use JWT instead of session cookies"
 ```
 
-Direct prompts bypass workflow phases entirely. The prompt is passed straight to a single Claude session.
+Direct prompts bypass workflow phases entirely. The prompt is passed straight to a single prompt-only session using the resolved provider.
 
 ### Enqueue from a file
 
@@ -306,7 +346,7 @@ At least one of `--workflow` or `--prompt`/`--prompt-file` is required. When bot
 
 You now have a working xylem setup. Here are the areas to explore next:
 
-- **[Configuration reference](configuration.md)** -- Full reference for every `.xylem.yml` field, including legacy format migration, Claude CLI flags, and daemon tuning.
+- **[Configuration reference](configuration.md)** -- Full reference for every `.xylem.yml` field, including legacy format migration, provider settings, and daemon tuning.
 - **[Workflows](workflows.md)** -- How to create custom workflows, write prompt templates using Go template variables, and configure command and label gates.
 - **[CLI reference](cli-reference.md)** -- Complete documentation for every xylem command: `scan`, `drain`, `daemon`, `enqueue`, `retry`, `status`, `pause`, `resume`, `cancel`, `cleanup`.
 - **[Architecture](architecture.md)** -- How the control plane and execution plane work together, the vessel state machine, source interface design, and worktree lifecycle.

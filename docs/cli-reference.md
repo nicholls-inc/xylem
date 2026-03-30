@@ -50,7 +50,7 @@ xylem init [flags]
 1. Writes a scaffold `.xylem.yml` (or the path specified by `--config`). Auto-detects the GitHub remote from `git remote get-url origin` and pre-fills the `repo` field.
 2. Creates the `.xylem/` state directory if it does not exist.
 3. Writes `.xylem/.gitignore` (always overwritten) with contents that ignore everything except the `.gitignore` itself.
-4. Creates `.xylem/HARNESS.md` -- a template for project-specific instructions appended to Claude's system prompt.
+4. Creates `.xylem/HARNESS.md` -- a template for project-specific instructions appended to the session runner's system prompt.
 5. Creates workflow definitions: `.xylem/workflows/fix-bug.yaml` and `.xylem/workflows/implement-feature.yaml`.
 6. Creates prompt templates for each workflow phase (`analyze`, `plan`, `implement`, `pr`) under `.xylem/prompts/<workflow>/<phase>.md`.
 
@@ -92,9 +92,13 @@ xylem scan [flags]
 ### Behavior
 
 - Iterates over every source defined in `.xylem.yml` and calls its `Scan()` method.
-- For `github` sources, this queries GitHub issues matching the configured labels and enqueues a vessel for each issue that is not already in the queue and does not have any excluded labels.
+- Supported source types are `github`, `github-pr`, `github-pr-events`, and `github-merge`.
+- `github` scans open issues matching task labels.
+- `github-pr` scans open pull requests matching task labels.
+- `github-pr-events` scans open pull requests for configured `on` triggers such as labels, submitted reviews, failed checks, and comments.
+- `github-merge` scans merged pull requests and dedupes by merge commit SHA.
 - If scanning is paused (via `xylem pause`), prints a message and exits without scanning.
-- Deduplication is handled automatically: issues already in the queue are skipped.
+- Deduplication is handled automatically. Depending on the source, xylem skips refs that are already present in the queue, already present in any vessel state, or already have xylem-owned branches/open PRs.
 
 In `--dry-run` mode, scan writes candidates to a temporary queue, prints a table of what would be enqueued (ID, Source, Workflow, Ref), and then discards the temporary queue. No changes are made to the real queue.
 
@@ -134,7 +138,7 @@ xylem scan --config production.yml
 
 ## xylem drain
 
-Dequeue pending vessels and launch Claude Code sessions in isolated git worktrees.
+Dequeue pending vessels and launch sessions in isolated git worktrees.
 
 ### Usage
 
@@ -153,9 +157,9 @@ xylem drain [flags]
 1. Before draining pending vessels, checks any vessels in the `waiting` state (e.g., waiting for a label gate) and resumes them if their condition is now met.
 2. Dequeues pending vessels in FIFO order, up to the `concurrency` limit.
 3. For each vessel:
-   - Calls `source.OnStart()` to perform side effects (e.g., adding an `in-progress` label on GitHub).
+   - Calls `source.OnStart()` to perform side effects (for example, applying configured status labels).
    - Creates an isolated git worktree via `worktree.Create`.
-   - Executes workflow phases sequentially in the worktree, piping rendered prompt templates to `claude -p` via stdin.
+   - Executes workflow phases sequentially in the worktree. Prompt phases use the resolved provider (`claude` or `copilot`), and command phases run shell commands directly.
    - Runs quality gates between phases (command gates with retries, label gates with polling).
 4. Marks vessels as `completed`, `failed`, `waiting`, or `timed_out` based on outcome.
 5. Prints a summary line and exits.
@@ -164,7 +168,7 @@ xylem drain [flags]
 
 **Exit codes**: Returns exit code `1` if any vessels failed during the drain. Returns exit code `2` for infrastructure errors (e.g., queue read failure).
 
-In `--dry-run` mode, lists pending vessels with the Claude command that would be executed for each, without launching any sessions.
+In `--dry-run` mode, lists pending vessels with a command preview, without launching any sessions.
 
 ### Output
 
@@ -229,7 +233,7 @@ The daemon uses the shorter of the two intervals as its tick interval and checks
 2. Enters a loop that alternates between scanning and draining based on elapsed time since each operation last ran.
 3. After each tick, logs a summary of the queue state (pending, running, completed, failed counts).
 
-**Graceful shutdown**: Handles `SIGINT` and `SIGTERM`. On signal, the daemon logs a shutdown message and exits cleanly. Running Claude sessions finish before the process terminates.
+**Graceful shutdown**: Handles `SIGINT` and `SIGTERM`. On signal, the daemon logs a shutdown message and exits cleanly. Running sessions finish before the process terminates.
 
 ### Output
 
@@ -271,7 +275,7 @@ xylem enqueue [flags]
 |------|------|---------|-------------|
 | `--workflow` | `string` | `""` | Workflow to invoke (e.g., `fix-bug`, `implement-feature`). |
 | `--ref` | `string` | `""` | Task reference (URL, ticket ID, or description). |
-| `--prompt` | `string` | `""` | Direct prompt to pass to Claude. Bypasses workflow phases entirely. |
+| `--prompt` | `string` | `""` | Direct prompt to pass to the resolved provider. Bypasses workflow phases entirely. |
 | `--prompt-file` | `string` | `""` | Read prompt from a file. Mutually exclusive with `--prompt`. |
 | `--source` | `string` | `"manual"` | Source identifier tag for the vessel. |
 | `--id` | `string` | auto-generated | Custom vessel ID. If empty, generates `task-<unix-millis>`. |
@@ -285,7 +289,7 @@ xylem enqueue [flags]
 
 Creates a new vessel in `pending` state and appends it to the queue. The vessel will be picked up on the next `drain`.
 
-When `--prompt` (or `--prompt-file`) is used without `--workflow`, the prompt is passed directly to Claude, bypassing the phase-based workflow system entirely.
+When `--prompt` (or `--prompt-file`) is used without `--workflow`, the prompt is passed directly to the resolved provider, bypassing the phase-based workflow system entirely.
 
 When `--workflow` is specified, the vessel follows the named workflow's phases during drain.
 
@@ -317,7 +321,7 @@ Retry a failed vessel, carrying forward failure context so the next session can 
 ### Usage
 
 ```
-xylem retry <vessel-id>
+xylem retry <vessel-id> [flags]
 ```
 
 ### Arguments
@@ -325,6 +329,12 @@ xylem retry <vessel-id>
 | Argument | Required | Description |
 |----------|----------|-------------|
 | `vessel-id` | Yes | The ID of the failed vessel to retry. |
+
+### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--from-scratch` | `bool` | `false` | Re-execute the workflow from the beginning instead of resuming from the failed phase. |
 
 ### Behavior
 
@@ -338,6 +348,8 @@ xylem retry <vessel-id>
    - `failed_phase`: the phase that failed
    - `gate_output`: output from the gate that caused the failure
 6. Sets the new vessel to `pending` state.
+7. By default, if the failed vessel has a saved worktree path, retry resumes from the failed phase and copies phase outputs into the new retry vessel's phase directory.
+8. If `--from-scratch` is set, xylem does not reuse the saved worktree path or copied phase outputs.
 
 This failure context is available to prompt templates so the retried session can avoid repeating the same mistakes.
 
@@ -347,6 +359,9 @@ This failure context is available to prompt templates so the retried session can
 # Retry a failed vessel
 xylem retry issue-42
 # Created retry vessel issue-42-retry-1 (retrying issue-42)
+
+# Retry from the beginning instead of resuming
+xylem retry issue-42 --from-scratch
 
 # Retry again after another failure
 xylem retry issue-42
@@ -434,7 +449,7 @@ Creates a pause marker file at `<state_dir>/paused`. While this marker exists:
 
 If already paused, prints "Already paused." and takes no action.
 
-**Important**: Pausing does not affect currently running Claude sessions. Sessions that are already in progress will run to completion.
+**Important**: Pausing does not affect currently running sessions. Sessions that are already in progress will run to completion.
 
 ### Examples
 
@@ -498,7 +513,7 @@ xylem cancel <vessel-id>
 
 Transitions the vessel to the `cancelled` state in the queue.
 
-**Important**: Cancel does not kill running Claude sessions. If the vessel is currently being executed, the session will run to completion, but the vessel's state in the queue will be marked as `cancelled`.
+**Important**: Cancel does not kill running sessions. If the vessel is currently being executed, the session will run to completion, but the vessel's state in the queue will be marked as `cancelled`.
 
 ### Examples
 
@@ -515,7 +530,7 @@ xylem status --state cancelled
 
 ## xylem cleanup
 
-Remove stale git worktrees and old phase outputs created by xylem.
+Remove stale git worktrees and old phase outputs created by xylem, then compact stale queue records.
 
 ### Usage
 
@@ -531,11 +546,13 @@ xylem cleanup [flags]
 
 ### Behavior
 
-Performs two cleanup operations:
+Performs three cleanup operations:
 
 **1. Worktree cleanup**: Lists all git worktrees created by xylem and removes them. Uses the worktree manager's `ListXylem` method to identify xylem-owned worktrees.
 
 **2. Phase output cleanup**: Scans the `<state_dir>/phases/` directory for phase output directories belonging to terminal vessels (completed, failed, cancelled, or timed out) that are older than the `cleanup_after` threshold (default: 7 days / 168 hours). Removes those directories.
+
+**3. Queue compaction**: Compacts the queue file by removing stale queue records. In `--dry-run` mode, it reports how many stale records would be removed.
 
 In `--dry-run` mode, prints what would be removed without deleting anything.
 
@@ -608,7 +625,7 @@ xylem status --state completed
 
 ### Direct prompt (no workflow)
 
-Skip the multi-phase workflow system and pass a prompt directly to Claude:
+Skip the multi-phase workflow system and pass a prompt directly to the resolved provider:
 
 ```bash
 xylem enqueue --prompt "Add rate limiting to the /api/orders endpoint"
@@ -698,7 +715,7 @@ Every vessel in the queue has one of the following states:
 | State | Description |
 |-------|-------------|
 | `pending` | Queued and waiting to be picked up by the next drain. |
-| `running` | Currently being executed in a Claude session. |
+| `running` | Currently being executed in a session. |
 | `completed` | All workflow phases finished successfully. |
 | `failed` | A phase or gate failed. Eligible for `xylem retry`. |
 | `waiting` | Blocked on a label gate (e.g., waiting for human approval). Checked on each drain. |
@@ -713,4 +730,4 @@ State transitions follow a defined state machine. For example, `pending` can tra
 |----------|-------------|
 | `XYLEM_CONFIG` | Alternative to `--config`. Sets the config file path. The flag takes precedence if both are set. |
 
-Additional environment variables can be passed to Claude sessions via `claude.env` in `.xylem.yml`. These support shell-style variable expansion (e.g., `"${ANTHROPIC_API_KEY}"`).
+`.xylem.yml` also includes `claude.env` and `copilot.env` maps. Today, the documented runtime validation uses `claude.env` to require `ANTHROPIC_API_KEY` when `claude.flags` includes `--bare`.
