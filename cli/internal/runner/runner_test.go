@@ -2217,3 +2217,85 @@ func TestDrainCommandPhaseWithNoOp(t *testing.T) {
 		t.Errorf("expected CurrentPhase 1, got %d", vessels[0].CurrentPhase)
 	}
 }
+
+func TestDrainPREventsVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	// Enqueue a PR-events vessel (review submitted)
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:       "pr-10-review-abc123",
+		Source:   "github-pr-events",
+		Ref:      "https://github.com/owner/repo/pull/10#review-1001",
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"pr_num":         "10",
+			"event_type":     "review_submitted",
+			"pr_head_branch": "feature-branch",
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "respond", promptContent: "Respond to review on {{.Issue.Title}}", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	// Mock the gh pr view call that fetchIssueData triggers
+	prViewJSON := `{"title":"Test PR","body":"PR body","url":"https://github.com/owner/repo/pull/10","labels":[{"name":"needs-review"}]}`
+	cmdRunner := &mockCmdRunner{
+		outputData: []byte(prViewJSON),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-pr-events": &source.GitHubPREvents{Repo: "owner/repo"},
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got %d", result.Completed)
+	}
+
+	// Verify that the prompt included the PR title from fetchIssueData
+	if len(cmdRunner.phaseCalls) != 1 {
+		t.Fatalf("expected 1 phase call, got %d", len(cmdRunner.phaseCalls))
+	}
+	if !strings.Contains(cmdRunner.phaseCalls[0].prompt, "Test PR") {
+		t.Errorf("expected prompt to contain PR title 'Test PR', got: %s", cmdRunner.phaseCalls[0].prompt)
+	}
+}
+
+func TestResolveRepoNewSources(t *testing.T) {
+	r := &Runner{
+		Sources: map[string]source.Source{
+			"github-pr-events": &source.GitHubPREvents{Repo: "owner/events-repo"},
+			"github-merge":     &source.GitHubMerge{Repo: "owner/merge-repo"},
+		},
+	}
+
+	tests := []struct {
+		source string
+		want   string
+	}{
+		{"github-pr-events", "owner/events-repo"},
+		{"github-merge", "owner/merge-repo"},
+		{"unknown", ""},
+	}
+
+	for _, tt := range tests {
+		got := r.resolveRepo(queue.Vessel{Source: tt.source})
+		if got != tt.want {
+			t.Errorf("resolveRepo(%q) = %q, want %q", tt.source, got, tt.want)
+		}
+	}
+}

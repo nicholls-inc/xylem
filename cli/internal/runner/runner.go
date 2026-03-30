@@ -591,7 +591,7 @@ func (r *Runner) fetchIssueData(ctx context.Context, vessel *queue.Vessel) phase
 	switch vessel.Source {
 	case "github-issue":
 		return r.fetchGitHubData(ctx, vessel, "issue", "issue")
-	case "github-pr":
+	case "github-pr", "github-pr-events", "github-merge":
 		return r.fetchGitHubData(ctx, vessel, "pr", "pr")
 	default:
 		return phase.IssueData{}
@@ -714,6 +714,10 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 	case *source.GitHub:
 		return s.Repo
 	case *source.GitHubPR:
+		return s.Repo
+	case *source.GitHubPREvents:
+		return s.Repo
+	case *source.GitHubMerge:
 		return s.Repo
 	default:
 		return ""
