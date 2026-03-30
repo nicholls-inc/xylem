@@ -143,6 +143,35 @@ phases:
 			},
 		},
 		{
+			name:         "valid workflow with model",
+			workflowName: "fix-bug",
+			yaml: `name: fix-bug
+description: Fix a bug
+model: claude-sonnet-4-20250514
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+  - name: implement
+    prompt_file: prompts/implement.md
+    max_turns: 20
+    model: claude-opus-4-20250514
+`,
+			prompts: []string{"prompts/analyze.md", "prompts/implement.md"},
+			checkFunc: func(t *testing.T, s *Workflow) {
+				t.Helper()
+				if s.Model == nil || *s.Model != "claude-sonnet-4-20250514" {
+					t.Fatalf("Workflow.Model = %v, want claude-sonnet-4-20250514", s.Model)
+				}
+				if s.Phases[0].Model != nil {
+					t.Fatalf("Phases[0].Model = %v, want nil", s.Phases[0].Model)
+				}
+				if s.Phases[1].Model == nil || *s.Phases[1].Model != "claude-opus-4-20250514" {
+					t.Fatalf("Phases[1].Model = %v, want claude-opus-4-20250514", s.Phases[1].Model)
+				}
+			},
+		},
+		{
 			name:      "missing phases key",
 			workflowName: "test-workflow",
 			yaml:      "name: test-workflow\n",

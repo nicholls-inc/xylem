@@ -20,6 +20,7 @@ var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 type Workflow struct {
 	Name        string  `yaml:"name"`
 	Description string  `yaml:"description,omitempty"`
+	Model       *string `yaml:"model,omitempty"`
 	Phases      []Phase `yaml:"phases"`
 }
 
@@ -28,6 +29,7 @@ type Phase struct {
 	Name         string  `yaml:"name"`
 	PromptFile   string  `yaml:"prompt_file"`
 	MaxTurns     int     `yaml:"max_turns"`
+	Model        *string `yaml:"model,omitempty"`
 	Gate         *Gate   `yaml:"gate,omitempty"`
 	AllowedTools *string `yaml:"allowed_tools,omitempty"`
 }
