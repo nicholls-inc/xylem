@@ -214,6 +214,11 @@ func (m *Manager) branchForWorktree(ctx context.Context, worktreePath string) st
 	if !filepath.IsAbs(worktreePath) {
 		absTarget = filepath.Join(m.RepoRoot, worktreePath)
 	}
+	// Resolve to absolute path (handles relative RepoRoot like ".")
+	absTarget, err = filepath.Abs(absTarget)
+	if err != nil {
+		return ""
+	}
 	absTarget = filepath.Clean(absTarget)
 
 	for _, wt := range parsePorcelain(string(out)) {
