@@ -32,6 +32,7 @@ type CommandRunner interface {
 // WorktreeManager abstracts worktree lifecycle for testing.
 type WorktreeManager interface {
 	Create(ctx context.Context, branchName string) (string, error)
+	Remove(ctx context.Context, worktreePath string) error
 }
 
 // DrainResult summarises a drain run.
@@ -143,6 +144,8 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 				}
+				// Clean up worktree (best-effort)
+				r.removeWorktree(vessel.WorktreePath, vessel.ID)
 				// Post timeout comment
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
@@ -401,6 +404,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
 	}
 
+	// Clean up worktree (best-effort)
+	r.removeWorktree(worktreePath, vessel.ID)
+
 	// Report completion
 	issueNum := r.parseIssueNum(vessel)
 	if issueNum > 0 && r.Reporter != nil {
@@ -435,6 +441,10 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
 	}
+
+	// Clean up worktree (best-effort)
+	r.removeWorktree(worktreePath, vessel.ID)
+
 	return "completed"
 }
 
@@ -469,6 +479,15 @@ func buildCommand(cfg *config.Config, vessel *queue.Vessel) (string, []string, e
 		args = append(args, strings.Fields(cfg.Claude.Flags)...)
 	}
 	return cfg.Claude.Command, args, nil
+}
+
+func (r *Runner) removeWorktree(worktreePath, vesselID string) {
+	if worktreePath == "" {
+		return
+	}
+	if removeErr := r.Worktree.Remove(context.Background(), worktreePath); removeErr != nil {
+		log.Printf("warn: failed to remove worktree for %s: %v", vesselID, removeErr)
+	}
 }
 
 func (r *Runner) failVessel(id string, errMsg string) {

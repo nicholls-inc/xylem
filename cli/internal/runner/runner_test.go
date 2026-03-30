@@ -139,8 +139,11 @@ func (c *countingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reade
 }
 
 type mockWorktree struct {
-	createErr error
-	path      string
+	createErr    error
+	path         string
+	removeErr    error
+	removeCalled bool
+	removePath   string
 }
 
 func (m *mockWorktree) Create(_ context.Context, branchName string) (string, error) {
@@ -153,6 +156,12 @@ func (m *mockWorktree) Create(_ context.Context, branchName string) (string, err
 	return ".claude/worktrees/" + branchName, nil
 }
 
+func (m *mockWorktree) Remove(_ context.Context, worktreePath string) error {
+	m.removeCalled = true
+	m.removePath = worktreePath
+	return m.removeErr
+}
+
 type trackingWorktree struct {
 	lastBranch string
 }
@@ -160,6 +169,10 @@ type trackingWorktree struct {
 func (tw *trackingWorktree) Create(_ context.Context, branchName string) (string, error) {
 	tw.lastBranch = branchName
 	return ".claude/worktrees/" + branchName, nil
+}
+
+func (tw *trackingWorktree) Remove(_ context.Context, _ string) error {
+	return nil
 }
 
 // --- Helpers ---
