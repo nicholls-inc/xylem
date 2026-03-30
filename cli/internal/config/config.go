@@ -153,7 +153,7 @@ func (c *Config) Validate() error {
 	// Validate sources
 	for name, src := range c.Sources {
 		switch src.Type {
-		case "github":
+		case "github", "github-pr":
 			if err := validateGitHubSource(name, src); err != nil {
 				return err
 			}

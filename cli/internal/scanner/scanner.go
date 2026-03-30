@@ -68,15 +68,18 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 func (s *Scanner) buildSources() []source.Source {
 	var sources []source.Source
 	for _, srcCfg := range s.Config.Sources {
-		if srcCfg.Type == "github" {
-			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
-			for name, t := range srcCfg.Tasks {
-				tasks[name] = source.GitHubTask{
-					Labels: t.Labels,
-					Workflow:  t.Workflow,
-				}
-			}
+		tasks := convertTasks(srcCfg.Tasks)
+		switch srcCfg.Type {
+		case "github":
 			sources = append(sources, &source.GitHub{
+				Repo:      srcCfg.Repo,
+				Tasks:     tasks,
+				Exclude:   srcCfg.Exclude,
+				Queue:     s.Queue,
+				CmdRunner: s.CmdRunner,
+			})
+		case "github-pr":
+			sources = append(sources, &source.GitHubPR{
 				Repo:      srcCfg.Repo,
 				Tasks:     tasks,
 				Exclude:   srcCfg.Exclude,
@@ -86,4 +89,15 @@ func (s *Scanner) buildSources() []source.Source {
 		}
 	}
 	return sources
+}
+
+func convertTasks(cfgTasks map[string]config.Task) map[string]source.GitHubTask {
+	tasks := make(map[string]source.GitHubTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		tasks[name] = source.GitHubTask{
+			Labels:   t.Labels,
+			Workflow: t.Workflow,
+		}
+	}
+	return tasks
 }
