@@ -47,6 +47,8 @@ phases:
   - name: analyze                                  # Unique name within this workflow
     prompt_file: .xylem/prompts/fix-bug/analyze.md # Path to the Go template file
     max_turns: 5                                   # Max Claude turns for this phase
+    noop:                                          # Optional early-success completion rule
+      match: XYLEM_NOOP                            # Complete the workflow if phase output contains this marker
 
   - name: plan
     prompt_file: .xylem/prompts/fix-bug/plan.md
@@ -84,8 +86,15 @@ phases:
 | `name` | Yes | Unique name within the workflow. Used to key previous outputs in templates. |
 | `prompt_file` | Yes | Path to the prompt template file, relative to the repo root. |
 | `max_turns` | Yes | Maximum number of Claude turns for this phase. Must be greater than 0. |
+| `noop` | No | Early-success completion rule checked against the phase output before any gate runs. |
 | `allowed_tools` | No | Comma-separated list of tools Claude can use in this phase. |
 | `gate` | No | Quality gate that must pass after this phase completes. |
+
+**No-op fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `match` | Yes | Substring marker that, when present in successful phase output, completes the workflow early. |
 
 **Gate fields (when `type: command`):**
 
@@ -116,11 +125,14 @@ A phase is a single step within a workflow, executed as its own Claude Code sess
 3. The rendered prompt is piped to `claude -p` via stdin, launching a new Claude session in the worktree directory.
 4. Claude runs for up to `max_turns` turns.
 5. The session output is captured and persisted to `.xylem/phases/<vessel-id>/`.
-6. If the phase has a gate, the gate is evaluated. If it fails and retries remain, the phase re-executes with the gate failure output injected into the template via `{{.GateResult}}`.
+6. If the phase has a `noop` rule and the successful phase output contains `noop.match`, the vessel is marked `completed`, remaining phases are skipped, and no gate is evaluated for that phase.
+7. Otherwise, if the phase has a gate, the gate is evaluated. If it fails and retries remain, the phase re-executes with the gate failure output injected into the template via `{{.GateResult}}`.
 
 ### Output persistence
 
 Each phase's output is saved to disk under `.xylem/phases/<vessel-id>/`. These outputs are then available to subsequent phases via `{{.PreviousOutputs.<phase-name>}}` in their prompt templates.
+
+No-op-triggering outputs are persisted the same way, so you can inspect exactly why the workflow stopped early.
 
 ### Turn limits
 

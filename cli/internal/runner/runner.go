@@ -323,11 +323,22 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 
 			log.Printf("%sphase %q completed (%s)", vesselLabel(vessel), p.Name, phaseDuration.Truncate(time.Second))
 
-			// Report phase completion (non-fatal)
-			phaseResults = append(phaseResults, reporter.PhaseResult{Name: p.Name, Duration: phaseDuration})
 			issueNum := r.parseIssueNum(vessel)
+
+			phaseStatus := "completed"
+			if phaseMatchedNoOp(&p, string(output)) {
+				phaseStatus = "no-op"
+			}
+
+			// Report phase completion (non-fatal)
+			phaseResults = append(phaseResults, reporter.PhaseResult{Name: p.Name, Duration: phaseDuration, Status: phaseStatus})
 			if issueNum > 0 && r.Reporter != nil {
 				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output))
+			}
+
+			if phaseStatus == "no-op" {
+				log.Printf("%sphase %q triggered no-op; completing workflow early", vesselLabel(vessel), p.Name)
+				return r.completeVessel(ctx, vessel, worktreePath, phaseResults)
 			}
 
 			// Handle gate
@@ -419,20 +430,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 
 	// All phases complete
 	log.Printf("%scompleted all phases", vesselLabel(vessel))
-	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
-		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
-	}
-
-	// Clean up worktree (best-effort)
-	r.removeWorktree(worktreePath, vessel.ID)
-
-	// Report completion
-	issueNum := r.parseIssueNum(vessel)
-	if issueNum > 0 && r.Reporter != nil {
-		r.Reporter.VesselCompleted(ctx, issueNum, phaseResults)
-	}
-
-	return "completed"
+	return r.completeVessel(ctx, vessel, worktreePath, phaseResults)
 }
 
 // runPromptOnly handles vessels with a prompt but no workflow.
@@ -501,6 +499,27 @@ func (r *Runner) failVessel(id string, errMsg string) {
 	if updateErr := r.Queue.Update(id, queue.StateFailed, errMsg); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", id, updateErr)
 	}
+}
+
+func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktreePath string, phaseResults []reporter.PhaseResult) string {
+	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
+		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
+	}
+
+	// Clean up worktree (best-effort)
+	r.removeWorktree(worktreePath, vessel.ID)
+
+	// Report completion
+	issueNum := r.parseIssueNum(vessel)
+	if issueNum > 0 && r.Reporter != nil {
+		r.Reporter.VesselCompleted(ctx, issueNum, phaseResults)
+	}
+
+	return "completed"
+}
+
+func phaseMatchedNoOp(p *workflow.Phase, output string) bool {
+	return p != nil && p.NoOp != nil && strings.Contains(output, p.NoOp.Match)
 }
 
 func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, error) {

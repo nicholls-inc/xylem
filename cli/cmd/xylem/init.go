@@ -216,6 +216,8 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/fix-bug/analyze.md
     max_turns: 5
+    noop:
+      match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/fix-bug/plan.md
     max_turns: 3
@@ -237,6 +239,8 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/implement-feature/analyze.md
     max_turns: 5
+    noop:
+      match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/implement-feature/plan.md
     max_turns: 3
@@ -267,6 +271,8 @@ Read the codebase and identify:
 1. Which files are relevant to this issue
 2. The root cause (for bugs) or the requirements (for features)
 3. Any dependencies or constraints
+
+If you determine the issue is already resolved in the default branch or no code changes are needed, include the exact standalone line "XYLEM_NOOP" in your final output and explain why no further phases should run.
 
 Write your analysis clearly and concisely.
 `
