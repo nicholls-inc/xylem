@@ -1089,6 +1089,138 @@ func TestFindByID(t *testing.T) {
 	})
 }
 
+// --- Duplicate-ID tests (re-enqueued vessels) ---
+
+// helperCompleteVessel transitions the first pending vessel through pending -> running -> completed.
+func helperCompleteVessel(t *testing.T, q *Queue, id string) {
+	t.Helper()
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update(id, StateCompleted, ""); err != nil {
+		t.Fatalf("update to completed: %v", err)
+	}
+}
+
+// helperEnqueueCompleteThenReenqueue creates a queue with two records for the
+// same vessel ID: the first completed, the second pending.
+func helperEnqueueCompleteThenReenqueue(t *testing.T) (*Queue, Vessel) {
+	t.Helper()
+	q, _ := newTestQueue(t)
+	vessel := testVessel(42)
+	if err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	helperCompleteVessel(t, q, vessel.ID)
+	if err := q.Enqueue(testVessel(42)); err != nil {
+		t.Fatalf("re-enqueue: %v", err)
+	}
+	return q, vessel
+}
+
+func TestDuplicateID(t *testing.T) {
+	t.Run("Update", func(t *testing.T) {
+		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+
+		// Dequeue the re-enqueued vessel (now running).
+		got, err := q.Dequeue()
+		if err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		if got == nil {
+			t.Fatal("expected vessel from dequeue")
+		}
+
+		// Update should target the re-enqueued (running) vessel, not the old completed one.
+		if err := q.Update(vessel.ID, StateFailed, "err"); err != nil {
+			t.Fatalf("update: %v", err)
+		}
+
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(vessels) != 2 {
+			t.Fatalf("expected 2 vessels, got %d", len(vessels))
+		}
+		if vessels[0].State != StateCompleted {
+			t.Fatalf("expected first record (old) to be completed, got %s", vessels[0].State)
+		}
+		if vessels[1].State != StateFailed {
+			t.Fatalf("expected second record (re-enqueued) to be failed, got %s", vessels[1].State)
+		}
+	})
+
+	t.Run("UpdateVessel", func(t *testing.T) {
+		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+
+		found, err := q.FindByID(vessel.ID)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		found.WorktreePath = "/tmp/wt-updated"
+		found.CurrentPhase = 5
+
+		if err := q.UpdateVessel(*found); err != nil {
+			t.Fatalf("UpdateVessel: %v", err)
+		}
+
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(vessels) != 2 {
+			t.Fatalf("expected 2 vessels, got %d", len(vessels))
+		}
+		if vessels[0].State != StateCompleted {
+			t.Fatalf("expected first record to remain completed, got %s", vessels[0].State)
+		}
+		if vessels[0].WorktreePath != "" {
+			t.Fatalf("expected first record WorktreePath empty, got %q", vessels[0].WorktreePath)
+		}
+		if vessels[1].WorktreePath != "/tmp/wt-updated" {
+			t.Fatalf("expected second record WorktreePath '/tmp/wt-updated', got %q", vessels[1].WorktreePath)
+		}
+		if vessels[1].CurrentPhase != 5 {
+			t.Fatalf("expected second record CurrentPhase 5, got %d", vessels[1].CurrentPhase)
+		}
+	})
+
+	t.Run("FindByID", func(t *testing.T) {
+		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+
+		got, err := q.FindByID(vessel.ID)
+		if err != nil {
+			t.Fatalf("FindByID: %v", err)
+		}
+		if got.State != StatePending {
+			t.Fatalf("expected FindByID to return the re-enqueued pending vessel, got state %s", got.State)
+		}
+	})
+
+	t.Run("Cancel", func(t *testing.T) {
+		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+
+		if err := q.Cancel(vessel.ID); err != nil {
+			t.Fatalf("cancel: %v", err)
+		}
+
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if len(vessels) != 2 {
+			t.Fatalf("expected 2 vessels, got %d", len(vessels))
+		}
+		if vessels[0].State != StateCompleted {
+			t.Fatalf("expected first record (old) to remain completed, got %s", vessels[0].State)
+		}
+		if vessels[1].State != StateCancelled {
+			t.Fatalf("expected second record (re-enqueued) to be cancelled, got %s", vessels[1].State)
+		}
+	})
+}
+
 func TestCancelWaitingVessel(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(900)

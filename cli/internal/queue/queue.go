@@ -137,7 +137,7 @@ func (q *Queue) Update(id string, state VesselState, errMsg string) error {
 			return err
 		}
 
-		for i := range vessels {
+		for i := len(vessels) - 1; i >= 0; i-- {
 			if vessels[i].ID != id {
 				continue
 			}
@@ -200,7 +200,7 @@ func (q *Queue) FindByID(id string) (*Vessel, error) {
 		if readErr != nil {
 			return readErr
 		}
-		for i := range vessels {
+		for i := len(vessels) - 1; i >= 0; i-- {
 			if vessels[i].ID == id {
 				v := vessels[i]
 				found = &v
@@ -236,7 +236,7 @@ func (q *Queue) UpdateVessel(vessel Vessel) error {
 			return err
 		}
 
-		for i := range vessels {
+		for i := len(vessels) - 1; i >= 0; i-- {
 			if vessels[i].ID != vessel.ID {
 				continue
 			}
@@ -255,7 +255,7 @@ func (q *Queue) Cancel(id string) error {
 			return err
 		}
 
-		for i := range vessels {
+		for i := len(vessels) - 1; i >= 0; i-- {
 			if vessels[i].ID != id {
 				continue
 			}
