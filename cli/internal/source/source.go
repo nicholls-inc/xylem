@@ -3,6 +3,7 @@ package source
 import (
 	"context"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -14,6 +15,29 @@ type StatusLabels struct {
 	Completed string
 	Failed    string
 	TimedOut  string
+}
+
+// GitHubTaskFromConfig converts a config.Task to a GitHubTask.
+// When t.StatusLabels is nil (block omitted from config), the returned task's
+// StatusLabels is also nil, preserving the legacy "in-progress" fallback in
+// OnStart. When t.StatusLabels is non-nil (block present, even if all values
+// are empty), all status_label_* meta keys are populated so tasks can
+// explicitly opt out of any label operation.
+func GitHubTaskFromConfig(t config.Task) GitHubTask {
+	task := GitHubTask{
+		Labels:   t.Labels,
+		Workflow: t.Workflow,
+	}
+	if t.StatusLabels != nil {
+		task.StatusLabels = &StatusLabels{
+			Queued:    t.StatusLabels.Queued,
+			Running:   t.StatusLabels.Running,
+			Completed: t.StatusLabels.Completed,
+			Failed:    t.StatusLabels.Failed,
+			TimedOut:  t.StatusLabels.TimedOut,
+		}
+	}
+	return task
 }
 
 // Source discovers tasks and produces Vessels.

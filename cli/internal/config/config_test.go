@@ -626,6 +626,9 @@ claude:
 	}
 
 	sl := task.StatusLabels
+	if sl == nil {
+		t.Fatal("StatusLabels should not be nil when status_labels block is present")
+	}
 	if sl.Queued != "queued" {
 		t.Errorf("StatusLabels.Queued = %q, want queued", sl.Queued)
 	}
@@ -665,9 +668,8 @@ claude:
 	}
 
 	task := cfg.Sources["github"].Tasks["fix-bugs"]
-	sl := task.StatusLabels
-	if sl.Queued != "" || sl.Running != "" || sl.Completed != "" || sl.Failed != "" || sl.TimedOut != "" {
-		t.Errorf("expected all StatusLabels empty when not configured, got %+v", sl)
+	if task.StatusLabels != nil {
+		t.Errorf("expected StatusLabels to be nil when status_labels block is omitted, got %+v", task.StatusLabels)
 	}
 }
 

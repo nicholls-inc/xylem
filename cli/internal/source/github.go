@@ -15,7 +15,7 @@ import (
 type GitHubTask struct {
 	Labels       []string
 	Workflow     string
-	StatusLabels StatusLabels
+	StatusLabels *StatusLabels
 }
 
 // GitHub scans GitHub issues and produces vessels.
@@ -83,7 +83,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					"issue_num": strconv.Itoa(issue.Number),
 				}
 				sl := task.StatusLabels
-				if sl.Queued != "" || sl.Running != "" || sl.Completed != "" || sl.Failed != "" || sl.TimedOut != "" {
+				if sl != nil {
 					meta["status_label_queued"] = sl.Queued
 					meta["status_label_running"] = sl.Running
 					meta["status_label_completed"] = sl.Completed

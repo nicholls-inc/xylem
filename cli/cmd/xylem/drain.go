@@ -62,10 +62,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 		if srcCfg.Type == "github" {
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
-				tasks[name] = source.GitHubTask{
-					Labels: t.Labels,
-					Workflow:  t.Workflow,
-				}
+				tasks[name] = source.GitHubTaskFromConfig(t)
 			}
 			gh := &source.GitHub{
 				Repo:      srcCfg.Repo,

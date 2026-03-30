@@ -500,7 +500,7 @@ func TestScanAppliesQueuedLabel(t *testing.T) {
 				"fix-bugs": {
 					Labels:   []string{"bug"},
 					Workflow: "fix-bug",
-					StatusLabels: config.StatusLabels{
+					StatusLabels: &config.StatusLabels{
 						Queued: "queued",
 					},
 				},

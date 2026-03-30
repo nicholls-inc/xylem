@@ -44,9 +44,9 @@ type StatusLabels struct {
 }
 
 type Task struct {
-	Labels       []string     `yaml:"labels,omitempty"`
-	Workflow     string       `yaml:"workflow"`
-	StatusLabels StatusLabels `yaml:"status_labels,omitempty"`
+	Labels       []string      `yaml:"labels,omitempty"`
+	Workflow     string        `yaml:"workflow"`
+	StatusLabels *StatusLabels `yaml:"status_labels,omitempty"`
 }
 
 type ClaudeConfig struct {
