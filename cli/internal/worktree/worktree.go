@@ -115,6 +115,16 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 	if hasOrigin {
 		startPoint = "origin/" + defaultBranch
 	}
+
+	// Remove stale worktree at this path from a previous run (e.g., re-enqueued vessel).
+	// The -B flag handles branch name collisions, but git worktree add still fails
+	// if the worktree PATH is already registered.
+	if m.branchForWorktree(ctx, worktreePath) != "" {
+		if _, removeErr := m.Runner.Run(ctx, "git", "worktree", "remove", worktreePath, "--force"); removeErr != nil {
+			return "", fmt.Errorf("remove stale worktree %s: %w", worktreePath, removeErr)
+		}
+	}
+
 	if _, err := m.Runner.Run(ctx, "git", "worktree", "add", worktreePath, "-B", branchName, startPoint); err != nil {
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}

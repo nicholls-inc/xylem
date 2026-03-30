@@ -689,3 +689,100 @@ func TestCreateWithOriginRemote(t *testing.T) {
 		t.Errorf("expected worktree add with 'origin/main' start point, got calls: %v", r.calls)
 	}
 }
+
+// --- Stale worktree removal tests ---
+
+// TestCreateRemovesStaleWorktree verifies that Create() removes a previously
+// registered worktree at the same path before calling git worktree add.
+// This handles re-enqueued vessels that generate the same deterministic branch name.
+func TestCreateRemovesStaleWorktree(t *testing.T) {
+	r := newMock()
+	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
+	// Porcelain output shows existing worktree at the target path
+	porcelain := "worktree /repo/.claude/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	m := New("/repo", r)
+	_, err := m.Create(context.Background(), "feat/issue-6-6")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Must call remove BEFORE add
+	removeIdx := -1
+	addIdx := -1
+	for i, call := range r.calls {
+		if len(call) >= 3 && call[0] == "git" && call[1] == "worktree" && call[2] == "remove" {
+			removeIdx = i
+		}
+		if len(call) >= 3 && call[0] == "git" && call[1] == "worktree" && call[2] == "add" {
+			addIdx = i
+		}
+	}
+	if removeIdx == -1 {
+		t.Fatalf("expected 'git worktree remove' to be called, got calls: %v", r.calls)
+	}
+	if addIdx == -1 {
+		t.Fatalf("expected 'git worktree add' to be called, got calls: %v", r.calls)
+	}
+	if removeIdx >= addIdx {
+		t.Errorf("git worktree remove (index %d) must be called BEFORE git worktree add (index %d)", removeIdx, addIdx)
+	}
+	if !r.called("git", "worktree", "remove", ".claude/worktrees/feat/issue-6-6", "--force") {
+		t.Errorf("expected 'git worktree remove ... --force', got calls: %v", r.calls)
+	}
+}
+
+// TestCreateNoStaleWorktree verifies that Create() does NOT call
+// git worktree remove when no existing worktree occupies the target path.
+func TestCreateNoStaleWorktree(t *testing.T) {
+	r := newMock()
+	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
+	// Porcelain output with a different worktree path — no collision
+	porcelain := "worktree /repo\nHEAD abc123\nbranch refs/heads/main\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	m := New("/repo", r)
+	_, err := m.Create(context.Background(), "feat/issue-7-7")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Should NOT call worktree remove
+	for _, call := range r.calls {
+		if len(call) >= 3 && call[0] == "git" && call[1] == "worktree" && call[2] == "remove" {
+			t.Errorf("git worktree remove should NOT be called when no stale worktree exists, got: %v", call)
+		}
+	}
+	// Should still call worktree add
+	if !r.called("git", "worktree", "add", ".claude/worktrees/feat/issue-7-7", "-B", "feat/issue-7-7", "origin/main") {
+		t.Errorf("expected 'git worktree add', got calls: %v", r.calls)
+	}
+}
+
+// TestCreateStaleRemoveFails verifies that Create() returns an error and does
+// NOT proceed to git worktree add when removing a stale worktree fails.
+func TestCreateStaleRemoveFails(t *testing.T) {
+	r := newMock()
+	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
+	// Porcelain output shows existing worktree at the target path
+	porcelain := "worktree /repo/.claude/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+	// Remove fails
+	r.setErr("git worktree remove .claude/worktrees/feat/issue-6-6 --force", errors.New("worktree is locked"))
+
+	m := New("/repo", r)
+	_, err := m.Create(context.Background(), "feat/issue-6-6")
+	if err == nil {
+		t.Fatal("expected error when stale worktree remove fails")
+	}
+	if !strings.Contains(err.Error(), "remove stale worktree") {
+		t.Errorf("expected 'remove stale worktree' error, got: %v", err)
+	}
+	// Should NOT call worktree add after remove failure
+	for _, call := range r.calls {
+		if len(call) >= 3 && call[0] == "git" && call[1] == "worktree" && call[2] == "add" {
+			t.Error("git worktree add should NOT be called when stale worktree remove fails")
+		}
+	}
+}
