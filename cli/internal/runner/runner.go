@@ -144,6 +144,10 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 				}
+				src := r.resolveSource(vessel.Source)
+				if err := src.OnTimedOut(ctx, vessel); err != nil {
+					log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
+				}
 				// Clean up worktree (best-effort)
 				r.removeWorktree(vessel.WorktreePath, vessel.ID)
 				// Post timeout comment
@@ -194,6 +198,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 		worktreePath, err = r.Worktree.Create(ctx, branchName)
 		if err != nil {
 			r.failVessel(vessel.ID, err.Error())
+			if err := src.OnFail(ctx, vessel); err != nil {
+				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
 			return "failed"
 		}
 		vessel.WorktreePath = worktreePath
@@ -204,18 +211,24 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 
 	// Prompt-only vessel (no workflow): single claude -p invocation
 	if vessel.Workflow == "" && vessel.Prompt != "" {
-		return r.runPromptOnly(ctx, vessel, worktreePath)
+		return r.runPromptOnly(ctx, vessel, worktreePath, src)
 	}
 
 	// Load workflow definition
 	if vessel.Workflow == "" {
 		r.failVessel(vessel.ID, "vessel has neither workflow nor prompt")
+		if err := src.OnFail(ctx, vessel); err != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
 		return "failed"
 	}
 
 	sk, err := r.loadWorkflow(vessel.Workflow)
 	if err != nil {
 		r.failVessel(vessel.ID, fmt.Sprintf("load workflow: %v", err))
+		if err := src.OnFail(ctx, vessel); err != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
 		return "failed"
 	}
 
@@ -263,6 +276,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 			promptContent, err := os.ReadFile(p.PromptFile)
 			if err != nil {
 				r.failVessel(vessel.ID, fmt.Sprintf("read prompt file %s: %v", p.PromptFile, err))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
 				return "failed"
 			}
 
@@ -270,6 +286,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 			rendered, err := phase.RenderPrompt(string(promptContent), td)
 			if err != nil {
 				r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
 				return "failed"
 			}
 
@@ -301,6 +320,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 				vessel.FailedPhase = p.Name
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
 					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), "")
@@ -351,6 +373,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
 				if gateErr != nil {
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
+					if err := src.OnFail(ctx, vessel); err != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+					}
 					return "failed"
 				}
 				if passed {
@@ -371,6 +396,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 					vessel.FailedPhase = p.Name
 					vessel.GateOutput = gateOut
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+					if err := src.OnFail(ctx, vessel); err != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+					}
 					if issueNum > 0 && r.Reporter != nil {
 						r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut)
 					}
@@ -430,11 +458,14 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 
 	// All phases complete
 	log.Printf("%scompleted all phases", vesselLabel(vessel))
+	if err := src.OnComplete(ctx, vessel); err != nil {
+		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
+	}
 	return r.completeVessel(ctx, vessel, worktreePath, phaseResults)
 }
 
 // runPromptOnly handles vessels with a prompt but no workflow.
-func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktreePath string) string {
+func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktreePath string, src source.Source) string {
 	prompt := vessel.Prompt
 	if vessel.Ref != "" {
 		prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
@@ -446,11 +477,17 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 
 	if runErr != nil {
 		r.failVessel(vessel.ID, runErr.Error())
+		if err := src.OnFail(ctx, vessel); err != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
 		return "failed"
 	}
 
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
+	}
+	if err := src.OnComplete(ctx, vessel); err != nil {
+		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
 
 	// Clean up worktree (best-effort)

@@ -488,6 +488,89 @@ func TestScanExistingBranchFeatPrefix(t *testing.T) {
 	}
 }
 
+func TestScanAppliesQueuedLabel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"github": {
+			Type:    "github",
+			Repo:    "owner/repo",
+			Exclude: []string{"wontfix"},
+			Tasks: map[string]config.Task{
+				"fix-bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+					StatusLabels: &config.StatusLabels{
+						Queued: "queued",
+					},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 5, Title: "fix something", URL: "https://github.com/owner/repo/issues/5", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("expected 1 added, got %d", result.Added)
+	}
+
+	// Verify OnEnqueue triggered gh issue edit --add-label queued
+	foundLabel := false
+	for _, call := range r.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "issue edit") && strings.Contains(joined, "queued") && strings.Contains(joined, "--add-label") {
+			foundLabel = true
+			break
+		}
+	}
+	if !foundLabel {
+		t.Errorf("expected gh issue edit --add-label queued call, calls were: %v", r.calls)
+	}
+}
+
+func TestScanNoQueuedLabelWhenNotConfigured(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 6, Title: "fix other", URL: "https://github.com/owner/repo/issues/6", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("expected 1 added, got %d", result.Added)
+	}
+
+	// No gh issue edit calls expected when status_labels not configured
+	for _, call := range r.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "issue edit") {
+			t.Errorf("unexpected gh issue edit call when status_labels not configured: %v", joined)
+		}
+	}
+}
+
 func TestScanEmptyIssuesList(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeConfig(dir)

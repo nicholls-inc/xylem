@@ -332,6 +332,204 @@ func TestGitHubPRName(t *testing.T) {
 	}
 }
 
+func TestGitHubPROnEnqueue(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10", "status_label_queued": "queued"},
+	}
+	if err := src.OnEnqueue(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, call := range r.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "pr edit") && strings.Contains(joined, "--add-label") && strings.Contains(joined, "queued") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected gh pr edit --add-label queued, calls: %v", r.calls)
+	}
+}
+
+func TestGitHubPROnEnqueueNoLabelConfigured(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{ID: "pr-10", Meta: map[string]string{"pr_num": "10"}}
+	if err := src.OnEnqueue(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("expected no calls when queued label not configured, got %v", r.calls)
+	}
+}
+
+func TestGitHubPROnStartConfiguredLabel(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10", "status_label_running": "wip", "status_label_queued": "queued"},
+	}
+	if err := src.OnStart(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label wip") {
+		t.Errorf("expected --add-label wip in call, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label queued") {
+		t.Errorf("expected --remove-label queued in call, got %q", joined)
+	}
+}
+
+func TestGitHubPROnComplete(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10", "status_label_completed": "done", "status_label_running": "wip"},
+	}
+	if err := src.OnComplete(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label done") {
+		t.Errorf("expected --add-label done in call, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label wip") {
+		t.Errorf("expected --remove-label wip in call, got %q", joined)
+	}
+}
+
+func TestGitHubPROnFail(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10", "status_label_failed": "failed", "status_label_running": "wip"},
+	}
+	if err := src.OnFail(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label failed") {
+		t.Errorf("expected --add-label failed in call, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label wip") {
+		t.Errorf("expected --remove-label wip in call, got %q", joined)
+	}
+}
+
+func TestGitHubPROnTimedOut(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10", "status_label_timed_out": "timed-out", "status_label_running": "wip"},
+	}
+	if err := src.OnTimedOut(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label timed-out") {
+		t.Errorf("expected --add-label timed-out, got %q", joined)
+	}
+}
+
+func TestGitHubPRLifecycleNilRunner(t *testing.T) {
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: nil}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10", "status_label_queued": "queued", "status_label_running": "wip", "status_label_failed": "failed"},
+	}
+	ctx := context.Background()
+	if err := src.OnEnqueue(ctx, vessel); err != nil {
+		t.Errorf("OnEnqueue with nil runner: %v", err)
+	}
+	if err := src.OnComplete(ctx, vessel); err != nil {
+		t.Errorf("OnComplete with nil runner: %v", err)
+	}
+	if err := src.OnFail(ctx, vessel); err != nil {
+		t.Errorf("OnFail with nil runner: %v", err)
+	}
+	if err := src.OnTimedOut(ctx, vessel); err != nil {
+		t.Errorf("OnTimedOut with nil runner: %v", err)
+	}
+}
+
+func TestGitHubIssueOnStartBackwardCompat(t *testing.T) {
+	// When status_label_running is absent (old vessel), OnStart should add "in-progress"
+	r := newMock()
+	src := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "issue-1",
+		Meta: map[string]string{"issue_num": "1"},
+	}
+	if err := src.OnStart(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d", len(r.calls))
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "in-progress") {
+		t.Errorf("expected in-progress fallback label, got %q", joined)
+	}
+}
+
+func TestGitHubIssueOnStartConfiguredLabel(t *testing.T) {
+	r := newMock()
+	src := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "issue-1",
+		Meta: map[string]string{"issue_num": "1", "status_label_running": "active", "status_label_queued": "queued"},
+	}
+	if err := src.OnStart(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label active") {
+		t.Errorf("expected --add-label active, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label queued") {
+		t.Errorf("expected --remove-label queued, got %q", joined)
+	}
+}
+
+func TestGitHubIssueOnCompleteNoLabels(t *testing.T) {
+	// When no status labels are configured, OnComplete should make no gh calls
+	r := newMock()
+	src := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "issue-1",
+		Meta: map[string]string{"issue_num": "1"},
+	}
+	if err := src.OnComplete(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 0 {
+		t.Errorf("expected no calls when no labels configured, got %v", r.calls)
+	}
+}
+
 var errTest = &testError{"test error"}
 
 type testError struct{ msg string }

@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"log"
 	"os"
 	"path/filepath"
 
@@ -56,6 +57,9 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 			}
 			if enqueued {
 				result.Added++
+				if err := src.OnEnqueue(ctx, vessel); err != nil {
+					log.Printf("warn: OnEnqueue hook for vessel %s failed: %v", vessel.ID, err)
+				}
 			} else {
 				result.Skipped++
 			}
@@ -94,10 +98,7 @@ func (s *Scanner) buildSources() []source.Source {
 func convertTasks(cfgTasks map[string]config.Task) map[string]source.GitHubTask {
 	tasks := make(map[string]source.GitHubTask, len(cfgTasks))
 	for name, t := range cfgTasks {
-		tasks[name] = source.GitHubTask{
-			Labels:   t.Labels,
-			Workflow: t.Workflow,
-		}
+		tasks[name] = source.GitHubTaskFromConfig(t)
 	}
 	return tasks
 }

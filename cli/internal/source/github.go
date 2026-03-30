@@ -13,8 +13,9 @@ import (
 
 // GitHubTask defines a label-based task for the GitHub source.
 type GitHubTask struct {
-	Labels []string
-	Workflow  string
+	Labels       []string
+	Workflow     string
+	StatusLabels *StatusLabels
 }
 
 // GitHub scans GitHub issues and produces vessels.
@@ -78,14 +79,23 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					continue
 				}
 				seen[issue.Number] = true
+				meta := map[string]string{
+					"issue_num": strconv.Itoa(issue.Number),
+				}
+				sl := task.StatusLabels
+				if sl != nil {
+					meta["status_label_queued"] = sl.Queued
+					meta["status_label_running"] = sl.Running
+					meta["status_label_completed"] = sl.Completed
+					meta["status_label_failed"] = sl.Failed
+					meta["status_label_timed_out"] = sl.TimedOut
+				}
 				vessels = append(vessels, queue.Vessel{
-					ID:     fmt.Sprintf("issue-%d", issue.Number),
-					Source: "github-issue",
-					Ref:    issue.URL,
+					ID:        fmt.Sprintf("issue-%d", issue.Number),
+					Source:    "github-issue",
+					Ref:       issue.URL,
 					Workflow:  task.Workflow,
-					Meta: map[string]string{
-						"issue_num": strconv.Itoa(issue.Number),
-					},
+					Meta:      meta,
 					State:     queue.StatePending,
 					CreatedAt: time.Now().UTC(),
 				})
@@ -93,6 +103,12 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 		}
 	}
 	return vessels, nil
+}
+
+func (g *GitHub) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
+	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
+		vessel.Meta["status_label_queued"], "")
+	return nil
 }
 
 func (g *GitHub) OnStart(ctx context.Context, vessel queue.Vessel) error {
@@ -103,12 +119,52 @@ func (g *GitHub) OnStart(ctx context.Context, vessel queue.Vessel) error {
 	if issueNum == "" {
 		return nil
 	}
-	// Best-effort: add in-progress label
-	_, _ = g.CmdRunner.Run(ctx, "gh", "issue", "edit",
-		issueNum,
-		"--repo", g.Repo,
-		"--add-label", "in-progress")
+	running, hasRunning := vessel.Meta["status_label_running"]
+	if !hasRunning {
+		running = "in-progress" // backward-compat: preserve old behaviour
+	}
+	g.applyIssueLabel(ctx, issueNum, running, vessel.Meta["status_label_queued"])
 	return nil
+}
+
+func (g *GitHub) OnComplete(ctx context.Context, vessel queue.Vessel) error {
+	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
+		vessel.Meta["status_label_completed"],
+		vessel.Meta["status_label_running"])
+	return nil
+}
+
+func (g *GitHub) OnFail(ctx context.Context, vessel queue.Vessel) error {
+	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
+		vessel.Meta["status_label_failed"],
+		vessel.Meta["status_label_running"])
+	return nil
+}
+
+func (g *GitHub) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
+	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
+		vessel.Meta["status_label_timed_out"],
+		vessel.Meta["status_label_running"])
+	return nil
+}
+
+// applyIssueLabel runs gh issue edit to add and/or remove a label on the issue.
+// Both add and remove are optional — empty string means skip that operation.
+func (g *GitHub) applyIssueLabel(ctx context.Context, issueNum, add, remove string) {
+	if g.CmdRunner == nil || issueNum == "" {
+		return
+	}
+	if add == "" && remove == "" {
+		return
+	}
+	args := []string{"issue", "edit", issueNum, "--repo", g.Repo}
+	if add != "" {
+		args = append(args, "--add-label", add)
+	}
+	if remove != "" {
+		args = append(args, "--remove-label", remove)
+	}
+	_, _ = g.CmdRunner.Run(ctx, "gh", args...)
 }
 
 func (g *GitHub) BranchName(vessel queue.Vessel) string {

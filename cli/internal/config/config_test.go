@@ -589,6 +589,90 @@ claude:
 	}
 }
 
+func TestLoadStatusLabels(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+        status_labels:
+          queued: "queued"
+          running: "in-progress"
+          completed: "done"
+          failed: "failed"
+          timed_out: "timed-out"
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	src, ok := cfg.Sources["github"]
+	if !ok {
+		t.Fatal("missing github source")
+	}
+	task, ok := src.Tasks["fix-bugs"]
+	if !ok {
+		t.Fatal("missing fix-bugs task")
+	}
+
+	sl := task.StatusLabels
+	if sl == nil {
+		t.Fatal("StatusLabels should not be nil when status_labels block is present")
+	}
+	if sl.Queued != "queued" {
+		t.Errorf("StatusLabels.Queued = %q, want queued", sl.Queued)
+	}
+	if sl.Running != "in-progress" {
+		t.Errorf("StatusLabels.Running = %q, want in-progress", sl.Running)
+	}
+	if sl.Completed != "done" {
+		t.Errorf("StatusLabels.Completed = %q, want done", sl.Completed)
+	}
+	if sl.Failed != "failed" {
+		t.Errorf("StatusLabels.Failed = %q, want failed", sl.Failed)
+	}
+	if sl.TimedOut != "timed-out" {
+		t.Errorf("StatusLabels.TimedOut = %q, want timed-out", sl.TimedOut)
+	}
+}
+
+func TestLoadStatusLabelsOmitted(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	task := cfg.Sources["github"].Tasks["fix-bugs"]
+	if task.StatusLabels != nil {
+		t.Errorf("expected StatusLabels to be nil when status_labels block is omitted, got %+v", task.StatusLabels)
+	}
+}
+
 func TestLoadDaemonConfig(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:

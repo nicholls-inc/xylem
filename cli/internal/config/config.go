@@ -35,9 +35,18 @@ type SourceConfig struct {
 	Tasks   map[string]Task `yaml:"tasks,omitempty"`
 }
 
+type StatusLabels struct {
+	Queued    string `yaml:"queued,omitempty"`
+	Running   string `yaml:"running,omitempty"`
+	Completed string `yaml:"completed,omitempty"`
+	Failed    string `yaml:"failed,omitempty"`
+	TimedOut  string `yaml:"timed_out,omitempty"`
+}
+
 type Task struct {
-	Labels   []string `yaml:"labels,omitempty"`
-	Workflow string   `yaml:"workflow"`
+	Labels       []string      `yaml:"labels,omitempty"`
+	Workflow     string        `yaml:"workflow"`
+	StatusLabels *StatusLabels `yaml:"status_labels,omitempty"`
 }
 
 type ClaudeConfig struct {
