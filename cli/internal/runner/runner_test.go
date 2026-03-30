@@ -384,7 +384,7 @@ func TestDrainSingleVessel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{name: "analyze", promptContent: "Analyze the issue", maxTurns: 5},
@@ -428,7 +428,7 @@ func TestDrainMultiPhaseWorkflow(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{name: "analyze", promptContent: "Analyze: {{.Issue.Title}}", maxTurns: 5},
@@ -480,7 +480,7 @@ func TestDrainPhaseFailsStopsSubsequent(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
@@ -525,7 +525,7 @@ func TestDrainPromptOnlyVessel(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makePromptVessel(1, "Fix the null pointer in handler.go"))
+	_, _ = q.Enqueue(makePromptVessel(1, "Fix the null pointer in handler.go"))
 
 	cmdRunner := &mockCmdRunner{}
 	wt := &mockWorktree{}
@@ -576,7 +576,7 @@ func TestDrainPromptOnlyWithRef(t *testing.T) {
 
 	v := makePromptVessel(1, "Fix the null pointer")
 	v.Ref = "https://github.com/owner/repo/issues/99"
-	_ = q.Enqueue(v)
+	_, _ = q.Enqueue(v)
 
 	cmdRunner := &mockCmdRunner{}
 	wt := &mockWorktree{}
@@ -604,7 +604,7 @@ func TestDrainCommandGatePasses(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{
@@ -647,7 +647,7 @@ func TestDrainCommandGateFailsNoRetries(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{
@@ -690,7 +690,7 @@ func TestDrainCommandGateFailsWithRetries(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{
@@ -740,7 +740,7 @@ func TestDrainLabelGateTransitionsToWaiting(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{
@@ -791,7 +791,7 @@ func TestDrainVesselFails(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
@@ -823,7 +823,7 @@ func TestDrainWorktreeCreateFails(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	cmdRunner := &mockCmdRunner{}
 	wt := &mockWorktree{createErr: errors.New("git fetch failed")}
@@ -857,7 +857,7 @@ func TestDrainConcurrencyLimit(t *testing.T) {
 	defer os.Chdir(oldWd)
 
 	for i := 1; i <= 4; i++ {
-		_ = q.Enqueue(makeVessel(i, "fix-bug"))
+		_, _ = q.Enqueue(makeVessel(i, "fix-bug"))
 	}
 
 	counter := &countingCmdRunner{delay: 50 * time.Millisecond}
@@ -892,7 +892,7 @@ func TestDrainContextCancel(t *testing.T) {
 	defer os.Chdir(oldWd)
 
 	for i := 1; i <= 5; i++ {
-		_ = q.Enqueue(makeVessel(i, "fix-bug"))
+		_, _ = q.Enqueue(makeVessel(i, "fix-bug"))
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -924,7 +924,7 @@ func TestDrainTimeout(t *testing.T) {
 	cfg := makeTestConfig(dir, 1)
 	cfg.Timeout = "50ms"
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	cmdRunner := &mockCmdRunner{
 		processErr: context.DeadlineExceeded,
@@ -989,7 +989,7 @@ func TestDrainHarnessAppended(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
@@ -1040,7 +1040,7 @@ func TestDrainPreviousOutputsAvailable(t *testing.T) {
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{name: "analyze", promptContent: "Analyze the issue", maxTurns: 5},
@@ -1097,7 +1097,7 @@ func TestBranchPrefixSelection(t *testing.T) {
 			cfg := makeTestConfig(dir, 1)
 			cfg.StateDir = filepath.Join(dir, ".xylem")
 			q := queue.New(filepath.Join(dir, "queue.jsonl"))
-			_ = q.Enqueue(makeVessel(1, tc.workflow))
+			_, _ = q.Enqueue(makeVessel(1, tc.workflow))
 
 			writeWorkflowFile(t, dir, tc.workflow, []testPhase{
 				{name: "work", promptContent: "Do work", maxTurns: 5},
@@ -1283,7 +1283,7 @@ func TestDrainTimeoutV2Phase(t *testing.T) {
 	cfg.Timeout = "50ms"
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_ = q.Enqueue(makeVessel(1, "fix-bug"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
 
 	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},

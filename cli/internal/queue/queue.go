@@ -90,15 +90,35 @@ func New(path string) *Queue {
 	return &Queue{path: path, lockPath: path + ".lock"}
 }
 
-func (q *Queue) Enqueue(vessel Vessel) error {
-	return q.withLock(func() error {
+// Enqueue adds a vessel to the queue. If the vessel has a non-empty Ref that
+// already exists in an active state (pending, running, waiting), the call is a
+// no-op and returns (false, nil). Otherwise the vessel is appended and the call
+// returns (true, nil). The ref check and append happen under a single lock
+// acquisition, eliminating the TOCTOU race between HasRef and Enqueue.
+func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
+	var enqueued bool
+	err := q.withLock(func() error {
 		vessels, err := q.readAllVessels()
 		if err != nil {
 			return err
 		}
+
+		if vessel.Ref != "" {
+			for _, v := range vessels {
+				if v.Ref == vessel.Ref {
+					switch v.State {
+					case StatePending, StateRunning, StateWaiting:
+						return nil // already active, skip silently
+					}
+				}
+			}
+		}
+
+		enqueued = true
 		vessels = append(vessels, vessel)
 		return q.writeAllVessels(vessels)
 	})
+	return enqueued, err
 }
 
 func (q *Queue) Dequeue() (*Vessel, error) {

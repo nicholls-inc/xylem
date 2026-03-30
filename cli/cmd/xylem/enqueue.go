@@ -72,7 +72,7 @@ func cmdEnqueue(q *queue.Queue, stateDir, workflow, ref, prompt, promptFile, src
 		State:     queue.StatePending,
 		CreatedAt: time.Now().UTC(),
 	}
-	if err := q.Enqueue(vessel); err != nil {
+	if _, err := q.Enqueue(vessel); err != nil {
 		return fmt.Errorf("enqueue error: %w", err)
 	}
 	fmt.Printf("Enqueued vessel %s (workflow=%s, source=%s)\n", vessel.ID, vessel.Workflow, vessel.Source)
