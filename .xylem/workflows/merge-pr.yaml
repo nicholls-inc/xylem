@@ -1,0 +1,13 @@
+name: merge-pr
+description: "Merge a PR after verifying all merge criteria are met"
+phases:
+  - name: check
+    prompt_file: .xylem/prompts/merge-pr/check.md
+    max_turns: 10
+    noop:
+      match: XYLEM_NOOP
+  - name: merge
+    type: command
+    run: |
+      PR_NUM=$(gh pr view --json number --jq '.number')
+      gh pr merge $PR_NUM --repo nicholls-inc/xylem --squash --delete-branch
