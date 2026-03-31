@@ -23,8 +23,8 @@ type Purpose string
 
 const (
 	PurposeContext    Purpose = "context"
-	PurposeReasoning Purpose = "reasoning"
-	PurposeToolCall  Purpose = "tool_call"
+	PurposeReasoning  Purpose = "reasoning"
+	PurposeToolCall   Purpose = "tool_call"
 	PurposeCompaction Purpose = "compaction"
 	PurposeEvaluation Purpose = "evaluation"
 )
@@ -43,8 +43,8 @@ type UsageRecord struct {
 
 // Budget defines token and cost limits for a mission.
 type Budget struct {
-	TokenLimit   int           `json:"token_limit"`
-	CostLimitUSD float64      `json:"cost_limit_usd"`
+	TokenLimit   int     `json:"token_limit"`
+	CostLimitUSD float64 `json:"cost_limit_usd"`
 	// Window is the duration of the rolling time window. When non-zero,
 	// WindowedTracker enforces per-window limits instead of cumulative limits.
 	Window time.Duration `json:"window"`
@@ -60,14 +60,14 @@ type BudgetAlert struct {
 
 // CostReport summarises cost data for a mission.
 type CostReport struct {
-	MissionID     string             `json:"mission_id"`
-	TotalTokens   int                `json:"total_tokens"`
-	TotalCostUSD  float64            `json:"total_cost_usd"`
-	ByRole        map[AgentRole]float64 `json:"by_role"`
-	ByPurpose     map[Purpose]float64   `json:"by_purpose"`
-	ByModel       map[string]float64    `json:"by_model"`
-	RecordCount   int                `json:"record_count"`
-	GeneratedAt   time.Time          `json:"generated_at"`
+	MissionID    string                `json:"mission_id"`
+	TotalTokens  int                   `json:"total_tokens"`
+	TotalCostUSD float64               `json:"total_cost_usd"`
+	ByRole       map[AgentRole]float64 `json:"by_role"`
+	ByPurpose    map[Purpose]float64   `json:"by_purpose"`
+	ByModel      map[string]float64    `json:"by_model"`
+	RecordCount  int                   `json:"record_count"`
+	GeneratedAt  time.Time             `json:"generated_at"`
 }
 
 // ModelLadder maps each agent role to a preferred model name.

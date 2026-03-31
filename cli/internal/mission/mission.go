@@ -59,7 +59,7 @@ type Mission struct {
 	SourceRef   string     `json:"source_ref"`
 	Constraints Constraint `json:"constraints"`
 	Persona     *Persona   `json:"persona,omitempty"`
-	Context     []string   `json:"context"`  // linked doc paths
+	Context     []string   `json:"context"` // linked doc paths
 	CreatedAt   time.Time  `json:"created_at"`
 }
 

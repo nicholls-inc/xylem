@@ -228,7 +228,7 @@ func TestStatusFilterByWaiting(t *testing.T) {
 	started := now.Add(-10 * time.Minute)
 
 	q.Enqueue(testStatusVessel("issue-1", queue.StatePending)) //nolint:errcheck
-	q.Enqueue(queue.Vessel{ //nolint:errcheck
+	q.Enqueue(queue.Vessel{                                    //nolint:errcheck
 		ID: "issue-2", Source: "github-issue", Workflow: "fix-bug",
 		State: queue.StateWaiting, CreatedAt: now,
 		StartedAt: &started, WaitingFor: "review",
@@ -257,7 +257,7 @@ func TestStatusSummaryCounts(t *testing.T) {
 	waitingSince := now.Add(-3 * time.Minute)
 
 	q.Enqueue(testStatusVessel("v-1", queue.StatePending)) //nolint:errcheck
-	q.Enqueue(queue.Vessel{ //nolint:errcheck
+	q.Enqueue(queue.Vessel{                                //nolint:errcheck
 		ID: "v-2", Source: "github-issue", Workflow: "fix-bug",
 		State: queue.StateRunning, CreatedAt: now, StartedAt: &started,
 	})

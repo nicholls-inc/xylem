@@ -168,7 +168,7 @@ func TestScanAlreadyQueued(t *testing.T) {
 	_, _ = q.Enqueue(queue.Vessel{
 		ID: "issue-1", Source: "github-issue",
 		Ref: "https://github.com/owner/repo/issues/1", Workflow: "fix-bug",
-		Meta: map[string]string{"issue_num": "1"},
+		Meta:  map[string]string{"issue_num": "1"},
 		State: queue.StatePending, CreatedAt: queue.Vessel{}.CreatedAt,
 	})
 

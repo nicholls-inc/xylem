@@ -216,9 +216,9 @@ pre-commit install
 pre-commit run --all-files
 ```
 
-The configured hooks run `gofmt`, `golangci-lint`, and `go build ./cmd/xylem`. `go test` is intentionally excluded from pre-commit checks.
+The configured hooks run `goimports`, `golangci-lint`, and `go build ./cmd/xylem`. `go test` is intentionally excluded from pre-commit checks.
 
-The lint hook uses the system `golangci-lint` binary, so install it separately and ensure it is on your `PATH`.
+The formatting and lint hooks use the system `goimports` and `golangci-lint` binaries, so install them separately and ensure they are on your `PATH`.
 
 ## Documentation
 

@@ -12,9 +12,9 @@ import (
 type PermissionScope int
 
 const (
-	ScopeReadOnly         PermissionScope = 1
+	ScopeReadOnly          PermissionScope = 1
 	ScopeWriteWithApproval PermissionScope = 2
-	ScopeFullAutonomy     PermissionScope = 3
+	ScopeFullAutonomy      PermissionScope = 3
 )
 
 // ParamType enumerates the supported parameter types.

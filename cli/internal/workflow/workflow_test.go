@@ -1171,7 +1171,7 @@ phases:
     prompt_file: prompts/analyze.md
     max_turns: 5
 `,
-			prompts:  []string{"prompts/analyze.md"},
+			prompts: []string{"prompts/analyze.md"},
 			wantErr: `workflow: llm must be "claude" or "copilot"`,
 		},
 		{

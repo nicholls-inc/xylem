@@ -12,10 +12,10 @@ import (
 type Pattern int
 
 const (
-	PatternSequential        Pattern = iota // agents run one after another
-	PatternParallel                         // agents run concurrently
-	PatternOrchestratorWorkers              // central orchestrator dispatches to workers
-	PatternHandoff                          // one agent hands off to the next
+	PatternSequential          Pattern = iota // agents run one after another
+	PatternParallel                           // agents run concurrently
+	PatternOrchestratorWorkers                // central orchestrator dispatches to workers
+	PatternHandoff                            // one agent hands off to the next
 )
 
 // String returns the human-readable name for a Pattern.
@@ -112,7 +112,7 @@ type OrchestratorConfig struct {
 	MaxSubAgents    int
 	SummaryMaxChars int
 	SubAgentTimeout time.Duration
-	FailurePolicy   string // "fail-fast", "continue", "retry"
+	FailurePolicy   string       // "fail-fast", "continue", "retry"
 	CostBudget      *cost.Budget // nil = no budget enforcement
 	DefaultModel    string       // model name for cost records
 	MissionID       string       // for cost report generation

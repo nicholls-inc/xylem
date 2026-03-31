@@ -39,10 +39,10 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 		StateCancelled: true,
 		StateWaiting:   true, // label gate pauses vessel
 	},
-	StateWaiting: {            // label gate pause state
-		StateRunning:   true,  // label gate passed, resume
-		StateTimedOut:  true,  // label gate timed out
-		StateCancelled: true,  // manually cancelled while waiting
+	StateWaiting: { // label gate pause state
+		StateRunning:   true, // label gate passed, resume
+		StateTimedOut:  true, // label gate timed out
+		StateCancelled: true, // manually cancelled while waiting
 	},
 	StateFailed: {
 		StatePending: true, // allow retry
@@ -65,7 +65,7 @@ type Vessel struct {
 	ID        string            `json:"id"`
 	Source    string            `json:"source"`
 	Ref       string            `json:"ref,omitempty"`
-	Workflow     string            `json:"workflow,omitempty"`
+	Workflow  string            `json:"workflow,omitempty"`
 	Prompt    string            `json:"prompt,omitempty"`
 	Meta      map[string]string `json:"meta,omitempty"`
 	State     VesselState       `json:"state"`
@@ -422,9 +422,9 @@ func (q *Queue) readAllVessels() ([]Vessel, error) {
 	defer f.Close()
 
 	var (
-		vessels     = make([]Vessel, 0)
-		lineNum  int
-		skipped  int
+		vessels = make([]Vessel, 0)
+		lineNum int
+		skipped int
 	)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

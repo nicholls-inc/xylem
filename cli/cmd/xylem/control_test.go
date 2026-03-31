@@ -120,4 +120,3 @@ func TestCancelNonExistentVessel(t *testing.T) {
 		t.Errorf("expected wrapped 'cancel error:', got: %v", err)
 	}
 }
-

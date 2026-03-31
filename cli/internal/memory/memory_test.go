@@ -48,10 +48,10 @@ func TestNewStore(t *testing.T) {
 
 func TestValidateEntry(t *testing.T) {
 	tests := []struct {
-		name    string
-		entry   Entry
-		wantOK  bool
-		wantN   int // expected number of errors
+		name   string
+		entry  Entry
+		wantOK bool
+		wantN  int // expected number of errors
 	}{
 		{
 			name:   "valid procedural",
@@ -1009,4 +1009,3 @@ func TestKVStoreConcurrentAccess(t *testing.T) {
 		t.Fatalf("expected 0 keys after deletion, got %d", remaining)
 	}
 }
-
