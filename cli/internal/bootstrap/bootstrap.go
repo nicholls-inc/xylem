@@ -706,8 +706,8 @@ func GenerateAgentsMD(profile *RepoProfile) string {
 	if len(profile.Languages) > 0 {
 		sb.WriteString("## Languages\n\n")
 		for _, lang := range profile.Languages {
-			sb.WriteString(fmt.Sprintf("- **%s** (%d files, %.0f%% confidence)\n",
-				lang.Name, lang.FileCount, lang.Confidence*100))
+			fmt.Fprintf(&sb, "- **%s** (%d files, %.0f%% confidence)\n",
+				lang.Name, lang.FileCount, lang.Confidence*100)
 		}
 		sb.WriteString("\n")
 	}
@@ -716,7 +716,7 @@ func GenerateAgentsMD(profile *RepoProfile) string {
 	if len(profile.Frameworks) > 0 {
 		sb.WriteString("## Frameworks\n\n")
 		for _, fw := range profile.Frameworks {
-			sb.WriteString(fmt.Sprintf("- **%s** (%s)\n", fw.Name, fw.Language))
+			fmt.Fprintf(&sb, "- **%s** (%s)\n", fw.Name, fw.Language)
 		}
 		sb.WriteString("\n")
 	}
@@ -725,7 +725,7 @@ func GenerateAgentsMD(profile *RepoProfile) string {
 	if len(profile.BuildTools) > 0 {
 		sb.WriteString("## Build Tools\n\n")
 		for _, bt := range profile.BuildTools {
-			sb.WriteString(fmt.Sprintf("- **%s** (config: `%s`)\n", bt.Name, bt.ConfigFile))
+			fmt.Fprintf(&sb, "- **%s** (config: `%s`)\n", bt.Name, bt.ConfigFile)
 		}
 		sb.WriteString("\n")
 	}
@@ -734,7 +734,7 @@ func GenerateAgentsMD(profile *RepoProfile) string {
 	if len(profile.EntryPoints) > 0 {
 		sb.WriteString("## Entry Points\n\n")
 		for _, ep := range profile.EntryPoints {
-			sb.WriteString(fmt.Sprintf("- **%s**: `%s`\n", ep.Name, ep.Command))
+			fmt.Fprintf(&sb, "- **%s**: `%s`\n", ep.Name, ep.Command)
 		}
 		sb.WriteString("\n")
 	}
@@ -743,8 +743,8 @@ func GenerateAgentsMD(profile *RepoProfile) string {
 	if len(profile.TechStack.Warnings) > 0 {
 		sb.WriteString("## Agent Compatibility Warnings\n\n")
 		for _, w := range profile.TechStack.Warnings {
-			sb.WriteString(fmt.Sprintf("- **%s** (%s): %s. Alternative: %s\n",
-				w.Technology, w.Level, w.Reason, w.Alternative))
+			fmt.Fprintf(&sb, "- **%s** (%s): %s. Alternative: %s\n",
+				w.Technology, w.Level, w.Reason, w.Alternative)
 		}
 		sb.WriteString("\n")
 	}
@@ -817,7 +817,7 @@ func GenerateDocsStructure(profile *RepoProfile, dir string) error {
 		if len(profile.EntryPoints) > 0 {
 			sb.WriteString("## Entry Points\n\n")
 			for _, ep := range profile.EntryPoints {
-				sb.WriteString(fmt.Sprintf("- **%s**: `%s`\n", ep.Name, ep.Command))
+				fmt.Fprintf(&sb, "- **%s**: `%s`\n", ep.Name, ep.Command)
 			}
 		}
 		if err := os.WriteFile(gsPath, []byte(sb.String()), 0o644); err != nil {

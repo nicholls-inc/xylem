@@ -154,7 +154,8 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				// Post timeout comment
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
-					r.Reporter.LabelTimeout(ctx, issueNum, vessel.WaitingFor, vessel.FailedPhase, time.Since(*vessel.WaitingSince))
+					r.logReporterError("post label-timeout comment", vessel.ID,
+						r.Reporter.LabelTimeout(ctx, issueNum, vessel.WaitingFor, vessel.FailedPhase, time.Since(*vessel.WaitingSince)))
 				}
 				continue
 			}
@@ -281,7 +282,13 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 
 			// Create phases dir early
 			phasesDir := filepath.Join(r.Config.StateDir, "phases", vessel.ID)
-			os.MkdirAll(phasesDir, 0o755)
+			if err := os.MkdirAll(phasesDir, 0o755); err != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("create phases dir: %v", err))
+				if failErr := src.OnFail(ctx, vessel); failErr != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+				}
+				return "failed"
+			}
 
 			var output []byte
 			var runErr error
@@ -347,7 +354,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				}
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
-					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), "")
+					r.logReporterError("post vessel-failed comment", vessel.ID,
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
 				}
 				return "failed"
 			}
@@ -377,7 +385,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 			// Report phase completion (non-fatal)
 			phaseResults = append(phaseResults, reporter.PhaseResult{Name: p.Name, Duration: phaseDuration, Status: phaseStatus})
 			if issueNum > 0 && r.Reporter != nil {
-				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output))
+				r.logReporterError("post phase-complete comment", vessel.ID,
+					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
 			}
 
 			if phaseStatus == "no-op" {
@@ -422,7 +431,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
 					if issueNum > 0 && r.Reporter != nil {
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut)
+						r.logReporterError("post vessel-failed comment", vessel.ID,
+							r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut))
 					}
 					return "failed"
 				}
@@ -571,7 +581,8 @@ func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktr
 	// Report completion
 	issueNum := r.parseIssueNum(vessel)
 	if issueNum > 0 && r.Reporter != nil {
-		r.Reporter.VesselCompleted(ctx, issueNum, phaseResults)
+		r.logReporterError("post vessel-completed comment", vessel.ID,
+			r.Reporter.VesselCompleted(ctx, issueNum, phaseResults))
 	}
 
 	return "completed"
@@ -746,7 +757,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 
 		phasesDir := filepath.Join(r.Config.StateDir, "phases", vessel.ID)
-		os.MkdirAll(phasesDir, 0o755)
+		if err := os.MkdirAll(phasesDir, 0o755); err != nil {
+			r.failVessel(vessel.ID, fmt.Sprintf("create phases dir: %v", err))
+			if failErr := src.OnFail(ctx, vessel); failErr != nil {
+				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+			}
+			return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+		}
 
 		var output []byte
 		var runErr error
@@ -808,7 +825,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			issueNum := r.parseIssueNum(vessel)
 			if issueNum > 0 && r.Reporter != nil {
-				r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), "")
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
 			}
 			return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
 		}
@@ -817,13 +835,15 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		issueNum := r.parseIssueNum(vessel)
 		if phaseMatchedNoOp(&p, string(output)) {
 			if issueNum > 0 && r.Reporter != nil {
-				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output))
+				r.logReporterError("post phase-complete comment", vessel.ID,
+					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output)))
 			}
 			return singlePhaseResult{output: string(output), status: "no-op", duration: time.Since(phaseStart)}
 		}
 
 		if issueNum > 0 && r.Reporter != nil {
-			r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output))
+			r.logReporterError("post phase-complete comment", vessel.ID,
+				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output)))
 		}
 
 		// Handle gate.
@@ -862,7 +882,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
 				if issueNum > 0 && r.Reporter != nil {
-					r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut)
+					r.logReporterError("post vessel-failed comment", vessel.ID,
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut))
 				}
 				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart), gateOut: gateOut}
 			}
@@ -895,6 +916,12 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 func phaseMatchedNoOp(p *workflow.Phase, output string) bool {
 	return p != nil && p.NoOp != nil && strings.Contains(output, p.NoOp.Match)
+}
+
+func (r *Runner) logReporterError(action string, vesselID string, err error) {
+	if err != nil {
+		log.Printf("warn: %s for vessel %s: %v", action, vesselID, err)
+	}
 }
 
 func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, error) {

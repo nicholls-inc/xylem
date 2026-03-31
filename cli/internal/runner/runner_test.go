@@ -59,10 +59,7 @@ func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string
 	m.mu.Unlock()
 	// Detect gate commands by matching the exact shape produced by gate.RunCommandGate:
 	// RunOutput("sh", "-c", "cd <dir> && <cmd>")
-	isGate := false
-	if name == "sh" && len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "cd ") {
-		isGate = true
-	}
+	isGate := name == "sh" && len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "cd ")
 	if isGate && m.gateCallResults != nil {
 		idx := int(atomic.AddInt32(&m.gateCallCount, 1) - 1)
 		if idx < len(m.gateCallResults) {
@@ -292,33 +289,33 @@ func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
 
 	var phaseYAML strings.Builder
 	for _, p := range phases {
-		phaseYAML.WriteString(fmt.Sprintf("  - name: %s\n", p.name))
+		fmt.Fprintf(&phaseYAML, "  - name: %s\n", p.name)
 
 		if p.phaseType == "command" {
 			phaseYAML.WriteString("    type: command\n")
-			phaseYAML.WriteString(fmt.Sprintf("    run: %q\n", p.run))
+			fmt.Fprintf(&phaseYAML, "    run: %q\n", p.run)
 		} else {
 			promptPath := filepath.Join(dir, ".xylem", "prompts", name, p.name+".md")
 			os.MkdirAll(filepath.Dir(promptPath), 0o755)
 			os.WriteFile(promptPath, []byte(p.promptContent), 0o644)
 
-			phaseYAML.WriteString(fmt.Sprintf("    prompt_file: %s\n", promptPath))
-			phaseYAML.WriteString(fmt.Sprintf("    max_turns: %d\n", p.maxTurns))
+			fmt.Fprintf(&phaseYAML, "    prompt_file: %s\n", promptPath)
+			fmt.Fprintf(&phaseYAML, "    max_turns: %d\n", p.maxTurns)
 		}
 		if p.noopMatch != "" {
 			phaseYAML.WriteString("    noop:\n")
-			phaseYAML.WriteString(fmt.Sprintf("      match: %q\n", p.noopMatch))
+			fmt.Fprintf(&phaseYAML, "      match: %q\n", p.noopMatch)
 		}
 		if p.gate != "" {
-			phaseYAML.WriteString(fmt.Sprintf("    gate:\n%s\n", p.gate))
+			fmt.Fprintf(&phaseYAML, "    gate:\n%s\n", p.gate)
 		}
 		if p.allowedTools != "" {
-			phaseYAML.WriteString(fmt.Sprintf("    allowed_tools: %q\n", p.allowedTools))
+			fmt.Fprintf(&phaseYAML, "    allowed_tools: %q\n", p.allowedTools)
 		}
 		if len(p.dependsOn) > 0 {
 			phaseYAML.WriteString("    depends_on:\n")
 			for _, dep := range p.dependsOn {
-				phaseYAML.WriteString(fmt.Sprintf("      - %s\n", dep))
+				fmt.Fprintf(&phaseYAML, "      - %s\n", dep)
 			}
 		}
 	}

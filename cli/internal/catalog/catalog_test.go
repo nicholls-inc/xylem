@@ -245,7 +245,8 @@ func TestDetectOverlapsSymmetric(t *testing.T) {
 	}
 	o := overlaps[0]
 	// Symmetric: either order is fine, but both names must appear.
-	if !((o.ToolA == "read-file" && o.ToolB == "load-file") || (o.ToolA == "load-file" && o.ToolB == "read-file")) {
+	tools := map[string]bool{o.ToolA: true, o.ToolB: true}
+	if len(tools) != 2 || !tools["read-file"] || !tools["load-file"] {
 		t.Errorf("unexpected overlap pair: %q and %q", o.ToolA, o.ToolB)
 	}
 	if o.Similarity <= 0 || o.Similarity > 1 {

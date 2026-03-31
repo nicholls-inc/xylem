@@ -334,11 +334,13 @@ func TestSetResultTruncatesSummary(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	r := o.GetResult("a1")
-	if r == nil {
+	if r != nil {
+		summary := r.Summary
+		if len(summary) > 10 {
+			t.Errorf("summary should be truncated to 10, got %d chars", len(summary))
+		}
+	} else {
 		t.Fatal("expected result, got nil")
-	}
-	if len(r.Summary) > 10 {
-		t.Errorf("summary should be truncated to 10, got %d chars", len(r.Summary))
 	}
 }
 
@@ -839,14 +841,15 @@ func TestOrchestratorCostReport(t *testing.T) {
 	_ = o.UpdateAgent("a2", StatusRunning, 200, time.Second, "")
 
 	report := o.CostReport()
-	if report == nil {
+	if report != nil {
+		if report.MissionID != "mission-report" {
+			t.Errorf("MissionID = %q, want %q", report.MissionID, "mission-report")
+		}
+		if report.TotalTokens != 500 {
+			t.Errorf("TotalTokens = %d, want 500", report.TotalTokens)
+		}
+	} else {
 		t.Fatal("CostReport should not be nil with budget configured")
-	}
-	if report.MissionID != "mission-report" {
-		t.Errorf("MissionID = %q, want %q", report.MissionID, "mission-report")
-	}
-	if report.TotalTokens != 500 {
-		t.Errorf("TotalTokens = %d, want 500", report.TotalTokens)
 	}
 	if o.TotalTokenCost() != 500 {
 		t.Errorf("TotalTokenCost = %d, want 500", o.TotalTokenCost())

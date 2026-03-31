@@ -266,7 +266,7 @@ func generateDirAgentsMD(instructions []Instruction) string {
 	var sb strings.Builder
 	sb.WriteString("# AGENTS.md\n\n## Directory Instructions\n\nDetected conventions for this directory:\n\n")
 	for _, inst := range instructions {
-		sb.WriteString(fmt.Sprintf("- %s\n", inst.Content))
+		fmt.Fprintf(&sb, "- %s\n", inst.Content)
 	}
 	return sb.String()
 }

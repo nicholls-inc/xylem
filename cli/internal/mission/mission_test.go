@@ -376,11 +376,13 @@ func TestNewContract(t *testing.T) {
 				if err != nil {
 					t.Fatalf("expected no error, got %v", err)
 				}
-				if c == nil {
+				if c != nil {
+					gotMissionID := c.MissionID
+					if gotMissionID != tc.mission.ID {
+						t.Errorf("MissionID = %q, want %q", gotMissionID, tc.mission.ID)
+					}
+				} else {
 					t.Fatal("expected contract, got nil")
-				}
-				if c.MissionID != tc.mission.ID {
-					t.Errorf("MissionID = %q, want %q", c.MissionID, tc.mission.ID)
 				}
 				return
 			}
