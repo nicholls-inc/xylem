@@ -36,7 +36,8 @@ type Phase struct {
 	Model        *string `yaml:"model,omitempty"`
 	NoOp         *NoOp   `yaml:"noop,omitempty"`
 	Gate         *Gate   `yaml:"gate,omitempty"`
-	AllowedTools *string `yaml:"allowed_tools,omitempty"`
+	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
+	DependsOn    []string `yaml:"depends_on,omitempty"`
 }
 
 // NoOp defines an early-success completion rule for a phase.
@@ -96,6 +97,12 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 		return err
 	}
 
+	// Collect all phase names upfront for dependency reference validation.
+	allNames := make(map[string]bool, len(s.Phases))
+	for _, p := range s.Phases {
+		allNames[p.Name] = true
+	}
+
 	seen := make(map[string]bool, len(s.Phases))
 	for _, p := range s.Phases {
 		if p.Name == "" {
@@ -151,8 +158,92 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 		if err := validateLLM(p.LLM, fmt.Sprintf("phase %q", p.Name)); err != nil {
 			return err
 		}
+
+		seenDeps := make(map[string]bool, len(p.DependsOn))
+		for _, dep := range p.DependsOn {
+			if seenDeps[dep] {
+				return fmt.Errorf("phase %q: depends_on contains duplicate entry %q", p.Name, dep)
+			}
+			seenDeps[dep] = true
+			if dep == p.Name {
+				return fmt.Errorf("phase %q: depends_on contains self-reference", p.Name)
+			}
+			if !allNames[dep] {
+				return fmt.Errorf("phase %q: depends_on references unknown phase %q", p.Name, dep)
+			}
+		}
 	}
 
+	if err := validateDependencyCycles(s.Phases); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// HasDependencies returns true if any phase declares explicit depends_on.
+func (s *Workflow) HasDependencies() bool {
+	for _, p := range s.Phases {
+		if len(p.DependsOn) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// validateDependencyCycles checks for cycles in the phase dependency graph.
+func validateDependencyCycles(phases []Phase) error {
+	hasDeps := false
+	for _, p := range phases {
+		if len(p.DependsOn) > 0 {
+			hasDeps = true
+			break
+		}
+	}
+	if !hasDeps {
+		return nil
+	}
+
+	// Build adjacency list: edge from dep -> phase (dep must complete before phase).
+	adj := make(map[string][]string, len(phases))
+	for _, p := range phases {
+		adj[p.Name] = nil // ensure all nodes present
+	}
+	for _, p := range phases {
+		for _, dep := range p.DependsOn {
+			adj[dep] = append(adj[dep], p.Name)
+		}
+	}
+
+	const (
+		white = 0 // unvisited
+		gray  = 1 // in current path
+		black = 2 // fully explored
+	)
+	color := make(map[string]int, len(phases))
+
+	var dfs func(string) bool
+	dfs = func(u string) bool {
+		color[u] = gray
+		for _, v := range adj[u] {
+			if color[v] == gray {
+				return true
+			}
+			if color[v] == white && dfs(v) {
+				return true
+			}
+		}
+		color[u] = black
+		return false
+	}
+
+	for _, p := range phases {
+		if color[p.Name] == white {
+			if dfs(p.Name) {
+				return fmt.Errorf("depends_on creates a cycle in the phase graph")
+			}
+		}
+	}
 	return nil
 }
 

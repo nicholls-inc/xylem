@@ -319,6 +319,145 @@ phases:
 			prompts: []string{"prompts/analyze.md"},
 			wantErr: `workflow name "wrong-name" does not match filename "fix-bug.yaml"`,
 		},
+		{
+			name: "valid depends_on",
+			yaml: `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+  - name: implement
+    prompt_file: prompts/implement.md
+    max_turns: 20
+    depends_on:
+      - analyze
+`,
+			prompts: []string{"prompts/analyze.md", "prompts/implement.md"},
+			checkFunc: func(t *testing.T, s *Workflow) {
+				t.Helper()
+				if len(s.Phases[1].DependsOn) != 1 || s.Phases[1].DependsOn[0] != "analyze" {
+					t.Fatalf("DependsOn = %v, want [analyze]", s.Phases[1].DependsOn)
+				}
+				if !s.HasDependencies() {
+					t.Fatal("HasDependencies() = false, want true")
+				}
+			},
+		},
+		{
+			name: "depends_on self-reference",
+			yaml: `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    depends_on:
+      - analyze
+`,
+			prompts: []string{"prompts/analyze.md"},
+			wantErr: "depends_on contains self-reference",
+		},
+		{
+			name: "depends_on unknown phase",
+			yaml: `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    depends_on:
+      - nonexistent
+`,
+			prompts: []string{"prompts/analyze.md"},
+			wantErr: `depends_on references unknown phase "nonexistent"`,
+		},
+		{
+			name: "depends_on duplicate entry",
+			yaml: `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+  - name: implement
+    prompt_file: prompts/implement.md
+    max_turns: 20
+    depends_on:
+      - analyze
+      - analyze
+`,
+			prompts: []string{"prompts/analyze.md", "prompts/implement.md"},
+			wantErr: `depends_on contains duplicate entry "analyze"`,
+		},
+		{
+			name: "depends_on cycle",
+			yaml: `name: fix-bug
+phases:
+  - name: alpha
+    prompt_file: prompts/alpha.md
+    max_turns: 10
+    depends_on:
+      - beta
+  - name: beta
+    prompt_file: prompts/beta.md
+    max_turns: 10
+    depends_on:
+      - alpha
+`,
+			prompts: []string{"prompts/alpha.md", "prompts/beta.md"},
+			wantErr: "depends_on creates a cycle",
+		},
+		{
+			name: "parallel phases with shared dependency",
+			yaml: `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+  - name: implement_a
+    prompt_file: prompts/implement_a.md
+    max_turns: 20
+    depends_on:
+      - analyze
+  - name: implement_b
+    prompt_file: prompts/implement_b.md
+    max_turns: 20
+    depends_on:
+      - analyze
+  - name: merge
+    prompt_file: prompts/merge.md
+    max_turns: 5
+    depends_on:
+      - implement_a
+      - implement_b
+`,
+			prompts: []string{"prompts/analyze.md", "prompts/implement_a.md", "prompts/implement_b.md", "prompts/merge.md"},
+			checkFunc: func(t *testing.T, s *Workflow) {
+				t.Helper()
+				if len(s.Phases) != 4 {
+					t.Fatalf("len(Phases) = %d, want 4", len(s.Phases))
+				}
+				if len(s.Phases[3].DependsOn) != 2 {
+					t.Fatalf("merge DependsOn = %v, want [implement_a, implement_b]", s.Phases[3].DependsOn)
+				}
+			},
+		},
+		{
+			name: "no depends_on means HasDependencies false",
+			yaml: `name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+  - name: implement
+    prompt_file: prompts/implement.md
+    max_turns: 20
+`,
+			prompts: []string{"prompts/analyze.md", "prompts/implement.md"},
+			checkFunc: func(t *testing.T, s *Workflow) {
+				t.Helper()
+				if s.HasDependencies() {
+					t.Fatal("HasDependencies() = true, want false")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -818,6 +957,55 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
+		},
+		{
+			name:             "depends_on duplicate entry",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "analyze", PromptFile: "a.md", MaxTurns: 5},
+					{Name: "implement", PromptFile: "b.md", MaxTurns: 5, DependsOn: []string{"analyze", "analyze"}},
+				},
+			},
+			prompts: []string{"a.md", "b.md"},
+			wantErr: `depends_on contains duplicate entry "analyze"`,
+		},
+		{
+			name:             "depends_on self-reference",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5, DependsOn: []string{"step1"}},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: "depends_on contains self-reference",
+		},
+		{
+			name:             "depends_on unknown phase",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5, DependsOn: []string{"missing"}},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `depends_on references unknown phase "missing"`,
+		},
+		{
+			name:             "valid depends_on",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{Name: "analyze", PromptFile: "a.md", MaxTurns: 5},
+					{Name: "implement", PromptFile: "b.md", MaxTurns: 5, DependsOn: []string{"analyze"}},
+				},
+			},
+			prompts: []string{"a.md", "b.md"},
 		},
 	}
 
