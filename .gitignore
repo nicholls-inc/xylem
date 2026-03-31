@@ -1,7 +1,6 @@
 cli/cmd/xylem/xylem
 cli/xylem
 .xylem/
-.xylem.yml
 field-reports/
 .claude/worktrees
 .copilot-worktrees/
