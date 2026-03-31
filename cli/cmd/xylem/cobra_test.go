@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -59,10 +60,17 @@ func TestCobraStatusJsonFlag(t *testing.T) {
 		}
 	})
 
-	// --json with empty queue should output []
+	// --json with empty queue should output a valid statusOutput with empty arrays
 	trimmed := strings.TrimSpace(out)
-	if trimmed != "[]" {
-		t.Errorf("expected '[]' for --json empty status, got: %q", trimmed)
+	var result statusOutput
+	if err := json.Unmarshal([]byte(trimmed), &result); err != nil {
+		t.Fatalf("expected valid JSON statusOutput, got: %q\nerr: %v", trimmed, err)
+	}
+	if len(result.Vessels) != 0 {
+		t.Errorf("expected empty vessels in JSON, got %d", len(result.Vessels))
+	}
+	if result.Anomalies == nil {
+		t.Error("expected anomalies field to be present (not null)")
 	}
 }
 

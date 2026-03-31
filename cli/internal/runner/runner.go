@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/anomaly"
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
@@ -144,6 +145,14 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 			if time.Since(*vessel.WaitingSince) > timeoutDur {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
+				}
+				// Emit anomaly for label gate timeout.
+				timedOut := vessel
+				timedOut.State = queue.StateTimedOut
+				if detected := anomaly.DetectFromVessel(timedOut); len(detected) > 0 {
+					if emitErr := anomaly.Emit(r.Config.StateDir, detected); emitErr != nil {
+						log.Printf("warn: anomaly emit for vessel %s: %v", vessel.ID, emitErr)
+					}
 				}
 				src := r.resolveSource(vessel.Source)
 				if err := src.OnTimedOut(ctx, vessel); err != nil {
@@ -418,6 +427,12 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 					vessel.FailedPhase = p.Name
 					vessel.GateOutput = gateOut
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+					// Emit anomaly for exhausted gate retries.
+					if detected := anomaly.DetectFromVessel(vessel); len(detected) > 0 {
+						if emitErr := anomaly.Emit(r.Config.StateDir, detected); emitErr != nil {
+							log.Printf("warn: anomaly emit for vessel %s: %v", vessel.ID, emitErr)
+						}
+					}
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -480,6 +495,13 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 
 	// All phases complete
 	log.Printf("%scompleted all phases", vesselLabel(vessel))
+	// Emit any anomalies detectable from the completed vessel state (e.g. policy
+	// denial patterns that appeared in output but did not prevent completion).
+	if detected := anomaly.DetectFromVessel(vessel); len(detected) > 0 {
+		if emitErr := anomaly.Emit(r.Config.StateDir, detected); emitErr != nil {
+			log.Printf("warn: anomaly emit for vessel %s: %v", vessel.ID, emitErr)
+		}
+	}
 	if err := src.OnComplete(ctx, vessel); err != nil {
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
@@ -858,6 +880,12 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				vessel.FailedPhase = p.Name
 				vessel.GateOutput = gateOut
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+				// Emit anomaly for exhausted gate retries (orchestrated path).
+				if detected := anomaly.DetectFromVessel(vessel); len(detected) > 0 {
+					if emitErr := anomaly.Emit(r.Config.StateDir, detected); emitErr != nil {
+						log.Printf("warn: anomaly emit for vessel %s: %v", vessel.ID, emitErr)
+					}
+				}
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}

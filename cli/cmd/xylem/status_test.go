@@ -37,7 +37,7 @@ func TestStatusEmpty(t *testing.T) {
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -53,7 +53,7 @@ func TestStatusTable(t *testing.T) {
 	q.Enqueue(testStatusVessel("issue-55", queue.StateCompleted)) //nolint:errcheck
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -83,16 +83,16 @@ func TestStatusJSON(t *testing.T) {
 	q.Enqueue(testStatusVessel("issue-1", queue.StatePending)) //nolint:errcheck
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, true, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, true, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	var vessels []queue.Vessel
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &vessels); err != nil {
+	var result statusOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &result); err != nil {
 		t.Fatalf("expected valid JSON, got: %s\nerr: %v", out, err)
 	}
-	if len(vessels) != 1 {
-		t.Errorf("expected 1 vessel in JSON, got %d", len(vessels))
+	if len(result.Vessels) != 1 {
+		t.Errorf("expected 1 vessel in JSON, got %d", len(result.Vessels))
 	}
 }
 
@@ -103,7 +103,7 @@ func TestStatusStateFilter(t *testing.T) {
 	q.Enqueue(testStatusVessel("issue-2", queue.StateCompleted)) //nolint:errcheck
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "pending") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "pending") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestStatusRunningVesselShowsDuration(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestStatusCompletedVesselShowsFixedDuration(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestStatusShowsWaitingVessels(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestStatusShowsTimedOutVessels(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -236,7 +236,7 @@ func TestStatusFilterByWaiting(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "waiting") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "waiting") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestStatusSummaryCounts(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, false, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, false, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -332,19 +332,19 @@ func TestStatusJSONIncludesWaitingFields(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdStatus(q, true, "") })
+	out := captureStdout(func() { err = cmdStatus(q, dir, true, "") })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	var vessels []queue.Vessel
-	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &vessels); err != nil {
+	var result statusOutput
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &result); err != nil {
 		t.Fatalf("expected valid JSON, got: %s\nerr: %v", out, err)
 	}
-	if len(vessels) != 1 {
-		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	if len(result.Vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(result.Vessels))
 	}
-	v := vessels[0]
+	v := result.Vessels[0]
 	if v.WaitingFor != "plan-approved" {
 		t.Errorf("expected waiting_for='plan-approved', got %q", v.WaitingFor)
 	}
