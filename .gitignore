@@ -4,3 +4,4 @@ cli/xylem
 .xylem.yml
 field-reports/
 .claude/worktrees
+.copilot-worktrees/
