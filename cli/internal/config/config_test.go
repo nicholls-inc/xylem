@@ -625,10 +625,10 @@ claude:
 		t.Fatal("missing fix-bugs task")
 	}
 
-	sl := task.StatusLabels
-	if sl == nil {
+	if task.StatusLabels == nil {
 		t.Fatal("StatusLabels should not be nil when status_labels block is present")
 	}
+	sl := task.StatusLabels
 	if sl.Queued != "queued" {
 		t.Errorf("StatusLabels.Queued = %q, want queued", sl.Queued)
 	}

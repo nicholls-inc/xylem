@@ -207,6 +207,19 @@ See the [Architecture](docs/architecture.md) document for details on the control
 go install github.com/nicholls-inc/xylem/cli/cmd/xylem@latest
 ```
 
+## Development checks
+
+Optional local pre-commit hooks catch formatting, lint, and build problems before you push without running the test suite.
+
+```bash
+pre-commit install
+pre-commit run --all-files
+```
+
+The configured hooks run `gofmt`, `golangci-lint`, and `go build ./cmd/xylem`. `go test` is intentionally excluded from pre-commit checks.
+
+The lint hook uses the system `golangci-lint` binary, so install it separately and ensure it is on your `PATH`.
+
 ## Documentation
 
 - [Getting Started](docs/getting-started.md) -- installation, first run, and setup walkthrough
