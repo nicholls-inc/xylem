@@ -1,0 +1,31 @@
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: check-yaml
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt
+        entry: gofmt -w
+        language: system
+        files: ^cli/.*\.go$
+        types: [go]
+
+      - id: golangci-lint
+        name: golangci-lint
+        entry: bash -c 'cd cli && golangci-lint run --path-mode=abs'
+        language: system
+        pass_filenames: false
+        files: ^(cli/.*\.go|cli/go\.(mod|sum)|\.golangci\.yml)$
+
+      - id: go-build
+        name: go build
+        entry: bash -c 'cd cli && go build ./cmd/xylem'
+        language: system
+        pass_filenames: false
+        files: ^(cli/.*\.go|cli/go\.(mod|sum))$
