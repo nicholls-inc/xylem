@@ -31,12 +31,12 @@ func newTestQueue(t *testing.T) (*Queue, string) {
 
 func testVessel(issue int) Vessel {
 	return Vessel{
-		ID:     fmt.Sprintf("issue-%d", issue),
-		Source: "github-issue",
-		Ref:    fmt.Sprintf("https://github.com/example/repo/issues/%d", issue),
+		ID:        fmt.Sprintf("issue-%d", issue),
+		Source:    "github-issue",
+		Ref:       fmt.Sprintf("https://github.com/example/repo/issues/%d", issue),
 		Workflow:  "fix-bug",
-		Meta:   map[string]string{"issue_num": fmt.Sprintf("%d", issue)},
-		State:  StatePending,
+		Meta:      map[string]string{"issue_num": fmt.Sprintf("%d", issue)},
+		State:     StatePending,
 		CreatedAt: time.Now().UTC(),
 	}
 }
@@ -1099,7 +1099,7 @@ func TestV2VesselFields(t *testing.T) {
 		ID:           "v2-test-1",
 		Source:       "github-issue",
 		Ref:          "https://github.com/example/repo/issues/99",
-		Workflow:        "fix-bug",
+		Workflow:     "fix-bug",
 		State:        StatePending,
 		CreatedAt:    now,
 		CurrentPhase: 2,
@@ -1289,6 +1289,48 @@ func TestFindByID(t *testing.T) {
 		_, err := q.FindByID("does-not-exist")
 		if err == nil {
 			t.Fatal("expected error for non-existent vessel")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("expected not-found error, got: %v", err)
+		}
+	})
+}
+
+func TestFindLatestByRef(t *testing.T) {
+	t.Run("returns latest vessel for ref", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+		vessel := testVessel(701)
+		if _, err := q.Enqueue(vessel); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		if _, err := q.Dequeue(); err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		if err := q.Update(vessel.ID, StateFailed, "boom"); err != nil {
+			t.Fatalf("update failed: %v", err)
+		}
+		retry := vessel
+		retry.ID = "issue-701-retry-1"
+		retry.State = StatePending
+		retry.CreatedAt = time.Now().UTC()
+		if _, err := q.Enqueue(retry); err != nil {
+			t.Fatalf("enqueue retry: %v", err)
+		}
+
+		got, err := q.FindLatestByRef(vessel.Ref)
+		if err != nil {
+			t.Fatalf("FindLatestByRef: %v", err)
+		}
+		if got.ID != retry.ID {
+			t.Fatalf("expected latest id %s, got %s", retry.ID, got.ID)
+		}
+	})
+
+	t.Run("missing ref returns error", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+		_, err := q.FindLatestByRef("https://github.com/example/repo/issues/999")
+		if err == nil {
+			t.Fatal("expected error for missing ref")
 		}
 		if !strings.Contains(err.Error(), "not found") {
 			t.Fatalf("expected not-found error, got: %v", err)
@@ -1646,4 +1688,3 @@ func TestCompactDryRun(t *testing.T) {
 		t.Fatalf("dry run modified the file: before=%d lines, after=%d lines", len(linesBefore), len(linesAfter))
 	}
 }
-

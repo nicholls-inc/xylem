@@ -2,13 +2,16 @@ package scanner
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -52,6 +55,7 @@ func (m *mockRunner) Run(_ context.Context, name string, args ...string) ([]byte
 type ghIssue struct {
 	Number int    `json:"number"`
 	Title  string `json:"title"`
+	Body   string `json:"body"`
 	URL    string `json:"url"`
 	Labels []struct {
 		Name string `json:"name"`
@@ -88,6 +92,17 @@ func issueJSON(issues []ghIssue) []byte {
 	return b
 }
 
+func scanFingerprint(title, body string, labels []string) string {
+	sorted := append([]string(nil), labels...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		title,
+		body,
+		strings.Join(sorted, ","),
+	}, "\n")))
+	return fmt.Sprintf("%x", sum)
+}
+
 func TestScanFindsIssues(t *testing.T) {
 	dir := t.TempDir()
 	queueFile := filepath.Join(dir, "queue.jsonl")
@@ -103,7 +118,7 @@ func TestScanFindsIssues(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -145,7 +160,7 @@ func TestScanExcludedLabel(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}, {Name: "wontfix"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -168,7 +183,7 @@ func TestScanAlreadyQueued(t *testing.T) {
 	_, _ = q.Enqueue(queue.Vessel{
 		ID: "issue-1", Source: "github-issue",
 		Ref: "https://github.com/owner/repo/issues/1", Workflow: "fix-bug",
-		Meta: map[string]string{"issue_num": "1"},
+		Meta:  map[string]string{"issue_num": "1"},
 		State: queue.StatePending, CreatedAt: queue.Vessel{}.CreatedAt,
 	})
 
@@ -177,7 +192,7 @@ func TestScanAlreadyQueued(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -200,7 +215,7 @@ func TestScanExistingBranch(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte("abc123\trefs/heads/fix/issue-42-something"), "git", "ls-remote", "--heads", "origin", "fix/issue-42-*")
 
 	s := New(cfg, q, r)
@@ -224,7 +239,7 @@ func TestScanExistingPR(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(`[{"number":99,"headRefName":"fix/issue-55-null-fix"}]`),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-55-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 
@@ -235,6 +250,116 @@ func TestScanExistingPR(t *testing.T) {
 	}
 	if result.Added != 0 {
 		t.Errorf("expected 0 added (open PR exists), got %d", result.Added)
+	}
+}
+
+func TestScanSkipsUnchangedFailedIssue(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 1, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	for _, prefix := range []string{"fix", "feat"} {
+		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
+	}
+
+	fingerprint := scanFingerprint("same title", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Ref:      "https://github.com/owner/repo/issues/1",
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "1",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("enqueue seed: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update("issue-1", queue.StateFailed, "boom"); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 0 {
+		t.Fatalf("expected unchanged failed issue to be skipped, added=%d", result.Added)
+	}
+}
+
+func TestScanReenqueuesChangedFailedIssue(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 1, Title: "same title", Body: "updated body", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	for _, prefix := range []string{"fix", "feat"} {
+		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
+	}
+
+	oldFingerprint := scanFingerprint("same title", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Ref:      "https://github.com/owner/repo/issues/1",
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "1",
+			"source_input_fingerprint": oldFingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("enqueue seed: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update("issue-1", queue.StateFailed, "boom"); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("expected changed failed issue to be re-enqueued, added=%d", result.Added)
+	}
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list queue: %v", err)
+	}
+	if len(vessels) != 2 {
+		t.Fatalf("expected 2 queue entries, got %d", len(vessels))
+	}
+	if vessels[1].Meta["source_input_fingerprint"] == oldFingerprint {
+		t.Fatal("expected updated fingerprint for changed issue input")
 	}
 }
 
@@ -249,7 +374,7 @@ func TestScanPRFalsePositiveIgnored(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(`[{"number":200,"headRefName":"chore/priority-1-ci-fix"}]`),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-1-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 	r.set([]byte(`[]`),
@@ -287,8 +412,8 @@ func TestScanCrossTaskDedupDeterministic(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}, {Name: "urgent"}}},
 	}
-	r.set(issueJSON(sharedIssue), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
-	r.set(issueJSON(sharedIssue), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "urgent")
+	r.set(issueJSON(sharedIssue), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(sharedIssue), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "urgent")
 
 	for i := 0; i < 5; i++ {
 		qFile := filepath.Join(dir, fmt.Sprintf("queue-%d.jsonl", i))
@@ -335,7 +460,7 @@ func TestScanGHFailure(t *testing.T) {
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	r := newMock()
 
-	r.setErr(errors.New("network error"), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.setErr(errors.New("network error"), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	_, err := s.Scan(context.Background())
@@ -373,8 +498,8 @@ func TestScanMultipleTasks(t *testing.T) {
 		}{{Name: "low-effort"}}},
 	}
 
-	r.set(issueJSON(bugIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
-	r.set(issueJSON(featureIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "low-effort")
+	r.set(issueJSON(bugIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(featureIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "low-effort")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -400,7 +525,7 @@ func TestScanGHReturnsMalformedJSON(t *testing.T) {
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	r := newMock()
 
-	r.set([]byte(`{not valid json`), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set([]byte(`{not valid json`), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	_, err := s.Scan(context.Background())
@@ -420,7 +545,7 @@ func TestHasOpenPRMalformedJSONIgnored(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(`not json at all`),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-77-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 	r.set([]byte(`not json`),
@@ -447,7 +572,7 @@ func TestHasOpenPRGHErrorIgnored(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.setErr(errors.New("gh auth error"),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-88-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 	r.setErr(errors.New("gh auth error"),
@@ -474,7 +599,7 @@ func TestScanExistingBranchFeatPrefix(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(""), "git", "ls-remote", "--heads", "origin", "fix/issue-99-*")
 	r.set([]byte("abc123\trefs/heads/feat/issue-99-add-feature"), "git", "ls-remote", "--heads", "origin", "feat/issue-99-*")
 
@@ -515,7 +640,7 @@ func TestScanAppliesQueuedLabel(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -551,7 +676,7 @@ func TestScanNoQueuedLabelWhenNotConfigured(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())

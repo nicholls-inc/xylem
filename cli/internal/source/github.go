@@ -2,8 +2,10 @@ package source
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,7 @@ type GitHub struct {
 type ghIssue struct {
 	Number int    `json:"number"`
 	Title  string `json:"title"`
+	Body   string `json:"body"`
 	URL    string `json:"url"`
 	Labels []struct {
 		Name string `json:"name"`
@@ -53,7 +56,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				"search", "issues",
 				"--repo", g.Repo,
 				"--state", "open",
-				"--json", "number,title,url,labels",
+				"--json", "number,title,body,url,labels",
 				"--limit", "20",
 				"--label", label,
 			}
@@ -72,15 +75,21 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				if seen[issue.Number] {
 					continue
 				}
+				fingerprint := githubSourceFingerprint(issue.Title, issue.Body, issueLabelNames(issue.Labels))
 				if g.hasExcludedLabel(issue, excludeSet) ||
 					g.Queue.HasRef(issue.URL) ||
+					g.hasMatchingFailedFingerprint(issue.URL, fingerprint) ||
 					g.hasBranch(ctx, issue.Number) ||
 					g.hasOpenPR(ctx, issue.Number) {
 					continue
 				}
 				seen[issue.Number] = true
 				meta := map[string]string{
-					"issue_num": strconv.Itoa(issue.Number),
+					"issue_num":                strconv.Itoa(issue.Number),
+					"issue_title":              issue.Title,
+					"issue_body":               issue.Body,
+					"issue_labels":             strings.Join(issueLabelNames(issue.Labels), ","),
+					"source_input_fingerprint": fingerprint,
 				}
 				sl := task.StatusLabels
 				if sl != nil {
@@ -184,6 +193,35 @@ func (g *GitHub) hasExcludedLabel(issue ghIssue, excluded map[string]bool) bool 
 		}
 	}
 	return false
+}
+
+func (g *GitHub) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
+	latest, err := g.Queue.FindLatestByRef(ref)
+	if err != nil || latest == nil {
+		return false
+	}
+	return latest.State == queue.StateFailed && latest.Meta["source_input_fingerprint"] == fingerprint
+}
+
+func issueLabelNames(labels []struct {
+	Name string `json:"name"`
+}) []string {
+	names := make([]string, 0, len(labels))
+	for _, l := range labels {
+		names = append(names, l.Name)
+	}
+	return names
+}
+
+func githubSourceFingerprint(title, body string, labels []string) string {
+	sorted := append([]string(nil), labels...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		title,
+		body,
+		strings.Join(sorted, ","),
+	}, "\n")))
+	return fmt.Sprintf("%x", sum)
 }
 
 // branchPrefixes lists the branch name prefixes xylem uses when creating

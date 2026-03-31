@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
@@ -55,11 +56,15 @@ func TestGitHubPRScanFindsPRs(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 10, Title: "fix readme", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix-readme",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 		{Number: 20, Title: "add tests", URL: "https://github.com/owner/repo/pull/20", HeadRefName: "add-tests",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -99,9 +104,11 @@ func TestGitHubPRScanExcludedLabel(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 10, Title: "excluded pr", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "excluded",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}, {Name: "wontfix"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}, {Name: "wontfix"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -126,16 +133,18 @@ func TestGitHubPRScanAlreadyQueued(t *testing.T) {
 	_, _ = q.Enqueue(queue.Vessel{
 		ID: "pr-10", Source: "github-pr",
 		Ref: "https://github.com/owner/repo/pull/10", Workflow: "review-pr",
-		Meta: map[string]string{"pr_num": "10"},
+		Meta:  map[string]string{"pr_num": "10"},
 		State: queue.StatePending,
 	})
 	r := newMock()
 
 	prs := []ghPR{
 		{Number: 10, Title: "already queued", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -160,9 +169,11 @@ func TestGitHubPRScanExistingBranch(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 42, Title: "has branch", URL: "https://github.com/owner/repo/pull/42", HeadRefName: "fix",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
 	r.set([]byte("abc123\trefs/heads/review/pr-42-something"), "git", "ls-remote", "--heads", "origin", "review/pr-42-*")
 
 	src := &GitHubPR{
@@ -188,10 +199,12 @@ func TestGitHubPRScanDeduplicates(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 10, Title: "dup pr", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}, {Name: "urgent"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}, {Name: "urgent"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "urgent", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "urgent", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo: "owner/repo",
@@ -217,7 +230,7 @@ func TestGitHubPRScanGHFailure(t *testing.T) {
 	q := queue.New(dir + "/queue.jsonl")
 	r := newMock()
 
-	r.setErr(errTest, "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+	r.setErr(errTest, "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -237,7 +250,7 @@ func TestGitHubPRScanMalformedJSON(t *testing.T) {
 	q := queue.New(dir + "/queue.jsonl")
 	r := newMock()
 
-	r.set([]byte(`{not valid`), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
+	r.set([]byte(`{not valid`), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -249,6 +262,113 @@ func TestGitHubPRScanMalformedJSON(t *testing.T) {
 	_, err := src.Scan(context.Background())
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
+	}
+}
+
+func TestGitHubPRScanSkipsUnchangedFailedVessel(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10",
+		Source:   "github-pr",
+		Ref:      "https://github.com/owner/repo/pull/10",
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("enqueue failed vessel seed: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update("pr-10", queue.StateFailed, "boom"); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	src := &GitHubPR{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected unchanged failed PR to be skipped, got %d vessels", len(vessels))
+	}
+}
+
+func TestGitHubPRScanReenqueuesChangedFailedVessel(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "updated body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+
+	oldFingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10",
+		Source:   "github-pr",
+		Ref:      "https://github.com/owner/repo/pull/10",
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"source_input_fingerprint": oldFingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("enqueue failed vessel seed: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update("pr-10", queue.StateFailed, "boom"); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	src := &GitHubPR{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected changed failed PR to be re-enqueued, got %d vessels", len(vessels))
+	}
+	if vessels[0].Meta["source_input_fingerprint"] == oldFingerprint {
+		t.Fatal("expected updated fingerprint for changed PR input")
 	}
 }
 

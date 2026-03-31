@@ -73,6 +73,7 @@ func makeScanConfig(dir string) *config.Config {
 type ghIssueJSON struct {
 	Number int    `json:"number"`
 	Title  string `json:"title"`
+	Body   string `json:"body"`
 	URL    string `json:"url"`
 	Labels []struct {
 		Name string `json:"name"`
@@ -91,7 +92,7 @@ func stubScanCommands(r *mockScanRunner, cfg *config.Config, issues []ghIssueJSO
 	ghSrc := cfg.Sources["github"]
 	for _, task := range ghSrc.Tasks {
 		r.set(issuesJSON(issues), "gh", "search", "issues", "--repo", ghSrc.Repo,
-			"--state", "open", "--json", "number,title,url,labels",
+			"--state", "open", "--json", "number,title,body,url,labels",
 			"--limit", "20", "--label", task.Labels[0])
 	}
 	// Stub branch checks and PR checks for each issue
@@ -208,7 +209,7 @@ func TestScanPausedOutput(t *testing.T) {
 	// Stub the gh search command (paused scan short-circuits before this,
 	// but the mock would error on unstubbed commands)
 	r.set([]byte("[]"), "gh", "search", "issues", "--repo", "owner/repo",
-		"--state", "open", "--json", "number,title,url,labels",
+		"--state", "open", "--json", "number,title,body,url,labels",
 		"--limit", "20", "--label", "bug")
 
 	out := captureStdout(func() {
@@ -231,7 +232,7 @@ func TestScanDryRunEmpty(t *testing.T) {
 
 	// Stub the gh search to return empty array
 	r.set([]byte("[]"), "gh", "search", "issues", "--repo", "owner/repo",
-		"--state", "open", "--json", "number,title,url,labels",
+		"--state", "open", "--json", "number,title,body,url,labels",
 		"--limit", "20", "--label", "bug")
 
 	old := os.Stdout
@@ -264,7 +265,7 @@ func TestScanError(t *testing.T) {
 	// Stub gh search to return an error
 	r.setErr(errors.New("gh: not authenticated"),
 		"gh", "search", "issues", "--repo", "owner/repo",
-		"--state", "open", "--json", "number,title,url,labels",
+		"--state", "open", "--json", "number,title,body,url,labels",
 		"--limit", "20", "--label", "bug")
 
 	err := cmdScan(cfg, q, r, false)

@@ -39,10 +39,10 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 		StateCancelled: true,
 		StateWaiting:   true, // label gate pauses vessel
 	},
-	StateWaiting: {            // label gate pause state
-		StateRunning:   true,  // label gate passed, resume
-		StateTimedOut:  true,  // label gate timed out
-		StateCancelled: true,  // manually cancelled while waiting
+	StateWaiting: { // label gate pause state
+		StateRunning:   true, // label gate passed, resume
+		StateTimedOut:  true, // label gate timed out
+		StateCancelled: true, // manually cancelled while waiting
 	},
 	StateFailed: {
 		StatePending: true, // allow retry
@@ -65,7 +65,7 @@ type Vessel struct {
 	ID        string            `json:"id"`
 	Source    string            `json:"source"`
 	Ref       string            `json:"ref,omitempty"`
-	Workflow     string            `json:"workflow,omitempty"`
+	Workflow  string            `json:"workflow,omitempty"`
 	Prompt    string            `json:"prompt,omitempty"`
 	Meta      map[string]string `json:"meta,omitempty"`
 	State     VesselState       `json:"state"`
@@ -233,6 +233,27 @@ func (q *Queue) FindByID(id string) (*Vessel, error) {
 			}
 		}
 		return fmt.Errorf("vessel %s not found", id)
+	})
+	return found, err
+}
+
+// FindLatestByRef returns the most recent vessel with the given ref.
+func (q *Queue) FindLatestByRef(ref string) (*Vessel, error) {
+	var found *Vessel
+	err := q.withRLock(func() error {
+		vessels, readErr := q.readAllVessels()
+		if readErr != nil {
+			return readErr
+		}
+		for i := len(vessels) - 1; i >= 0; i-- {
+			if vessels[i].Ref != ref {
+				continue
+			}
+			v := vessels[i]
+			found = &v
+			return nil
+		}
+		return fmt.Errorf("vessel with ref %s not found", ref)
 	})
 	return found, err
 }
@@ -422,9 +443,9 @@ func (q *Queue) readAllVessels() ([]Vessel, error) {
 	defer f.Close()
 
 	var (
-		vessels     = make([]Vessel, 0)
-		lineNum  int
-		skipped  int
+		vessels = make([]Vessel, 0)
+		lineNum int
+		skipped int
 	)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

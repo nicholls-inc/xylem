@@ -23,6 +23,7 @@ type GitHubPR struct {
 type ghPR struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
+	Body        string `json:"body"`
 	URL         string `json:"url"`
 	HeadRefName string `json:"headRefName"`
 	Labels      []struct {
@@ -48,7 +49,7 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				"--repo", g.Repo,
 				"--state", "open",
 				"--label", label,
-				"--json", "number,title,url,labels,headRefName",
+				"--json", "number,title,body,url,labels,headRefName",
 				"--limit", "20",
 			}
 
@@ -66,14 +67,20 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				if seen[pr.Number] {
 					continue
 				}
+				fingerprint := githubSourceFingerprint(pr.Title, pr.Body, issueLabelNames(pr.Labels))
 				if g.hasExcludedLabel(pr, excludeSet) ||
 					g.Queue.HasRef(pr.URL) ||
+					g.hasMatchingFailedFingerprint(pr.URL, fingerprint) ||
 					g.hasBranch(ctx, pr.Number) {
 					continue
 				}
 				seen[pr.Number] = true
 				meta := map[string]string{
-					"pr_num": strconv.Itoa(pr.Number),
+					"pr_num":                   strconv.Itoa(pr.Number),
+					"pr_title":                 pr.Title,
+					"pr_body":                  pr.Body,
+					"pr_labels":                strings.Join(issueLabelNames(pr.Labels), ","),
+					"source_input_fingerprint": fingerprint,
 				}
 				sl := task.StatusLabels
 				if sl != nil {
@@ -182,4 +189,12 @@ func (g *GitHubPR) hasBranch(ctx context.Context, prNum int) bool {
 		return true
 	}
 	return false
+}
+
+func (g *GitHubPR) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
+	latest, err := g.Queue.FindLatestByRef(ref)
+	if err != nil || latest == nil {
+		return false
+	}
+	return latest.State == queue.StateFailed && latest.Meta["source_input_fingerprint"] == fingerprint
 }
