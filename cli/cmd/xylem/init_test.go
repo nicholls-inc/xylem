@@ -16,7 +16,7 @@ func TestInitCreatesConfigAndStateDir(t *testing.T) {
 
 	// Temporarily change to temp dir so defaultStateDir resolves there
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	captureStdout(func() {
@@ -53,7 +53,7 @@ func TestInitIdempotentWithoutForce(t *testing.T) {
 	configPath := filepath.Join(dir, ".xylem.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	// Write existing config
@@ -89,7 +89,7 @@ func TestInitForceOverwritesConfig(t *testing.T) {
 	configPath := filepath.Join(dir, ".xylem.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	// Write existing config
@@ -121,11 +121,11 @@ func TestInitStateDirAlreadyExists(t *testing.T) {
 	stateDir := filepath.Join(dir, ".xylem")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	// Pre-create state dir with a file
-	os.MkdirAll(stateDir, 0o755) //nolint:errcheck
+	os.MkdirAll(stateDir, 0o755)                                                    //nolint:errcheck
 	os.WriteFile(filepath.Join(stateDir, "queue.jsonl"), []byte("existing"), 0o644) //nolint:errcheck
 
 	err := cmdInit(configPath, false)
@@ -174,7 +174,7 @@ func TestInitScaffoldConfigLoads(t *testing.T) {
 	configPath := filepath.Join(dir, ".xylem.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	captureStdout(func() {
@@ -197,7 +197,7 @@ func TestInitRespectsConfigFlag(t *testing.T) {
 	customPath := filepath.Join(dir, "custom.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	cmd := newRootCmd()
@@ -224,7 +224,7 @@ func TestInitCreatesV2Files(t *testing.T) {
 	configPath := filepath.Join(dir, ".xylem.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	captureStdout(func() {
@@ -265,7 +265,7 @@ func TestInitSkipsExistingV2Files(t *testing.T) {
 	configPath := filepath.Join(dir, ".xylem.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	// Pre-create HARNESS.md with custom content
@@ -301,11 +301,11 @@ func TestInitForceOverwritesV2Files(t *testing.T) {
 	configPath := filepath.Join(dir, ".xylem.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	// Pre-create HARNESS.md with custom content
-	os.MkdirAll(filepath.Join(dir, ".xylem"), 0o755) //nolint:errcheck
+	os.MkdirAll(filepath.Join(dir, ".xylem"), 0o755)                                  //nolint:errcheck
 	os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("custom"), 0o644) //nolint:errcheck
 
 	captureStdout(func() {
@@ -330,7 +330,7 @@ func TestInitScaffoldConfigV2Format(t *testing.T) {
 	configPath := filepath.Join(dir, ".xylem.yml")
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	captureStdout(func() {
@@ -361,7 +361,7 @@ func TestInitCobraBypassesPersistentPreRunE(t *testing.T) {
 	dir := t.TempDir()
 
 	orig, _ := os.Getwd()
-	os.Chdir(dir) //nolint:errcheck
+	os.Chdir(dir)                        //nolint:errcheck
 	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
 
 	// Negative control: status (non-init) should fail without a config file

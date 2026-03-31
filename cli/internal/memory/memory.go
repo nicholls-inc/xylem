@@ -306,12 +306,12 @@ func (s *Store) Delete(memType MemoryType, key string) error {
 // HandoffArtifact captures session outcome for structured handoff between
 // sessions.
 type HandoffArtifact struct {
-	MissionID  string   `json:"mission_id"`
-	SessionID  string   `json:"session_id"`
-	Completed  []string `json:"completed,omitempty"`
-	Failed     []string `json:"failed,omitempty"`
-	Unresolved []string `json:"unresolved,omitempty"`
-	NextSteps  []string `json:"next_steps,omitempty"`
+	MissionID  string    `json:"mission_id"`
+	SessionID  string    `json:"session_id"`
+	Completed  []string  `json:"completed,omitempty"`
+	Failed     []string  `json:"failed,omitempty"`
+	Unresolved []string  `json:"unresolved,omitempty"`
+	NextSteps  []string  `json:"next_steps,omitempty"`
 	CreatedAt  time.Time `json:"created_at"`
 }
 

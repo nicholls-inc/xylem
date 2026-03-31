@@ -25,11 +25,11 @@ func TestMergeScan(t *testing.T) {
 
 	prs := []ghMergedPR{
 		{
-			Number:         20,
-			Title:          "merged PR",
-			URL:            "https://github.com/owner/repo/pull/20",
+			Number:      20,
+			Title:       "merged PR",
+			URL:         "https://github.com/owner/repo/pull/20",
 			MergeCommit: ghMergeCommit{OID: "abcdef1234567890"},
-			HeadRefName:    "feature-x",
+			HeadRefName: "feature-x",
 		},
 	}
 	prBytes, _ := json.Marshal(prs)

@@ -372,9 +372,9 @@ func TestDetectTechStack(t *testing.T) {
 		wantWarnings []string
 	}{
 		{
-			name:     "docker project",
-			files:    []string{"Dockerfile"},
-			wantTech: []string{"Docker"},
+			name:         "docker project",
+			files:        []string{"Dockerfile"},
+			wantTech:     []string{"Docker"},
 			wantWarnings: []string{"Docker"},
 		},
 		{
@@ -383,9 +383,9 @@ func TestDetectTechStack(t *testing.T) {
 			wantTech: []string{"Go Modules"},
 		},
 		{
-			name:     "terraform project",
-			files:    []string{"main.tf"},
-			wantTech: []string{"Terraform"},
+			name:         "terraform project",
+			files:        []string{"main.tf"},
+			wantTech:     []string{"Terraform"},
 			wantWarnings: []string{"Terraform"},
 		},
 		{

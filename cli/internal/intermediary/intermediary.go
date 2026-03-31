@@ -61,8 +61,8 @@ type PolicyResult struct {
 
 // AuditEntry records a single intermediary decision for the tamper-proof log.
 type AuditEntry struct {
-	Intent     Intent `json:"intent"`
-	Decision   Effect `json:"decision"`
+	Intent     Intent    `json:"intent"`
+	Decision   Effect    `json:"decision"`
 	Timestamp  time.Time `json:"timestamp"`
 	ApprovedBy string    `json:"approved_by,omitempty"`
 	Error      string    `json:"error,omitempty"`

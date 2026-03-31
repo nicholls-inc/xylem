@@ -67,7 +67,7 @@ func cmdEnqueue(q *queue.Queue, stateDir, workflow, ref, prompt, promptFile, src
 		ID:        id,
 		Source:    srcName,
 		Ref:       ref,
-		Workflow:     workflow,
+		Workflow:  workflow,
 		Prompt:    prompt,
 		State:     queue.StatePending,
 		CreatedAt: time.Now().UTC(),

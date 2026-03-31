@@ -2152,7 +2152,7 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 	cmdRunner := &mockCmdRunner{
 		gateCallResults: []gateCallResult{
 			{output: []byte("build ok\n"), err: nil},   // command phase execution
-			{output: []byte("tests pass\n"), err: nil},  // gate execution
+			{output: []byte("tests pass\n"), err: nil}, // gate execution
 		},
 	}
 	wt := &mockWorktree{}

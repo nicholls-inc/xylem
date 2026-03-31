@@ -83,8 +83,8 @@ type ThresholdConfig struct {
 // SignalConfig holds configuration for all signal computations.
 type SignalConfig struct {
 	Thresholds         map[SignalType]ThresholdConfig `json:"thresholds"`
-	StallWindow        time.Duration                 `json:"stall_window"`
-	EfficiencyBaseline int                           `json:"efficiency_baseline"`
+	StallWindow        time.Duration                  `json:"stall_window"`
+	EfficiencyBaseline int                            `json:"efficiency_baseline"`
 }
 
 // SignalSet is a collection of computed signals with helper methods.

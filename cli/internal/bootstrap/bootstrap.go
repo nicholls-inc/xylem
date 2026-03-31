@@ -59,7 +59,7 @@ type EntryPoint struct {
 	Name    string
 	Command string
 	// Exists indicates the entry point file was found on disk.
-	Exists bool   `json:"exists"`
+	Exists bool `json:"exists"`
 	Error  string
 }
 
@@ -99,21 +99,21 @@ type LegibilityReport struct {
 
 // knownLanguages maps file extensions to language names.
 var knownLanguages = map[string]string{
-	".go":   "Go",
-	".py":   "Python",
-	".js":   "JavaScript",
-	".ts":   "TypeScript",
-	".tsx":  "TypeScript",
-	".jsx":  "JavaScript",
-	".rs":   "Rust",
-	".java": "Java",
-	".rb":   "Ruby",
-	".c":    "C",
-	".cpp":  "C++",
-	".cs":   "C#",
-	".php":  "PHP",
+	".go":    "Go",
+	".py":    "Python",
+	".js":    "JavaScript",
+	".ts":    "TypeScript",
+	".tsx":   "TypeScript",
+	".jsx":   "JavaScript",
+	".rs":    "Rust",
+	".java":  "Java",
+	".rb":    "Ruby",
+	".c":     "C",
+	".cpp":   "C++",
+	".cs":    "C#",
+	".php":   "PHP",
 	".swift": "Swift",
-	".kt":   "Kotlin",
+	".kt":    "Kotlin",
 }
 
 // frameworkIndicators maps config/marker files to framework definitions.
@@ -357,9 +357,9 @@ func DetectTechStack(profile *RepoProfile) TechStack {
 
 	// Check for infrastructure-as-code files.
 	infraFiles := map[string]Technology{
-		"main.tf":        {Name: "Terraform", Category: "infrastructure", Confidence: 0.95},
-		"k8s":            {Name: "Kubernetes", Category: "infrastructure", Confidence: 0.8},
-		"kubernetes":     {Name: "Kubernetes", Category: "infrastructure", Confidence: 0.8},
+		"main.tf":           {Name: "Terraform", Category: "infrastructure", Confidence: 0.95},
+		"k8s":               {Name: "Kubernetes", Category: "infrastructure", Confidence: 0.8},
+		"kubernetes":        {Name: "Kubernetes", Category: "infrastructure", Confidence: 0.8},
 		".github/workflows": {Name: "GitHub Actions", Category: "ci", Confidence: 0.95},
 	}
 

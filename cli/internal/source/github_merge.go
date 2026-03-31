@@ -29,11 +29,11 @@ type ghMergeCommit struct {
 }
 
 type ghMergedPR struct {
-	Number      int            `json:"number"`
-	Title       string         `json:"title"`
-	URL         string         `json:"url"`
-	MergeCommit ghMergeCommit  `json:"mergeCommit"`
-	HeadRefName string         `json:"headRefName"`
+	Number      int           `json:"number"`
+	Title       string        `json:"title"`
+	URL         string        `json:"url"`
+	MergeCommit ghMergeCommit `json:"mergeCommit"`
+	HeadRefName string        `json:"headRefName"`
 }
 
 func (g *GitHubMerge) Name() string { return "github-merge" }

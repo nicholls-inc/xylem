@@ -26,9 +26,15 @@ go test ./internal/memory -run TestProp
 
 # Run tests with race detector
 go test -race ./...
+
+# Check formatting (mirrors CI)
+goimports -l .
+
+# Fix formatting
+goimports -w .
 ```
 
-There is no Makefile, linter config, or CI pipeline in the repo — just `go test`.
+There is no Makefile or linter config. CI runs `goimports` (format check), `go vet`, `go build`, and `go test`.
 
 ## Architecture
 

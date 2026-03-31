@@ -27,13 +27,13 @@ func TestRetryCreatesNewVessel(t *testing.T) {
 	now := time.Now().UTC()
 	v := queue.Vessel{
 		ID: "issue-42", Source: "github-issue", Workflow: "fix-bug",
-		Ref: "https://github.com/owner/repo/issues/42",
-		Meta:        map[string]string{"issue_num": "42"},
-		State:       queue.StatePending, CreatedAt: now,
+		Ref:   "https://github.com/owner/repo/issues/42",
+		Meta:  map[string]string{"issue_num": "42"},
+		State: queue.StatePending, CreatedAt: now,
 		FailedPhase: "gate",
 		GateOutput:  "exit code 1: tests failed",
 	}
-	q.Enqueue(v) //nolint:errcheck
+	q.Enqueue(v)                                          //nolint:errcheck
 	q.Update("issue-42", queue.StateRunning, "")          //nolint:errcheck
 	q.Update("issue-42", queue.StateFailed, "test error") //nolint:errcheck
 
@@ -107,8 +107,8 @@ func TestRetryNonFailedVessel(t *testing.T) {
 			setup: func(t *testing.T, q *queue.Queue) {
 				t.Helper()
 				q.Enqueue(queue.Vessel{ID: "issue-1", Source: "manual", State: queue.StatePending, CreatedAt: time.Now().UTC()}) //nolint:errcheck
-				q.Update("issue-1", queue.StateRunning, "")                                                                     //nolint:errcheck
-				q.Update("issue-1", queue.StateCompleted, "")                                                                   //nolint:errcheck
+				q.Update("issue-1", queue.StateRunning, "")                                                                      //nolint:errcheck
+				q.Update("issue-1", queue.StateCompleted, "")                                                                    //nolint:errcheck
 			},
 		},
 	}
@@ -148,8 +148,8 @@ func TestRetryMultipleRetries(t *testing.T) {
 	now := time.Now().UTC()
 
 	q.Enqueue(queue.Vessel{ID: "issue-42", Source: "manual", Workflow: "fix-bug", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
-	q.Update("issue-42", queue.StateRunning, "")                                                                             //nolint:errcheck
-	q.Update("issue-42", queue.StateFailed, "first error")                                                                   //nolint:errcheck
+	q.Update("issue-42", queue.StateRunning, "")                                                                              //nolint:errcheck
+	q.Update("issue-42", queue.StateFailed, "first error")                                                                    //nolint:errcheck
 
 	// First retry
 	if err := cmdRetry(q, cfg, "issue-42", false); err != nil {
@@ -392,8 +392,8 @@ func TestRetryEmptyWorktreePathFallsBackToFromScratch(t *testing.T) {
 		WorktreePath: "", // failed before worktree creation
 		FailedPhase:  "plan",
 	}
-	q.Enqueue(v)                                       //nolint:errcheck
-	q.Update("issue-10", queue.StateRunning, "")       //nolint:errcheck
+	q.Enqueue(v)                                           //nolint:errcheck
+	q.Update("issue-10", queue.StateRunning, "")           //nolint:errcheck
 	q.Update("issue-10", queue.StateFailed, "no worktree") //nolint:errcheck
 
 	err := cmdRetry(q, cfg, "issue-10", false)

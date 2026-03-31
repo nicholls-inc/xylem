@@ -39,12 +39,12 @@ func TestDrainDryRun(t *testing.T) {
 	now := time.Now().UTC()
 	q.Enqueue(queue.Vessel{ //nolint:errcheck
 		ID: "issue-1", Source: "github-issue",
-		Ref:   "https://github.com/owner/repo/issues/1",
+		Ref:      "https://github.com/owner/repo/issues/1",
 		Workflow: "fix-bug", State: queue.StatePending, CreatedAt: now,
 	})
 	q.Enqueue(queue.Vessel{ //nolint:errcheck
 		ID: "issue-2", Source: "github-issue",
-		Ref:   "https://github.com/owner/repo/issues/2",
+		Ref:      "https://github.com/owner/repo/issues/2",
 		Workflow: "fix-bug", State: queue.StatePending, CreatedAt: now,
 	})
 
@@ -75,7 +75,7 @@ func TestDrainDryRunCommandFormat(t *testing.T) {
 	now := time.Now().UTC()
 	q.Enqueue(queue.Vessel{ //nolint:errcheck
 		ID: "issue-1", Source: "github-issue",
-		Ref:   "https://github.com/owner/repo/issues/1",
+		Ref:      "https://github.com/owner/repo/issues/1",
 		Workflow: "fix-bug", State: queue.StatePending, CreatedAt: now,
 	})
 
@@ -133,4 +133,3 @@ func TestDrainDryRunQueueReadError(t *testing.T) {
 		t.Errorf("expected exit code 2, got %d", ee.code)
 	}
 }
-

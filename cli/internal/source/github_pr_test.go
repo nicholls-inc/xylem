@@ -55,9 +55,13 @@ func TestGitHubPRScanFindsPRs(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 10, Title: "fix readme", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix-readme",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 		{Number: 20, Title: "add tests", URL: "https://github.com/owner/repo/pull/20", HeadRefName: "add-tests",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 	}
 	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
 
@@ -99,7 +103,9 @@ func TestGitHubPRScanExcludedLabel(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 10, Title: "excluded pr", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "excluded",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}, {Name: "wontfix"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}, {Name: "wontfix"}}},
 	}
 	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
 
@@ -126,14 +132,16 @@ func TestGitHubPRScanAlreadyQueued(t *testing.T) {
 	_, _ = q.Enqueue(queue.Vessel{
 		ID: "pr-10", Source: "github-pr",
 		Ref: "https://github.com/owner/repo/pull/10", Workflow: "review-pr",
-		Meta: map[string]string{"pr_num": "10"},
+		Meta:  map[string]string{"pr_num": "10"},
 		State: queue.StatePending,
 	})
 	r := newMock()
 
 	prs := []ghPR{
 		{Number: 10, Title: "already queued", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 	}
 	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
 
@@ -160,7 +168,9 @@ func TestGitHubPRScanExistingBranch(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 42, Title: "has branch", URL: "https://github.com/owner/repo/pull/42", HeadRefName: "fix",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
 	}
 	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
 	r.set([]byte("abc123\trefs/heads/review/pr-42-something"), "git", "ls-remote", "--heads", "origin", "review/pr-42-*")
@@ -188,7 +198,9 @@ func TestGitHubPRScanDeduplicates(t *testing.T) {
 
 	prs := []ghPR{
 		{Number: 10, Title: "dup pr", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
-			Labels: []struct{ Name string `json:"name"` }{{Name: "review-me"}, {Name: "urgent"}}},
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}, {Name: "urgent"}}},
 	}
 	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,url,labels,headRefName", "--limit", "20")
 	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "urgent", "--json", "number,title,url,labels,headRefName", "--limit", "20")

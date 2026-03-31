@@ -7,7 +7,7 @@ import (
 
 // SemanticCheck describes one semantic validation finding.
 type SemanticCheck struct {
-	Check    string `json:"check"`    // "contradiction", "hallucination", "duplication"
+	Check    string `json:"check"` // "contradiction", "hallucination", "duplication"
 	Message  string `json:"message"`
 	Severity string `json:"severity"` // "error", "warning"
 }

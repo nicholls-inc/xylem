@@ -65,4 +65,3 @@ func TestCobraStatusJsonFlag(t *testing.T) {
 		t.Errorf("expected '[]' for --json empty status, got: %q", trimmed)
 	}
 }
-

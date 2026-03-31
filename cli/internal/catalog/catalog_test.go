@@ -184,8 +184,8 @@ func TestListByTag(t *testing.T) {
 	_ = c.Register(makeTool("c", ScopeReadOnly, []string{"compute"}))
 
 	tests := []struct {
-		tag      string
-		wantLen  int
+		tag     string
+		wantLen int
 	}{
 		{"io", 2},
 		{"file", 1},

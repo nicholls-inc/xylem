@@ -31,12 +31,12 @@ func newTestQueue(t *testing.T) (*Queue, string) {
 
 func testVessel(issue int) Vessel {
 	return Vessel{
-		ID:     fmt.Sprintf("issue-%d", issue),
-		Source: "github-issue",
-		Ref:    fmt.Sprintf("https://github.com/example/repo/issues/%d", issue),
+		ID:        fmt.Sprintf("issue-%d", issue),
+		Source:    "github-issue",
+		Ref:       fmt.Sprintf("https://github.com/example/repo/issues/%d", issue),
 		Workflow:  "fix-bug",
-		Meta:   map[string]string{"issue_num": fmt.Sprintf("%d", issue)},
-		State:  StatePending,
+		Meta:      map[string]string{"issue_num": fmt.Sprintf("%d", issue)},
+		State:     StatePending,
 		CreatedAt: time.Now().UTC(),
 	}
 }
@@ -1099,7 +1099,7 @@ func TestV2VesselFields(t *testing.T) {
 		ID:           "v2-test-1",
 		Source:       "github-issue",
 		Ref:          "https://github.com/example/repo/issues/99",
-		Workflow:        "fix-bug",
+		Workflow:     "fix-bug",
 		State:        StatePending,
 		CreatedAt:    now,
 		CurrentPhase: 2,
@@ -1646,4 +1646,3 @@ func TestCompactDryRun(t *testing.T) {
 		t.Fatalf("dry run modified the file: before=%d lines, after=%d lines", len(linesBefore), len(linesAfter))
 	}
 }
-

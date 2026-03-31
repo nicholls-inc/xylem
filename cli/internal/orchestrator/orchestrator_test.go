@@ -387,46 +387,46 @@ func TestAgentFilterFunctions(t *testing.T) {
 
 func TestTruncateSummary(t *testing.T) {
 	tests := []struct {
-		name      string
-		summary   string
+		name     string
+		summary  string
 		maxChars int
-		wantLen   int
+		wantLen  int
 	}{
 		{
-			name:      "short summary unchanged",
-			summary:   "hello",
+			name:     "short summary unchanged",
+			summary:  "hello",
 			maxChars: 100,
-			wantLen:   5,
+			wantLen:  5,
 		},
 		{
-			name:      "exact length unchanged",
-			summary:   "abcde",
+			name:     "exact length unchanged",
+			summary:  "abcde",
 			maxChars: 5,
-			wantLen:   5,
+			wantLen:  5,
 		},
 		{
-			name:      "long summary truncated",
-			summary:   strings.Repeat("x", 3000),
+			name:     "long summary truncated",
+			summary:  strings.Repeat("x", 3000),
 			maxChars: 2000,
-			wantLen:   2000,
+			wantLen:  2000,
 		},
 		{
-			name:      "zero maxChars uses default",
-			summary:   strings.Repeat("x", 3000),
+			name:     "zero maxChars uses default",
+			summary:  strings.Repeat("x", 3000),
 			maxChars: 0,
-			wantLen:   DefaultSummaryMaxChars,
+			wantLen:  DefaultSummaryMaxChars,
 		},
 		{
-			name:      "negative maxChars uses default",
-			summary:   strings.Repeat("x", 3000),
+			name:     "negative maxChars uses default",
+			summary:  strings.Repeat("x", 3000),
 			maxChars: -1,
-			wantLen:   DefaultSummaryMaxChars,
+			wantLen:  DefaultSummaryMaxChars,
 		},
 		{
-			name:      "empty summary",
-			summary:   "",
+			name:     "empty summary",
+			summary:  "",
 			maxChars: 100,
-			wantLen:   0,
+			wantLen:  0,
 		},
 	}
 	for _, tt := range tests {
