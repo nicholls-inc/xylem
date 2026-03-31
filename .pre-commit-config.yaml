@@ -9,9 +9,9 @@ repos:
 
   - repo: local
     hooks:
-      - id: gofmt
-        name: gofmt
-        entry: gofmt -w
+      - id: goimports
+        name: goimports
+        entry: goimports -w
         language: system
         files: ^cli/.*\.go$
         types: [go]
