@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: ["cli/**"]
+    paths: ["cli/**", ".golangci.yml"]
   pull_request:
     branches: [main]
-    paths: ["cli/**"]
+    paths: ["cli/**", ".golangci.yml"]
 
 jobs:
   go-checks:
@@ -25,3 +25,8 @@ jobs:
       - run: go vet ./...
       - run: go build ./cmd/xylem
       - run: go test ./...
+
+      - uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.64.8
+          working-directory: cli
