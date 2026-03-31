@@ -59,10 +59,7 @@ func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string
 	m.mu.Unlock()
 	// Detect gate commands by matching the exact shape produced by gate.RunCommandGate:
 	// RunOutput("sh", "-c", "cd <dir> && <cmd>")
-	isGate := false
-	if name == "sh" && len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "cd ") {
-		isGate = true
-	}
+	isGate := name == "sh" && len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "cd ")
 	if isGate && m.gateCallResults != nil {
 		idx := int(atomic.AddInt32(&m.gateCallCount, 1) - 1)
 		if idx < len(m.gateCallResults) {
@@ -2152,7 +2149,7 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 	cmdRunner := &mockCmdRunner{
 		gateCallResults: []gateCallResult{
 			{output: []byte("build ok\n"), err: nil},   // command phase execution
-			{output: []byte("tests pass\n"), err: nil},  // gate execution
+			{output: []byte("tests pass\n"), err: nil}, // gate execution
 		},
 	}
 	wt := &mockWorktree{}
