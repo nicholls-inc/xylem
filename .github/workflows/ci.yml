@@ -23,10 +23,12 @@ jobs:
           cache-dependency-path: cli/go.sum
 
       - run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.11
+          working-directory: cli
+
       - run: go build ./cmd/xylem
       - run: go test ./...
 
-      - uses: golangci/golangci-lint-action@v6
-        with:
-          version: v2.11.4
-          working-directory: cli
