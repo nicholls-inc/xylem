@@ -15,6 +15,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
+	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
@@ -238,10 +239,16 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 	// Read harness file
 	harnessContent := r.readHarness()
 
+	// Orchestrator-driven execution for workflows with explicit phase dependencies.
+	// This enables parallel phase execution within waves and context firewalls.
+	if sk.HasDependencies() {
+		return r.runVesselOrchestrated(ctx, vessel, sk, issueData, harnessContent, worktreePath, src)
+	}
+
 	// Rebuild previousOutputs from .xylem/phases/<id>/*.output (for resume)
 	previousOutputs := r.rebuildPreviousOutputs(vessel.ID, sk)
 
-	// Execute phases
+	// Execute phases sequentially (no explicit dependencies)
 	var phaseResults []reporter.PhaseResult
 	for i := vessel.CurrentPhase; i < len(sk.Phases); i++ {
 		p := sk.Phases[i]
@@ -568,6 +575,322 @@ func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktr
 	}
 
 	return "completed"
+}
+
+// runVesselOrchestrated executes a workflow with explicit phase dependencies
+// using the orchestrator for tracking and wave-based parallel execution.
+// Phases within the same wave (no dependencies between them) run concurrently.
+// Context firewalls ensure each phase only sees outputs from its declared dependencies.
+func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel, wf *workflow.Workflow, issueData phase.IssueData, harnessContent, worktreePath string, src source.Source) string {
+	graph, err := buildPhaseGraph(wf)
+	if err != nil {
+		r.failVessel(vessel.ID, fmt.Sprintf("build phase graph: %v", err))
+		if err := src.OnFail(ctx, vessel); err != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
+		return "failed"
+	}
+
+	// Rebuild previous outputs for resume.
+	allOutputs := r.rebuildPreviousOutputs(vessel.ID, wf)
+
+	// Mark already-completed phases in orchestrator.
+	for phaseName, output := range allOutputs {
+		_ = graph.orch.UpdateAgent(phaseName, orchestrator.StatusCompleted, 0, 0, "")
+		_ = graph.orch.SetResult(orchestrator.SubAgentResult{
+			AgentID: phaseName,
+			Summary: output,
+			Success: true,
+		})
+	}
+
+	var allPhaseResults []reporter.PhaseResult
+
+	for _, wave := range graph.waves {
+		// Filter out already-completed phases.
+		var pending []int
+		for _, idx := range wave {
+			if _, done := allOutputs[wf.Phases[idx].Name]; !done {
+				pending = append(pending, idx)
+			}
+		}
+		if len(pending) == 0 {
+			continue
+		}
+
+		// Execute wave: single phase runs inline, multiple phases run concurrently.
+		type waveResult struct {
+			phaseIdx int
+			output   string
+			status   string // "completed", "no-op", "failed", "waiting"
+			duration time.Duration
+			gateOut  string
+		}
+
+		results := make([]waveResult, len(pending))
+
+		if len(pending) == 1 {
+			// Single phase: run inline (no goroutine overhead).
+			idx := pending[0]
+			depOutputs := graph.dependencyOutputs(idx, allOutputs)
+			res := r.runSinglePhase(ctx, vessel, wf, idx, depOutputs, issueData, harnessContent, worktreePath, src)
+			results[0] = waveResult{phaseIdx: idx, output: res.output, status: res.status, duration: res.duration, gateOut: res.gateOut}
+		} else {
+			// Multiple phases: run concurrently.
+			var wg sync.WaitGroup
+			var mu sync.Mutex
+			for ri, idx := range pending {
+				wg.Add(1)
+				go func(ri, idx int) {
+					defer wg.Done()
+					mu.Lock()
+					depOutputs := graph.dependencyOutputs(idx, allOutputs)
+					mu.Unlock()
+
+					// Mark running in orchestrator.
+					mu.Lock()
+					_ = graph.orch.UpdateAgent(wf.Phases[idx].Name, orchestrator.StatusRunning, 0, 0, "")
+					mu.Unlock()
+
+					res := r.runSinglePhase(ctx, vessel, wf, idx, depOutputs, issueData, harnessContent, worktreePath, src)
+
+					mu.Lock()
+					results[ri] = waveResult{phaseIdx: idx, output: res.output, status: res.status, duration: res.duration, gateOut: res.gateOut}
+					mu.Unlock()
+				}(ri, idx)
+			}
+			wg.Wait()
+		}
+
+		// Process wave results: update orchestrator, collect outputs.
+		for _, res := range results {
+			p := wf.Phases[res.phaseIdx]
+
+			switch res.status {
+			case "completed", "no-op":
+				_ = graph.orch.UpdateAgent(p.Name, orchestrator.StatusCompleted, 0, res.duration, "")
+				_ = graph.orch.SetResult(orchestrator.SubAgentResult{
+					AgentID: p.Name,
+					Summary: res.output,
+					Success: true,
+				})
+				allOutputs[p.Name] = res.output
+			case "failed":
+				_ = graph.orch.UpdateAgent(p.Name, orchestrator.StatusFailed, 0, res.duration, res.gateOut)
+				// Fail-fast: stop processing.
+				return "failed"
+			case "waiting":
+				return "waiting"
+			}
+
+			allPhaseResults = append(allPhaseResults, reporter.PhaseResult{
+				Name:     p.Name,
+				Duration: res.duration,
+				Status:   res.status,
+			})
+
+			if res.status == "no-op" {
+				log.Printf("%sphase %q triggered no-op; completing workflow early", vesselLabel(vessel), p.Name)
+				if err := src.OnComplete(ctx, vessel); err != nil {
+					log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
+				}
+				return r.completeVessel(ctx, vessel, worktreePath, allPhaseResults)
+			}
+		}
+	}
+
+	// All waves complete.
+	log.Printf("%scompleted all phases (orchestrated, %d waves)", vesselLabel(vessel), len(graph.waves))
+	if err := src.OnComplete(ctx, vessel); err != nil {
+		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
+	}
+	return r.completeVessel(ctx, vessel, worktreePath, allPhaseResults)
+}
+
+// singlePhaseResult holds the outcome of executing one phase including its gate.
+type singlePhaseResult struct {
+	output   string
+	status   string // "completed", "no-op", "failed", "waiting"
+	duration time.Duration
+	gateOut  string
+}
+
+// runSinglePhase executes a single workflow phase (prompt or command), including
+// gate evaluation and retries. It returns the outcome without mutating the
+// vessel's queue state directly (the caller handles that).
+func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *workflow.Workflow, phaseIdx int, previousOutputs map[string]string, issueData phase.IssueData, harnessContent, worktreePath string, src source.Source) singlePhaseResult {
+	p := wf.Phases[phaseIdx]
+	gateResult := ""
+	gateRetries := 0
+	if p.Gate != nil && p.Gate.Type == "command" && p.Gate.Retries > 0 {
+		gateRetries = p.Gate.Retries
+	}
+
+	phaseStart := time.Now()
+
+	for {
+		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
+
+		td := phase.TemplateData{
+			Issue: issueData,
+			Phase: phase.PhaseData{
+				Name:  p.Name,
+				Index: phaseIdx,
+			},
+			PreviousOutputs: previousOutputs,
+			GateResult:      gateResult,
+			Vessel: phase.VesselData{
+				ID:     vessel.ID,
+				Source: vessel.Source,
+			},
+		}
+
+		phasesDir := filepath.Join(r.Config.StateDir, "phases", vessel.ID)
+		os.MkdirAll(phasesDir, 0o755)
+
+		var output []byte
+		var runErr error
+
+		if p.Type == "command" {
+			rendered, err := phase.RenderPrompt(p.Run, td)
+			if err != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("render command for phase %s: %v", p.Name, err))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+			}
+			if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
+				log.Printf("warn: write command file: %v", wErr)
+			}
+			cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
+			output = []byte(cmdOut)
+			runErr = cmdErr
+		} else {
+			promptContent, err := os.ReadFile(p.PromptFile)
+			if err != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("read prompt file %s: %v", p.PromptFile, err))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+			}
+			rendered, err := phase.RenderPrompt(string(promptContent), td)
+			if err != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+			}
+			promptPath := filepath.Join(phasesDir, p.Name+".prompt")
+			if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
+				log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
+			}
+			provider := resolveProvider(r.Config, wf, &p)
+			cmd, args := buildProviderPhaseArgs(r.Config, wf, &p, harnessContent, provider)
+			output, runErr = r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), cmd, args...)
+		}
+
+		// Write output file.
+		outputPath := filepath.Join(phasesDir, p.Name+".output")
+		if wErr := os.WriteFile(outputPath, output, 0o644); wErr != nil {
+			log.Printf("warn: write output file %s: %v", outputPath, wErr)
+		}
+		fmt.Printf("Phase %s complete: %s\n", p.Name, outputPath)
+
+		if runErr != nil {
+			log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
+			vessel.FailedPhase = p.Name
+			r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+			if err := src.OnFail(ctx, vessel); err != nil {
+				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), "")
+			}
+			return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+		}
+
+		// Report phase completion.
+		issueNum := r.parseIssueNum(vessel)
+		if phaseMatchedNoOp(&p, string(output)) {
+			if issueNum > 0 && r.Reporter != nil {
+				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output))
+			}
+			return singlePhaseResult{output: string(output), status: "no-op", duration: time.Since(phaseStart)}
+		}
+
+		if issueNum > 0 && r.Reporter != nil {
+			r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output))
+		}
+
+		// Handle gate.
+		if p.Gate == nil {
+			return singlePhaseResult{output: string(output), status: "completed", duration: time.Since(phaseStart)}
+		}
+
+		switch p.Gate.Type {
+		case "command":
+			gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
+			if gateErr != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart), gateOut: gateOut}
+			}
+			if passed {
+				log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
+				return singlePhaseResult{output: string(output), status: "completed", duration: time.Since(phaseStart)}
+			}
+
+			// Gate failed — retry or fail.
+			retryDelay := 10 * time.Second
+			if p.Gate.RetryDelay != "" {
+				if parsed, pErr := time.ParseDuration(p.Gate.RetryDelay); pErr == nil {
+					retryDelay = parsed
+				}
+			}
+			if gateRetries <= 0 {
+				log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
+				vessel.FailedPhase = p.Name
+				vessel.GateOutput = gateOut
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				if issueNum > 0 && r.Reporter != nil {
+					r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut)
+				}
+				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart), gateOut: gateOut}
+			}
+			gateRetries--
+			log.Printf("%sgate failed for phase %q, retries remaining=%d", vesselLabel(vessel), p.Name, gateRetries)
+			gateResult = fmt.Sprintf("The following gate check failed after the previous phase. Fix the issues and try again:\n\n%s", gateOut)
+			time.Sleep(retryDelay)
+			continue // re-run phase
+
+		case "label":
+			log.Printf("%swaiting for label %q after phase %q", vesselLabel(vessel), p.Gate.WaitFor, p.Name)
+			vessel.WaitingFor = p.Gate.WaitFor
+			now := time.Now().UTC()
+			vessel.WaitingSince = &now
+			vessel.State = queue.StateWaiting
+			vessel.CurrentPhase = phaseIdx + 1
+			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+				log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
+			}
+			if updateErr := r.Queue.Update(vessel.ID, queue.StateWaiting, ""); updateErr != nil {
+				log.Printf("warn: failed to set vessel %s to waiting: %v", vessel.ID, updateErr)
+			}
+			return singlePhaseResult{output: string(output), status: "waiting", duration: time.Since(phaseStart)}
+		}
+
+		// Unknown gate type: treat as passed.
+		return singlePhaseResult{output: string(output), status: "completed", duration: time.Since(phaseStart)}
+	}
 }
 
 func phaseMatchedNoOp(p *workflow.Phase, output string) bool {

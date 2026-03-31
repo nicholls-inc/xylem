@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -23,6 +24,7 @@ import (
 // --- Mock types ---
 
 type mockCmdRunner struct {
+	mu           sync.Mutex // protects phaseCalls and outputArgs
 	processErr   error
 	outputErr    error
 	outputData   []byte
@@ -52,7 +54,9 @@ type phaseCall struct {
 }
 
 func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string) ([]byte, error) {
+	m.mu.Lock()
 	m.outputArgs = append(m.outputArgs, append([]string{name}, args...))
+	m.mu.Unlock()
 	// Detect gate commands by matching the exact shape produced by gate.RunCommandGate:
 	// RunOutput("sh", "-c", "cd <dir> && <cmd>")
 	isGate := false
@@ -83,12 +87,14 @@ func (m *mockCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...s
 
 func (m *mockCmdRunner) RunPhase(_ context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 	prompt, _ := io.ReadAll(stdin)
+	m.mu.Lock()
 	m.phaseCalls = append(m.phaseCalls, phaseCall{
 		dir:    dir,
 		prompt: string(prompt),
 		name:   name,
 		args:   args,
 	})
+	m.mu.Unlock()
 	atomic.AddInt32(&m.started, 1)
 
 	// Return canned output based on prompt content
@@ -156,6 +162,7 @@ func (c *countingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reade
 }
 
 type mockWorktree struct {
+	mu           sync.Mutex
 	createErr    error
 	path         string
 	removeErr    error
@@ -164,6 +171,8 @@ type mockWorktree struct {
 }
 
 func (m *mockWorktree) Create(_ context.Context, branchName string) (string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.createErr != nil {
 		return "", m.createErr
 	}
@@ -174,6 +183,8 @@ func (m *mockWorktree) Create(_ context.Context, branchName string) (string, err
 }
 
 func (m *mockWorktree) Remove(_ context.Context, worktreePath string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.removeCalled = true
 	m.removePath = worktreePath
 	return m.removeErr
@@ -304,6 +315,12 @@ func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
 		if p.allowedTools != "" {
 			phaseYAML.WriteString(fmt.Sprintf("    allowed_tools: %q\n", p.allowedTools))
 		}
+		if len(p.dependsOn) > 0 {
+			phaseYAML.WriteString("    depends_on:\n")
+			for _, dep := range p.dependsOn {
+				phaseYAML.WriteString(fmt.Sprintf("      - %s\n", dep))
+			}
+		}
 	}
 
 	workflowContent := fmt.Sprintf("name: %s\nphases:\n%s", name, phaseYAML.String())
@@ -417,8 +434,9 @@ type testPhase struct {
 	noopMatch     string
 	gate          string
 	allowedTools  string
-	phaseType     string // "command" or "" for prompt (default)
-	run           string // shell command for type=command
+	phaseType     string   // "command" or "" for prompt (default)
+	run           string   // shell command for type=command
+	dependsOn     []string // explicit phase dependencies
 }
 
 // --- Tests ---
@@ -2297,5 +2315,303 @@ func TestResolveRepoNewSources(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("resolveRepo(%q) = %q, want %q", tt.source, got, tt.want)
 		}
+	}
+}
+
+// --- Orchestrated (parallel) execution tests ---
+
+func TestDrainOrchestratedDiamondWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "diamond"))
+
+	// Diamond: analyze -> implement_a + implement_b -> merge
+	writeWorkflowFile(t, dir, "diamond", []testPhase{
+		{name: "analyze", promptContent: "Analyze issue", maxTurns: 5},
+		{name: "implement_a", promptContent: "Implement A: {{.PreviousOutputs.analyze}}", maxTurns: 10, dependsOn: []string{"analyze"}},
+		{name: "implement_b", promptContent: "Implement B: {{.PreviousOutputs.analyze}}", maxTurns: 10, dependsOn: []string{"analyze"}},
+		{name: "merge", promptContent: "Merge: {{.PreviousOutputs.implement_a}} {{.PreviousOutputs.implement_b}}", maxTurns: 5, dependsOn: []string{"implement_a", "implement_b"}},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got %d (failed=%d)", result.Completed, result.Failed)
+	}
+
+	// All 4 phases should have been executed.
+	if len(cmdRunner.phaseCalls) != 4 {
+		t.Errorf("expected 4 phase calls, got %d", len(cmdRunner.phaseCalls))
+	}
+
+	// Verify output files were written.
+	for _, name := range []string{"analyze", "implement_a", "implement_b", "merge"} {
+		path := filepath.Join(cfg.StateDir, "phases", "issue-1", name+".output")
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			t.Errorf("expected output file for phase %q", name)
+		}
+	}
+}
+
+func TestDrainOrchestratedContextFirewall(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "firewall"))
+
+	// Phase b depends on a, phase c depends on a.
+	// Phase c should NOT see b's output in PreviousOutputs.
+	writeWorkflowFile(t, dir, "firewall", []testPhase{
+		{name: "a", promptContent: "Phase A", maxTurns: 5},
+		{name: "b", promptContent: "Phase B with dep: {{.PreviousOutputs.a}}", maxTurns: 5, dependsOn: []string{"a"}},
+		{name: "c", promptContent: "Phase C with dep: {{.PreviousOutputs.a}} absent: {{.PreviousOutputs.b}}", maxTurns: 5, dependsOn: []string{"a"}},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Phase A": []byte("output-A"),
+			"Phase B": []byte("output-B"),
+			"Phase C": []byte("output-C"),
+		},
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got %d (failed=%d)", result.Completed, result.Failed)
+	}
+
+	// Check that phase c's prompt was rendered with a's output but not b's.
+	// The template {{.PreviousOutputs.b}} should render as empty (context firewall).
+	for _, call := range cmdRunner.phaseCalls {
+		if strings.Contains(call.prompt, "Phase C") {
+			if strings.Contains(call.prompt, "output-B") {
+				t.Error("context firewall violated: phase c saw phase b's output")
+			}
+			// Phase c should see "output-A" from its dependency on a.
+			if !strings.Contains(call.prompt, "output-A") {
+				t.Error("phase c should see phase a's output via depends_on")
+			}
+		}
+	}
+}
+
+func TestDrainOrchestratedPhaseFailure(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fail-test"))
+
+	writeWorkflowFile(t, dir, "fail-test", []testPhase{
+		{name: "a", promptContent: "Phase A", maxTurns: 5},
+		{name: "b", promptContent: "Phase B", maxTurns: 5, dependsOn: []string{"a"}},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseErr: errors.New("claude crashed"),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("expected 1 failed, got failed=%d completed=%d", result.Failed, result.Completed)
+	}
+	// Phase b should NOT have been called since a failed.
+	if len(cmdRunner.phaseCalls) != 1 {
+		t.Errorf("expected 1 phase call (only a), got %d", len(cmdRunner.phaseCalls))
+	}
+}
+
+func TestDrainOrchestratedNoOp(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "noop-test"))
+
+	writeWorkflowFile(t, dir, "noop-test", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5, noopMatch: "XYLEM_NOOP"},
+		{name: "implement", promptContent: "Implement", maxTurns: 10, dependsOn: []string{"analyze"}},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("Nothing to do XYLEM_NOOP"),
+		},
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed (noop), got completed=%d failed=%d", result.Completed, result.Failed)
+	}
+	// Only analyze should have been called (noop stops workflow).
+	if len(cmdRunner.phaseCalls) != 1 {
+		t.Errorf("expected 1 phase call (noop), got %d", len(cmdRunner.phaseCalls))
+	}
+}
+
+func TestDrainOrchestratedWithGate(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "gate-test"))
+
+	writeWorkflowFile(t, dir, "gate-test", []testPhase{
+		{name: "implement", promptContent: "Implement", maxTurns: 10,
+			gate: "      type: command\n      run: \"go test ./...\""},
+		{name: "pr", promptContent: "Create PR: {{.PreviousOutputs.implement}}", maxTurns: 5, dependsOn: []string{"implement"}},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	// Gate passes (exit code 0 from RunOutput for gate commands).
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("ok"),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("expected 1 completed, got completed=%d failed=%d", result.Completed, result.Failed)
+	}
+	// Both phases should have executed.
+	if len(cmdRunner.phaseCalls) != 2 {
+		t.Errorf("expected 2 phase calls, got %d", len(cmdRunner.phaseCalls))
+	}
+}
+
+// perPhaseCmdRunner returns per-phase errors based on prompt content.
+// Phases whose prompt contains a key in failOn return the corresponding error.
+type perPhaseCmdRunner struct {
+	mu     sync.Mutex
+	failOn map[string]error // prompt substring -> error
+	calls  []phaseCall
+}
+
+func (m *perPhaseCmdRunner) RunOutput(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func (m *perPhaseCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
+	return nil
+}
+
+func (m *perPhaseCmdRunner) RunPhase(_ context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	prompt, _ := io.ReadAll(stdin)
+	m.mu.Lock()
+	m.calls = append(m.calls, phaseCall{dir: dir, prompt: string(prompt), name: name, args: args})
+	m.mu.Unlock()
+
+	for key, err := range m.failOn {
+		if bytes.Contains(prompt, []byte(key)) {
+			return []byte("failed output"), err
+		}
+	}
+	return []byte("mock output"), nil
+}
+
+// TestDrainOrchestratedParallelFailureNoRace verifies that two phases in the
+// same wave can both fail without a data race on vessel fields. Run with
+// `go test -race` to confirm.
+func TestDrainOrchestratedParallelFailureNoRace(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "parallel-fail"))
+
+	// root -> a, root -> b: a and b are in the same wave and run concurrently.
+	writeWorkflowFile(t, dir, "parallel-fail", []testPhase{
+		{name: "root", promptContent: "Root phase", maxTurns: 5},
+		{name: "a", promptContent: "Phase A", maxTurns: 5, dependsOn: []string{"root"}},
+		{name: "b", promptContent: "Phase B", maxTurns: 5, dependsOn: []string{"root"}},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	// root succeeds; a and b both fail. Since a and b are in the same wave,
+	// they run concurrently and both write to their local vessel copy.
+	// Before the fix (vessel passed by pointer), this was a data race.
+	cmdRunner := &perPhaseCmdRunner{
+		failOn: map[string]error{
+			"Phase A": errors.New("phase A crashed"),
+			"Phase B": errors.New("phase B crashed"),
+		},
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("expected 1 failed vessel, got failed=%d completed=%d", result.Failed, result.Completed)
 	}
 }

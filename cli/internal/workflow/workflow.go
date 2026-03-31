@@ -27,15 +27,15 @@ type Workflow struct {
 
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
-	Name         string  `yaml:"name"`
-	Type         string  `yaml:"type,omitempty"`          // "prompt" (default) or "command"
-	Run          string  `yaml:"run,omitempty"`            // shell command for type=command, supports template variables
-	PromptFile   string  `yaml:"prompt_file"`
-	MaxTurns     int     `yaml:"max_turns"`
-	LLM          *string `yaml:"llm,omitempty"`
-	Model        *string `yaml:"model,omitempty"`
-	NoOp         *NoOp   `yaml:"noop,omitempty"`
-	Gate         *Gate   `yaml:"gate,omitempty"`
+	Name         string   `yaml:"name"`
+	Type         string   `yaml:"type,omitempty"`          // "prompt" (default) or "command"
+	Run          string   `yaml:"run,omitempty"`            // shell command for type=command, supports template variables
+	PromptFile   string   `yaml:"prompt_file"`
+	MaxTurns     int      `yaml:"max_turns"`
+	LLM          *string  `yaml:"llm,omitempty"`
+	Model        *string  `yaml:"model,omitempty"`
+	NoOp         *NoOp    `yaml:"noop,omitempty"`
+	Gate         *Gate    `yaml:"gate,omitempty"`
 	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
 	DependsOn    []string `yaml:"depends_on,omitempty"`
 }
