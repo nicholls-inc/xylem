@@ -2,6 +2,8 @@
 
 This document describes the internal architecture of xylem for contributors working on the codebase. It covers the system's two-layer design, core abstractions, data flow, isolation model, and testing approach.
 
+Architecture decisions are recorded in [docs/decisions/](decisions/).
+
 ## High-level overview
 
 xylem is a two-layer system:
@@ -361,7 +363,7 @@ Every vessel runs in its own git worktree. This provides filesystem isolation be
 
 **Worktree lifecycle:**
 
-1. **Create** -- `git fetch origin <default-branch>` then `git worktree add .claude/worktrees/<branch> -b <branch> origin/<default-branch>`. The worktree starts from a clean copy of the default branch.
+1. **Create** -- `git fetch origin <default-branch>` then `git worktree add .claude/worktrees/<branch> -B <branch> origin/<default-branch>`. The worktree starts from a clean copy of the default branch.
 
 2. **Config copy** -- `.claude/settings.json`, `.claude/settings.local.json`, and `.claude/rules/` are copied from the main repo into the worktree so provider-backed prompt phases have the correct tool permissions and rules.
 
