@@ -1,0 +1,42 @@
+name: implement-harness
+description: "Implement a harness spec step with verification, testing, and smoke scenarios"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/implement-harness/analyze.md
+    max_turns: 30
+    noop:
+      match: XYLEM_NOOP
+  - name: plan
+    prompt_file: .xylem/prompts/implement-harness/plan.md
+    max_turns: 30
+  - name: implement
+    prompt_file: .xylem/prompts/implement-harness/implement.md
+    max_turns: 80
+    gate:
+      type: command
+      run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
+      retries: 3
+  - name: verify
+    prompt_file: .xylem/prompts/implement-harness/verify.md
+    max_turns: 80
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 2
+  - name: test_critic
+    prompt_file: .xylem/prompts/implement-harness/test_critic.md
+    max_turns: 30
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 1
+  - name: smoke
+    prompt_file: .xylem/prompts/implement-harness/smoke.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 2
+  - name: pr
+    prompt_file: .xylem/prompts/implement-harness/pr.md
+    max_turns: 15
