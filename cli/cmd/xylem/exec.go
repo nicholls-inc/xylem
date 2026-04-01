@@ -8,6 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"sync"
+
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 )
 
 // maxStderrBytes is the maximum amount of stderr captured from a phase subprocess.
@@ -67,7 +69,27 @@ func (lw *limitedWriter) Len() int {
 	return lw.buf.Len()
 }
 
-type realCmdRunner struct{}
+type realCmdRunner struct {
+	// extraEnv holds additional KEY=VALUE pairs merged into the subprocess
+	// environment. Populated from claude.env and copilot.env in config.
+	extraEnv []string
+}
+
+// newCmdRunner creates a realCmdRunner with extra env vars merged from
+// claude.env and copilot.env config sections.
+func newCmdRunner(cfg *config.Config) *realCmdRunner {
+	if cfg == nil {
+		return &realCmdRunner{}
+	}
+	var env []string
+	for k, v := range cfg.Claude.Env {
+		env = append(env, k+"="+os.ExpandEnv(v))
+	}
+	for k, v := range cfg.Copilot.Env {
+		env = append(env, k+"="+os.ExpandEnv(v))
+	}
+	return &realCmdRunner{extraEnv: env}
+}
 
 func (r *realCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
 	return exec.CommandContext(ctx, name, args...).CombinedOutput()
@@ -89,6 +111,9 @@ func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reade
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = stdin
+	if len(r.extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), r.extraEnv...)
+	}
 
 	var stdout bytes.Buffer
 	stderr := newLimitedWriter(maxStderrBytes)

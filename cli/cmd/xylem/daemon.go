@@ -151,13 +151,13 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 }
 
 func runScan(ctx context.Context, cfg *config.Config, q *queue.Queue) (scanner.ScanResult, error) {
-	cmdRunner := &realCmdRunner{}
+	cmdRunner := newCmdRunner(cfg)
 	s := scanner.New(cfg, q, cmdRunner)
 	return s.Scan(ctx)
 }
 
 func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager) (runner.DrainResult, error) {
-	cmdRunner := &realCmdRunner{}
+	cmdRunner := newCmdRunner(cfg)
 	r := runner.New(cfg, q, wt, cmdRunner)
 	r.Sources = buildSourceMap(cfg, q, cmdRunner)
 	return r.Drain(ctx)

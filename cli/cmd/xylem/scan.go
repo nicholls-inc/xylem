@@ -18,7 +18,7 @@ func newScanCmd() *cobra.Command {
 		Short: "Query GitHub for actionable issues and enqueue vessels",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			return cmdScan(deps.cfg, deps.q, &realCmdRunner{}, dryRun)
+			return cmdScan(deps.cfg, deps.q, newCmdRunner(deps.cfg), dryRun)
 		},
 	}
 	cmd.Flags().Bool("dry-run", false, "Preview what would be queued")

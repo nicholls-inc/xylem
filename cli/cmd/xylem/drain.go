@@ -37,7 +37,7 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cmdRunner := &realCmdRunner{}
+	cmdRunner := newCmdRunner(cfg)
 	r := runner.New(cfg, q, wt, cmdRunner)
 	r.Sources = buildSourceMap(cfg, q, cmdRunner)
 	r.Reporter = buildReporter(cfg, cmdRunner)

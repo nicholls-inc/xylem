@@ -114,5 +114,6 @@ claude:
 copilot:
   command: "copilot"
   flags: "--yolo --autopilot"
-  default_model: "GPT-5.4"
-  # env: {}
+  default_model: "gpt-5.4"
+  env:
+    COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
