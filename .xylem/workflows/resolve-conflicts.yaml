@@ -1,0 +1,18 @@
+name: resolve-conflicts
+description: "Resolve merge conflicts on a PR branch"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/resolve-conflicts/analyze.md
+    max_turns: 20
+    noop:
+      match: XYLEM_NOOP
+  - name: resolve
+    prompt_file: .xylem/prompts/resolve-conflicts/resolve.md
+    max_turns: 40
+    gate:
+      type: command
+      run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
+      retries: 2
+  - name: push
+    prompt_file: .xylem/prompts/resolve-conflicts/push.md
+    max_turns: 10
