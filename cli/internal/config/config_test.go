@@ -3,8 +3,13 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func writeConfigFile(t *testing.T, yaml string) string {
@@ -991,4 +996,333 @@ func TestValidateUnknownSourceType(t *testing.T) {
 	}
 	err := cfg.Validate()
 	requireErrorContains(t, err, "unknown type")
+}
+
+func TestSmoke_S1_FullConfigLoadsWithHarnessSection(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+harness:
+  audit_log: ".xylem/audit.jsonl"
+  protected_surfaces:
+    paths:
+      - ".xylem/HARNESS.md"
+      - ".xylem.yml"
+      - ".xylem/workflows/*.yaml"
+      - ".xylem/prompts/*/*.md"
+  policy:
+    rules:
+      - action: "file_write"
+        resource: ".xylem/*"
+        effect: "deny"
+      - action: "git_push"
+        resource: "*"
+        effect: "require_approval"
+      - action: "pr_create"
+        resource: "*"
+        effect: "require_approval"
+      - action: "*"
+        resource: "*"
+        effect: "allow"
+observability:
+  enabled: true
+  endpoint: "localhost:4317"
+  insecure: true
+  sample_rate: 1.0
+cost:
+  budget:
+    max_cost_usd: 10.0
+    max_tokens: 1000000
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.NotNil(t, cfg.Observability.Enabled)
+	require.NotNil(t, cfg.Cost.Budget)
+
+	assert.Equal(t, ".xylem/audit.jsonl", cfg.Harness.AuditLog)
+	assert.Len(t, cfg.Harness.ProtectedSurfaces.Paths, 4)
+	assert.Len(t, cfg.Harness.Policy.Rules, 4)
+	assert.True(t, *cfg.Observability.Enabled)
+	assert.Equal(t, 1.0, cfg.Observability.SampleRate)
+	assert.Equal(t, 10.0, cfg.Cost.Budget.MaxCostUSD)
+	assert.Equal(t, 1000000, cfg.Cost.Budget.MaxTokens)
+}
+
+func TestSmoke_S2_DefaultsActivateWhenHarnessSectionAbsent(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.True(t, reflect.DeepEqual(cfg.EffectiveProtectedSurfaces(), DefaultProtectedSurfaces))
+	assert.Equal(t, DefaultAuditLogPath, cfg.EffectiveAuditLogPath())
+	assert.True(t, cfg.ObservabilityEnabled())
+	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
+	assert.Nil(t, cfg.VesselBudget())
+
+	policies := cfg.BuildIntermediaryPolicies()
+	require.Len(t, policies, 1)
+	assert.Equal(t, "default", policies[0].Name)
+}
+
+func TestSmoke_S3_PathsNoneDisablesSurfaceProtection(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+harness:
+  protected_surfaces:
+    paths: ["none"]
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Nil(t, cfg.EffectiveProtectedSurfaces())
+}
+
+func TestSmoke_S4_InvalidGlobPatternRejected(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+harness:
+  protected_surfaces:
+    paths:
+      - "[invalid-glob"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.protected_surfaces.paths")
+	assert.Contains(t, err.Error(), "invalid glob")
+	assert.Contains(t, err.Error(), "[invalid-glob")
+}
+
+func TestSmoke_S5_UnknownPolicyEffectRejected(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+harness:
+  policy:
+    rules:
+      - action: "file_write"
+        resource: "*"
+        effect: "approve_maybe"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.policy.rules[0]")
+	assert.Contains(t, err.Error(), "invalid effect")
+	assert.Contains(t, err.Error(), "approve_maybe")
+}
+
+func TestSmoke_S6_DefaultPolicyDeniesFileWriteToHarness(t *testing.T) {
+	cfg := &Config{}
+	inter := intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), nil, nil)
+
+	result := inter.Evaluate(intermediary.Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "vessel-001",
+	})
+
+	require.NotNil(t, result.MatchedRule)
+	assert.Equal(t, intermediary.Deny, result.Effect)
+	assert.Equal(t, "file_write", result.MatchedRule.Action)
+	assert.Equal(t, ".xylem/HARNESS.md", result.MatchedRule.Resource)
+}
+
+func TestSmoke_S7_DefaultPolicyRequiresApprovalForGitPush(t *testing.T) {
+	cfg := &Config{}
+	inter := intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), nil, nil)
+
+	result := inter.Evaluate(intermediary.Intent{
+		Action:   "git_push",
+		Resource: "main",
+		AgentID:  "vessel-002",
+	})
+
+	assert.Equal(t, intermediary.RequireApproval, result.Effect)
+}
+
+func TestSmoke_S8_DefaultPolicyAllowsPhaseExecute(t *testing.T) {
+	cfg := &Config{}
+	inter := intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), nil, nil)
+
+	result := inter.Evaluate(intermediary.Intent{
+		Action:   "phase_execute",
+		Resource: "lint",
+		AgentID:  "vessel-003",
+	})
+
+	require.NotNil(t, result.MatchedRule)
+	assert.Equal(t, intermediary.Allow, result.Effect)
+	assert.Equal(t, "*", result.MatchedRule.Action)
+	assert.Equal(t, "*", result.MatchedRule.Resource)
+}
+
+func TestSmoke_S29_ObservabilityDefaultsWhenAbsent(t *testing.T) {
+	cfg := &Config{}
+
+	assert.True(t, cfg.ObservabilityEnabled())
+	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
+}
+
+func TestSmoke_S30_CostBudgetLoadsCorrectly(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+cost:
+  budget:
+    max_cost_usd: 5.0
+    max_tokens: 500000
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	budget := cfg.VesselBudget()
+	require.NotNil(t, budget)
+	assert.Equal(t, 5.0, budget.CostLimitUSD)
+	assert.Equal(t, 500000, budget.TokenLimit)
+}
+
+func TestSmoke_S31_NegativeSampleRateRejected(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+observability:
+  sample_rate: -0.5
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "observability.sample_rate")
+}
+
+func TestSmoke_S32_NegativeMaxCostRejected(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+cost:
+  budget:
+    max_cost_usd: -1.0
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cost.budget.max_cost_usd")
+}
+
+func TestValidateHarnessPolicyRuleMissingAction(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.Policy.Rules = []PolicyRuleConfig{
+		{Resource: "*", Effect: string(intermediary.Allow)},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "harness.policy.rules[0]: action is required")
+}
+
+func TestValidateCostNegativeMaxTokens(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.Budget = &BudgetConfig{MaxTokens: -1}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.budget.max_tokens")
+}
+
+func TestValidateObservabilitySampleRateAboveOneRejected(t *testing.T) {
+	cfg := validConfig()
+	cfg.Observability.SampleRate = 1.5
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "observability.sample_rate")
 }

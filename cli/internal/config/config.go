@@ -3,13 +3,25 @@ package config
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"gopkg.in/yaml.v3"
 )
 
 const minTimeout = 30 * time.Second
+
+var DefaultProtectedSurfaces = []string{
+	".xylem/HARNESS.md",
+	".xylem.yml",
+	".xylem/workflows/*.yaml",
+	".xylem/prompts/*/*.md",
+}
+
+const DefaultAuditLogPath = "audit.jsonl"
 
 type Config struct {
 	Repo          string                  `yaml:"repo,omitempty"`
@@ -26,6 +38,9 @@ type Config struct {
 	Claude        ClaudeConfig            `yaml:"claude"`
 	Copilot       CopilotConfig           `yaml:"copilot,omitempty"`
 	Daemon        DaemonConfig            `yaml:"daemon,omitempty"`
+	Harness       HarnessConfig           `yaml:"harness,omitempty"`
+	Observability ObservabilityConfig     `yaml:"observability,omitempty"`
+	Cost          CostConfig              `yaml:"cost,omitempty"`
 }
 
 type SourceConfig struct {
@@ -79,6 +94,42 @@ type CopilotConfig struct {
 type DaemonConfig struct {
 	ScanInterval  string `yaml:"scan_interval,omitempty"`
 	DrainInterval string `yaml:"drain_interval,omitempty"`
+}
+
+type HarnessConfig struct {
+	ProtectedSurfaces ProtectedSurfacesConfig `yaml:"protected_surfaces,omitempty"`
+	Policy            PolicyConfig            `yaml:"policy,omitempty"`
+	AuditLog          string                  `yaml:"audit_log,omitempty"`
+}
+
+type ProtectedSurfacesConfig struct {
+	Paths []string `yaml:"paths,omitempty"`
+}
+
+type PolicyConfig struct {
+	Rules []PolicyRuleConfig `yaml:"rules,omitempty"`
+}
+
+type PolicyRuleConfig struct {
+	Action   string `yaml:"action"`
+	Resource string `yaml:"resource"`
+	Effect   string `yaml:"effect"`
+}
+
+type ObservabilityConfig struct {
+	Enabled    *bool   `yaml:"enabled,omitempty"`
+	Endpoint   string  `yaml:"endpoint,omitempty"`
+	Insecure   bool    `yaml:"insecure,omitempty"`
+	SampleRate float64 `yaml:"sample_rate,omitempty"`
+}
+
+type CostConfig struct {
+	Budget *BudgetConfig `yaml:"budget,omitempty"`
+}
+
+type BudgetConfig struct {
+	MaxCostUSD float64 `yaml:"max_cost_usd,omitempty"`
+	MaxTokens  int     `yaml:"max_tokens,omitempty"`
 }
 
 func Load(path string) (*Config, error) {
@@ -235,7 +286,92 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	if err := c.validateHarness(); err != nil {
+		return err
+	}
+	if err := c.validateObservability(); err != nil {
+		return err
+	}
+	if err := c.validateCost(); err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (c *Config) EffectiveProtectedSurfaces() []string {
+	if len(c.Harness.ProtectedSurfaces.Paths) == 0 {
+		return DefaultProtectedSurfaces
+	}
+	if len(c.Harness.ProtectedSurfaces.Paths) == 1 && c.Harness.ProtectedSurfaces.Paths[0] == "none" {
+		return nil
+	}
+	return c.Harness.ProtectedSurfaces.Paths
+}
+
+func (c *Config) EffectiveAuditLogPath() string {
+	if c.Harness.AuditLog != "" {
+		return c.Harness.AuditLog
+	}
+	return DefaultAuditLogPath
+}
+
+func (c *Config) ObservabilityEnabled() bool {
+	if c.Observability.Enabled == nil {
+		return true
+	}
+	return *c.Observability.Enabled
+}
+
+func (c *Config) ObservabilitySampleRate() float64 {
+	if c.Observability.SampleRate <= 0 || c.Observability.SampleRate > 1.0 {
+		return 1.0
+	}
+	return c.Observability.SampleRate
+}
+
+func (c *Config) VesselBudget() *cost.Budget {
+	if c.Cost.Budget == nil {
+		return nil
+	}
+	b := c.Cost.Budget
+	if b.MaxCostUSD <= 0 && b.MaxTokens <= 0 {
+		return nil
+	}
+	return &cost.Budget{
+		TokenLimit:   b.MaxTokens,
+		CostLimitUSD: b.MaxCostUSD,
+	}
+}
+
+func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
+	if len(c.Harness.Policy.Rules) == 0 {
+		return []intermediary.Policy{DefaultPolicy()}
+	}
+	rules := make([]intermediary.Rule, len(c.Harness.Policy.Rules))
+	for i, r := range c.Harness.Policy.Rules {
+		rules[i] = intermediary.Rule{
+			Action:   r.Action,
+			Resource: r.Resource,
+			Effect:   intermediary.Effect(r.Effect),
+		}
+	}
+	return []intermediary.Policy{{Name: "user", Rules: rules}}
+}
+
+func DefaultPolicy() intermediary.Policy {
+	return intermediary.Policy{
+		Name: "default",
+		Rules: []intermediary.Rule{
+			{Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
+			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
+			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
+			{Action: "file_write", Resource: ".xylem/prompts/*", Effect: intermediary.Deny},
+			{Action: "git_push", Resource: "*", Effect: intermediary.RequireApproval},
+			{Action: "pr_create", Resource: "*", Effect: intermediary.RequireApproval},
+			{Action: "*", Resource: "*", Effect: intermediary.Allow},
+		},
+	}
 }
 
 // CleanupAfterDuration returns the parsed cleanup_after duration, defaulting to
@@ -249,6 +385,52 @@ func (c *Config) CleanupAfterDuration() time.Duration {
 		return 168 * time.Hour
 	}
 	return d
+}
+
+func (c *Config) validateHarness() error {
+	for _, pattern := range c.Harness.ProtectedSurfaces.Paths {
+		if pattern == "none" {
+			continue
+		}
+		if _, err := filepath.Match(pattern, "test"); err != nil {
+			return fmt.Errorf("harness.protected_surfaces.paths: invalid glob %q: %w", pattern, err)
+		}
+	}
+	for i, rule := range c.Harness.Policy.Rules {
+		if rule.Action == "" {
+			return fmt.Errorf("harness.policy.rules[%d]: action is required", i)
+		}
+		if rule.Resource == "" {
+			return fmt.Errorf("harness.policy.rules[%d]: resource is required", i)
+		}
+		switch intermediary.Effect(rule.Effect) {
+		case intermediary.Allow, intermediary.Deny, intermediary.RequireApproval:
+		default:
+			return fmt.Errorf("harness.policy.rules[%d]: invalid effect %q (must be allow, deny, or require_approval)", i, rule.Effect)
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateObservability() error {
+	if c.Observability.SampleRate != 0 {
+		if c.Observability.SampleRate < 0 || c.Observability.SampleRate > 1.0 {
+			return fmt.Errorf("observability.sample_rate must be in [0.0, 1.0]")
+		}
+	}
+	return nil
+}
+
+func (c *Config) validateCost() error {
+	if c.Cost.Budget != nil {
+		if c.Cost.Budget.MaxCostUSD < 0 {
+			return fmt.Errorf("cost.budget.max_cost_usd must be non-negative")
+		}
+		if c.Cost.Budget.MaxTokens < 0 {
+			return fmt.Errorf("cost.budget.max_tokens must be non-negative")
+		}
+	}
+	return nil
 }
 
 func validateGitHubSource(name string, src SourceConfig) error {
