@@ -1,0 +1,18 @@
+name: fix-pr-checks
+description: "Diagnose and fix failing CI checks on a PR"
+phases:
+  - name: diagnose
+    prompt_file: .xylem/prompts/fix-pr-checks/diagnose.md
+    max_turns: 30
+    noop:
+      match: XYLEM_NOOP
+  - name: fix
+    prompt_file: .xylem/prompts/fix-pr-checks/fix.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "cd cli && goimports -l . | grep -c . | xargs test 0 -eq && go vet ./... && go build ./cmd/xylem && go test ./..."
+      retries: 3
+  - name: push
+    prompt_file: .xylem/prompts/fix-pr-checks/push.md
+    max_turns: 10
