@@ -3,7 +3,12 @@ package observability
 import "testing"
 
 func TestSmoke_S1_VesselSpanAttributesIncludesIDSourceWorkflowRef(t *testing.T) {
-	attrs := VesselSpanAttributes("vessel-123", "github", "fix-bug", "refs/pull/42/head")
+	attrs := VesselSpanAttributes(VesselSpanData{
+		ID:       "vessel-123",
+		Source:   "github",
+		Workflow: "fix-bug",
+		Ref:      "refs/pull/42/head",
+	})
 	got := attrMap(attrs)
 
 	if len(attrs) != 4 {
@@ -24,7 +29,11 @@ func TestSmoke_S1_VesselSpanAttributesIncludesIDSourceWorkflowRef(t *testing.T) 
 }
 
 func TestSmoke_S2_VesselSpanAttributesOmitsEmptyRef(t *testing.T) {
-	attrs := VesselSpanAttributes("vessel-456", "manual", "implement-feature", "")
+	attrs := VesselSpanAttributes(VesselSpanData{
+		ID:       "vessel-456",
+		Source:   "manual",
+		Workflow: "implement-feature",
+	})
 	got := attrMap(attrs)
 
 	if len(attrs) != 3 {
@@ -36,7 +45,13 @@ func TestSmoke_S2_VesselSpanAttributesOmitsEmptyRef(t *testing.T) {
 }
 
 func TestSmoke_S3_PhaseSpanAttributesIncludesAllFive(t *testing.T) {
-	attrs := PhaseSpanAttributes("analyse", 0, "prompt", "anthropic", "claude-sonnet-4-20250514")
+	attrs := PhaseSpanAttributes(PhaseSpanData{
+		Name:     "analyse",
+		Index:    0,
+		Type:     "prompt",
+		Provider: "anthropic",
+		Model:    "claude-sonnet-4-20250514",
+	})
 	got := attrMap(attrs)
 
 	if len(attrs) != 5 {
@@ -58,7 +73,12 @@ func TestSmoke_S3_PhaseSpanAttributesIncludesAllFive(t *testing.T) {
 }
 
 func TestSmoke_S4_PhaseResultAttributesFormatsTokensAndCost(t *testing.T) {
-	attrs := PhaseResultAttributes(1200, 300, 0.0081, 4500)
+	attrs := PhaseResultAttributes(PhaseResultData{
+		InputTokensEst:  1200,
+		OutputTokensEst: 300,
+		CostUSDEst:      0.0081,
+		DurationMS:      4500,
+	})
 	got := attrMap(attrs)
 
 	if len(attrs) != 4 {
@@ -79,7 +99,11 @@ func TestSmoke_S4_PhaseResultAttributesFormatsTokensAndCost(t *testing.T) {
 }
 
 func TestSmoke_S5_GateSpanAttributesFormatsBooleanAndIntAsStrings(t *testing.T) {
-	attrs := GateSpanAttributes("command", true, 2)
+	attrs := GateSpanAttributes(GateSpanData{
+		Type:         "command",
+		Passed:       true,
+		RetryAttempt: 2,
+	})
 	got := attrMap(attrs)
 
 	if len(attrs) != 3 {
@@ -100,7 +124,7 @@ func TestSmoke_S5_GateSpanAttributesFormatsBooleanAndIntAsStrings(t *testing.T) 
 }
 
 func TestVesselSpanAttributesAllowsEmptyCoreFields(t *testing.T) {
-	attrs := VesselSpanAttributes("", "", "", "")
+	attrs := VesselSpanAttributes(VesselSpanData{})
 	got := attrMap(attrs)
 
 	if len(attrs) != 3 {
@@ -112,7 +136,12 @@ func TestVesselSpanAttributesAllowsEmptyCoreFields(t *testing.T) {
 }
 
 func TestPhaseResultAttributesFormatsNegativeDuration(t *testing.T) {
-	attrs := PhaseResultAttributes(1, 2, 3.5, -1)
+	attrs := PhaseResultAttributes(PhaseResultData{
+		InputTokensEst:  1,
+		OutputTokensEst: 2,
+		CostUSDEst:      3.5,
+		DurationMS:      -1,
+	})
 	got := attrMap(attrs)
 
 	if got["xylem.phase.duration_ms"] != "-1" {
