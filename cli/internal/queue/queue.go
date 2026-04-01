@@ -38,6 +38,7 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 		StateFailed:    true,
 		StateCancelled: true,
 		StateWaiting:   true, // label gate pauses vessel
+		StateTimedOut:  true, // hung vessel timeout
 	},
 	StateWaiting: { // label gate pause state
 		StateRunning:   true, // label gate passed, resume

@@ -2,13 +2,18 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log"
+	"os"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -21,6 +26,10 @@ import (
 // drainShutdownTimeout is how long the daemon waits for an in-flight drain to
 // finish after receiving a shutdown signal before returning anyway.
 const drainShutdownTimeout = 30 * time.Second
+
+// defaultStaleTimeout is the fallback timeout for considering a running vessel
+// stale when no explicit timeout is configured.
+const defaultStaleTimeout = 2 * time.Hour
 
 func newDaemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -36,6 +45,21 @@ func newDaemonCmd() *cobra.Command {
 func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	scanInterval, drainInterval := parseDaemonIntervals(cfg.Daemon)
 
+	// P0-3: Acquire singleton lock to prevent multiple daemons.
+	pidPath := filepath.Join(cfg.StateDir, "daemon.pid")
+	unlock, err := acquireDaemonLock(pidPath)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	// P0-2: Reconcile any vessels left in running state from a previous daemon.
+	var timeout time.Duration
+	if cfg.Timeout != "" {
+		timeout, _ = time.ParseDuration(cfg.Timeout)
+	}
+	reconcileStaleVessels(q, timeout)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -45,8 +69,15 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
 		return runDrain(ctx, cfg, q, wt)
 	}
+	check := func(ctx context.Context) {
+		cmdRunner := &realCmdRunner{}
+		r := runner.New(cfg, q, wt, cmdRunner)
+		r.Sources = buildSourceMap(cfg, q, cmdRunner)
+		r.CheckWaitingVessels(ctx)
+		r.CheckHungVessels(ctx)
+	}
 
-	return daemonLoop(ctx, q, scan, drain, scanInterval, drainInterval)
+	return daemonLoop(ctx, q, scan, drain, check, scanInterval, drainInterval)
 }
 
 func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
@@ -70,10 +101,14 @@ func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
 type scanFunc func(ctx context.Context) (scanner.ScanResult, error)
 type drainFunc func(ctx context.Context) (runner.DrainResult, error)
 
+// checkFunc runs periodic vessel health checks (waiting vessel label checks,
+// hung vessel timeouts). May be nil if no checks are needed.
+type checkFunc func(ctx context.Context)
+
 // daemonLoop is the core loop extracted for testability. It accepts an
 // externally-controlled context so tests can cancel it without signals,
-// and injectable scan/drain functions so tests can use stubs.
-func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, scanInterval, drainInterval time.Duration) error {
+// and injectable scan/drain/check functions so tests can use stubs.
+func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, check checkFunc, scanInterval, drainInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
@@ -111,6 +146,11 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 				lastScan = now
 				log.Printf("daemon: scan complete — added=%d skipped=%d", scanResult.Added, scanResult.Skipped)
 			}
+		}
+
+		// Run vessel health checks (waiting label gates, hung vessel timeouts)
+		if check != nil {
+			check(ctx)
 		}
 
 		if now.Sub(lastDrain) >= drainInterval {
@@ -175,4 +215,83 @@ func logTickSummary(q *queue.Queue) {
 	log.Printf("daemon: tick summary — pending=%d running=%d completed=%d failed=%d",
 		counts[queue.StatePending], counts[queue.StateRunning],
 		counts[queue.StateCompleted], counts[queue.StateFailed])
+}
+
+// reconcileStaleVessels transitions any running vessels that have exceeded the
+// given timeout to failed state. This cleans up orphaned vessels left behind
+// when a previous daemon was killed. If timeout is zero, defaultStaleTimeout
+// is used.
+func reconcileStaleVessels(q *queue.Queue, timeout time.Duration) {
+	if timeout == 0 {
+		timeout = defaultStaleTimeout
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		log.Printf("daemon: reconcile: failed to list vessels: %v", err)
+		return
+	}
+
+	now := time.Now()
+	for _, v := range vessels {
+		if v.State != queue.StateRunning {
+			continue
+		}
+		if v.StartedAt == nil {
+			// No start time recorded — treat as stale.
+			log.Printf("daemon: reconcile: vessel %s in running state with no start time, marking failed", v.ID)
+			if err := q.Update(v.ID, queue.StateFailed, "orphaned by daemon restart"); err != nil {
+				log.Printf("daemon: reconcile: failed to update vessel %s: %v", v.ID, err)
+			}
+			continue
+		}
+		if v.StartedAt.Add(timeout).Before(now) {
+			log.Printf("daemon: reconcile: vessel %s started at %s exceeded timeout %s, marking failed", v.ID, v.StartedAt.Format(time.RFC3339), timeout)
+			if err := q.Update(v.ID, queue.StateFailed, "orphaned by daemon restart"); err != nil {
+				log.Printf("daemon: reconcile: failed to update vessel %s: %v", v.ID, err)
+			}
+		}
+	}
+}
+
+// acquireDaemonLock tries to acquire an exclusive file lock on the given PID
+// file path. On success it writes the current PID and returns an unlock
+// function. On failure (another daemon holds the lock) it returns an error
+// that includes the PID of the existing daemon.
+func acquireDaemonLock(pidPath string) (unlock func(), err error) {
+	// Ensure the parent directory exists.
+	if mkErr := os.MkdirAll(filepath.Dir(pidPath), 0o755); mkErr != nil {
+		return nil, fmt.Errorf("daemon lock: create state dir: %w", mkErr)
+	}
+
+	fl := flock.New(pidPath)
+	locked, err := fl.TryLock()
+	if err != nil {
+		return nil, fmt.Errorf("daemon lock: %w", err)
+	}
+	if !locked {
+		// Try to read existing PID for a helpful error message.
+		if data, readErr := os.ReadFile(pidPath); readErr == nil {
+			if pid, parseErr := strconv.Atoi(string(data)); parseErr == nil {
+				return nil, fmt.Errorf("daemon already running (PID %d)", pid)
+			}
+		}
+		return nil, fmt.Errorf("daemon already running (could not read PID)")
+	}
+
+	// Write our PID to the file.
+	pid := os.Getpid()
+	if writeErr := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0o644); writeErr != nil {
+		fl.Unlock() //nolint:errcheck
+		return nil, fmt.Errorf("daemon lock: write PID: %w", writeErr)
+	}
+
+	log.Printf("daemon: acquired lock %s (PID %d)", pidPath, pid)
+
+	return func() {
+		if unlockErr := fl.Unlock(); unlockErr != nil {
+			log.Printf("daemon: failed to release lock: %v", unlockErr)
+		}
+		os.Remove(pidPath) //nolint:errcheck
+	}, nil
 }

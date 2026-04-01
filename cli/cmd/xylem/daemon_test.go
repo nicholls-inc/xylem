@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -28,7 +30,7 @@ func TestDaemonShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, noopDrain, time.Hour, time.Hour)
+	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, time.Hour, time.Hour)
 	if err != nil {
 		t.Fatalf("expected nil error on shutdown, got: %v", err)
 	}
@@ -90,7 +92,7 @@ func TestDaemonNonBlockingDrain(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := daemonLoop(ctx, q, noopScan, slowDrain, time.Hour, time.Millisecond)
+	err := daemonLoop(ctx, q, noopScan, slowDrain, nil, time.Hour, time.Millisecond)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -119,4 +121,188 @@ func TestLogTickSummary(t *testing.T) {
 
 	// logTickSummary should not panic on any queue state
 	logTickSummary(q)
+}
+
+func TestReconcileStaleVessels(t *testing.T) {
+	t.Run("stale running vessel transitions to failed", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		now := time.Now().UTC()
+		staleStart := now.Add(-3 * time.Hour)
+
+		// Enqueue then dequeue to move to running state (sets StartedAt).
+		q.Enqueue(queue.Vessel{ID: "stale-1", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
+		v, _ := q.Dequeue()
+		if v == nil {
+			t.Fatal("expected vessel from dequeue")
+		}
+		// Backdate StartedAt to make it stale.
+		v.StartedAt = &staleStart
+		q.UpdateVessel(*v) //nolint:errcheck
+
+		reconcileStaleVessels(q, 2*time.Hour)
+
+		updated, err := q.FindByID("stale-1")
+		if err != nil {
+			t.Fatalf("failed to find vessel: %v", err)
+		}
+		if updated.State != queue.StateFailed {
+			t.Errorf("expected state %s, got %s", queue.StateFailed, updated.State)
+		}
+		if updated.Error != "orphaned by daemon restart" {
+			t.Errorf("expected error 'orphaned by daemon restart', got %q", updated.Error)
+		}
+	})
+
+	t.Run("recent running vessel is not reconciled", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		now := time.Now().UTC()
+
+		q.Enqueue(queue.Vessel{ID: "recent-1", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
+		v, _ := q.Dequeue()
+		if v == nil {
+			t.Fatal("expected vessel from dequeue")
+		}
+		// StartedAt is set to now by Dequeue — well within the timeout.
+
+		reconcileStaleVessels(q, 2*time.Hour)
+
+		updated, err := q.FindByID("recent-1")
+		if err != nil {
+			t.Fatalf("failed to find vessel: %v", err)
+		}
+		if updated.State != queue.StateRunning {
+			t.Errorf("expected state %s, got %s", queue.StateRunning, updated.State)
+		}
+	})
+
+	t.Run("pending and completed vessels are not affected", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		now := time.Now().UTC()
+
+		q.Enqueue(queue.Vessel{ID: "pending-1", Source: "manual", State: queue.StatePending, CreatedAt: now})    //nolint:errcheck
+		q.Enqueue(queue.Vessel{ID: "complete-1", Source: "manual", State: queue.StateCompleted, CreatedAt: now}) //nolint:errcheck
+
+		reconcileStaleVessels(q, 1*time.Millisecond)
+
+		pending, _ := q.FindByID("pending-1")
+		if pending.State != queue.StatePending {
+			t.Errorf("expected pending-1 to remain pending, got %s", pending.State)
+		}
+		complete, _ := q.FindByID("complete-1")
+		if complete.State != queue.StateCompleted {
+			t.Errorf("expected complete-1 to remain completed, got %s", complete.State)
+		}
+	})
+
+	t.Run("zero timeout uses default", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		now := time.Now().UTC()
+		// Started 1 hour ago — less than the 2-hour default.
+		recentStart := now.Add(-1 * time.Hour)
+
+		q.Enqueue(queue.Vessel{ID: "v1", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
+		v, _ := q.Dequeue()
+		v.StartedAt = &recentStart
+		q.UpdateVessel(*v) //nolint:errcheck
+
+		reconcileStaleVessels(q, 0) // should use defaultStaleTimeout (2h)
+
+		updated, _ := q.FindByID("v1")
+		if updated.State != queue.StateRunning {
+			t.Errorf("expected vessel to remain running with default timeout, got %s", updated.State)
+		}
+	})
+
+	t.Run("running vessel with nil StartedAt is reconciled", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		now := time.Now().UTC()
+
+		q.Enqueue(queue.Vessel{ID: "nil-start", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
+		v, _ := q.Dequeue()
+		// Clear StartedAt to simulate a legacy/corrupt entry.
+		v.StartedAt = nil
+		q.UpdateVessel(*v) //nolint:errcheck
+
+		reconcileStaleVessels(q, 2*time.Hour)
+
+		updated, _ := q.FindByID("nil-start")
+		if updated.State != queue.StateFailed {
+			t.Errorf("expected state failed for nil StartedAt, got %s", updated.State)
+		}
+	})
+}
+
+func TestAcquireDaemonLock(t *testing.T) {
+	t.Run("acquires lock successfully", func(t *testing.T) {
+		dir := t.TempDir()
+		pidPath := filepath.Join(dir, "daemon.pid")
+
+		unlock, err := acquireDaemonLock(pidPath)
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+		defer unlock()
+
+		// PID file should exist and contain our PID.
+		data, err := os.ReadFile(pidPath)
+		if err != nil {
+			t.Fatalf("failed to read PID file: %v", err)
+		}
+		if len(data) == 0 {
+			t.Fatal("PID file is empty")
+		}
+	})
+
+	t.Run("second lock fails with already running error", func(t *testing.T) {
+		dir := t.TempDir()
+		pidPath := filepath.Join(dir, "daemon.pid")
+
+		unlock1, err := acquireDaemonLock(pidPath)
+		if err != nil {
+			t.Fatalf("first lock failed: %v", err)
+		}
+		defer unlock1()
+
+		_, err = acquireDaemonLock(pidPath)
+		if err == nil {
+			t.Fatal("expected error from second lock, got nil")
+		}
+		if !strings.Contains(err.Error(), "daemon already running") {
+			t.Errorf("expected 'daemon already running' error, got: %v", err)
+		}
+	})
+
+	t.Run("lock is released on unlock", func(t *testing.T) {
+		dir := t.TempDir()
+		pidPath := filepath.Join(dir, "daemon.pid")
+
+		unlock1, err := acquireDaemonLock(pidPath)
+		if err != nil {
+			t.Fatalf("first lock failed: %v", err)
+		}
+		unlock1()
+
+		// Should be able to acquire again after unlock.
+		unlock2, err := acquireDaemonLock(pidPath)
+		if err != nil {
+			t.Fatalf("second lock after unlock failed: %v", err)
+		}
+		defer unlock2()
+	})
+
+	t.Run("creates parent directory if needed", func(t *testing.T) {
+		dir := t.TempDir()
+		pidPath := filepath.Join(dir, "nested", "subdir", "daemon.pid")
+
+		unlock, err := acquireDaemonLock(pidPath)
+		if err != nil {
+			t.Fatalf("expected no error, got: %v", err)
+		}
+		defer unlock()
+	})
 }

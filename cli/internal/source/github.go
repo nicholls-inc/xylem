@@ -80,7 +80,8 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					g.Queue.HasRef(issue.URL) ||
 					g.hasMatchingFailedFingerprint(issue.URL, fingerprint) ||
 					g.hasBranch(ctx, issue.Number) ||
-					g.hasOpenPR(ctx, issue.Number) {
+					g.hasOpenPR(ctx, issue.Number) ||
+					g.hasMergedPR(ctx, issue.Number) {
 					continue
 				}
 				seen[issue.Number] = true
@@ -246,6 +247,35 @@ func (g *GitHub) hasOpenPR(ctx context.Context, issueNum int) bool {
 			"--repo", g.Repo,
 			"--search", search,
 			"--state", "open",
+			"--json", "number,headRefName",
+			"--limit", "5")
+		if err != nil {
+			continue
+		}
+		var prs []struct {
+			Number      int    `json:"number"`
+			HeadRefName string `json:"headRefName"`
+		}
+		if err := json.Unmarshal(out, &prs); err != nil {
+			continue
+		}
+		branchPrefix := fmt.Sprintf("%s/issue-%d-", prefix, issueNum)
+		for _, pr := range prs {
+			if strings.HasPrefix(pr.HeadRefName, branchPrefix) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (g *GitHub) hasMergedPR(ctx context.Context, issueNum int) bool {
+	for _, prefix := range branchPrefixes {
+		search := fmt.Sprintf("head:%s/issue-%d-", prefix, issueNum)
+		out, err := g.CmdRunner.Run(ctx, "gh", "pr", "list",
+			"--repo", g.Repo,
+			"--search", search,
+			"--state", "merged",
 			"--json", "number,headRefName",
 			"--limit", "5")
 		if err != nil {

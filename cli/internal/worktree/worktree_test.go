@@ -3,9 +3,11 @@ package worktree
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -870,5 +872,227 @@ func TestCreateStaleRemoveFails(t *testing.T) {
 		if len(call) >= 3 && call[0] == "git" && call[1] == "worktree" && call[2] == "add" {
 			t.Error("git worktree add should NOT be called when stale worktree remove fails")
 		}
+	}
+}
+
+// --- retryGitCmd tests ---
+
+// exitError is a test double that satisfies the exitCoder interface.
+type exitError struct {
+	code int
+	msg  string
+}
+
+func (e *exitError) Error() string { return e.msg }
+func (e *exitError) ExitCode() int { return e.code }
+
+// sequenceRunner returns different results for successive calls to the same command.
+// It uses a mutex to be safe for concurrent use, though tests here are sequential.
+type sequenceRunner struct {
+	mu       sync.Mutex
+	calls    [][]string
+	sequence map[string][]runResult
+	counters map[string]int
+}
+
+type runResult struct {
+	out []byte
+	err error
+}
+
+func newSequenceRunner() *sequenceRunner {
+	return &sequenceRunner{
+		sequence: make(map[string][]runResult),
+		counters: make(map[string]int),
+	}
+}
+
+func (s *sequenceRunner) addResult(key string, out []byte, err error) {
+	s.sequence[key] = append(s.sequence[key], runResult{out: out, err: err})
+}
+
+func (s *sequenceRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	parts := append([]string{name}, args...)
+	s.calls = append(s.calls, parts)
+	key := strings.Join(parts, " ")
+	results, ok := s.sequence[key]
+	if !ok {
+		return []byte{}, nil
+	}
+	idx := s.counters[key]
+	s.counters[key]++
+	if idx >= len(results) {
+		// Return last result for any further calls
+		r := results[len(results)-1]
+		return r.out, r.err
+	}
+	return results[idx].out, results[idx].err
+}
+
+func (s *sequenceRunner) callCount(name string, args ...string) int {
+	target := append([]string{name}, args...)
+	count := 0
+	for _, call := range s.calls {
+		if len(call) != len(target) {
+			continue
+		}
+		match := true
+		for i := range call {
+			if call[i] != target[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			count++
+		}
+	}
+	return count
+}
+
+func TestRetryGitCmdSucceedsOnSecondAttempt(t *testing.T) {
+	s := newSequenceRunner()
+	// First call fails with exit code 128 (index lock), second succeeds
+	s.addResult("git fetch origin main", nil, &exitError{code: 128, msg: "fatal: Unable to create .git/index.lock"})
+	s.addResult("git fetch origin main", []byte("ok"), nil)
+
+	out, err := retryGitCmd(context.Background(), s, 3, "fetch", "origin", "main")
+	if err != nil {
+		t.Fatalf("expected success on retry, got: %v", err)
+	}
+	if string(out) != "ok" {
+		t.Errorf("expected output 'ok', got %q", string(out))
+	}
+	if got := s.callCount("git", "fetch", "origin", "main"); got != 2 {
+		t.Errorf("expected 2 calls, got %d", got)
+	}
+}
+
+func TestRetryGitCmdRetriesExitCode255(t *testing.T) {
+	s := newSequenceRunner()
+	// First call fails with exit code 255, second succeeds
+	s.addResult("git worktree add path -B br origin/main", nil, &exitError{code: 255, msg: "generic error"})
+	s.addResult("git worktree add path -B br origin/main", []byte("done"), nil)
+
+	out, err := retryGitCmd(context.Background(), s, 3, "worktree", "add", "path", "-B", "br", "origin/main")
+	if err != nil {
+		t.Fatalf("expected success on retry, got: %v", err)
+	}
+	if string(out) != "done" {
+		t.Errorf("expected output 'done', got %q", string(out))
+	}
+	if got := s.callCount("git", "worktree", "add", "path", "-B", "br", "origin/main"); got != 2 {
+		t.Errorf("expected 2 calls, got %d", got)
+	}
+}
+
+func TestRetryGitCmdRetriesExitCode1(t *testing.T) {
+	s := newSequenceRunner()
+	s.addResult("git fetch origin main", nil, &exitError{code: 1, msg: "network error"})
+	s.addResult("git fetch origin main", []byte("ok"), nil)
+
+	_, err := retryGitCmd(context.Background(), s, 3, "fetch", "origin", "main")
+	if err != nil {
+		t.Fatalf("expected success on retry, got: %v", err)
+	}
+	if got := s.callCount("git", "fetch", "origin", "main"); got != 2 {
+		t.Errorf("expected 2 calls, got %d", got)
+	}
+}
+
+func TestRetryGitCmdDoesNotRetryNonRetryableError(t *testing.T) {
+	s := newSequenceRunner()
+	// A plain error (not an exitCoder) should not be retried
+	s.addResult("git fetch origin main", nil, errors.New("invalid branch name"))
+
+	_, err := retryGitCmd(context.Background(), s, 3, "fetch", "origin", "main")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if got := s.callCount("git", "fetch", "origin", "main"); got != 1 {
+		t.Errorf("expected 1 call (no retry for non-retryable error), got %d", got)
+	}
+}
+
+func TestRetryGitCmdDoesNotRetryOnContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // cancel immediately
+
+	s := newSequenceRunner()
+	s.addResult("git fetch origin main", nil, &exitError{code: 128, msg: "index lock"})
+	// Second result should never be reached
+	s.addResult("git fetch origin main", []byte("ok"), nil)
+
+	_, err := retryGitCmd(ctx, s, 3, "fetch", "origin", "main")
+	if err == nil {
+		t.Fatal("expected error from cancelled context")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Errorf("expected context.Canceled, got: %v", err)
+	}
+	// Should have attempted once, then hit context cancellation during backoff
+	if got := s.callCount("git", "fetch", "origin", "main"); got != 1 {
+		t.Errorf("expected 1 call before context cancellation, got %d", got)
+	}
+}
+
+func TestRetryGitCmdGivesUpAfterMaxAttempts(t *testing.T) {
+	s := newSequenceRunner()
+	// All 3 attempts fail with exit code 128
+	s.addResult("git fetch origin main", nil, &exitError{code: 128, msg: "index lock attempt 1"})
+	s.addResult("git fetch origin main", nil, &exitError{code: 128, msg: "index lock attempt 2"})
+	s.addResult("git fetch origin main", nil, &exitError{code: 128, msg: "index lock attempt 3"})
+
+	_, err := retryGitCmd(context.Background(), s, 3, "fetch", "origin", "main")
+	if err == nil {
+		t.Fatal("expected error after all attempts exhausted")
+	}
+	if err.Error() != "index lock attempt 3" {
+		t.Errorf("expected last error, got: %v", err)
+	}
+	if got := s.callCount("git", "fetch", "origin", "main"); got != 3 {
+		t.Errorf("expected 3 calls (max attempts), got %d", got)
+	}
+}
+
+func TestRetryGitCmdSucceedsFirstAttempt(t *testing.T) {
+	s := newSequenceRunner()
+	s.addResult("git fetch origin main", []byte("ok"), nil)
+
+	out, err := retryGitCmd(context.Background(), s, 3, "fetch", "origin", "main")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if string(out) != "ok" {
+		t.Errorf("expected 'ok', got %q", string(out))
+	}
+	if got := s.callCount("git", "fetch", "origin", "main"); got != 1 {
+		t.Errorf("expected 1 call on first-attempt success, got %d", got)
+	}
+}
+
+func TestIsRetryableGitError(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		retryable bool
+	}{
+		{"exit code 1", &exitError{code: 1, msg: "error"}, true},
+		{"exit code 128", &exitError{code: 128, msg: "index lock"}, true},
+		{"exit code 255", &exitError{code: 255, msg: "generic"}, true},
+		{"exit code 0", &exitError{code: 0, msg: "success?"}, false},
+		{"exit code 2", &exitError{code: 2, msg: "usage error"}, false},
+		{"plain error", errors.New("plain"), false},
+		{"wrapped exit error", fmt.Errorf("wrap: %w", &exitError{code: 128, msg: "lock"}), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isRetryableGitError(tt.err)
+			if got != tt.retryable {
+				t.Errorf("isRetryableGitError(%v) = %v, want %v", tt.err, got, tt.retryable)
+			}
+		})
 	}
 }

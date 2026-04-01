@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
@@ -2770,5 +2771,269 @@ func TestDrainOrchestratedParallelFailureNoRace(t *testing.T) {
 	}
 	if result.Failed != 1 {
 		t.Errorf("expected 1 failed vessel, got failed=%d completed=%d", result.Failed, result.Completed)
+	}
+}
+
+// --- P1-2: Command phase template validation ---
+
+func TestValidateCommandRender_UnresolvedTemplate(t *testing.T) {
+	err := validateCommandRender("merge", "gh pr merge {{.Issue.Number}} --repo owner/repo")
+	if err == nil {
+		t.Fatal("expected error for unresolved template variable, got nil")
+	}
+	if !strings.Contains(err.Error(), "unresolved template variable") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "merge") {
+		t.Errorf("expected phase name in error, got: %v", err)
+	}
+}
+
+func TestValidateCommandRender_Resolved(t *testing.T) {
+	err := validateCommandRender("merge", "gh pr merge 42 --repo owner/repo")
+	if err != nil {
+		t.Fatalf("unexpected error for resolved command: %v", err)
+	}
+}
+
+func TestValidateIssueDataForWorkflow_CommandPhaseZeroNumber(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 0}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{Name: "merge", Type: "command", Run: "gh pr merge {{.Issue.Number}} --repo owner/repo"},
+		},
+	}
+	err := validateIssueDataForWorkflow(vessel, data, wf)
+	if err == nil {
+		t.Fatal("expected error for command phase with zero issue number, got nil")
+	}
+	if !strings.Contains(err.Error(), "Number is 0") {
+		t.Errorf("unexpected error message: %v", err)
+	}
+	if !strings.Contains(err.Error(), "merge") {
+		t.Errorf("expected phase name in error: %v", err)
+	}
+}
+
+func TestValidateIssueDataForWorkflow_CommandPhaseValidNumber(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 42}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{Name: "merge", Type: "command", Run: "gh pr merge {{.Issue.Number}} --repo owner/repo"},
+		},
+	}
+	if err := validateIssueDataForWorkflow(vessel, data, wf); err != nil {
+		t.Fatalf("unexpected error for valid issue number: %v", err)
+	}
+}
+
+func TestValidateIssueDataForWorkflow_NonCommandPhase(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 0}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{Name: "analyze", Type: "", Run: ""},
+		},
+	}
+	if err := validateIssueDataForWorkflow(vessel, data, wf); err != nil {
+		t.Fatalf("non-command phase should not trigger validation: %v", err)
+	}
+}
+
+func TestValidateIssueDataForWorkflow_CommandPhaseWithoutIssueRef(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 0}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{Name: "build", Type: "command", Run: "make build"},
+		},
+	}
+	if err := validateIssueDataForWorkflow(vessel, data, wf); err != nil {
+		t.Fatalf("command without .Issue. reference should not trigger: %v", err)
+	}
+}
+
+func TestValidateIssueDataForWorkflow_NilWorkflow(t *testing.T) {
+	vessel := queue.Vessel{ID: "issue-1", Source: "github-issue"}
+	data := phase.IssueData{Number: 0}
+	if err := validateIssueDataForWorkflow(vessel, data, nil); err != nil {
+		t.Fatalf("nil workflow should not trigger: %v", err)
+	}
+}
+
+func TestDrainCommandPhaseTemplateValidation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	// Command phase using {{.Issue.Number}} — the mock won't fetch real data,
+	// so Number will be 0 and the issue data validation should catch it.
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "merge", phaseType: "command", run: "gh pr merge {{.Issue.Number}} --repo owner/repo"},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Should fail because issue data Number is 0 (mock doesn't fetch real data)
+	if result.Failed != 1 {
+		t.Errorf("expected 1 failed, got failed=%d completed=%d", result.Failed, result.Completed)
+	}
+
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateFailed {
+		t.Errorf("expected vessel failed, got %s", vessels[0].State)
+	}
+	if !strings.Contains(vessels[0].Error, "Number is 0") {
+		t.Errorf("expected error about zero issue number, got: %s", vessels[0].Error)
+	}
+}
+
+// --- P1-3: Hung vessel timeout ---
+
+func TestCheckHungVessels_TimesOut(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1s" // very short timeout
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	// Enqueue and dequeue to get a running vessel
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "hung-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue() // transitions to running, sets StartedAt
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+	}
+
+	// Backdate StartedAt to simulate a hung vessel
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	wt := &mockWorktree{}
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, wt, cmdRunner)
+
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].State != queue.StateTimedOut {
+		t.Errorf("expected vessel timed_out, got %s", vessels[0].State)
+	}
+	if !strings.Contains(vessels[0].Error, "vessel timed out after") {
+		t.Errorf("expected timeout error message, got: %s", vessels[0].Error)
+	}
+}
+
+func TestCheckHungVessels_NotTimedOut(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1h" // long timeout
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "ok-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+	}
+
+	wt := &mockWorktree{}
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, wt, cmdRunner)
+
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateRunning {
+		t.Errorf("expected vessel still running, got %s", vessels[0].State)
+	}
+}
+
+func TestCheckHungVessels_CleansUpWorktree(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1s"
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:           "hung-wt-1",
+		Source:       "manual",
+		State:        queue.StatePending,
+		CreatedAt:    now,
+		WorktreePath: "/tmp/some-worktree",
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+	}
+	// Preserve worktree path after dequeue
+	vessel.WorktreePath = "/tmp/some-worktree"
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	wt := &mockWorktree{}
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, wt, cmdRunner)
+
+	r.CheckHungVessels(context.Background())
+
+	wt.mu.Lock()
+	defer wt.mu.Unlock()
+	if !wt.removeCalled {
+		t.Error("expected worktree cleanup for timed out vessel")
+	}
+	if wt.removePath != "/tmp/some-worktree" {
+		t.Errorf("expected worktree path /tmp/some-worktree, got %s", wt.removePath)
 	}
 }

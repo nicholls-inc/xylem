@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // CommandRunner abstracts shell command execution for testing.
@@ -104,7 +106,7 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 
 	// Fetch the default branch (only if origin exists)
 	if hasOrigin {
-		if _, err := m.Runner.Run(ctx, "git", "fetch", "origin", defaultBranch); err != nil {
+		if _, err := retryGitCmd(ctx, m.Runner, 3, "fetch", "origin", defaultBranch); err != nil {
 			return "", fmt.Errorf("git fetch origin %s: %w", defaultBranch, err)
 		}
 	}
@@ -125,7 +127,7 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 		}
 	}
 
-	if _, err := m.Runner.Run(ctx, "git", "worktree", "add", worktreePath, "-B", branchName, startPoint); err != nil {
+	if _, err := retryGitCmd(ctx, m.Runner, 3, "worktree", "add", worktreePath, "-B", branchName, startPoint); err != nil {
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 
@@ -141,6 +143,50 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 func (m *Manager) hasRemote(ctx context.Context, name string) bool {
 	_, err := m.Runner.Run(ctx, "git", "remote", "get-url", name)
 	return err == nil
+}
+
+// retryGitCmd runs a git command with exponential backoff on transient errors.
+// It retries up to maxAttempts times, waiting 1s, 2s, 4s, ... between attempts.
+// Only errors with retryable exit codes (1, 128, 255) are retried.
+func retryGitCmd(ctx context.Context, runner CommandRunner, maxAttempts int, args ...string) ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		out, err := runner.Run(ctx, "git", args...)
+		if err == nil {
+			return out, nil
+		}
+		lastErr = err
+		if attempt < maxAttempts && isRetryableGitError(err) {
+			backoff := time.Duration(1<<(attempt-1)) * time.Second
+			log.Printf("worktree: retrying git %s (attempt %d/%d after %v): %v",
+				args[0], attempt, maxAttempts, backoff, err)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff):
+			}
+			continue
+		}
+		break
+	}
+	return nil, lastErr
+}
+
+// exitCoder is satisfied by exec.ExitError and test doubles.
+type exitCoder interface {
+	ExitCode() int
+}
+
+// isRetryableGitError returns true if the error indicates a transient git failure
+// that may succeed on retry (index lock contention, network errors, etc.).
+func isRetryableGitError(err error) bool {
+	if ec, ok := err.(exitCoder); ok {
+		switch ec.ExitCode() {
+		case 1, 128, 255:
+			return true
+		}
+	}
+	return false
 }
 
 // copyClaudeConfig copies selected .claude/ files from the repo root into the worktree.

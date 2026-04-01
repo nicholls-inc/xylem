@@ -5,52 +5,61 @@ sources:
   bugs:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
     tasks:
       fix-bugs:
         labels: [bug, ready-for-work]
         workflow: fix-bug
+        status_labels:
+          failed: xylem-failed
 
   features:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
     tasks:
       implement-features:
         labels: [enhancement, ready-for-work]
         workflow: implement-feature
+        status_labels:
+          failed: xylem-failed
 
   triage:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, needs-refinement]
+    exclude: [wontfix, duplicate, in-progress, no-bot, needs-refinement, xylem-failed]
     llm: claude
     model: claude-haiku-4-5
     tasks:
       triage-issues:
         labels: [needs-triage]
         workflow: triage
+        status_labels:
+          failed: xylem-failed
 
   refinement:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot]
+    exclude: [wontfix, duplicate, in-progress, no-bot, xylem-failed]
     tasks:
       refine-issues:
         labels: [needs-refinement]
         workflow: refine-issue
+        status_labels:
+          failed: xylem-failed
 
   # Harness implementation issues
   harness-impl:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, blocked]
+    exclude: [wontfix, duplicate, in-progress, no-bot, blocked, xylem-failed]
     tasks:
       implement-harness-steps:
         labels: [harness-impl, ready-for-work]
         workflow: implement-harness
         status_labels:
           running: in-progress
+          failed: xylem-failed
 
   # PR review + CI failure monitoring for harness PRs
   # NOTE: review_submitted and checks_failed fire for ALL open PRs.

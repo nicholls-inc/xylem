@@ -47,8 +47,37 @@ phases:
       type: command
       run: "cd cli && go test ./..."
       retries: 2
-  - name: pr
-    prompt_file: .xylem/prompts/implement-harness/pr.md
-    max_turns: 30
+  - name: pr_draft
+    prompt_file: .xylem/prompts/implement-harness/pr_draft.md
+    max_turns: 15
     llm: copilot
     model: gpt-5.4
+  - name: pr_create
+    type: command
+    run: |
+      set -euo pipefail
+
+      DRAFT_FILE="pr_draft.json"
+      if [ ! -f "$DRAFT_FILE" ]; then
+        echo "ERROR: pr_draft.json not found in worktree root"
+        exit 1
+      fi
+
+      TITLE=$(jq -r '.title' "$DRAFT_FILE")
+      BODY=$(jq -r '.body' "$DRAFT_FILE")
+
+      if [ -z "$TITLE" ] || [ "$TITLE" = "null" ]; then
+        echo "ERROR: title is missing or null in pr_draft.json"
+        exit 1
+      fi
+
+      # Append Fixes #N deterministically so GitHub auto-closes the issue
+      BODY="${BODY}
+
+      Fixes #{{.Issue.Number}}"
+
+      gh pr create \
+        --repo nicholls-inc/xylem \
+        --title "$TITLE" \
+        --body "$BODY" \
+        --label "harness-impl"

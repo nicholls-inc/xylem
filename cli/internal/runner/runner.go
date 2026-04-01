@@ -237,6 +237,17 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 	// Fetch issue data (GitHub source only)
 	issueData := r.fetchIssueData(ctx, &vessel)
 
+	// Validate issue data when the workflow has command phases that reference
+	// issue/PR template variables. Without valid issue data, templates like
+	// {{.Issue.Number}} render to "0" causing confusing downstream failures.
+	if err := validateIssueDataForWorkflow(vessel, issueData, sk); err != nil {
+		r.failVessel(vessel.ID, err.Error())
+		if err := src.OnFail(ctx, vessel); err != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
+		return "failed"
+	}
+
 	// Read harness file
 	harnessContent := r.readHarness()
 
@@ -298,6 +309,13 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				rendered, err := phase.RenderPrompt(p.Run, td)
 				if err != nil {
 					r.failVessel(vessel.ID, fmt.Sprintf("render command for phase %s: %v", p.Name, err))
+					if err := src.OnFail(ctx, vessel); err != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+					}
+					return "failed"
+				}
+				if err := validateCommandRender(p.Name, rendered); err != nil {
+					r.failVessel(vessel.ID, err.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -778,6 +796,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
 			}
+			if err := validateCommandRender(p.Name, rendered); err != nil {
+				r.failVessel(vessel.ID, err.Error())
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+			}
 			if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write command file: %v", wErr)
 			}
@@ -1102,6 +1127,73 @@ func vesselLabel(v queue.Vessel) string {
 		}
 	}
 	return fmt.Sprintf("[%s] ", v.ID)
+}
+
+// validateCommandRender checks the rendered command string for unresolved
+// template variables (leftover "{{" sequences). This catches cases where
+// template data has zero values that cause confusing downstream failures.
+func validateCommandRender(phaseName, rendered string) error {
+	if strings.Contains(rendered, "{{") {
+		return fmt.Errorf("command phase %s: unresolved template variable in: %s", phaseName, rendered)
+	}
+	return nil
+}
+
+// validateIssueDataForWorkflow returns an error when the workflow contains
+// command phases that reference .Issue template variables but the issue data
+// has a zero Number. This prevents commands like `gh pr merge 0` from
+// executing with confusing results.
+func validateIssueDataForWorkflow(vessel queue.Vessel, data phase.IssueData, wf *workflow.Workflow) error {
+	if wf == nil {
+		return nil
+	}
+	for _, p := range wf.Phases {
+		if p.Type != "command" {
+			continue
+		}
+		if strings.Contains(p.Run, ".Issue.") && data.Number == 0 {
+			return fmt.Errorf("command phase %s references .Issue but issue data is unavailable for vessel %s (Number is 0)", p.Name, vessel.ID)
+		}
+	}
+	return nil
+}
+
+// CheckHungVessels checks all running vessels for timeout. Vessels that have
+// been running longer than the configured timeout are transitioned to timed_out
+// and their worktrees are cleaned up.
+func (r *Runner) CheckHungVessels(ctx context.Context) {
+	timeout, err := time.ParseDuration(r.Config.Timeout)
+	if err != nil {
+		log.Printf("warn: parse timeout for hung vessel check: %v", err)
+		return
+	}
+
+	running, err := r.Queue.ListByState(queue.StateRunning)
+	if err != nil {
+		log.Printf("warn: list running vessels: %v", err)
+		return
+	}
+
+	for _, vessel := range running {
+		if vessel.StartedAt == nil {
+			continue
+		}
+		elapsed := time.Since(*vessel.StartedAt)
+		if elapsed <= timeout {
+			continue
+		}
+
+		errMsg := fmt.Sprintf("vessel timed out after %s", elapsed.Truncate(time.Second))
+		log.Printf("warn: %s for vessel %s", errMsg, vessel.ID)
+
+		if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, errMsg); updateErr != nil {
+			log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
+			continue
+		}
+
+		// Clean up worktree (best-effort)
+		r.removeWorktree(vessel.WorktreePath, vessel.ID)
+	}
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
