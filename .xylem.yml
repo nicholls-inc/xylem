@@ -1,0 +1,118 @@
+# xylem configuration
+# Docs: https://github.com/nicholls-inc/claude-code-marketplace/tree/main/xylem
+
+sources:
+  bugs:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      fix-bugs:
+        labels: [bug, ready-for-work]
+        workflow: fix-bug
+
+  features:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      implement-features:
+        labels: [enhancement, ready-for-work]
+        workflow: implement-feature
+
+  triage:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot, needs-refinement]
+    llm: claude
+    model: claude-haiku-4-5
+    tasks:
+      triage-issues:
+        labels: [needs-triage]
+        workflow: triage
+
+  refinement:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      refine-issues:
+        labels: [needs-refinement]
+        workflow: refine-issue
+
+  # Harness implementation issues
+  harness-impl:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot, blocked]
+    tasks:
+      implement-harness-steps:
+        labels: [harness-impl, ready-for-work]
+        workflow: implement-harness
+        status_labels:
+          running: in-progress
+
+  # PR review + CI failure monitoring for harness PRs
+  # NOTE: review_submitted and checks_failed fire for ALL open PRs.
+  # Each workflow's analyze phase checks for harness-impl label and
+  # exits via XYLEM_NOOP if absent.
+  harness-pr-lifecycle:
+    type: github-pr-events
+    repo: nicholls-inc/xylem
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      respond-reviews:
+        workflow: respond-to-pr-review
+        on:
+          review_submitted: true
+      fix-checks:
+        workflow: fix-pr-checks
+        on:
+          checks_failed: true
+
+  # Merge-ready harness PRs
+  harness-merge:
+    type: github-pr
+    repo: nicholls-inc/xylem
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      merge-ready:
+        labels: [ready-to-merge, harness-impl]
+        workflow: merge-pr
+        status_labels:
+          running: pr-vessel-active
+
+  # Post-merge wave dependency unblocking
+  # NOTE: github-merge has no label filtering. The unblock-wave prompt
+  # guards with XYLEM_NOOP for non-harness merges.
+  harness-post-merge:
+    type: github-merge
+    repo: nicholls-inc/xylem
+    tasks:
+      unblock-deps:
+        workflow: unblock-wave
+
+concurrency: 3
+max_turns: 80
+timeout: "45m"
+state_dir: ".xylem"
+
+# llm selects the global default LLM provider: "claude" (default) or "copilot"
+llm: claude
+model: claude-sonnet-4-6
+
+claude:
+  command: "claude"
+  flags: "--dangerously-skip-permissions"
+  # env:
+  #   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+  # allowed_tools:
+  #   - "Bash(gh issue view *)"
+  #   - "Bash(gh pr create *)"
+  #   - "WebFetch"
+
+copilot:
+  command: "copilot"
+  flags: "--allow-all --autopilot"
+  default_model: "GPT-5.4"
+  # env: {}
