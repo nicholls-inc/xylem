@@ -1,0 +1,18 @@
+name: respond-to-pr-review
+description: "Respond to PR review comments: fix code or explain and resolve"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/respond-to-pr-review/analyze.md
+    max_turns: 20
+    noop:
+      match: XYLEM_NOOP
+  - name: respond
+    prompt_file: .xylem/prompts/respond-to-pr-review/respond.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
+      retries: 2
+  - name: push
+    prompt_file: .xylem/prompts/respond-to-pr-review/push.md
+    max_turns: 10
