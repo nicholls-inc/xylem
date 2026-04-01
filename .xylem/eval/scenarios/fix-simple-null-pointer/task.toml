@@ -1,0 +1,12 @@
+[task]
+id = "fix-simple-null-pointer"
+version = "1"
+
+[task.environment]
+timeout_seconds = 600
+
+[task.metadata]
+category = "workflow-execution"
+tags = ["fix-bug", "gate-verification", "go"]
+difficulty = "easy"
+canary = "CANARY-XYLEM-EVAL-9a3f"

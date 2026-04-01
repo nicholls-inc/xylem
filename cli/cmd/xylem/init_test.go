@@ -1,12 +1,20 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	toml "github.com/pelletier/go-toml/v2"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestInitCreatesConfigAndStateDir(t *testing.T) {
@@ -381,4 +389,483 @@ func TestInitCobraBypassesPersistentPreRunE(t *testing.T) {
 			t.Fatalf("init should bypass PersistentPreRunE: %v", err)
 		}
 	})
+}
+
+type smokeHarborConfig struct {
+	Agent             string  `yaml:"agent"`
+	Model             string  `yaml:"model"`
+	Path              string  `yaml:"path"`
+	NAttempts         int     `yaml:"n_attempts"`
+	NConcurrent       int     `yaml:"n_concurrent"`
+	TimeoutMultiplier float64 `yaml:"timeout_multiplier"`
+}
+
+type smokeTaskFile struct {
+	Task struct {
+		ID          string `toml:"id"`
+		Version     string `toml:"version"`
+		Environment struct {
+			TimeoutSeconds int `toml:"timeout_seconds"`
+		} `toml:"environment"`
+		Metadata struct {
+			Category   string   `toml:"category"`
+			Tags       []string `toml:"tags"`
+			Difficulty string   `toml:"difficulty"`
+			Canary     string   `toml:"canary"`
+		} `toml:"metadata"`
+	} `toml:"task"`
+}
+
+type smokeRubricFile struct {
+	Rubric struct {
+		Name        string `toml:"name"`
+		Description string `toml:"description"`
+		Criteria    []struct {
+			Name        string  `toml:"name"`
+			Description string  `toml:"description"`
+			Weight      float64 `toml:"weight"`
+		} `toml:"criteria"`
+	} `toml:"rubric"`
+}
+
+func repoRoot(t *testing.T) string {
+	t.Helper()
+
+	_, file, _, ok := runtime.Caller(0)
+	require.True(t, ok, "runtime.Caller should resolve init_test.go")
+
+	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", ".."))
+}
+
+func repoPath(t *testing.T, elems ...string) string {
+	t.Helper()
+
+	parts := append([]string{repoRoot(t)}, elems...)
+	return filepath.Join(parts...)
+}
+
+func readRepoFile(t *testing.T, elems ...string) []byte {
+	t.Helper()
+
+	path := repoPath(t, elems...)
+	data, err := os.ReadFile(path)
+	require.NoError(t, err, "read %s", path)
+	return data
+}
+
+func readRepoText(t *testing.T, elems ...string) string {
+	t.Helper()
+	return string(readRepoFile(t, elems...))
+}
+
+func evalScenarioDirs(t *testing.T) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(repoPath(t, ".xylem", "eval", "scenarios"))
+	require.NoError(t, err)
+
+	var dirs []string
+	for _, entry := range entries {
+		if entry.IsDir() {
+			dirs = append(dirs, entry.Name())
+		}
+	}
+	sort.Strings(dirs)
+	return dirs
+}
+
+func firstEvalScenario(t *testing.T) string {
+	t.Helper()
+
+	dirs := evalScenarioDirs(t)
+	require.NotEmpty(t, dirs, "expected at least one eval scenario directory")
+	return dirs[0]
+}
+
+func loadHarborConfig(t *testing.T) smokeHarborConfig {
+	t.Helper()
+
+	var cfg smokeHarborConfig
+	require.NoError(t, yaml.Unmarshal(readRepoFile(t, ".xylem", "eval", "harbor.yaml"), &cfg))
+	return cfg
+}
+
+func loadTaskFile(t *testing.T, scenario string) smokeTaskFile {
+	t.Helper()
+
+	var taskFile smokeTaskFile
+	require.NoError(t, toml.Unmarshal(readRepoFile(t, ".xylem", "eval", "scenarios", scenario, "task.toml"), &taskFile))
+	return taskFile
+}
+
+func loadRubricFile(t *testing.T, name string) smokeRubricFile {
+	t.Helper()
+
+	var rubric smokeRubricFile
+	require.NoError(t, toml.Unmarshal(readRepoFile(t, ".xylem", "eval", "rubrics", name), &rubric))
+	return rubric
+}
+
+func pythonFunctionNames(src string) []string {
+	re := regexp.MustCompile(`(?m)^def ([A-Za-z_][A-Za-z0-9_]*)\(`)
+	matches := re.FindAllStringSubmatch(src, -1)
+
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		names = append(names, match[1])
+	}
+	return names
+}
+
+func pythonImportNames(src string) []string {
+	re := regexp.MustCompile(`(?m)^import ([A-Za-z_][A-Za-z0-9_]*)`)
+	matches := re.FindAllStringSubmatch(src, -1)
+
+	names := make([]string, 0, len(matches))
+	for _, match := range matches {
+		names = append(names, match[1])
+	}
+	sort.Strings(names)
+	return names
+}
+
+func pythonDictBlock(t *testing.T, src, name string) string {
+	t.Helper()
+
+	start := strings.Index(src, name+" = {")
+	require.NotEqual(t, -1, start, "expected %s dictionary", name)
+
+	block := src[start:]
+	end := strings.Index(block, "}")
+	require.NotEqual(t, -1, end, "expected closing brace for %s dictionary", name)
+
+	return block[:end+1]
+}
+
+func parsePythonIntDict(t *testing.T, src, name string) map[string]int {
+	t.Helper()
+
+	block := pythonDictBlock(t, src, name)
+	re := regexp.MustCompile(`(?m)^\s*"([^"]*)":\s*([0-9]+),?`)
+	matches := re.FindAllStringSubmatch(block, -1)
+	require.NotEmpty(t, matches, "expected entries in %s", name)
+
+	values := make(map[string]int, len(matches))
+	for _, match := range matches {
+		var value int
+		_, err := fmt.Sscanf(match[2], "%d", &value)
+		require.NoError(t, err)
+		values[match[1]] = value
+	}
+	return values
+}
+
+func parsePythonFloatDict(t *testing.T, src, name string) map[string]float64 {
+	t.Helper()
+
+	block := pythonDictBlock(t, src, name)
+	re := regexp.MustCompile(`(?m)^\s*"([^"]+)":\s*([0-9.]+),?`)
+	matches := re.FindAllStringSubmatch(block, -1)
+	require.NotEmpty(t, matches, "expected entries in %s", name)
+
+	values := make(map[string]float64, len(matches))
+	for _, match := range matches {
+		var value float64
+		_, err := fmt.Sscanf(match[2], "%f", &value)
+		require.NoError(t, err)
+		values[match[1]] = value
+	}
+	return values
+}
+
+func computeReward(checks []struct {
+	Name   string
+	Passed bool
+}, weights map[string]float64) float64 {
+	if len(checks) == 0 {
+		return 0
+	}
+
+	totalWeight := 0.0
+	earnedWeight := 0.0
+	for _, check := range checks {
+		weight := 1.0
+		if weights != nil {
+			if configured, ok := weights[check.Name]; ok {
+				weight = configured
+			}
+		}
+		totalWeight += weight
+		if check.Passed {
+			earnedWeight += weight
+		}
+	}
+
+	if totalWeight == 0 {
+		return 0
+	}
+	return earnedWeight / totalWeight
+}
+
+func TestSmoke_S1_EvalDirectoryScaffoldExists(t *testing.T) {
+	expectedPaths := []string{
+		repoPath(t, ".xylem", "eval", "harbor.yaml"),
+		repoPath(t, ".xylem", "eval", "helpers", "xylem_verify.py"),
+		repoPath(t, ".xylem", "eval", "helpers", "conftest.py"),
+		repoPath(t, ".xylem", "eval", "scenarios"),
+		repoPath(t, ".xylem", "eval", "rubrics", "plan_quality.toml"),
+		repoPath(t, ".xylem", "eval", "rubrics", "evidence_quality.toml"),
+	}
+
+	for _, path := range expectedPaths {
+		info, err := os.Stat(path)
+		require.NoError(t, err, "expected %s to exist", path)
+		if strings.HasSuffix(path, "scenarios") {
+			assert.True(t, info.IsDir(), "%s should be a directory", path)
+			continue
+		}
+		assert.False(t, info.IsDir(), "%s should be a file", path)
+	}
+}
+
+func TestSmoke_S2_HarborYamlValidWithRequiredFields(t *testing.T) {
+	cfg := loadHarborConfig(t)
+
+	assert.Equal(t, "claude-code", cfg.Agent)
+	assert.NotEmpty(t, cfg.Model)
+	assert.Equal(t, "scenarios/", cfg.Path)
+	assert.Positive(t, cfg.NAttempts)
+	assert.Positive(t, cfg.NConcurrent)
+}
+
+func TestSmoke_S3_XylemVerifyImportsCleanly(t *testing.T) {
+	src := readRepoText(t, ".xylem", "eval", "helpers", "xylem_verify.py")
+	imports := pythonImportNames(src)
+
+	assert.Equal(t, []string{"glob", "json", "os"}, imports)
+}
+
+func TestSmoke_S4_XylemVerifyExposesExpectedPublicAPI(t *testing.T) {
+	src := readRepoText(t, ".xylem", "eval", "helpers", "xylem_verify.py")
+	names := pythonFunctionNames(src)
+	expected := []string{
+		"find_vessel_dir",
+		"load_summary",
+		"load_evidence",
+		"load_phase_output",
+		"load_audit_log",
+		"assert_vessel_completed",
+		"assert_vessel_failed",
+		"assert_phases_completed",
+		"assert_gates_passed",
+		"assert_evidence_level",
+		"assert_cost_within_budget",
+		"compute_reward",
+		"write_reward",
+	}
+
+	for _, expectedName := range expected {
+		assert.Contains(t, names, expectedName)
+	}
+	assert.Contains(t, src, "EVIDENCE_RANK =")
+}
+
+func TestSmoke_S5_EvidenceRankContainsAllFiveDocumentedLevels(t *testing.T) {
+	ranks := parsePythonIntDict(t, readRepoText(t, ".xylem", "eval", "helpers", "xylem_verify.py"), "EVIDENCE_RANK")
+
+	assert.Equal(t, 5, len(ranks))
+	assert.Contains(t, ranks, "proved")
+	assert.Contains(t, ranks, "mechanically_checked")
+	assert.Contains(t, ranks, "behaviorally_checked")
+	assert.Contains(t, ranks, "observed_in_situ")
+	assert.Contains(t, ranks, "")
+	assert.Greater(t, ranks["proved"], ranks["mechanically_checked"])
+	assert.Greater(t, ranks["mechanically_checked"], ranks["behaviorally_checked"])
+	assert.Greater(t, ranks["behaviorally_checked"], ranks["observed_in_situ"])
+	assert.Greater(t, ranks["observed_in_situ"], ranks[""])
+}
+
+func TestSmoke_S6_ComputeRewardReturnsCorrectScores(t *testing.T) {
+	src := readRepoText(t, ".xylem", "eval", "helpers", "xylem_verify.py")
+
+	assert.Contains(t, src, "if not checks:")
+	assert.Contains(t, src, "return 0.0")
+	assert.Equal(t, 1.0, computeReward([]struct {
+		Name   string
+		Passed bool
+	}{
+		{Name: "a", Passed: true},
+		{Name: "b", Passed: true},
+	}, nil))
+	assert.Equal(t, 0.5, computeReward([]struct {
+		Name   string
+		Passed bool
+	}{
+		{Name: "a", Passed: true},
+		{Name: "b", Passed: false},
+	}, nil))
+	assert.Equal(t, 0.0, computeReward(nil, nil))
+}
+
+func TestSmoke_S7_ConftestExposesWorkDirTaskDirAndVerifyFixtures(t *testing.T) {
+	names := pythonFunctionNames(readRepoText(t, ".xylem", "eval", "helpers", "conftest.py"))
+
+	assert.Contains(t, names, "work_dir")
+	assert.Contains(t, names, "task_dir")
+	assert.Contains(t, names, "verify")
+}
+
+func TestSmoke_S8_ScenarioTaskTomlHasRequiredFields(t *testing.T) {
+	scenario := firstEvalScenario(t)
+	taskFile := loadTaskFile(t, scenario)
+
+	assert.Equal(t, scenario, taskFile.Task.ID)
+	assert.Positive(t, taskFile.Task.Environment.TimeoutSeconds)
+}
+
+func TestSmoke_S9_ScenarioInstructionContainsNoHarborSpecificTerms(t *testing.T) {
+	scenario := firstEvalScenario(t)
+	text := strings.ToLower(readRepoText(t, ".xylem", "eval", "scenarios", scenario, "instruction.md"))
+
+	assert.NotEmpty(t, strings.TrimSpace(text))
+	assert.NotContains(t, text, "harbor")
+	assert.NotContains(t, text, "scoring")
+	assert.NotContains(t, text, "verification")
+	assert.Regexp(t, regexp.MustCompile(`\bxylem\s+\w+`), text)
+}
+
+func TestSmoke_S10_ScenarioDirectoryContainsAllRequiredFiles(t *testing.T) {
+	scenario := firstEvalScenario(t)
+	base := repoPath(t, ".xylem", "eval", "scenarios", scenario)
+
+	requiredPaths := []string{
+		filepath.Join(base, "instruction.md"),
+		filepath.Join(base, "task.toml"),
+		filepath.Join(base, "tests", "test.sh"),
+		filepath.Join(base, "tests", "test_verification.py"),
+	}
+
+	for _, path := range requiredPaths {
+		info, err := os.Stat(path)
+		require.NoError(t, err, "expected %s to exist", path)
+		assert.False(t, info.IsDir(), "%s should be a file", path)
+	}
+
+	info, err := os.Stat(filepath.Join(base, "tests", "test.sh"))
+	require.NoError(t, err)
+	assert.NotZero(t, info.Mode()&0o100, "test.sh should be executable by the owner")
+}
+
+func TestSmoke_S11_PlanQualityTomlValidWithWeightsSummingToOne(t *testing.T) {
+	rubric := loadRubricFile(t, "plan_quality.toml")
+
+	assert.Equal(t, "plan_quality", rubric.Rubric.Name)
+	assert.Len(t, rubric.Rubric.Criteria, 3)
+
+	total := 0.0
+	for _, criterion := range rubric.Rubric.Criteria {
+		total += criterion.Weight
+		assert.NotEmpty(t, criterion.Description)
+	}
+	assert.InDelta(t, 1.0, total, 0.001)
+}
+
+func TestSmoke_S12_EvidenceQualityTomlValidWithWeightsSummingToOne(t *testing.T) {
+	rubric := loadRubricFile(t, "evidence_quality.toml")
+
+	assert.Equal(t, "evidence_quality", rubric.Rubric.Name)
+
+	total := 0.0
+	for _, criterion := range rubric.Rubric.Criteria {
+		total += criterion.Weight
+		assert.NotEmpty(t, criterion.Description)
+	}
+	assert.InDelta(t, 1.0, total, 0.001)
+}
+
+func TestSmoke_S13_HarborYamlPathResolvesToDirectoryThatExists(t *testing.T) {
+	cfg := loadHarborConfig(t)
+	resolved := repoPath(t, ".xylem", "eval", cfg.Path)
+
+	info, err := os.Stat(resolved)
+	require.NoError(t, err)
+	assert.True(t, info.IsDir(), "%s should resolve to a directory", resolved)
+}
+
+func TestSmoke_S14_WorkflowExecutionVerificationTemplateProducesValidReward(t *testing.T) {
+	template := readRepoText(t, ".xylem", "eval", "scenarios", "fix-simple-null-pointer", "tests", "test_verification.py")
+	weights := parsePythonFloatDict(t, template, "weights")
+
+	score := computeReward([]struct {
+		Name   string
+		Passed bool
+	}{
+		{Name: "vessel_completed", Passed: true},
+		{Name: "phases_completed", Passed: true},
+		{Name: "gate_passed", Passed: true},
+		{Name: "evidence_level", Passed: true},
+		{Name: "budget_ok", Passed: true},
+	}, weights)
+
+	assert.Equal(t, 1.0, score)
+	assert.Contains(t, template, `assert score >= 0.8`)
+}
+
+func TestSmoke_S15_WorkflowExecutionVerificationTemplateFailsBelowThresholdWhenChecksFail(t *testing.T) {
+	template := readRepoText(t, ".xylem", "eval", "scenarios", "fix-simple-null-pointer", "tests", "test_verification.py")
+	weights := parsePythonFloatDict(t, template, "weights")
+
+	score := computeReward([]struct {
+		Name   string
+		Passed bool
+	}{
+		{Name: "vessel_completed", Passed: false},
+		{Name: "phases_completed", Passed: true},
+		{Name: "gate_passed", Passed: true},
+		{Name: "evidence_level", Passed: true},
+		{Name: "budget_ok", Passed: true},
+	}, weights)
+
+	assert.Less(t, score, 0.8)
+	assert.Contains(t, template, `assert score >= 0.8`)
+}
+
+func TestSmoke_S16_WriteRewardCreatesRewardTxtWithFourDecimalScore(t *testing.T) {
+	src := readRepoText(t, ".xylem", "eval", "helpers", "xylem_verify.py")
+	assert.Contains(t, src, `reward.txt`)
+	assert.Contains(t, src, `f.write(f"{score:.4f}\n")`)
+}
+
+func TestSmoke_S17_DeferredItemsAreNotPresent(t *testing.T) {
+	scenarioDirs := evalScenarioDirs(t)
+	for _, scenario := range scenarioDirs {
+		dockerfile := repoPath(t, ".xylem", "eval", "scenarios", scenario, "environment", "Dockerfile")
+		_, err := os.Stat(dockerfile)
+		assert.True(t, os.IsNotExist(err), "Dockerfile is deferred and should not exist: %s", dockerfile)
+	}
+
+	for _, pattern := range []string{
+		repoPath(t, ".github", "workflows", "*.yml"),
+		repoPath(t, ".github", "workflows", "*.yaml"),
+	} {
+		files, err := filepath.Glob(pattern)
+		require.NoError(t, err)
+		for _, file := range files {
+			content, err := os.ReadFile(file)
+			require.NoError(t, err)
+			assert.NotContains(t, string(content), "harbor run")
+		}
+	}
+
+	_, err := os.Stat(repoPath(t, ".xylem", "eval", "jobs"))
+	require.True(t, os.IsNotExist(err), ".xylem/eval/jobs should be absent")
+
+	_, err = os.Stat(repoPath(t, "jobs"))
+	require.True(t, os.IsNotExist(err), "jobs should be absent at repo root")
+}
+
+func TestSmoke_S18_ScenariosDirectoryPresentEvenWithNoScenariosYetPopulated(t *testing.T) {
+	info, err := os.Stat(repoPath(t, ".xylem", "eval", "scenarios"))
+	require.NoError(t, err)
+	assert.True(t, info.IsDir())
 }
