@@ -1296,6 +1296,48 @@ func TestFindByID(t *testing.T) {
 	})
 }
 
+func TestFindLatestByRef(t *testing.T) {
+	t.Run("returns latest vessel for ref", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+		vessel := testVessel(701)
+		if _, err := q.Enqueue(vessel); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		if _, err := q.Dequeue(); err != nil {
+			t.Fatalf("dequeue: %v", err)
+		}
+		if err := q.Update(vessel.ID, StateFailed, "boom"); err != nil {
+			t.Fatalf("update failed: %v", err)
+		}
+		retry := vessel
+		retry.ID = "issue-701-retry-1"
+		retry.State = StatePending
+		retry.CreatedAt = time.Now().UTC()
+		if _, err := q.Enqueue(retry); err != nil {
+			t.Fatalf("enqueue retry: %v", err)
+		}
+
+		got, err := q.FindLatestByRef(vessel.Ref)
+		if err != nil {
+			t.Fatalf("FindLatestByRef: %v", err)
+		}
+		if got.ID != retry.ID {
+			t.Fatalf("expected latest id %s, got %s", retry.ID, got.ID)
+		}
+	})
+
+	t.Run("missing ref returns error", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+		_, err := q.FindLatestByRef("https://github.com/example/repo/issues/999")
+		if err == nil {
+			t.Fatal("expected error for missing ref")
+		}
+		if !strings.Contains(err.Error(), "not found") {
+			t.Fatalf("expected not-found error, got: %v", err)
+		}
+	})
+}
+
 // --- Duplicate-ID tests (re-enqueued vessels) ---
 
 // helperCompleteVessel transitions the first pending vessel through pending -> running -> completed.

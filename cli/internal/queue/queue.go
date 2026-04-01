@@ -237,6 +237,27 @@ func (q *Queue) FindByID(id string) (*Vessel, error) {
 	return found, err
 }
 
+// FindLatestByRef returns the most recent vessel with the given ref.
+func (q *Queue) FindLatestByRef(ref string) (*Vessel, error) {
+	var found *Vessel
+	err := q.withRLock(func() error {
+		vessels, readErr := q.readAllVessels()
+		if readErr != nil {
+			return readErr
+		}
+		for i := len(vessels) - 1; i >= 0; i-- {
+			if vessels[i].Ref != ref {
+				continue
+			}
+			v := vessels[i]
+			found = &v
+			return nil
+		}
+		return fmt.Errorf("vessel with ref %s not found", ref)
+	})
+	return found, err
+}
+
 func (q *Queue) ListByState(state VesselState) ([]Vessel, error) {
 	vessels, err := q.List()
 	if err != nil {
