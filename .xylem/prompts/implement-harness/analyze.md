@@ -22,6 +22,8 @@ If any dependency is still open, output `XYLEM_NOOP` on a standalone line and ex
 
 If the issue is already resolved or no code changes are needed, include the exact standalone line `XYLEM_NOOP` in your output and explain why.
 
+CRITICAL: Only include the string XYLEM_NOOP in your output if you are actually signaling a noop (dependencies unmet or issue already resolved). Never mention XYLEM_NOOP in explanatory text, commentary, or to say it "does not apply" — the runner uses substring matching and will incorrectly treat any mention as a noop signal.
+
 Write your analysis including:
 - Spec step details and acceptance criteria
 - Assigned smoke scenario IDs with their titles

@@ -992,3 +992,82 @@ func TestValidateUnknownSourceType(t *testing.T) {
 	err := cfg.Validate()
 	requireErrorContains(t, err, "unknown type")
 }
+
+func TestLoadTopLevelModel(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+model: claude-sonnet-4-6
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Model != "claude-sonnet-4-6" {
+		t.Fatalf("Model = %q, want claude-sonnet-4-6", cfg.Model)
+	}
+}
+
+func TestLoadSourceLLMAndModel(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  triage:
+    type: github
+    repo: owner/name
+    llm: claude
+    model: claude-haiku-4-5
+    tasks:
+      triage-issues:
+        labels: [needs-triage]
+        workflow: triage
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	src := cfg.Sources["triage"]
+	if src.LLM != "claude" {
+		t.Fatalf("Sources[triage].LLM = %q, want claude", src.LLM)
+	}
+	if src.Model != "claude-haiku-4-5" {
+		t.Fatalf("Sources[triage].Model = %q, want claude-haiku-4-5", src.Model)
+	}
+}
+
+func TestValidateSourceLLMInvalid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 1,
+		MaxTurns:    10,
+		Timeout:     "30m",
+		Sources: map[string]SourceConfig{
+			"bad": {
+				Type: "github",
+				Repo: "owner/name",
+				LLM:  "invalid-provider",
+				Tasks: map[string]Task{
+					"test": {Labels: []string{"bug"}, Workflow: "fix-bug"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "llm must be")
+}

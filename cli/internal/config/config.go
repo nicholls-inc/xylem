@@ -23,6 +23,7 @@ type Config struct {
 	DefaultBranch string                  `yaml:"default_branch,omitempty"`
 	CleanupAfter  string                  `yaml:"cleanup_after,omitempty"`
 	LLM           string                  `yaml:"llm,omitempty"`
+	Model         string                  `yaml:"model,omitempty"`
 	Claude        ClaudeConfig            `yaml:"claude"`
 	Copilot       CopilotConfig           `yaml:"copilot,omitempty"`
 	Daemon        DaemonConfig            `yaml:"daemon,omitempty"`
@@ -31,6 +32,8 @@ type Config struct {
 type SourceConfig struct {
 	Type    string          `yaml:"type"`
 	Repo    string          `yaml:"repo,omitempty"`
+	LLM     string          `yaml:"llm,omitempty"`
+	Model   string          `yaml:"model,omitempty"`
 	Exclude []string        `yaml:"exclude,omitempty"`
 	Tasks   map[string]Task `yaml:"tasks,omitempty"`
 }
@@ -196,6 +199,13 @@ func (c *Config) Validate() error {
 
 	// Validate sources
 	for name, src := range c.Sources {
+		switch src.LLM {
+		case "", "claude", "copilot":
+			// valid
+		default:
+			return fmt.Errorf("source %q: llm must be \"claude\" or \"copilot\", got %q", name, src.LLM)
+		}
+
 		switch src.Type {
 		case "github", "github-pr":
 			if err := validateGitHubSource(name, src); err != nil {

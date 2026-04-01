@@ -5,7 +5,7 @@ sources:
   bugs:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot]
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
     tasks:
       fix-bugs:
         labels: [bug, ready-for-work]
@@ -14,7 +14,7 @@ sources:
   features:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot]
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
     tasks:
       implement-features:
         labels: [enhancement, ready-for-work]
@@ -113,6 +113,6 @@ claude:
 
 copilot:
   command: "copilot"
-  flags: "--allow-all --autopilot"
+  flags: "--yolo --autopilot"
   default_model: "GPT-5.4"
   # env: {}

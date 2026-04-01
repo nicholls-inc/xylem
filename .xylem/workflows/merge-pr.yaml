@@ -4,6 +4,8 @@ phases:
   - name: check
     prompt_file: .xylem/prompts/merge-pr/check.md
     max_turns: 10
+    llm: copilot
+    model: gpt-5-mini
     noop:
       match: XYLEM_NOOP
   - name: merge

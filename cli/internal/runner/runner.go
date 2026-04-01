@@ -331,9 +331,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
 					log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
 				}
-				provider := resolveProvider(r.Config, sk, &p)
-				cmd, args := buildProviderPhaseArgs(r.Config, sk, &p, harnessContent, provider)
-				output, runErr = r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), cmd, args...)
+				srcCfg := r.sourceConfigFromMeta(vessel)
+				provider := resolveProvider(r.Config, srcCfg, sk, &p)
+				cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, sk, &p, harnessContent, provider, rendered)
+				output, runErr = r.Runner.RunPhase(ctx, worktreePath, phaseStdin, cmd, args...)
 			}
 
 			// Shared: Write phase output
@@ -503,7 +504,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
 	}
 
-	cmd, args := buildPromptOnlyCmdArgs(r.Config, "")
+	cmd, args := buildPromptOnlyCmdArgs(r.Config, prompt)
 
 	_, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(prompt), cmd, args...)
 
@@ -804,9 +805,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
 			}
-			provider := resolveProvider(r.Config, wf, &p)
-			cmd, args := buildProviderPhaseArgs(r.Config, wf, &p, harnessContent, provider)
-			output, runErr = r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(rendered), cmd, args...)
+			srcCfg := r.sourceConfigFromMeta(vessel)
+			provider := resolveProvider(r.Config, srcCfg, wf, &p)
+			cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, wf, &p, harnessContent, provider, rendered)
+			output, runErr = r.Runner.RunPhase(ctx, worktreePath, phaseStdin, cmd, args...)
 		}
 
 		// Write output file.
@@ -922,6 +924,22 @@ func (r *Runner) logReporterError(action string, vesselID string, err error) {
 	if err != nil {
 		log.Printf("warn: %s for vessel %s: %v", action, vesselID, err)
 	}
+}
+
+// sourceConfigFromMeta returns the SourceConfig for a vessel by looking up
+// the config source name stored in vessel Meta at scan time.
+func (r *Runner) sourceConfigFromMeta(v queue.Vessel) *config.SourceConfig {
+	if v.Meta == nil {
+		return nil
+	}
+	name := v.Meta["config_source"]
+	if name == "" {
+		return nil
+	}
+	if sc, ok := r.Config.Sources[name]; ok {
+		return &sc
+	}
+	return nil
 }
 
 func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, error) {
@@ -1087,13 +1105,13 @@ func vesselLabel(v queue.Vessel) string {
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
-// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > ClaudeConfig.DefaultModel.
+// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > Config.Model > ClaudeConfig.DefaultModel.
 // When a model is resolved from the hierarchy, any --model flag in Claude.Flags is stripped to avoid duplication.
-func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
+func buildPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
 	args := []string{"-p"}
 	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
 
-	model := resolveModel(cfg, wf, p, "claude")
+	model := resolveModel(cfg, srcCfg, wf, p, "claude")
 
 	// Add flags, stripping --model if we resolved one from the hierarchy
 	if cfg.Claude.Flags != "" {
@@ -1126,18 +1144,29 @@ func buildPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase
 }
 
 // buildCopilotPhaseArgs constructs the GitHub Copilot CLI arguments for a phase invocation.
-// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > CopilotConfig.DefaultModel.
-func buildCopilotPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
-	args := []string{"--headless"}
-	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
+// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > Config.Model > CopilotConfig.DefaultModel.
+// The rendered prompt and harness content are combined into the -p flag value because
+// copilot has no --system-prompt equivalent.
+func buildCopilotPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, renderedPrompt string) []string {
+	// Combine harness + prompt into a single prompt text for -p.
+	// Copilot has no --system-prompt or --append-system-prompt flag.
+	promptText := renderedPrompt
+	if harnessContent != "" {
+		promptText = harnessContent + "\n\n" + renderedPrompt
+	}
 
-	model := resolveModel(cfg, wf, p, "copilot")
+	args := []string{"-p", promptText, "-s"}
 
-	// Add flags, stripping --headless (always prepended) and --model (resolved from hierarchy)
-	// to avoid duplication
+	model := resolveModel(cfg, srcCfg, wf, p, "copilot")
+
+	// Add user flags, stripping flags we always prepend to avoid duplication.
+	// -p/--prompt is value-aware (strips flag + its value); -s/--headless are boolean.
 	if cfg.Copilot.Flags != "" {
 		fields := strings.Fields(cfg.Copilot.Flags)
-		fields = stripBoolFlag(fields, "--headless")
+		fields = stripPromptFlag(fields)
+		fields = stripBoolFlag(fields, "-s")
+		fields = stripBoolFlag(fields, "--silent")
+		fields = stripBoolFlag(fields, "--headless") // legacy: was never valid, strip if present
 		if model != "" {
 			fields = stripModelFlag(fields)
 		}
@@ -1148,38 +1177,43 @@ func buildCopilotPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflo
 		args = append(args, "--model", model)
 	}
 
-	// Copilot CLI uses kebab-case flags, unlike Claude's --allowedTools (camelCase)
+	// Copilot uses --available-tools to restrict which tools are visible,
+	// plus --allow-all-tools to auto-approve them for non-interactive mode.
 	if p.AllowedTools != nil && *p.AllowedTools != "" {
-		args = append(args, "--allowed-tools", *p.AllowedTools)
-	}
-
-	// Copilot CLI uses --system-prompt, unlike Claude's --append-system-prompt
-	if harnessContent != "" {
-		args = append(args, "--system-prompt", harnessContent)
+		args = append(args, "--available-tools", *p.AllowedTools, "--allow-all-tools")
 	}
 
 	return args
 }
 
 // buildProviderPhaseArgs dispatches to the correct arg builder based on the resolved provider,
-// and returns the command binary and argument slice for the phase invocation.
-func buildProviderPhaseArgs(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider string) (string, []string) {
+// and returns the command binary, argument slice, and stdin reader for the phase invocation.
+// For providers that embed the prompt in CLI args (copilot -p <text>), stdin is nil.
+// For providers that read the prompt from stdin (claude -p), stdin carries the prompt.
+func buildProviderPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, renderedPrompt string) (string, []string, io.Reader) {
 	switch provider {
 	case "copilot":
-		return cfg.Copilot.Command, buildCopilotPhaseArgs(cfg, wf, p, harnessContent)
+		return cfg.Copilot.Command, buildCopilotPhaseArgs(cfg, srcCfg, wf, p, harnessContent, renderedPrompt), nil
 	default: // "claude"
-		return cfg.Claude.Command, buildPhaseArgs(cfg, wf, p, harnessContent)
+		var stdin io.Reader
+		if renderedPrompt != "" {
+			stdin = strings.NewReader(renderedPrompt)
+		}
+		return cfg.Claude.Command, buildPhaseArgs(cfg, srcCfg, wf, p, harnessContent), stdin
 	}
 }
 
 // resolveProvider determines which LLM provider to use for a phase invocation.
-// Resolution order: Phase.LLM > Workflow.LLM > Config.LLM, defaulting to "claude".
-func resolveProvider(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase) string {
+// Resolution order: Phase.LLM > Workflow.LLM > Source.LLM > Config.LLM, defaulting to "claude".
+func resolveProvider(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase) string {
 	if p != nil && p.LLM != nil && *p.LLM != "" {
 		return *p.LLM
 	}
 	if wf != nil && wf.LLM != nil && *wf.LLM != "" {
 		return *wf.LLM
+	}
+	if srcCfg != nil && srcCfg.LLM != "" {
+		return srcCfg.LLM
 	}
 	if cfg != nil && cfg.LLM != "" {
 		return cfg.LLM
@@ -1188,16 +1222,22 @@ func resolveProvider(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phas
 }
 
 // resolveModel determines the model string for a phase invocation.
-// Resolution order: Phase.Model > Workflow.Model > provider's DefaultModel from config.
-func resolveModel(cfg *config.Config, wf *workflow.Workflow, p *workflow.Phase, provider string) string {
+// Resolution order: Phase.Model > Workflow.Model > Source.Model > Config.Model > provider's DefaultModel.
+func resolveModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, provider string) string {
 	if p != nil && p.Model != nil && *p.Model != "" {
 		return *p.Model
 	}
 	if wf != nil && wf.Model != nil && *wf.Model != "" {
 		return *wf.Model
 	}
+	if srcCfg != nil && srcCfg.Model != "" {
+		return srcCfg.Model
+	}
 	if cfg == nil {
 		return ""
+	}
+	if cfg.Model != "" {
+		return cfg.Model
 	}
 	switch provider {
 	case "copilot":
@@ -1219,21 +1259,23 @@ func stripBoolFlag(fields []string, flag string) []string {
 }
 
 // buildPromptOnlyCmdArgs returns the command and args for a prompt-only invocation.
-// If prompt is non-empty, it is included as a positional argument (for buildCommand).
-// If prompt is empty, the caller supplies it via stdin (for runPromptOnly).
+// For claude, the prompt is a positional argument after the -p boolean flag.
+// For copilot, the prompt is the value of the -p flag (-p <text>).
 func buildPromptOnlyCmdArgs(cfg *config.Config, prompt string) (string, []string) {
-	provider := resolveProvider(cfg, nil, nil)
+	provider := resolveProvider(cfg, nil, nil, nil)
 	switch provider {
 	case "copilot":
 		cmd := cfg.Copilot.Command
-		args := []string{"--headless"}
+		var args []string
 		if prompt != "" {
-			args = append(args, prompt)
+			args = append(args, "-p", prompt, "-s")
 		}
-		args = append(args, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns))
 		if cfg.Copilot.Flags != "" {
-			// Strip --headless (always prepended) to avoid duplication
-			fields := stripBoolFlag(strings.Fields(cfg.Copilot.Flags), "--headless")
+			fields := strings.Fields(cfg.Copilot.Flags)
+			fields = stripPromptFlag(fields)
+			fields = stripBoolFlag(fields, "-s")
+			fields = stripBoolFlag(fields, "--silent")
+			fields = stripBoolFlag(fields, "--headless") // legacy: strip if present
 			args = append(args, fields...)
 		}
 		return cmd, args
@@ -1259,6 +1301,20 @@ func stripModelFlag(fields []string) []string {
 	var out []string
 	for i := 0; i < len(fields); i++ {
 		if fields[i] == "--model" && i+1 < len(fields) {
+			i++ // skip the value too
+			continue
+		}
+		out = append(out, fields[i])
+	}
+	return out
+}
+
+// stripPromptFlag removes -p/--prompt and its value from a slice of CLI flag tokens.
+// Unlike stripBoolFlag, this handles -p <value> where the next token is the prompt text.
+func stripPromptFlag(fields []string) []string {
+	var out []string
+	for i := 0; i < len(fields); i++ {
+		if (fields[i] == "-p" || fields[i] == "--prompt") && i+1 < len(fields) {
 			i++ // skip the value too
 			continue
 		}

@@ -43,21 +43,30 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 	}
 
 	var result ScanResult
-	sources := s.buildSources()
+	entries := s.buildSources()
 
-	for _, src := range sources {
-		vessels, err := src.Scan(ctx)
+	for _, entry := range entries {
+		vessels, err := entry.src.Scan(ctx)
 		if err != nil {
 			return result, err
 		}
 		for _, vessel := range vessels {
+			// Propagate source config name so the runner can look up
+			// source-level LLM/Model overrides at execution time.
+			if entry.configName != "" {
+				if vessel.Meta == nil {
+					vessel.Meta = make(map[string]string)
+				}
+				vessel.Meta["config_source"] = entry.configName
+			}
+
 			enqueued, err := s.Queue.Enqueue(vessel)
 			if err != nil {
 				return result, err
 			}
 			if enqueued {
 				result.Added++
-				if err := src.OnEnqueue(ctx, vessel); err != nil {
+				if err := entry.src.OnEnqueue(ctx, vessel); err != nil {
 					log.Printf("warn: OnEnqueue hook for vessel %s failed: %v", vessel.ID, err)
 				}
 			} else {
@@ -68,49 +77,66 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 	return result, nil
 }
 
+type sourceEntry struct {
+	src        source.Source
+	configName string
+}
+
 // buildSources constructs Source implementations from the config.
-func (s *Scanner) buildSources() []source.Source {
-	var sources []source.Source
-	for _, srcCfg := range s.Config.Sources {
+func (s *Scanner) buildSources() []sourceEntry {
+	var entries []sourceEntry
+	for name, srcCfg := range s.Config.Sources {
 		switch srcCfg.Type {
 		case "github":
 			tasks := convertTasks(srcCfg.Tasks)
-			sources = append(sources, &source.GitHub{
-				Repo:      srcCfg.Repo,
-				Tasks:     tasks,
-				Exclude:   srcCfg.Exclude,
-				Queue:     s.Queue,
-				CmdRunner: s.CmdRunner,
+			entries = append(entries, sourceEntry{
+				src: &source.GitHub{
+					Repo:      srcCfg.Repo,
+					Tasks:     tasks,
+					Exclude:   srcCfg.Exclude,
+					Queue:     s.Queue,
+					CmdRunner: s.CmdRunner,
+				},
+				configName: name,
 			})
 		case "github-pr":
 			tasks := convertTasks(srcCfg.Tasks)
-			sources = append(sources, &source.GitHubPR{
-				Repo:      srcCfg.Repo,
-				Tasks:     tasks,
-				Exclude:   srcCfg.Exclude,
-				Queue:     s.Queue,
-				CmdRunner: s.CmdRunner,
+			entries = append(entries, sourceEntry{
+				src: &source.GitHubPR{
+					Repo:      srcCfg.Repo,
+					Tasks:     tasks,
+					Exclude:   srcCfg.Exclude,
+					Queue:     s.Queue,
+					CmdRunner: s.CmdRunner,
+				},
+				configName: name,
 			})
 		case "github-pr-events":
 			prEventsTasks := convertPREventsTasks(srcCfg.Tasks)
-			sources = append(sources, &source.GitHubPREvents{
-				Repo:      srcCfg.Repo,
-				Tasks:     prEventsTasks,
-				Exclude:   srcCfg.Exclude,
-				Queue:     s.Queue,
-				CmdRunner: s.CmdRunner,
+			entries = append(entries, sourceEntry{
+				src: &source.GitHubPREvents{
+					Repo:      srcCfg.Repo,
+					Tasks:     prEventsTasks,
+					Exclude:   srcCfg.Exclude,
+					Queue:     s.Queue,
+					CmdRunner: s.CmdRunner,
+				},
+				configName: name,
 			})
 		case "github-merge":
 			mergeTasks := convertMergeTasks(srcCfg.Tasks)
-			sources = append(sources, &source.GitHubMerge{
-				Repo:      srcCfg.Repo,
-				Tasks:     mergeTasks,
-				Queue:     s.Queue,
-				CmdRunner: s.CmdRunner,
+			entries = append(entries, sourceEntry{
+				src: &source.GitHubMerge{
+					Repo:      srcCfg.Repo,
+					Tasks:     mergeTasks,
+					Queue:     s.Queue,
+					CmdRunner: s.CmdRunner,
+				},
+				configName: name,
 			})
 		}
 	}
-	return sources
+	return entries
 }
 
 func convertTasks(cfgTasks map[string]config.Task) map[string]source.GitHubTask {
