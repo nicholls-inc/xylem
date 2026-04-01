@@ -857,19 +857,11 @@ func TestSmoke_S17_DeferredItemsAreNotPresent(t *testing.T) {
 		}
 	}
 
-	evalJobs, err := os.Stat(repoPath(t, ".xylem", "eval", "jobs"))
-	if err == nil {
-		assert.False(t, evalJobs.IsDir(), ".xylem/eval/jobs should be absent")
-	} else {
-		assert.True(t, os.IsNotExist(err))
-	}
+	_, err := os.Stat(repoPath(t, ".xylem", "eval", "jobs"))
+	require.True(t, os.IsNotExist(err), ".xylem/eval/jobs should be absent")
 
-	rootJobs, err := os.Stat(repoPath(t, "jobs"))
-	if err == nil {
-		assert.False(t, rootJobs.IsDir(), "jobs should be absent at repo root")
-	} else {
-		assert.True(t, os.IsNotExist(err))
-	}
+	_, err = os.Stat(repoPath(t, "jobs"))
+	require.True(t, os.IsNotExist(err), "jobs should be absent at repo root")
 }
 
 func TestSmoke_S18_ScenariosDirectoryPresentEvenWithNoScenariosYetPopulated(t *testing.T) {
