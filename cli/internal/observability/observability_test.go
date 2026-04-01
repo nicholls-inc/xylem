@@ -11,6 +11,14 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
+func attrMap(attrs []SpanAttribute) map[string]string {
+	m := make(map[string]string, len(attrs))
+	for _, attr := range attrs {
+		m[attr.Key] = attr.Value
+	}
+	return m
+}
+
 func TestSignalSpanAttributesBasic(t *testing.T) {
 	signals := []SignalData{
 		{Type: "Repetition", Value: 0.75, Level: "Warning"},
