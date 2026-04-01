@@ -1,0 +1,18 @@
+[rubric]
+name = "plan_quality"
+description = "Evaluate the quality of xylem's diagnose/plan phase output"
+
+[[rubric.criteria]]
+name = "root_cause_identification"
+description = "Did the agent correctly identify the root cause of the issue?"
+weight = 0.4
+
+[[rubric.criteria]]
+name = "reasoning_chain"
+description = "Is the reasoning from symptoms to root cause clear and logical?"
+weight = 0.3
+
+[[rubric.criteria]]
+name = "scope_accuracy"
+description = "Does the plan correctly scope the fix without unnecessary changes?"
+weight = 0.3

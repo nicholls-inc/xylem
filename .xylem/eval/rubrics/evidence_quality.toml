@@ -1,0 +1,13 @@
+[rubric]
+name = "evidence_quality"
+description = "Evaluate trust boundary clarity and evidence completeness"
+
+[[rubric.criteria]]
+name = "trust_boundary_clarity"
+description = "Does the evidence manifest clearly articulate what was and was not verified?"
+weight = 0.5
+
+[[rubric.criteria]]
+name = "evidence_completeness"
+description = "Are all meaningful verification claims captured with appropriate levels?"
+weight = 0.5
