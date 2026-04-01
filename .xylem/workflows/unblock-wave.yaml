@@ -1,0 +1,8 @@
+name: unblock-wave
+description: "Check if merged PR satisfies wave dependencies and unblock ready issues"
+phases:
+  - name: check_deps
+    prompt_file: .xylem/prompts/unblock-wave/check_deps.md
+    max_turns: 20
+    noop:
+      match: XYLEM_NOOP
