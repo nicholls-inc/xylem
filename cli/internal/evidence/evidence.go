@@ -5,10 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"time"
 )
 
 const manifestFileName = "evidence-manifest.json"
+
+var safePathComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // Level describes the strength of a verification claim.
 type Level string
@@ -47,12 +51,41 @@ func (l Level) Rank() int {
 	}
 }
 
-// String returns the serialized level string, or "untyped" for the zero value.
+// String returns the human-readable serialized name for a level.
 func (l Level) String() string {
 	if l == Untyped {
 		return "untyped"
 	}
 	return string(l)
+}
+
+// MarshalText encodes a level for use in text-based formats and map keys.
+func (l Level) MarshalText() ([]byte, error) {
+	return []byte(l.String()), nil
+}
+
+// UnmarshalText decodes a level from its serialized text form.
+func (l *Level) UnmarshalText(text []byte) error {
+	level, err := parseLevel(string(text))
+	if err != nil {
+		return fmt.Errorf("unmarshal Level: %w", err)
+	}
+	*l = level
+	return nil
+}
+
+// MarshalJSON encodes a level using its serialized string form.
+func (l Level) MarshalJSON() ([]byte, error) {
+	return json.Marshal(l.String())
+}
+
+// UnmarshalJSON decodes a level from its serialized string form.
+func (l *Level) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("unmarshal Level: %w", err)
+	}
+	return l.UnmarshalText([]byte(s))
 }
 
 // Claim captures a single verification claim and its provenance metadata.
@@ -117,9 +150,65 @@ func (m *Manifest) StrongestLevel() Level {
 	return strongest
 }
 
+func parseLevel(s string) (Level, error) {
+	switch Level(s) {
+	case Untyped:
+		return Untyped, nil
+	case Proved:
+		return Proved, nil
+	case MechanicallyChecked:
+		return MechanicallyChecked, nil
+	case BehaviorallyChecked:
+		return BehaviorallyChecked, nil
+	case ObservedInSitu:
+		return ObservedInSitu, nil
+	case Level("untyped"):
+		return Untyped, nil
+	default:
+		return "", fmt.Errorf("invalid level %q", s)
+	}
+}
+
+func validatePathComponent(component string) error {
+	if component == "" {
+		return fmt.Errorf("path component must not be empty")
+	}
+	if strings.Contains(component, "..") {
+		return fmt.Errorf("path component must not contain %q", "..")
+	}
+	if !safePathComponent.MatchString(component) {
+		return fmt.Errorf("path component %q contains invalid characters (allowed: a-zA-Z0-9._-)", component)
+	}
+	return nil
+}
+
+func validateManifestClaims(manifest *Manifest) error {
+	for i, claim := range manifest.Claims {
+		if !claim.Level.Valid() {
+			return fmt.Errorf("claim %d has invalid level %q", i, claim.Level)
+		}
+	}
+	return nil
+}
+
 // SaveManifest writes a manifest to <stateDir>/phases/<vesselID>/evidence-manifest.json.
 func SaveManifest(stateDir, vesselID string, manifest *Manifest) error {
-	path := filepath.Join(stateDir, "phases", vesselID, manifestFileName)
+	if manifest == nil {
+		return fmt.Errorf("save manifest: manifest must not be nil")
+	}
+	if manifest.VesselID == "" {
+		manifest.VesselID = vesselID
+	} else if vesselID != "" && manifest.VesselID != vesselID {
+		return fmt.Errorf("save manifest: vessel ID mismatch: param %q manifest %q", vesselID, manifest.VesselID)
+	}
+	if err := validatePathComponent(manifest.VesselID); err != nil {
+		return fmt.Errorf("save manifest: invalid vessel ID: %w", err)
+	}
+	if err := validateManifestClaims(manifest); err != nil {
+		return fmt.Errorf("save manifest: %w", err)
+	}
+
+	path := filepath.Join(stateDir, "phases", manifest.VesselID, manifestFileName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("save manifest: create dir: %w", err)
 	}
@@ -138,6 +227,10 @@ func SaveManifest(stateDir, vesselID string, manifest *Manifest) error {
 
 // LoadManifest reads a manifest from <stateDir>/phases/<vesselID>/evidence-manifest.json.
 func LoadManifest(stateDir, vesselID string) (*Manifest, error) {
+	if err := validatePathComponent(vesselID); err != nil {
+		return nil, fmt.Errorf("load manifest: invalid vessel ID: %w", err)
+	}
+
 	path := filepath.Join(stateDir, "phases", vesselID, manifestFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -148,5 +241,13 @@ func LoadManifest(stateDir, vesselID string) (*Manifest, error) {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return nil, fmt.Errorf("load manifest: unmarshal: %w", err)
 	}
+	if manifest.VesselID != vesselID {
+		return nil, fmt.Errorf("load manifest: vessel ID mismatch: path %q manifest %q", vesselID, manifest.VesselID)
+	}
+	if err := validateManifestClaims(&manifest); err != nil {
+		return nil, fmt.Errorf("load manifest: %w", err)
+	}
+	manifest.BuildSummary()
+
 	return &manifest, nil
 }

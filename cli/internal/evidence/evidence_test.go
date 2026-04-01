@@ -2,9 +2,11 @@ package evidence
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -206,7 +208,7 @@ func TestSmoke_S8_SaveManifestWritesJSONToTheExpectedPath(t *testing.T) {
 		t.Fatalf("SaveManifest() error = %v", err)
 	}
 
-	path := filepath.Join(stateDir, "phases", "vessel-abc123", "evidence-manifest.json")
+	path := filepath.Join(stateDir, "phases", "vessel-abc123", manifestFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("ReadFile() error = %v", err)
@@ -229,6 +231,16 @@ func TestSmoke_S8_SaveManifestWritesJSONToTheExpectedPath(t *testing.T) {
 	}
 	if got.VesselID != "vessel-abc123" {
 		t.Fatalf("VesselID = %q, want %q", got.VesselID, "vessel-abc123")
+	}
+
+	var summary struct {
+		ByLevel map[string]int `json:"by_level"`
+	}
+	if err := json.Unmarshal(raw["summary"], &summary); err != nil {
+		t.Fatalf("Unmarshal(summary) error = %v", err)
+	}
+	if got := summary.ByLevel["behaviorally_checked"]; got != 1 {
+		t.Fatalf("summary.by_level[%q] = %d, want 1", "behaviorally_checked", got)
 	}
 }
 
@@ -324,6 +336,198 @@ func TestSmoke_S10_LoadManifestRoundTripsCorrectly(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Summary, manifest.Summary) {
 		t.Fatalf("Summary = %#v, want %#v", got.Summary, manifest.Summary)
+	}
+}
+
+func TestSmoke_S11_SaveManifestUsesManifestVesselIDWhenParamIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	manifest := &Manifest{
+		VesselID: "vessel-from-manifest",
+		Claims: []Claim{
+			{Claim: "claim", Level: Untyped, Passed: true},
+		},
+	}
+
+	if err := SaveManifest(stateDir, "", manifest); err != nil {
+		t.Fatalf("SaveManifest() error = %v", err)
+	}
+
+	if _, err := os.Stat(filepath.Join(stateDir, "phases", manifest.VesselID, manifestFileName)); err != nil {
+		t.Fatalf("Stat() error = %v", err)
+	}
+}
+
+func TestSmoke_S12_SaveManifestRejectsMismatchedVesselIDs(t *testing.T) {
+	t.Parallel()
+
+	err := SaveManifest(t.TempDir(), "vessel-param", &Manifest{
+		VesselID: "vessel-manifest",
+		Claims: []Claim{
+			{Claim: "claim", Level: Proved, Passed: true},
+		},
+	})
+	if err == nil {
+		t.Fatal("SaveManifest() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "vessel ID mismatch") {
+		t.Fatalf("SaveManifest() error = %v, want vessel ID mismatch", err)
+	}
+}
+
+func TestSmoke_S13_SaveManifestRejectsUnsafeVesselID(t *testing.T) {
+	t.Parallel()
+
+	manifest := &Manifest{
+		VesselID: "../escape",
+		Claims: []Claim{
+			{Claim: "claim", Level: Proved, Passed: true},
+		},
+	}
+
+	err := SaveManifest(t.TempDir(), manifest.VesselID, manifest)
+	if err == nil {
+		t.Fatal("SaveManifest() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "invalid vessel ID") {
+		t.Fatalf("SaveManifest() error = %v, want invalid vessel ID", err)
+	}
+}
+
+func TestSmoke_S14_LoadManifestRebuildsStaleSummary(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "phases", "vessel-stale", manifestFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	data := []byte(`{
+  "vessel_id": "vessel-stale",
+  "workflow": "fix-bug",
+  "claims": [
+    {
+      "claim": "claim",
+      "level": "proved",
+      "passed": true,
+      "timestamp": "2026-01-01T00:00:00Z"
+    },
+    {
+      "claim": "failed",
+      "level": "untyped",
+      "passed": false,
+      "timestamp": "2026-01-01T00:01:00Z"
+    }
+  ],
+  "created_at": "2026-01-01T00:00:00Z",
+  "summary": {
+    "total": 99,
+    "passed": 0,
+    "failed": 99,
+    "by_level": {
+      "behaviorally_checked": 99
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	manifest, err := LoadManifest(stateDir, "vessel-stale")
+	if err != nil {
+		t.Fatalf("LoadManifest() error = %v", err)
+	}
+
+	if manifest.Summary.Total != 2 || manifest.Summary.Passed != 1 || manifest.Summary.Failed != 1 {
+		t.Fatalf("Summary counts = %#v, want total=2 passed=1 failed=1", manifest.Summary)
+	}
+	if got := manifest.Summary.ByLevel[Proved]; got != 1 {
+		t.Fatalf("ByLevel[%q] = %d, want 1", Proved, got)
+	}
+	if got := manifest.Summary.ByLevel[Untyped]; got != 1 {
+		t.Fatalf("ByLevel[%q] = %d, want 1", Untyped, got)
+	}
+}
+
+func TestSmoke_S15_LoadManifestRejectsInvalidLevel(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	path := filepath.Join(stateDir, "phases", "vessel-invalid", manifestFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	data := []byte(`{
+  "vessel_id": "vessel-invalid",
+  "workflow": "fix-bug",
+  "claims": [
+    {
+      "claim": "claim",
+      "level": "totally-invalid",
+      "passed": true,
+      "timestamp": "2026-01-01T00:00:00Z"
+    }
+  ],
+  "created_at": "2026-01-01T00:00:00Z",
+  "summary": {
+    "total": 1,
+    "passed": 1,
+    "failed": 0,
+    "by_level": {
+      "totally-invalid": 1
+    }
+  }
+}`)
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	_, err := LoadManifest(stateDir, "vessel-invalid")
+	if err == nil {
+		t.Fatal("LoadManifest() error = nil, want error")
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		t.Fatalf("LoadManifest() error = %v, want invalid level validation error", err)
+	}
+	if !strings.Contains(err.Error(), "invalid level") {
+		t.Fatalf("LoadManifest() error = %v, want invalid level", err)
+	}
+}
+
+func TestSmoke_S16_LevelJSONUsesSerializedNames(t *testing.T) {
+	t.Parallel()
+
+	data, err := json.Marshal(struct {
+		Level Level `json:"level"`
+	}{
+		Level: Untyped,
+	})
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	if string(data) != `{"level":"untyped"}` {
+		t.Fatalf("Marshal() = %s, want %s", data, `{"level":"untyped"}`)
+	}
+
+	var decoded struct {
+		Level Level `json:"level"`
+	}
+	if err := json.Unmarshal([]byte(`{"level":"untyped"}`), &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded.Level != Untyped {
+		t.Fatalf("Level = %q, want %q", decoded.Level, Untyped)
+	}
+
+	if err := json.Unmarshal([]byte(`{"level":""}`), &decoded); err != nil {
+		t.Fatalf("Unmarshal legacy empty level error = %v", err)
+	}
+	if decoded.Level != Untyped {
+		t.Fatalf("legacy Level = %q, want %q", decoded.Level, Untyped)
 	}
 }
 
