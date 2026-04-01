@@ -3,11 +3,13 @@ package surface
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 )
 
 type FileHash struct {
@@ -25,20 +27,29 @@ type Violation struct {
 	After  string `json:"after"`  // hex hash, or "deleted"
 }
 
+var errSymlinkNotSupported = errors.New("symlinks are not supported")
+
 func TakeSnapshot(worktreeRoot string, patterns []string) (Snapshot, error) {
 	seen := make(map[string]struct{})
 	files := make([]FileHash, 0)
 
 	for _, pattern := range patterns {
+		if err := validatePattern(pattern); err != nil {
+			return Snapshot{}, fmt.Errorf("validate pattern %q: %w", pattern, err)
+		}
+
 		matches, err := filepath.Glob(filepath.Join(worktreeRoot, pattern))
 		if err != nil {
-			continue
+			return Snapshot{}, fmt.Errorf("glob pattern %q: %w", pattern, err)
 		}
 
 		for _, match := range matches {
-			info, err := os.Stat(match)
+			info, err := os.Lstat(match)
 			if err != nil {
-				return Snapshot{}, fmt.Errorf("stat %q: %w", match, err)
+				return Snapshot{}, fmt.Errorf("lstat %q: %w", match, err)
+			}
+			if info.Mode()&os.ModeSymlink != 0 {
+				return Snapshot{}, fmt.Errorf("lstat %q: %w", match, errSymlinkNotSupported)
 			}
 			if info.IsDir() {
 				continue
@@ -47,6 +58,9 @@ func TakeSnapshot(worktreeRoot string, patterns []string) (Snapshot, error) {
 			relPath, err := filepath.Rel(worktreeRoot, match)
 			if err != nil {
 				return Snapshot{}, fmt.Errorf("relative path for %q: %w", match, err)
+			}
+			if !isPathWithinRoot(relPath) {
+				return Snapshot{}, fmt.Errorf("relative path for %q escapes worktree root: %q", match, relPath)
 			}
 
 			relPath = filepath.ToSlash(relPath)
@@ -72,6 +86,24 @@ func TakeSnapshot(worktreeRoot string, patterns []string) (Snapshot, error) {
 	})
 
 	return Snapshot{Files: files}, nil
+}
+
+func validatePattern(pattern string) error {
+	if filepath.IsAbs(pattern) {
+		return fmt.Errorf("pattern must be relative")
+	}
+	if !isPathWithinRoot(pattern) {
+		return fmt.Errorf("pattern must stay within worktree root")
+	}
+
+	return nil
+}
+
+func isPathWithinRoot(path string) bool {
+	cleaned := filepath.Clean(path)
+	parentPrefix := ".." + string(filepath.Separator)
+
+	return cleaned != ".." && !strings.HasPrefix(cleaned, parentPrefix)
 }
 
 func Compare(before, after Snapshot) []Violation {

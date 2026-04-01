@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -259,6 +260,85 @@ func TestTakeSnapshotPropagatesReadError(t *testing.T) {
 	}
 	if !errors.Is(err, os.ErrPermission) {
 		t.Fatalf("TakeSnapshot() error = %v, want os.ErrPermission", err)
+	}
+}
+
+func TestTakeSnapshotRejectsInvalidGlobPattern(t *testing.T) {
+	dir := t.TempDir()
+
+	_, err := TakeSnapshot(dir, []string{"["})
+	if err == nil {
+		t.Fatal("TakeSnapshot() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), `glob pattern "["`) {
+		t.Fatalf("TakeSnapshot() error = %v, want wrapped glob pattern error", err)
+	}
+	if !errors.Is(err, filepath.ErrBadPattern) {
+		t.Fatalf("TakeSnapshot() error = %v, want filepath.ErrBadPattern", err)
+	}
+}
+
+func TestTakeSnapshotRejectsUnsafePatterns(t *testing.T) {
+	tests := []struct {
+		name    string
+		pattern string
+	}{
+		{name: "parent segment", pattern: "../outside.txt"},
+		{name: "absolute path", pattern: filepath.Join(string(filepath.Separator), "tmp", "outside.txt")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := TakeSnapshot(t.TempDir(), []string{tt.pattern})
+			if err == nil {
+				t.Fatal("TakeSnapshot() error = nil, want non-nil")
+			}
+			if !strings.Contains(err.Error(), fmt.Sprintf("validate pattern %q", tt.pattern)) {
+				t.Fatalf("TakeSnapshot() error = %v, want wrapped validation error", err)
+			}
+		})
+	}
+}
+
+func TestTakeSnapshotRejectsEscapingMatches(t *testing.T) {
+	dir := t.TempDir()
+	parent := filepath.Dir(dir)
+	outsideName := filepath.Base(dir) + "-outside.txt"
+	outsidePath := filepath.Join(parent, outsideName)
+	if err := os.WriteFile(outsidePath, []byte("outside"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	defer os.Remove(outsidePath)
+
+	_, err := TakeSnapshot(dir, []string{"../" + outsideName})
+	if err == nil {
+		t.Fatal("TakeSnapshot() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "validate pattern") {
+		t.Fatalf("TakeSnapshot() error = %v, want validation error", err)
+	}
+}
+
+func TestTakeSnapshotRejectsSymlinks(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("target"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+	link := filepath.Join(dir, ".xylem.yml")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("Symlink() error = %v", err)
+	}
+
+	_, err := TakeSnapshot(dir, []string{".xylem.yml"})
+	if err == nil {
+		t.Fatal("TakeSnapshot() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), `lstat "`) {
+		t.Fatalf("TakeSnapshot() error = %v, want lstat context", err)
+	}
+	if !errors.Is(err, errSymlinkNotSupported) {
+		t.Fatalf("TakeSnapshot() error = %v, want errSymlinkNotSupported", err)
 	}
 }
 
