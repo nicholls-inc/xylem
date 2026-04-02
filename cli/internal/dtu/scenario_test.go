@@ -1038,3 +1038,65 @@ func TestScenarioIssueHappyPath(t *testing.T) {
 		t.Fatalf("len(issue comment invocations) = %d, want 3", len(commentCalls))
 	}
 }
+
+func TestScenarioGithubMergeProviderFailure(t *testing.T) {
+	env := newScenarioEnv(t, "github-merge-provider-failure.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "post-merge", []scenarioPhase{
+		{name: "postmerge", prompt: "Handle merged PR {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"merged-prs": {
+			Type: "github-merge",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"merged": {Workflow: "post-merge"},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+
+	src := &source.GitHubMerge{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Failed != 1 {
+		t.Fatalf("DrainResult.Failed = %d, want 1", drainResult.Failed)
+	}
+
+	vessel, err := env.queue.FindByID("merge-pr-31-deadbeef")
+	if err != nil {
+		t.Fatalf("FindByID(merge-pr-31-deadbeef) error = %v", err)
+	}
+	if vessel.State != queue.StateFailed {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateFailed)
+	}
+	if !strings.Contains(vessel.Error, "exit status 2") {
+		t.Fatalf("vessel.Error = %q, want exit status 2", vessel.Error)
+	}
+
+	events := readEvents(t, env.store)
+	var postmergeResult *dtu.ShimEvent
+	for _, event := range events {
+		if event.Kind == dtu.EventKindShimResult && event.Shim != nil && event.Shim.Command == "claude" && event.Shim.Phase == "postmerge" {
+			postmergeResult = event.Shim
+			break
+		}
+	}
+	if postmergeResult == nil || postmergeResult.ExitCode == nil || *postmergeResult.ExitCode != 2 {
+		t.Fatalf("missing postmerge result with exit code 2: %#v", events)
+	}
+}

@@ -1,0 +1,24 @@
+metadata:
+  name: github-merge-provider-failure
+  scenario: provider failure during post-merge workflow
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    pull_requests:
+      - number: 31
+        title: merged refactor
+        body: run post merge tasks
+        state: merged
+        merged: true
+        base_branch: main
+        head_branch: feature-merged-refactor
+        head_sha: deadbeefcafebabe
+providers:
+  scripts:
+    - name: postmerge
+      provider: claude
+      match:
+        phase: postmerge
+      stderr: provider crashed
+      exit_code: 2
