@@ -1,0 +1,27 @@
+metadata:
+  name: github-pr-provider-failure
+  scenario: provider failure during PR review workflow
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: ready
+      - name: failed
+    pull_requests:
+      - number: 15
+        title: add caching layer
+        body: review the new caching implementation
+        state: open
+        labels: [ready]
+        base_branch: main
+        head_branch: feature-caching
+        head_sha: deadbeef12345678
+providers:
+  scripts:
+    - name: review
+      provider: claude
+      match:
+        phase: review
+      stderr: provider crashed
+      exit_code: 2

@@ -1100,3 +1100,73 @@ func TestScenarioGithubMergeProviderFailure(t *testing.T) {
 		t.Fatalf("missing postmerge result with exit code 2: %#v", events)
 	}
 }
+
+func TestScenarioGithubPRProviderFailure(t *testing.T) {
+	env := newScenarioEnv(t, "github-pr-provider-failure.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "review-pr", []scenarioPhase{
+		{name: "review", prompt: "Review PR {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"pull-requests": {
+			Type: "github-pr",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"ready-prs": {
+					Labels:   []string{"ready"},
+					Workflow: "review-pr",
+					StatusLabels: &config.StatusLabels{
+						Running: "in-progress",
+						Failed:  "failed",
+					},
+				},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+
+	src := &source.GitHubPR{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Failed != 1 {
+		t.Fatalf("DrainResult.Failed = %d, want 1", drainResult.Failed)
+	}
+
+	vessel, err := env.queue.FindByID("pr-15")
+	if err != nil {
+		t.Fatalf("FindByID(pr-15) error = %v", err)
+	}
+	if vessel.State != queue.StateFailed {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateFailed)
+	}
+	if !strings.Contains(vessel.Error, "exit status 2") {
+		t.Fatalf("vessel.Error = %q, want exit status 2", vessel.Error)
+	}
+	assertStringSliceEqual(t, readPRLabels(t, env.store, "owner/repo", 15), []string{"failed", "ready"})
+
+	events := readEvents(t, env.store)
+	var reviewResult *dtu.ShimEvent
+	for _, event := range events {
+		if event.Kind == dtu.EventKindShimResult && event.Shim != nil && event.Shim.Command == "claude" && event.Shim.Phase == "review" {
+			reviewResult = event.Shim
+			break
+		}
+	}
+	if reviewResult == nil || reviewResult.ExitCode == nil || *reviewResult.ExitCode != 2 {
+		t.Fatalf("missing review result with exit code 2: %#v", events)
+	}
+}
