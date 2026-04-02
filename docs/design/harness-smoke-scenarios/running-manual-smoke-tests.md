@@ -32,6 +32,23 @@ cat "$XYLEM_DTU_EVENT_LOG_PATH" | jq -c 'select(.kind=="shim_result")'
 
 ---
 
+## Current checked-in manifest status
+
+Latest finalized DTU smoke summary (2026-04-02): **22 PASS, 4 FAIL, 1 ERROR** across the checked-in manifests.
+
+**Current known failures:**
+- `issue-gh-auth-scan-failure` fails because the `gh` shim returns `gh: authentication required`, but `xylem scan --dry-run` only surfaces exit status `1`.
+- `ws1-policy-deny-blocks-phase` fails because the documented policy deny block does not trigger; the provider still runs.
+- `ws1-policy-require-approval` fails because the documented approval block does not trigger; the provider still runs.
+- `ws1-surface-violation` fails because the documented protected-surface failure does not trigger.
+
+**Current manual-smoke limitation:**
+- `issue-daemon-recovery` is not a reliable Guide 4B manual smoke path. In the latest run it degenerated into a normal timeout, so treat that scenario as [Guide 4A fixture-backed regression test](../../dtu-fixture-regression-tests.md) territory instead.
+
+For the WS1 failures above, see the scenario notes in [WS1 Scenario Manual Tests](ws1-config-surface-policy.md#manual-smoke-tests). For the broader DTU method limitation, see [DTU Guide 4B: Manual Smoke Tests](../../dtu-manual-smoke-tests.md#current-dtu-testing-limitation-to-remember).
+
+---
+
 ## When to use manual smoke tests
 
 Choose manual smoke tests when you want to:

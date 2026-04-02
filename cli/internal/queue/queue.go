@@ -123,7 +123,13 @@ func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 
 		enqueued = true
 		vessels = append(vessels, vessel)
-		return q.writeAllVessels(vessels)
+		if err := q.writeAllVessels(vessels); err != nil {
+			return err
+		}
+		if err := recordRuntimeVesselEvent(dtu.VesselOperationEnqueue, nil, &vessel); err != nil {
+			return err
+		}
+		return nil
 	})
 	return enqueued, err
 }
@@ -140,6 +146,7 @@ func (q *Queue) Dequeue() (*Vessel, error) {
 			if vessels[i].State != StatePending {
 				continue
 			}
+			previous := vessels[i]
 			now := queueNow()
 			vessels[i].State = StateRunning
 			vessels[i].StartedAt = &now
@@ -147,7 +154,14 @@ func (q *Queue) Dequeue() (*Vessel, error) {
 
 			vessel := vessels[i]
 			out = &vessel
-			return q.writeAllVessels(vessels)
+			if err := q.writeAllVessels(vessels); err != nil {
+				return err
+			}
+			current := vessels[i]
+			if err := recordRuntimeVesselEvent(dtu.VesselOperationDequeue, &previous, &current); err != nil {
+				return err
+			}
+			return nil
 		}
 		return nil
 	})
@@ -168,6 +182,7 @@ func (q *Queue) Update(id string, state VesselState, errMsg string) error {
 			if vessels[i].ID != id {
 				continue
 			}
+			previous := vessels[i]
 
 			// Validate state transition.
 			allowed, knownState := validTransitions[vessels[i].State]
@@ -211,7 +226,14 @@ func (q *Queue) Update(id string, state VesselState, errMsg string) error {
 			default:
 				vessels[i].Error = ""
 			}
-			return q.writeAllVessels(vessels)
+			if err := q.writeAllVessels(vessels); err != nil {
+				return err
+			}
+			current := vessels[i]
+			if err := recordRuntimeVesselEvent(dtu.VesselOperationUpdate, &previous, &current); err != nil {
+				return err
+			}
+			return nil
 		}
 
 		return fmt.Errorf("vessel %s not found", id)
@@ -296,8 +318,25 @@ func (q *Queue) UpdateVessel(vessel Vessel) error {
 			if vessels[i].ID != vessel.ID {
 				continue
 			}
+			previous := vessels[i]
+			if previous.State != vessel.State {
+				allowed, knownState := validTransitions[previous.State]
+				if !knownState {
+					return fmt.Errorf("%w: unknown current state %s for vessel %s", ErrInvalidTransition, previous.State, vessel.ID)
+				}
+				if !allowed[vessel.State] {
+					return fmt.Errorf("%w: cannot move vessel %s from %s to %s", ErrInvalidTransition, vessel.ID, previous.State, vessel.State)
+				}
+			}
 			vessels[i] = vessel
-			return q.writeAllVessels(vessels)
+			if err := q.writeAllVessels(vessels); err != nil {
+				return err
+			}
+			current := vessels[i]
+			if err := recordRuntimeVesselEvent(dtu.VesselOperationUpdateVessel, &previous, &current); err != nil {
+				return err
+			}
+			return nil
 		}
 
 		return fmt.Errorf("vessel %s not found", vessel.ID)
@@ -315,6 +354,7 @@ func (q *Queue) Cancel(id string) error {
 			if vessels[i].ID != id {
 				continue
 			}
+			previous := vessels[i]
 			allowed, knownState := validTransitions[vessels[i].State]
 			if !knownState || !allowed[StateCancelled] {
 				return fmt.Errorf("cannot cancel vessel %s in state %s", id, vessels[i].State)
@@ -323,7 +363,14 @@ func (q *Queue) Cancel(id string) error {
 			vessels[i].State = StateCancelled
 			vessels[i].EndedAt = &now
 			vessels[i].Error = ""
-			return q.writeAllVessels(vessels)
+			if err := q.writeAllVessels(vessels); err != nil {
+				return err
+			}
+			current := vessels[i]
+			if err := recordRuntimeVesselEvent(dtu.VesselOperationCancel, &previous, &current); err != nil {
+				return err
+			}
+			return nil
 		}
 
 		return fmt.Errorf("vessel %s not found", id)
@@ -536,4 +583,74 @@ func (q *Queue) writeAllVessels(vessels []Vessel) error {
 	}
 
 	return os.WriteFile(q.path, []byte(content), 0o644)
+}
+
+func recordRuntimeVesselEvent(operation dtu.VesselOperation, previous, current *Vessel) error {
+	event := buildRuntimeVesselEvent(operation, previous, current)
+	if event == nil {
+		return nil
+	}
+	if err := dtu.RecordRuntimeEvent(&dtu.Event{
+		Kind:   dtu.EventKindVesselUpdated,
+		Vessel: event,
+	}); err != nil {
+		return fmt.Errorf("record DTU vessel event: %w", err)
+	}
+	return nil
+}
+
+func buildRuntimeVesselEvent(operation dtu.VesselOperation, previous, current *Vessel) *dtu.VesselEvent {
+	var vesselID string
+	switch {
+	case current != nil:
+		vesselID = current.ID
+	case previous != nil:
+		vesselID = previous.ID
+	default:
+		return nil
+	}
+	event := &dtu.VesselEvent{
+		Operation: operation,
+		VesselID:  vesselID,
+		Previous:  buildVesselSnapshot(previous),
+		Current:   buildVesselSnapshot(current),
+	}
+	if previous != nil {
+		event.OldState = string(previous.State)
+	}
+	if current != nil {
+		event.NewState = string(current.State)
+	}
+	return event
+}
+
+func buildVesselSnapshot(vessel *Vessel) *dtu.VesselSnapshot {
+	if vessel == nil {
+		return nil
+	}
+	return &dtu.VesselSnapshot{
+		State:        string(vessel.State),
+		Source:       vessel.Source,
+		Ref:          vessel.Ref,
+		Workflow:     vessel.Workflow,
+		Error:        vessel.Error,
+		CreatedAt:    formatVesselTime(&vessel.CreatedAt),
+		StartedAt:    formatVesselTime(vessel.StartedAt),
+		EndedAt:      formatVesselTime(vessel.EndedAt),
+		CurrentPhase: vessel.CurrentPhase,
+		GateRetries:  vessel.GateRetries,
+		WaitingSince: formatVesselTime(vessel.WaitingSince),
+		WaitingFor:   vessel.WaitingFor,
+		WorktreePath: vessel.WorktreePath,
+		FailedPhase:  vessel.FailedPhase,
+		GateOutput:   vessel.GateOutput,
+		RetryOf:      vessel.RetryOf,
+	}
+}
+
+func formatVesselTime(value *time.Time) string {
+	if value == nil {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }

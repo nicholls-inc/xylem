@@ -6,6 +6,11 @@ import (
 	"time"
 )
 
+type scheduledMutationApplication struct {
+	Mutation  ScheduledMutation
+	AppliedAt string
+}
+
 // PreviewObservation applies an observation to a cloned state so callers can
 // render against the next deterministic state without persisting it yet.
 func PreviewObservation(state *State, inv ShimInvocation) (*State, *MutationResult, error) {
@@ -20,7 +25,7 @@ func PreviewObservation(state *State, inv ShimInvocation) (*State, *MutationResu
 	if err != nil {
 		return nil, nil, fmt.Errorf("preview observation: resolve clock: %w", err)
 	}
-	result, err := observeState(cloned, inv, clock)
+	result, _, _, err := observeState(cloned, inv, clock)
 	if err != nil {
 		return nil, nil, fmt.Errorf("preview observation: %w", err)
 	}
@@ -35,14 +40,33 @@ func (s *Store) RecordObservation(inv ShimInvocation) (*MutationResult, error) {
 	}
 
 	var result *MutationResult
-	err := s.Update(func(state *State) error {
-		var err error
+	err := s.withLock(func() error {
+		state, err := s.loadUnlocked()
+		if err != nil {
+			return fmt.Errorf("record observation: load state: %w", err)
+		}
+		previous, err := cloneState(state)
+		if err != nil {
+			return fmt.Errorf("record observation: clone previous state: %w", err)
+		}
 		clock, err := ResolveClock(state.Clock, s.clockOrDefault())
 		if err != nil {
 			return fmt.Errorf("record observation: resolve clock: %w", err)
 		}
-		result, err = observeState(state, inv, clock)
-		return err
+		resultValue, matches, applications, observeErr := observeState(state, inv, clock)
+		if observeErr != nil {
+			return observeErr
+		}
+		result = resultValue
+		extraEvents := make([]*Event, 0, 1+len(applications))
+		extraEvents = append(extraEvents, newSchedulerObservationEvent(inv, resultValue, scheduledMutationNames(matches), scheduledMutationNames(appliedMutations(applications))))
+		for _, application := range applications {
+			extraEvents = append(extraEvents, newSchedulerMutationAppliedEvent(inv, resultValue.ObservationKey, resultValue.ObservationCount, application))
+		}
+		if err := s.persistUnlockedWithEvents(state, previous, EventKindStateUpdated, StateOperationUpdate, extraEvents); err != nil {
+			return fmt.Errorf("record observation: %w", err)
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -50,31 +74,32 @@ func (s *Store) RecordObservation(inv ShimInvocation) (*MutationResult, error) {
 	return result, nil
 }
 
-func observeState(state *State, inv ShimInvocation, clock Clock) (*MutationResult, error) {
+func observeState(state *State, inv ShimInvocation, clock Clock) (*MutationResult, []ScheduledMutation, []scheduledMutationApplication, error) {
 	if state == nil {
-		return nil, fmt.Errorf("record observation: state must not be nil")
+		return nil, nil, nil, fmt.Errorf("record observation: state must not be nil")
 	}
 	if !inv.Command.Valid() {
-		return nil, fmt.Errorf("record observation: invalid command %q", inv.Command)
+		return nil, nil, nil, fmt.Errorf("record observation: invalid command %q", inv.Command)
 	}
 	if clock == nil {
 		var err error
 		clock, err = ResolveClock(state.Clock, nil)
 		if err != nil {
-			return nil, fmt.Errorf("record observation: resolve clock: %w", err)
+			return nil, nil, nil, fmt.Errorf("record observation: resolve clock: %w", err)
 		}
 	}
 	observationKey := ObservationKey(inv)
+	matches := state.MatchingScheduledMutations(inv)
 	count := incrementObservationCount(&state.Runtime, observationKey)
-	applied, err := applyScheduledMutations(state, inv, observationKey, count, clock)
+	applied, applications, err := applyScheduledMutations(state, matches, observationKey, count, clock)
 	if err != nil {
-		return nil, err
+		return nil, nil, nil, err
 	}
 	return &MutationResult{
 		ObservationKey:   observationKey,
 		ObservationCount: count,
 		Applied:          applied,
-	}, nil
+	}, matches, applications, nil
 }
 
 // ObservationKey produces the stable runtime key used for deterministic mutation scheduling.
@@ -106,20 +131,17 @@ func incrementObservationCount(runtime *RuntimeState, key string) int {
 	return 1
 }
 
-func applyScheduledMutations(state *State, inv ShimInvocation, observationKey string, count int, clock Clock) ([]ScheduledMutation, error) {
+func applyScheduledMutations(state *State, matches []ScheduledMutation, observationKey string, count int, clock Clock) ([]ScheduledMutation, []scheduledMutationApplication, error) {
 	if state == nil {
-		return nil, fmt.Errorf("apply scheduled mutations: state must not be nil")
+		return nil, nil, fmt.Errorf("apply scheduled mutations: state must not be nil")
 	}
 	if clock == nil {
 		clock = SystemClock{}
 	}
 
 	var applied []ScheduledMutation
-	for i := range state.ScheduledMutations {
-		mutation := state.ScheduledMutations[i]
-		if !MatchScheduledMutation(&mutation, inv) {
-			continue
-		}
+	var applications []scheduledMutationApplication
+	for _, mutation := range matches {
 		if mutationAlreadyApplied(state.Runtime, mutation.Name, observationKey) {
 			continue
 		}
@@ -127,16 +149,21 @@ func applyScheduledMutations(state *State, inv ShimInvocation, observationKey st
 			continue
 		}
 		if err := applyMutationOperations(state, mutation); err != nil {
-			return nil, fmt.Errorf("apply scheduled mutation %q: %w", mutation.Name, err)
+			return nil, nil, fmt.Errorf("apply scheduled mutation %q: %w", mutation.Name, err)
 		}
+		appliedAt := clock.Now().UTC().Format(time.RFC3339Nano)
 		state.Runtime.AppliedMutations = append(state.Runtime.AppliedMutations, AppliedMutation{
 			Name:      mutation.Name,
 			Key:       observationKey,
-			AppliedAt: clock.Now().UTC().Format(time.RFC3339Nano),
+			AppliedAt: appliedAt,
 		})
 		applied = append(applied, mutation)
+		applications = append(applications, scheduledMutationApplication{
+			Mutation:  mutation,
+			AppliedAt: appliedAt,
+		})
 	}
-	return applied, nil
+	return applied, applications, nil
 }
 
 func mutationAlreadyApplied(runtime RuntimeState, name string, key string) bool {
@@ -249,4 +276,65 @@ func mutateLabels(existing, add, remove []string) []string {
 		out = append(out, label)
 	}
 	return normalizeStrings(out)
+}
+
+func appliedMutations(applications []scheduledMutationApplication) []ScheduledMutation {
+	if len(applications) == 0 {
+		return nil
+	}
+	out := make([]ScheduledMutation, 0, len(applications))
+	for _, application := range applications {
+		out = append(out, application.Mutation)
+	}
+	return out
+}
+
+func scheduledMutationNames(mutations []ScheduledMutation) []string {
+	if len(mutations) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(mutations))
+	for _, mutation := range mutations {
+		names = append(names, mutation.Name)
+	}
+	return normalizeStrings(names)
+}
+
+func newSchedulerObservationEvent(inv ShimInvocation, result *MutationResult, matchedNames []string, appliedNames []string) *Event {
+	if result == nil {
+		return nil
+	}
+	return &Event{
+		Kind: EventKindSchedulerObserved,
+		Scheduler: &SchedulerEvent{
+			Command:          inv.Command,
+			Args:             append([]string(nil), inv.Args...),
+			Phase:            strings.TrimSpace(inv.Phase),
+			Script:           strings.TrimSpace(inv.Script),
+			Attempt:          inv.Attempt,
+			ObservationKey:   result.ObservationKey,
+			ObservationCount: result.ObservationCount,
+			MatchedMutations: matchedNames,
+			AppliedMutations: appliedNames,
+		},
+	}
+}
+
+func newSchedulerMutationAppliedEvent(inv ShimInvocation, observationKey string, observationCount int, application scheduledMutationApplication) *Event {
+	return &Event{
+		Kind: EventKindSchedulerMutationApplied,
+		Scheduler: &SchedulerEvent{
+			Command:          inv.Command,
+			Args:             append([]string(nil), inv.Args...),
+			Phase:            strings.TrimSpace(inv.Phase),
+			Script:           strings.TrimSpace(inv.Script),
+			Attempt:          inv.Attempt,
+			ObservationKey:   observationKey,
+			ObservationCount: observationCount,
+			MutationName:     application.Mutation.Name,
+			TriggerAfter:     application.Mutation.Trigger.After,
+			AppliedAt:        application.AppliedAt,
+			Operations:       append([]MutationOperation(nil), application.Mutation.Operations...),
+		},
+	}
 }

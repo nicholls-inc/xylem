@@ -1,0 +1,32 @@
+metadata:
+  name: issue-git-fetch-retry-exit-1
+  scenario: git fetch exit code 1 retries and succeeds
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+    issues:
+      - number: 7
+        title: fetch exit one
+        body: worktree creation should retry git fetch after a transient exit 1
+        labels: [bug]
+providers:
+  scripts:
+    - name: fix
+      provider: claude
+      match:
+        phase: fix
+      stdout: fetch exit one recovered
+shim_faults:
+  - name: fetch-exit-1
+    command: git
+    match:
+      args_exact: [fetch, origin, main]
+      attempt: 1
+    stderr: "fatal: remote hung up unexpectedly"
+    exit_code: 1

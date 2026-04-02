@@ -1,4 +1,7 @@
 cli/cmd/xylem/xylem
+cli/claude
+cli/copilot
+cli/gh
 cli/xylem
 .xylem/
 field-reports/

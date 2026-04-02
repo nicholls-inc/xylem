@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -469,6 +470,123 @@ func TestExecuteClaudeRecordsDeterministicDuration(t *testing.T) {
 	}
 }
 
+func TestExecuteClaudeRecordsRichShimMetadata(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Providers.Scripts = []dtu.ProviderScript{{
+		Name:     "stdin-script",
+		Provider: dtu.ProviderClaude,
+		Match:    dtu.ProviderScriptMatch{PromptExact: "Please analyze via stdin"},
+		Stdout:   "analysis complete",
+		Stderr:   "warning\n",
+	}}
+	store, stateDir := testStore(t, state)
+	env := envForStore(store, stateDir, state.UniverseID)
+
+	workingDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	binaryPath := filepath.Join(workingDir, "claude")
+	prompt := "Please analyze via stdin"
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), binaryPath, []string{"-p", "--max-turns", "3", "--model", "claude-sonnet", "--allowedTools", "Read"}, strings.NewReader(prompt), &stdout, &stderr, env)
+	if code != 0 {
+		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr.String())
+	}
+
+	events, err := store.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents() error = %v", err)
+	}
+	var invocation, result *dtu.Event
+	for i := range events {
+		if events[i].Shim == nil || events[i].Shim.Command != "claude" {
+			continue
+		}
+		switch events[i].Kind {
+		case dtu.EventKindShimInvocation:
+			invocation = &events[i]
+		case dtu.EventKindShimResult:
+			result = &events[i]
+		}
+	}
+	if invocation == nil || result == nil {
+		t.Fatalf("missing claude shim events: %#v", events)
+	}
+	if got, want := invocation.Shim.BinaryPath, binaryPath; got != want {
+		t.Fatalf("BinaryPath = %q, want %q", got, want)
+	}
+	if got, want := invocation.Shim.BinaryName, "claude"; got != want {
+		t.Fatalf("BinaryName = %q, want %q", got, want)
+	}
+	if got, want := invocation.Shim.WorkingDir, workingDir; got != want {
+		t.Fatalf("WorkingDir = %q, want %q", got, want)
+	}
+	if got, want := invocation.Shim.StdinDigest, hashPrompt(prompt); got != want {
+		t.Fatalf("StdinDigest = %q, want %q", got, want)
+	}
+	if got, want := result.Shim.StdoutBytes, len(stdout.String()); got != want {
+		t.Fatalf("StdoutBytes = %d, want %d", got, want)
+	}
+	if got, want := result.Shim.StderrBytes, len(stderr.String()); got != want {
+		t.Fatalf("StderrBytes = %d, want %d", got, want)
+	}
+}
+
+func TestExecuteClaudeFallsBackWhenNamedScriptExistsOnlyInOtherScenario(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Metadata.Scenario = "issue workflow"
+	state.Providers.Scripts = []dtu.ProviderScript{{
+		Name:     "review",
+		Provider: dtu.ProviderClaude,
+		Match:    dtu.ProviderScriptMatch{Scenario: "merge workflow"},
+		Stdout:   "wrong scenario",
+	}, {
+		Name:     "review-response",
+		Provider: dtu.ProviderClaude,
+		Match:    dtu.ProviderScriptMatch{Scenario: "issue workflow", Phase: "review"},
+		Stdout:   "issue scenario",
+	}}
+	store, stateDir := testStore(t, state)
+	env := append(envForStore(store, stateDir, state.UniverseID), envPhase+"=review", envScript+"=review")
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), "claude", []string{"-p", "Review this issue"}, nil, &stdout, &stderr, env)
+	if code != 0 {
+		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "issue scenario"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+func TestExecuteClaudeProviderNoOpMarkerAppendsDeterministically(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Providers.Scripts = []dtu.ProviderScript{{
+		Name:       "noop-script",
+		Provider:   dtu.ProviderClaude,
+		Match:      dtu.ProviderScriptMatch{PromptExact: "already fixed"},
+		Stdout:     "Already fixed.\n",
+		NoOpMarker: "XYLEM_NOOP",
+	}}
+	store, stateDir := testStore(t, state)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), "claude", []string{"-p", "already fixed"}, nil, &stdout, &stderr, envForStore(store, stateDir, state.UniverseID))
+	if code != 0 {
+		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr.String())
+	}
+	if got, want := stdout.String(), "Already fixed.\n\nXYLEM_NOOP\n"; got != want {
+		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
 func TestExecuteClaudeDelayAdvancesDTURuntimeClock(t *testing.T) {
 	t.Parallel()
 
@@ -538,8 +656,14 @@ func TestDeriveStoreLocation(t *testing.T) {
 
 func TestMainPackagesCompile(t *testing.T) {
 	t.Parallel()
-	for _, path := range []string{"../../cmd/gh/main.go", "../../cmd/claude/main.go", "../../cmd/copilot/main.go"} {
-		if _, err := os.Stat(filepath.Clean(path)); err != nil {
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("runtime.Caller() failed")
+	}
+	baseDir := filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
+	for _, relPath := range []string{"cmd/gh/main.go", "cmd/claude/main.go", "cmd/copilot/main.go"} {
+		path := filepath.Join(baseDir, relPath)
+		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("expected %s to exist: %v", path, err)
 		}
 	}

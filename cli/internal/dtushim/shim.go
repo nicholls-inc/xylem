@@ -38,9 +38,24 @@ type options struct {
 	FaultName  string
 }
 
+type countingWriter struct {
+	writer io.Writer
+	bytes  int
+}
+
+func (w *countingWriter) Write(p []byte) (int, error) {
+	if w == nil || w.writer == nil {
+		return len(p), nil
+	}
+	n, err := w.writer.Write(p)
+	w.bytes += n
+	return n, err
+}
+
 // Execute runs a DTU shim entrypoint for the given binary name.
 func Execute(ctx context.Context, binary string, args []string, stdin io.Reader, stdout, stderr io.Writer, env []string) int {
-	binary = filepath.Base(binary)
+	binaryPath := strings.TrimSpace(binary)
+	binary = filepath.Base(binaryPath)
 	opts, remaining, err := parseOptions(args, env)
 	if err != nil {
 		return writeError(stderr, 2, err)
@@ -53,17 +68,17 @@ func Execute(ctx context.Context, binary string, args []string, stdin io.Reader,
 
 	switch binary {
 	case "gh":
-		return executeShim(ctx, store, dtu.ShimCommandGH, opts, remaining, "", "", stdout, stderr, func(ctx context.Context, state *dtu.State, _ *dtu.ShimEvent) (int, error) {
-			return runGH(ctx, store, state, remaining, stdout, stderr), nil
+		return executeShim(ctx, store, binaryPath, dtu.ShimCommandGH, opts, remaining, "", "", "", stdout, stderr, func(ctx context.Context, state *dtu.State, _ *dtu.ShimEvent, shimStdout, shimStderr io.Writer) (int, error) {
+			return runGH(ctx, store, state, remaining, shimStdout, shimStderr), nil
 		})
 	case "git":
-		return executeShim(ctx, store, dtu.ShimCommandGit, opts, remaining, "", "", stdout, stderr, func(ctx context.Context, state *dtu.State, _ *dtu.ShimEvent) (int, error) {
-			return runGit(ctx, store, state, remaining, stdout, stderr), nil
+		return executeShim(ctx, store, binaryPath, dtu.ShimCommandGit, opts, remaining, "", "", "", stdout, stderr, func(ctx context.Context, state *dtu.State, _ *dtu.ShimEvent, shimStdout, shimStderr io.Writer) (int, error) {
+			return runGit(ctx, store, state, remaining, shimStdout, shimStderr), nil
 		})
 	case "claude":
-		return runProvider(ctx, store, dtu.ProviderClaude, opts, remaining, stdin, stdout, stderr)
+		return runProvider(ctx, store, binaryPath, dtu.ProviderClaude, opts, remaining, stdin, stdout, stderr)
 	case "copilot":
-		return runProvider(ctx, store, dtu.ProviderCopilot, opts, remaining, stdin, stdout, stderr)
+		return runProvider(ctx, store, binaryPath, dtu.ProviderCopilot, opts, remaining, stdin, stdout, stderr)
 	default:
 		return writeError(stderr, 2, fmt.Errorf("unsupported DTU shim %q", binary))
 	}
@@ -196,12 +211,12 @@ func deriveStoreLocation(statePath string) (string, string, error) {
 	return stateDir, universeID, nil
 }
 
-func runProvider(ctx context.Context, store *dtu.Store, provider dtu.Provider, opts options, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
-	inv, err := parseProviderInvocation(provider, opts, args, stdin)
+func runProvider(ctx context.Context, store *dtu.Store, binaryPath string, provider dtu.Provider, opts options, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
+	inv, stdinDigest, err := parseProviderInvocation(provider, opts, args, stdin)
 	if err != nil {
 		return writeError(stderr, 2, err)
 	}
-	return executeShim(ctx, store, providerShimCommand(provider), opts, args, provider, inv.Prompt, stdout, stderr, func(ctx context.Context, state *dtu.State, event *dtu.ShimEvent) (int, error) {
+	return executeShim(ctx, store, binaryPath, providerShimCommand(provider), opts, args, provider, inv.Prompt, stdinDigest, stdout, stderr, func(ctx context.Context, state *dtu.State, event *dtu.ShimEvent, shimStdout, shimStderr io.Writer) (int, error) {
 		script, err := state.SelectProviderScript(inv)
 		if err != nil {
 			return 1, err
@@ -209,46 +224,49 @@ func runProvider(ctx context.Context, store *dtu.Store, provider dtu.Provider, o
 		if event.Script == "" {
 			event.Script = script.Name
 		}
-		return applyProviderScript(ctx, store, script, stdout, stderr)
+		return applyProviderScript(ctx, store, script, shimStdout, shimStderr)
 	})
 }
 
-func parseProviderInvocation(provider dtu.Provider, opts options, args []string, stdin io.Reader) (dtu.ProviderInvocation, error) {
+func parseProviderInvocation(provider dtu.Provider, opts options, args []string, stdin io.Reader) (dtu.ProviderInvocation, string, error) {
 	inv := dtu.ProviderInvocation{
 		Provider:   provider,
 		ScriptName: strings.TrimSpace(opts.ScriptName),
 		Phase:      strings.TrimSpace(opts.Phase),
 		Attempt:    opts.Attempt,
 	}
+	var stdinDigest string
 	switch provider {
 	case dtu.ProviderClaude:
-		prompt, model, allowedTools, err := parseClaudeArgs(args, stdin)
+		prompt, model, allowedTools, digest, err := parseClaudeArgs(args, stdin)
 		if err != nil {
-			return dtu.ProviderInvocation{}, err
+			return dtu.ProviderInvocation{}, "", err
 		}
 		inv.Prompt = prompt
 		inv.Model = model
 		inv.AllowedTools = allowedTools
+		stdinDigest = digest
 	case dtu.ProviderCopilot:
 		prompt, model, allowedTools, err := parseCopilotArgs(args)
 		if err != nil {
-			return dtu.ProviderInvocation{}, err
+			return dtu.ProviderInvocation{}, "", err
 		}
 		inv.Prompt = prompt
 		inv.Model = model
 		inv.AllowedTools = allowedTools
 	default:
-		return dtu.ProviderInvocation{}, fmt.Errorf("unsupported provider %q", provider)
+		return dtu.ProviderInvocation{}, "", fmt.Errorf("unsupported provider %q", provider)
 	}
-	return inv, nil
+	return inv, stdinDigest, nil
 }
 
-func parseClaudeArgs(args []string, stdin io.Reader) (string, string, []string, error) {
+func parseClaudeArgs(args []string, stdin io.Reader) (string, string, []string, string, error) {
 	var (
 		promptFlag   bool
 		prompt       string
 		model        string
 		allowedTools []string
+		stdinDigest  string
 	)
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -261,42 +279,43 @@ func parseClaudeArgs(args []string, stdin io.Reader) (string, string, []string, 
 		case "--max-turns":
 			_, next, err := requireValue(args, i, args[i])
 			if err != nil {
-				return "", "", nil, err
+				return "", "", nil, "", err
 			}
 			i = next
 		case "--model":
 			value, next, err := requireValue(args, i, args[i])
 			if err != nil {
-				return "", "", nil, err
+				return "", "", nil, "", err
 			}
 			model = value
 			i = next
 		case "--allowedTools":
 			value, next, err := requireValue(args, i, args[i])
 			if err != nil {
-				return "", "", nil, err
+				return "", "", nil, "", err
 			}
 			allowedTools = append(allowedTools, value)
 			i = next
 		case "--append-system-prompt":
 			_, next, err := requireValue(args, i, args[i])
 			if err != nil {
-				return "", "", nil, err
+				return "", "", nil, "", err
 			}
 			i = next
 		}
 	}
 	if !promptFlag {
-		return "", "", nil, fmt.Errorf("claude shim requires -p")
+		return "", "", nil, "", fmt.Errorf("claude shim requires -p")
 	}
 	if prompt == "" && stdin != nil {
 		data, err := io.ReadAll(stdin)
 		if err != nil {
-			return "", "", nil, fmt.Errorf("read claude prompt: %w", err)
+			return "", "", nil, "", fmt.Errorf("read claude prompt: %w", err)
 		}
 		prompt = string(data)
+		stdinDigest = hashPrompt(prompt)
 	}
-	return prompt, model, normalizeStrings(allowedTools), nil
+	return prompt, model, normalizeStrings(allowedTools), stdinDigest, nil
 }
 
 func parseCopilotArgs(args []string) (string, string, []string, error) {
@@ -351,14 +370,16 @@ func providerShimCommand(provider dtu.Provider) dtu.ShimCommand {
 func executeShim(
 	ctx context.Context,
 	store *dtu.Store,
+	binaryPath string,
 	command dtu.ShimCommand,
 	opts options,
 	args []string,
 	provider dtu.Provider,
 	prompt string,
+	stdinDigest string,
 	stdout io.Writer,
 	stderr io.Writer,
-	run func(context.Context, *dtu.State, *dtu.ShimEvent) (int, error),
+	run func(context.Context, *dtu.State, *dtu.ShimEvent, io.Writer, io.Writer) (int, error),
 ) int {
 	state, err := store.Load()
 	if err != nil {
@@ -377,7 +398,9 @@ func executeShim(
 		Script:    strings.TrimSpace(opts.ScriptName),
 		Attempt:   opts.Attempt,
 	}
-	invocationEvent := buildShimEvent(command, args, provider, opts, prompt)
+	stdoutCounter := &countingWriter{writer: stdout}
+	stderrCounter := &countingWriter{writer: stderr}
+	invocationEvent := buildShimEvent(binaryPath, command, args, provider, opts, prompt, stdinDigest)
 	if err := recordShimEvent(store, dtu.EventKindShimInvocation, invocationEvent); err != nil {
 		return writeError(stderr, 1, fmt.Errorf("record DTU shim invocation: %w", err))
 	}
@@ -402,9 +425,9 @@ func executeShim(
 		code = 1
 		runErr = err
 	case fault != nil:
-		code, runErr = applyShimFault(ctx, store, fault, stdout, stderr)
+		code, runErr = applyShimFault(ctx, store, fault, stdoutCounter, stderrCounter)
 	default:
-		code, runErr = run(ctx, runState, resultEvent)
+		code, runErr = run(ctx, runState, resultEvent, stdoutCounter, stderrCounter)
 	}
 	if runErr == nil && fault == nil && shouldRecordObservation(command, args) {
 		if _, obsErr := store.RecordObservation(invocation); obsErr != nil {
@@ -417,30 +440,47 @@ func executeShim(
 	if clockErr != nil {
 		return writeError(stderr, 1, clockErr)
 	}
+	if runErr != nil {
+		code = writeError(stderrCounter, code, runErr)
+	}
 	resultEvent.Duration = endClock.Since(start).String()
 	resultEvent.ExitCode = intPtr(code)
+	resultEvent.StdoutBytes = stdoutCounter.bytes
+	resultEvent.StderrBytes = stderrCounter.bytes
 	if runErr != nil {
 		resultEvent.Error = runErr.Error()
 	}
 	if err := recordShimEvent(store, dtu.EventKindShimResult, resultEvent); err != nil {
 		return writeError(stderr, 1, fmt.Errorf("record DTU shim result: %w", err))
 	}
-	if runErr != nil {
-		return writeError(stderr, code, runErr)
-	}
 	return code
 }
 
-func buildShimEvent(command dtu.ShimCommand, args []string, provider dtu.Provider, opts options, prompt string) *dtu.ShimEvent {
+func buildShimEvent(binaryPath string, command dtu.ShimCommand, args []string, provider dtu.Provider, opts options, prompt string, stdinDigest string) *dtu.ShimEvent {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		workingDir = ""
+	}
+	binaryName := filepath.Base(strings.TrimSpace(binaryPath))
+	if binaryName == "." || binaryName == string(filepath.Separator) {
+		binaryName = ""
+	}
+	if binaryName == "" {
+		binaryName = string(command)
+	}
 	return &dtu.ShimEvent{
-		Command:    string(command),
-		Args:       append([]string(nil), args...),
-		Provider:   provider,
-		Phase:      strings.TrimSpace(opts.Phase),
-		Attempt:    opts.Attempt,
-		Prompt:     prompt,
-		PromptHash: hashPrompt(prompt),
-		Script:     strings.TrimSpace(opts.ScriptName),
+		Command:     string(command),
+		Args:        append([]string(nil), args...),
+		Provider:    provider,
+		Phase:       strings.TrimSpace(opts.Phase),
+		Attempt:     opts.Attempt,
+		BinaryPath:  strings.TrimSpace(binaryPath),
+		BinaryName:  binaryName,
+		WorkingDir:  workingDir,
+		StdinDigest: strings.TrimSpace(stdinDigest),
+		Prompt:      prompt,
+		PromptHash:  hashPrompt(prompt),
+		Script:      strings.TrimSpace(opts.ScriptName),
 	}
 }
 
@@ -520,8 +560,9 @@ func applyProviderScript(ctx context.Context, store *dtu.Store, script *dtu.Prov
 		}
 		return 124, nil
 	}
-	if script.Stdout != "" {
-		_, _ = io.WriteString(stdout, script.Stdout)
+	stdoutContent := withNoOpMarker(script.Stdout, script.NoOpMarker)
+	if stdoutContent != "" {
+		_, _ = io.WriteString(stdout, stdoutContent)
 	}
 	if script.Stderr != "" {
 		_, _ = io.WriteString(stderr, script.Stderr)
@@ -530,6 +571,24 @@ func applyProviderScript(ctx context.Context, store *dtu.Store, script *dtu.Prov
 		return script.ExitCode, nil
 	}
 	return 0, nil
+}
+
+func withNoOpMarker(stdout string, marker string) string {
+	marker = strings.TrimSpace(marker)
+	if marker == "" {
+		return stdout
+	}
+	trimmed := strings.TrimRight(stdout, "\n")
+	switch {
+	case trimmed == "":
+		return marker + "\n"
+	case trimmed == marker:
+		return marker + "\n"
+	case strings.HasSuffix(trimmed, "\n\n"+marker):
+		return trimmed + "\n"
+	default:
+		return trimmed + "\n\n" + marker + "\n"
+	}
 }
 
 func applyShimFault(ctx context.Context, store *dtu.Store, fault *dtu.ShimFault, stdout, stderr io.Writer) (int, error) {

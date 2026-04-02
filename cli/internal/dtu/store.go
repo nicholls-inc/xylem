@@ -102,6 +102,29 @@ func (s *Store) Save(state *State) error {
 	})
 }
 
+// Reset restores persisted DTU state from a replay snapshot.
+func (s *Store) Reset(snapshot ReplaySnapshot) error {
+	if snapshot.State == nil {
+		return fmt.Errorf("reset state: replay snapshot state must not be nil")
+	}
+	if snapshot.Hash == "" {
+		return fmt.Errorf("reset state: replay snapshot hash is required")
+	}
+	return s.withLock(func() error {
+		state, hash, _, err := snapshotState(snapshot.State, s.universeID)
+		if err != nil {
+			return fmt.Errorf("reset state: snapshot replay state: %w", err)
+		}
+		if hash != snapshot.Hash {
+			return fmt.Errorf("reset state: replay snapshot event %d hash mismatch: have %q want %q", snapshot.EventIndex, hash, snapshot.Hash)
+		}
+		if err := s.persistUnlocked(state, s.existingStateForEventUnlocked(), EventKindStateUpdated, StateOperationReset); err != nil {
+			return fmt.Errorf("reset state: %w", err)
+		}
+		return nil
+	})
+}
+
 // LoadState is a convenience wrapper around Store.Load.
 func LoadState(stateDir, universeID string) (*State, error) {
 	store, err := NewStore(stateDir, universeID)
@@ -459,6 +482,7 @@ func validateProviderScripts(scripts []ProviderScript) error {
 	seen := make(map[string]struct{}, len(scripts))
 	for _, script := range scripts {
 		name := strings.TrimSpace(script.Name)
+		scenario := strings.TrimSpace(script.Match.Scenario)
 		if name == "" {
 			return fmt.Errorf("provider script name is required")
 		}
@@ -473,12 +497,16 @@ func validateProviderScripts(scripts []ProviderScript) error {
 				return fmt.Errorf("provider script %q: delay must be a valid duration: %w", name, err)
 			}
 		}
-		key := providerScriptKey(script.Provider, name, script.Match.Attempt)
+		key := providerScriptKey(script.Provider, scenario, name, script.Match.Attempt)
 		if _, ok := seen[key]; ok {
-			if script.Match.Attempt > 0 {
-				return fmt.Errorf("duplicate provider script %q for provider %q attempt %d", name, script.Provider, script.Match.Attempt)
+			scope := ""
+			if scenario != "" {
+				scope = fmt.Sprintf(" for scenario %q", scenario)
 			}
-			return fmt.Errorf("duplicate provider script %q for provider %q", name, script.Provider)
+			if script.Match.Attempt > 0 {
+				return fmt.Errorf("duplicate provider script %q for provider %q%s attempt %d", name, script.Provider, scope, script.Match.Attempt)
+			}
+			return fmt.Errorf("duplicate provider script %q for provider %q%s", name, script.Provider, scope)
 		}
 		seen[key] = struct{}{}
 	}
@@ -612,6 +640,7 @@ func (s *State) normalizeWithClock(clock Clock) {
 	if s.Version == "" {
 		s.Version = formatVersion
 	}
+	s.Metadata.Scenario = strings.TrimSpace(s.Metadata.Scenario)
 	s.Metadata.Tags = normalizeStrings(s.Metadata.Tags)
 	s.Clock = normalizeClockState(s.Clock, clock)
 
@@ -727,14 +756,16 @@ func (s *State) normalizeWithClock(clock Clock) {
 		script := &s.Providers.Scripts[i]
 		script.Name = strings.TrimSpace(script.Name)
 		script.Model = strings.TrimSpace(script.Model)
+		script.Match.Scenario = strings.TrimSpace(script.Match.Scenario)
 		script.Match.Phase = strings.TrimSpace(script.Match.Phase)
 		script.Match.PromptContains = strings.TrimSpace(script.Match.PromptContains)
 		script.Match.PromptExact = strings.TrimSpace(script.Match.PromptExact)
 		script.AllowedTools = normalizeStrings(script.AllowedTools)
+		script.NoOpMarker = strings.TrimSpace(script.NoOpMarker)
 	}
 	sort.SliceStable(s.Providers.Scripts, func(a, b int) bool {
-		left := providerScriptKey(s.Providers.Scripts[a].Provider, s.Providers.Scripts[a].Name, s.Providers.Scripts[a].Match.Attempt)
-		right := providerScriptKey(s.Providers.Scripts[b].Provider, s.Providers.Scripts[b].Name, s.Providers.Scripts[b].Match.Attempt)
+		left := providerScriptKey(s.Providers.Scripts[a].Provider, s.Providers.Scripts[a].Match.Scenario, s.Providers.Scripts[a].Name, s.Providers.Scripts[a].Match.Attempt)
+		right := providerScriptKey(s.Providers.Scripts[b].Provider, s.Providers.Scripts[b].Match.Scenario, s.Providers.Scripts[b].Name, s.Providers.Scripts[b].Match.Attempt)
 		return left < right
 	})
 
@@ -880,8 +911,8 @@ func normalizeMatchArgs(values []string) []string {
 	return out
 }
 
-func providerScriptKey(provider Provider, name string, attempt int) string {
-	return fmt.Sprintf("%s:%s:%06d", provider, name, attempt)
+func providerScriptKey(provider Provider, scenario string, name string, attempt int) string {
+	return fmt.Sprintf("%s:%s:%s:%06d", provider, strings.TrimSpace(scenario), name, attempt)
 }
 
 func shimFaultKey(command ShimCommand, name string, attempt int) string {

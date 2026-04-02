@@ -1,0 +1,31 @@
+metadata:
+  name: issue-gh-rate-limit-on-enqueue
+  scenario: queued label mutation is rate limited but issue processing continues
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+    issues:
+      - number: 6
+        title: queued label rate limit
+        body: best-effort gh issue edit failures should not block xylem
+        labels: [bug]
+providers:
+  scripts:
+    - name: fix
+      provider: claude
+      match:
+        phase: fix
+      stdout: queued label rate limit ignored
+shim_faults:
+  - name: queued-label-rate-limit
+    command: gh
+    match:
+      args_exact: [issue, edit, "6", --repo, owner/repo, --add-label, queued]
+    stderr: "HTTP 429: API rate limit exceeded"
+    exit_code: 1

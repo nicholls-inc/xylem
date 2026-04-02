@@ -10,8 +10,8 @@ divergences:
     command_or_case: git fetch origin <default-branch>
     divergence_type: latency
     status: intentional
-    rationale: DTU models deterministic exit codes and retries but does not attempt to mirror live network jitter, remote packfile sizes, or transport latency.
-    live_reference: canary:git-fetch-default-branch
+    rationale: DTU fully replaces git through deterministic shim wrappers but does not attempt to mirror live network jitter, remote packfile sizes, or transport latency during fetch.
+    live_reference: manual:git fetch origin <default-branch>
   - boundary: claude
     command_or_case: claude -p prompt streaming
     divergence_type: side_effect

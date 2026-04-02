@@ -189,10 +189,12 @@ type ProviderScript struct {
 	ExitCode     int                 `yaml:"exit_code,omitempty" json:"exit_code,omitempty"`
 	Delay        string              `yaml:"delay,omitempty" json:"delay,omitempty"`
 	Hang         bool                `yaml:"hang,omitempty" json:"hang,omitempty"`
+	NoOpMarker   string              `yaml:"noop_marker,omitempty" json:"noop_marker,omitempty"`
 }
 
 // ProviderScriptMatch narrows when a provider script should be selected.
 type ProviderScriptMatch struct {
+	Scenario       string `yaml:"scenario,omitempty" json:"scenario,omitempty"`
 	Phase          string `yaml:"phase,omitempty" json:"phase,omitempty"`
 	Attempt        int    `yaml:"attempt,omitempty" json:"attempt,omitempty"`
 	PromptContains string `yaml:"prompt_contains,omitempty" json:"prompt_contains,omitempty"`
@@ -544,13 +546,20 @@ func (s *State) Repository(owner, name string) *Repository {
 
 // ProviderScript returns the matching provider script, if present.
 func (s *State) ProviderScript(provider Provider, name string) *ProviderScript {
+	scenario := strings.TrimSpace(s.Metadata.Scenario)
+	var fallback *ProviderScript
 	for i := range s.Providers.Scripts {
 		script := &s.Providers.Scripts[i]
 		if script.Provider == provider && script.Name == name {
-			return script
+			if scenario != "" && script.Match.Scenario == scenario {
+				return script
+			}
+			if fallback == nil {
+				fallback = script
+			}
 		}
 	}
-	return nil
+	return fallback
 }
 
 // ShimFault returns the matching shim fault, if present.

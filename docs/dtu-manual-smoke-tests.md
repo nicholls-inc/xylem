@@ -19,7 +19,7 @@ Choose manual smoke tests when you want to:
 | `.xylem.yml`, workflows, prompts, HARNESS.md | **Real** | Your repo's actual files are used. |
 | Queue files, worktree directories, local filesystem | **Real** | The test mutates local state just like normal xylem execution. |
 | Shell command gates and local tools such as `go test` | **Real** | DTU does not replace arbitrary shell commands. |
-| `gh`, `git`, `claude`, `copilot` | **Twinned** | These are intercepted through the DTU shim directory and env. |
+| `gh`, `git`, `claude`, `copilot` | **Twinned** | These are intercepted through the materialized DTU shim directory and env. |
 | GitHub network/auth/provider APIs | **Twinned** | Only the behavior modeled in the manifest exists. |
 | Deterministic daemon time travel | **Available inside a materialized DTU universe** | Control-plane waits and timeout checks now use the DTU runtime clock, so repeated `drain`, `daemon`, and `shim-dispatch` commands can advance deterministic state without real sleeping. |
 
@@ -37,10 +37,10 @@ If a manual DTU smoke test passes, you can trust that:
 
 If it passes, you **cannot** conclude that:
 
-- live GitHub or live provider CLIs will behave identically
-- your production auth, latency, or rate-limit behavior is correct
+- live `gh`, `git`, or provider CLIs will behave identically
+- your production auth, git transport latency, or rate-limit behavior is correct
 - every real-world boundary variation is covered
-- live GitHub/provider timing will match the authored DTU clock behavior
+- live `gh`/`git`/provider timing will match the authored DTU clock behavior
 
 In short: **trust manual DTU smoke tests for real local xylem wiring plus modeled external boundaries, not for proving live boundary fidelity.**
 
@@ -170,6 +170,8 @@ xylem dtu verify --verify-workdir "$PWD"
 
 That executes enabled live differentials and canaries, applies the configured normalizers, and reports divergence-registry / attribution-policy context for mismatches.
 
+As checked in today, the suite defines three `gh` differentials, one `git ls-remote` differential, two provider-process-shape differentials (`claude`, `copilot`), and four canaries (`gh`, `git`, `claude`, `copilot`). `XYLEM_DTU_LIVE_CANARY=1` enables the canaries. `XYLEM_DTU_LIVE_GH_DIFFERENTIAL=1`, `XYLEM_DTU_LIVE_GIT_DIFFERENTIAL=1`, and `XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL=1` enable the current differential groups. In this repository, `.github/workflows/dtu-canary.yml` leaves the weekly run in canary-only mode, while a manual `full` dispatch enables all three differential groups.
+
 ## How to probe a boundary directly
 
 When a smoke test fails, probe the boundary before blaming xylem:
@@ -245,6 +247,7 @@ Use this rule:
 2. **If direct shim probing is right but xylem fails, the failure is much more likely to be in xylem.**
 3. **If a local command gate fails, that may be a real local build/test issue rather than a DTU issue.** In manual smoke tests, arbitrary shell commands are live.
 4. **If live behavior differs from DTU behavior, check the divergence registry.** Intentional differences are tracked in `cli/internal/dtu/testdata/divergence-registry.yaml`.
+   That registry currently records `git fetch origin <default-branch>` latency as an intentional divergence because the DTU git layer is a deterministic shim replacement, not a live transport simulator.
 
 ## What assurances this method provides
 
@@ -259,7 +262,7 @@ A passing manual DTU smoke test provides meaningful evidence that:
 
 A passing manual DTU smoke test does **not** prove that:
 
-- live GitHub or live providers will respond exactly the same way
+- live `gh`, `git`, or provider CLIs will respond exactly the same way
 - your production auth or network environment is healthy
 - every boundary shape has been modeled
 - there are no gaps in DTU fidelity
@@ -287,3 +290,11 @@ Those live cases are now executable through `xylem dtu verify`. Manual DTU smoke
 
 1. reproducible offline smoke tests in a real repo, and
 2. a triage tool for separating xylem bugs from DTU or fixture bugs before running live differentials.
+
+Latest finalized checked-in smoke run (2026-04-02): **22 PASS, 4 FAIL, 1 ERROR**.
+
+Current findings to remember:
+
+- `issue-gh-auth-scan-failure`: the `gh` shim returns `gh: authentication required`, but `xylem scan --dry-run` currently surfaces only exit status `1`. Treat this as a current xylem scan error-reporting gap when using manual smoke for auth failures.
+- `ws1-policy-deny-blocks-phase`, `ws1-policy-require-approval`, and `ws1-surface-violation`: these checked-in Guide 4B scenarios currently do not produce the documented blocking/failure behavior. The provider still runs, so these are currently known xylem failures, not passing smoke coverage.
+- `issue-daemon-recovery`: do **not** rely on Guide 4B manual smoke for stale-running daemon recovery. In the latest run, the scenario degenerated into a normal timeout instead of the stale-restart reconciliation path. Cover this path with the checked-in Guide 4A regression harness instead.

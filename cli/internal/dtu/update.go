@@ -60,6 +60,10 @@ func (s *Store) existingStateForEventUnlocked() *State {
 }
 
 func (s *Store) persistUnlocked(state *State, previous *State, kind EventKind, operation StateOperation) error {
+	return s.persistUnlockedWithEvents(state, previous, kind, operation, nil)
+}
+
+func (s *Store) persistUnlockedWithEvents(state *State, previous *State, kind EventKind, operation StateOperation, extraEvents []*Event) error {
 	if state == nil {
 		return fmt.Errorf("persist state: state must not be nil")
 	}
@@ -78,6 +82,14 @@ func (s *Store) persistUnlocked(state *State, previous *State, kind EventKind, o
 	}
 	if err := s.writeStateUnlocked(state); err != nil {
 		return err
+	}
+	for _, extraEvent := range extraEvents {
+		if extraEvent == nil {
+			continue
+		}
+		if err := s.appendEventUnlocked(extraEvent); err != nil {
+			return fmt.Errorf("append DTU event: %w", err)
+		}
 	}
 	event, err := newStateEvent(kind, s.universeID, operation, previous, state)
 	if err != nil {

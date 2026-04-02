@@ -1,0 +1,32 @@
+metadata:
+  name: issue-git-worktree-add-retry-exit-255
+  scenario: git worktree add exit code 255 retries and succeeds
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+    issues:
+      - number: 8
+        title: worktree add exit two fifty five
+        body: worktree creation should retry git worktree add after exit 255
+        labels: [bug]
+providers:
+  scripts:
+    - name: fix
+      provider: claude
+      match:
+        phase: fix
+      stdout: worktree add retry recovered
+shim_faults:
+  - name: worktree-add-exit-255
+    command: git
+    match:
+      args_prefix: [worktree, add]
+      attempt: 1
+    stderr: "fatal: Could not read from remote repository."
+    exit_code: 255

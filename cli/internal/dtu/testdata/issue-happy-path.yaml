@@ -19,6 +19,11 @@ clock:
   now: "2026-01-02T03:04:05Z"
 providers:
   scripts:
+    - name: live-verification-smoke
+      provider: claude
+      match:
+        prompt_exact: smoke test
+      stdout: claude smoke complete
     - name: plan
       provider: claude
       match:

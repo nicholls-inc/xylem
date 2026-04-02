@@ -42,10 +42,19 @@ type normalizedProviderProcess struct {
 	ExitCode int    `json:"exit_code"`
 }
 
+type normalizedProviderProcessShape struct {
+	HasStdout bool `json:"has_stdout"`
+	HasStderr bool `json:"has_stderr"`
+	ExitCode  int  `json:"exit_code"`
+}
+
 var verificationNormalizers = map[string]VerificationNormalizer{
+	"git_ls_remote_heads":         normalizeGitLSRemoteHeads,
+	"git_symbolic_ref":            normalizeGitSymbolicRef,
 	"issue_list":                  normalizeIssueList,
-	"pr_list":                     normalizePRList,
 	"labels_only":                 normalizeLabelsOnly,
+	"pr_list":                     normalizePRList,
+	"provider_process_shape":      normalizeProviderProcessShape,
 	"provider_stdout_stderr_exit": normalizeProviderStdoutStderrExit,
 }
 
@@ -161,6 +170,46 @@ func normalizeProviderStdoutStderrExit(result VerificationCommandResult) (any, e
 	}, nil
 }
 
+func normalizeProviderProcessShape(result VerificationCommandResult) (any, error) {
+	return normalizedProviderProcessShape{
+		HasStdout: strings.TrimSpace(result.Stdout) != "",
+		HasStderr: strings.TrimSpace(result.Stderr) != "",
+		ExitCode:  result.ExitCode,
+	}, nil
+}
+
+func normalizeGitLSRemoteHeads(result VerificationCommandResult) (any, error) {
+	lines := trimmedOutputLines(result.Stdout)
+	if len(lines) == 0 {
+		return []string{}, nil
+	}
+
+	refs := make([]string, 0, len(lines))
+	for i, line := range lines {
+		fields := strings.Fields(line)
+		if len(fields) != 2 {
+			return nil, fmt.Errorf("git_ls_remote_heads line %d must contain <sha> <ref>", i+1)
+		}
+		ref := strings.TrimSpace(fields[1])
+		if !strings.HasPrefix(ref, "refs/heads/") {
+			return nil, fmt.Errorf("git_ls_remote_heads line %d must contain refs/heads/*, got %q", i+1, ref)
+		}
+		refs = append(refs, ref)
+	}
+	return normalizeStrings(refs), nil
+}
+
+func normalizeGitSymbolicRef(result VerificationCommandResult) (any, error) {
+	ref := strings.TrimSpace(result.Stdout)
+	if ref == "" {
+		return nil, fmt.Errorf("git_symbolic_ref output must not be empty")
+	}
+	if !strings.HasPrefix(ref, "refs/") {
+		return nil, fmt.Errorf("git_symbolic_ref output must start with refs/, got %q", ref)
+	}
+	return ref, nil
+}
+
 func decodeJSONArray(stdout string, normalizerName string) ([]any, error) {
 	value, err := decodeJSONValue(stdout, normalizerName)
 	if err != nil {
@@ -183,6 +232,26 @@ func decodeJSONValue(stdout string, normalizerName string) (any, error) {
 		return nil, fmt.Errorf("decode %s output: %w", normalizerName, err)
 	}
 	return value, nil
+}
+
+func trimmedOutputLines(stdout string) []string {
+	if strings.TrimSpace(stdout) == "" {
+		return nil
+	}
+
+	lines := strings.Split(stdout, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func labelNamesFromJSON(value any) []string {

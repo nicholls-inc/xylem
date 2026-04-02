@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 )
 
 // helperTransitionToWaiting transitions a vessel from pending -> running -> waiting via the queue.
@@ -1309,6 +1311,144 @@ func TestUpdateVessel(t *testing.T) {
 			t.Fatalf("expected not-found error, got: %v", err)
 		}
 	})
+
+	t.Run("invalid state transition is rejected", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+		vessel := testVessel(601)
+		if _, err := q.Enqueue(vessel); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+
+		updated := vessel
+		updated.State = StateCompleted
+		err := q.UpdateVessel(updated)
+		if err == nil {
+			t.Fatal("expected invalid transition error")
+		}
+		if !errors.Is(err, ErrInvalidTransition) {
+			t.Fatalf("expected ErrInvalidTransition, got %v", err)
+		}
+	})
+}
+
+func TestQueueRecordsDTUVesselEvents(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := dtu.NewStore(stateDir, "universe-1")
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	if err := store.Save(&dtu.State{
+		UniverseID: "universe-1",
+		Metadata:   dtu.ManifestMetadata{Name: "sample"},
+		Clock:      dtu.ClockState{Now: "2026-01-02T03:04:05Z"},
+		Counters:   dtu.Counters{NextCommentID: 1, NextReviewID: 1, NextCheckID: 1},
+	}); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	t.Setenv(dtu.EnvStatePath, store.Path())
+	t.Setenv(dtu.EnvStateDir, stateDir)
+	t.Setenv(dtu.EnvUniverseID, "universe-1")
+
+	q, _ := newTestQueue(t)
+	vessel := testVessel(601)
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	running, err := q.Dequeue()
+	if err != nil {
+		t.Fatalf("Dequeue() error = %v", err)
+	}
+	if running == nil {
+		t.Fatal("Dequeue() = nil, want vessel")
+	}
+	waitingSince := running.CreatedAt.Add(time.Minute)
+	running.State = StateWaiting
+	running.CurrentPhase = 1
+	running.GateRetries = 2
+	running.WaitingSince = &waitingSince
+	running.WaitingFor = "plan-approved"
+	running.FailedPhase = "plan"
+	if err := q.UpdateVessel(*running); err != nil {
+		t.Fatalf("UpdateVessel() error = %v", err)
+	}
+	if err := q.Update(vessel.ID, StatePending, ""); err != nil {
+		t.Fatalf("Update() error = %v", err)
+	}
+
+	events, err := store.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents() error = %v", err)
+	}
+	var vesselEvents []dtu.Event
+	for _, event := range events {
+		if event.Kind == dtu.EventKindVesselUpdated {
+			vesselEvents = append(vesselEvents, event)
+		}
+	}
+	if len(vesselEvents) != 4 {
+		t.Fatalf("len(vessel events) = %d, want 4", len(vesselEvents))
+	}
+	if got, want := vesselEvents[0].Vessel.Operation, dtu.VesselOperationEnqueue; got != want {
+		t.Fatalf("vesselEvents[0].Operation = %q, want %q", got, want)
+	}
+	if got, want := vesselEvents[1].Vessel.OldState, string(StatePending); got != want {
+		t.Fatalf("vesselEvents[1].OldState = %q, want %q", got, want)
+	}
+	if got, want := vesselEvents[1].Vessel.NewState, string(StateRunning); got != want {
+		t.Fatalf("vesselEvents[1].NewState = %q, want %q", got, want)
+	}
+	waitingEvent := vesselEvents[2].Vessel
+	if waitingEvent == nil || waitingEvent.Current == nil {
+		t.Fatalf("waiting event = %#v, want current snapshot", waitingEvent)
+	}
+	if got, want := waitingEvent.Operation, dtu.VesselOperationUpdateVessel; got != want {
+		t.Fatalf("waiting event operation = %q, want %q", got, want)
+	}
+	if got, want := waitingEvent.NewState, string(StateWaiting); got != want {
+		t.Fatalf("waiting event new state = %q, want %q", got, want)
+	}
+	if got, want := waitingEvent.Current.WaitingFor, "plan-approved"; got != want {
+		t.Fatalf("waiting event WaitingFor = %q, want %q", got, want)
+	}
+	if got, want := waitingEvent.Current.GateRetries, 2; got != want {
+		t.Fatalf("waiting event GateRetries = %d, want %d", got, want)
+	}
+	if got, want := waitingEvent.Current.FailedPhase, "plan"; got != want {
+		t.Fatalf("waiting event FailedPhase = %q, want %q", got, want)
+	}
+	resumeEvent := vesselEvents[3].Vessel
+	if resumeEvent == nil || resumeEvent.Current == nil {
+		t.Fatalf("resume event = %#v, want current snapshot", resumeEvent)
+	}
+	if got, want := resumeEvent.OldState, string(StateWaiting); got != want {
+		t.Fatalf("resume event old state = %q, want %q", got, want)
+	}
+	if got, want := resumeEvent.NewState, string(StatePending); got != want {
+		t.Fatalf("resume event new state = %q, want %q", got, want)
+	}
+	if resumeEvent.Current.WaitingFor != "" || resumeEvent.Current.GateRetries != 0 || resumeEvent.Current.FailedPhase != "" {
+		t.Fatalf("resume event current snapshot = %#v, want waiting metadata cleared", resumeEvent.Current)
+	}
+}
+
+func TestQueueSurfacesDTUVesselEventErrors(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(602)
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	invalidStatePath := filepath.Join(t.TempDir(), "not-a-state-file.json")
+	if err := os.WriteFile(invalidStatePath, []byte("{}"), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", invalidStatePath, err)
+	}
+	t.Setenv(dtu.EnvStatePath, invalidStatePath)
+
+	if _, err := q.Dequeue(); err == nil {
+		t.Fatal("Dequeue() error = nil, want DTU event recording failure")
+	} else if !strings.Contains(err.Error(), "record DTU vessel event") {
+		t.Fatalf("Dequeue() error = %v, want DTU vessel event context", err)
+	}
 }
 
 func TestFindByID(t *testing.T) {

@@ -311,6 +311,29 @@ func TestNewStateAssignsMissingIDsAndNormalizesOrder(t *testing.T) {
 	}
 }
 
+func TestNewStateAllowsScenarioScopedProviderScripts(t *testing.T) {
+	t.Parallel()
+
+	manifest := &Manifest{
+		Metadata: ManifestMetadata{
+			Name:     "sample",
+			Scenario: "issue workflow",
+		},
+		Providers: Providers{Scripts: []ProviderScript{
+			{Name: "reply", Provider: ProviderClaude, Match: ProviderScriptMatch{Scenario: "issue workflow"}},
+			{Name: "reply", Provider: ProviderClaude, Match: ProviderScriptMatch{Scenario: "merge workflow"}},
+		}},
+	}
+
+	state, err := NewState("universe-1", manifest, "fixtures/universe.yaml", time.Date(2026, time.January, 2, 1, 0, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatalf("NewState() error = %v", err)
+	}
+	if len(state.Providers.Scripts) != 2 {
+		t.Fatalf("len(Providers.Scripts) = %d, want 2", len(state.Providers.Scripts))
+	}
+}
+
 func TestStoreSaveAndLoadRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -678,6 +701,52 @@ func TestStoreRecordObservationAppliesScheduledMutationAfterThreshold(t *testing
 	}
 	if got, want := loaded.Runtime.AppliedMutations[0].AppliedAt, appliedAt.Format(time.RFC3339Nano); got != want {
 		t.Fatalf("AppliedAt = %q, want %q", got, want)
+	}
+
+	events, err := store.ReadEvents()
+	if err != nil {
+		t.Fatalf("ReadEvents() error = %v", err)
+	}
+	var (
+		observedCount int
+		appliedEvent  *Event
+	)
+	for i := range events {
+		switch events[i].Kind {
+		case EventKindSchedulerObserved:
+			observedCount++
+			if events[i].Scheduler == nil {
+				t.Fatalf("events[%d].Scheduler = nil", i)
+			}
+			if observedCount == 3 {
+				if got, want := events[i].Scheduler.ObservationCount, 3; got != want {
+					t.Fatalf("events[%d].Scheduler.ObservationCount = %d, want %d", i, got, want)
+				}
+				if !reflect.DeepEqual(events[i].Scheduler.AppliedMutations, []string{"label-ready-after-second-view"}) {
+					t.Fatalf("events[%d].Scheduler.AppliedMutations = %#v, want applied mutation name", i, events[i].Scheduler.AppliedMutations)
+				}
+			}
+		case EventKindSchedulerMutationApplied:
+			appliedEvent = &events[i]
+		}
+	}
+	if observedCount != 3 {
+		t.Fatalf("scheduler observed events = %d, want 3", observedCount)
+	}
+	if appliedEvent == nil || appliedEvent.Scheduler == nil {
+		t.Fatalf("mutation applied event missing from %#v", events)
+	}
+	if got, want := appliedEvent.Scheduler.MutationName, "label-ready-after-second-view"; got != want {
+		t.Fatalf("Scheduler.MutationName = %q, want %q", got, want)
+	}
+	if got, want := appliedEvent.Scheduler.TriggerAfter, 2; got != want {
+		t.Fatalf("Scheduler.TriggerAfter = %d, want %d", got, want)
+	}
+	if got, want := appliedEvent.Scheduler.AppliedAt, appliedAt.Format(time.RFC3339Nano); got != want {
+		t.Fatalf("Scheduler.AppliedAt = %q, want %q", got, want)
+	}
+	if len(appliedEvent.Scheduler.Operations) != 1 || appliedEvent.Scheduler.Operations[0].Label != "ready" {
+		t.Fatalf("Scheduler.Operations = %#v, want ready label operation", appliedEvent.Scheduler.Operations)
 	}
 }
 

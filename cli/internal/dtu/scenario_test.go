@@ -341,6 +341,20 @@ func filterShimEvents(events []dtu.Event, kind dtu.EventKind, command string, ar
 	return filtered
 }
 
+func filterVesselEvents(events []dtu.Event, vesselID string) []dtu.Event {
+	filtered := make([]dtu.Event, 0, len(events))
+	for _, event := range events {
+		if event.Kind != dtu.EventKindVesselUpdated || event.Vessel == nil {
+			continue
+		}
+		if vesselID != "" && event.Vessel.VesselID != vesselID {
+			continue
+		}
+		filtered = append(filtered, event)
+	}
+	return filtered
+}
+
 func hasStringPrefix(values, prefix []string) bool {
 	if len(prefix) == 0 {
 		return true
@@ -486,6 +500,37 @@ func TestScenarioIssueLabelGateWaitsThenResumes(t *testing.T) {
 	}
 	if claudeInvocations[0].Shim.Phase != "plan" || claudeInvocations[1].Shim.Phase != "implement" {
 		t.Fatalf("unexpected claude phases: %#v", claudeInvocations)
+	}
+	vesselEvents := filterVesselEvents(events, "issue-1")
+	if len(vesselEvents) == 0 {
+		t.Fatalf("missing vessel events in %#v", events)
+	}
+	var (
+		sawWaiting  bool
+		sawResume   bool
+		sawComplete bool
+	)
+	for _, event := range vesselEvents {
+		if event.Vessel == nil || event.Vessel.Current == nil {
+			continue
+		}
+		switch {
+		case event.Vessel.OldState == string(queue.StateRunning) && event.Vessel.NewState == string(queue.StateWaiting):
+			sawWaiting = event.Vessel.Current.WaitingFor == "plan-approved" && event.Vessel.Current.CurrentPhase == 1 && event.Vessel.Current.FailedPhase == "plan"
+		case event.Vessel.OldState == string(queue.StateWaiting) && event.Vessel.NewState == string(queue.StatePending):
+			sawResume = event.Vessel.Current.WaitingFor == "" && event.Vessel.Current.GateRetries == 0
+		case event.Vessel.NewState == string(queue.StateCompleted):
+			sawComplete = true
+		}
+	}
+	if !sawWaiting {
+		t.Fatalf("missing waiting vessel event in %#v", vesselEvents)
+	}
+	if !sawResume {
+		t.Fatalf("missing resume vessel event in %#v", vesselEvents)
+	}
+	if !sawComplete {
+		t.Fatalf("missing completion vessel event in %#v", vesselEvents)
 	}
 }
 
@@ -884,6 +929,178 @@ func TestScenarioIssueGitFetchRetrySucceeds(t *testing.T) {
 	}
 }
 
+func TestScenarioIssueGitFetchRetryExitCode1Succeeds(t *testing.T) {
+	env := newScenarioEnv(t, "issue-git-fetch-retry-exit-1.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "fix-bug", []scenarioPhase{
+		{name: "fix", prompt: "Fix issue {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"issues": {
+			Type: "github",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+					StatusLabels: &config.StatusLabels{
+						Queued:    "queued",
+						Running:   "in-progress",
+						Completed: "done",
+					},
+				},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"bug", "queued"})
+
+	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Completed != 1 {
+		t.Fatalf("DrainResult.Completed = %d, want 1", drainResult.Completed)
+	}
+
+	vessel, err := env.queue.FindByID("issue-7")
+	if err != nil {
+		t.Fatalf("FindByID(issue-7) error = %v", err)
+	}
+	if vessel.State != queue.StateCompleted {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"bug", "done"})
+
+	state := loadState(t, env.store)
+	if got := len(state.RepositoryBySlug("owner/repo").Worktrees); got != 0 {
+		t.Fatalf("len(Worktrees) = %d, want 0 after completion", got)
+	}
+
+	events := readEvents(t, env.store)
+	fetchResults := filterShimEvents(events, dtu.EventKindShimResult, "git", []string{"fetch", "origin", "main"})
+	if len(fetchResults) != 2 {
+		t.Fatalf("len(fetch results) = %d, want 2", len(fetchResults))
+	}
+	gotAttempts := make([]int, 0, len(fetchResults))
+	gotCodes := make([]int, 0, len(fetchResults))
+	for _, event := range fetchResults {
+		gotAttempts = append(gotAttempts, event.Shim.Attempt)
+		if event.Shim.ExitCode == nil {
+			gotCodes = append(gotCodes, 0)
+			continue
+		}
+		gotCodes = append(gotCodes, *event.Shim.ExitCode)
+	}
+	if !reflect.DeepEqual(gotAttempts, []int{1, 2}) {
+		t.Fatalf("fetch attempts = %v, want [1 2]", gotAttempts)
+	}
+	if !reflect.DeepEqual(gotCodes, []int{1, 0}) {
+		t.Fatalf("fetch exit codes = %v, want [1 0]", gotCodes)
+	}
+}
+
+func TestScenarioIssueGitWorktreeAddRetryExitCode255Succeeds(t *testing.T) {
+	env := newScenarioEnv(t, "issue-git-worktree-add-retry-exit-255.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "fix-bug", []scenarioPhase{
+		{name: "fix", prompt: "Fix issue {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"issues": {
+			Type: "github",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+					StatusLabels: &config.StatusLabels{
+						Queued:    "queued",
+						Running:   "in-progress",
+						Completed: "done",
+					},
+				},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 8), []string{"bug", "queued"})
+
+	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Completed != 1 {
+		t.Fatalf("DrainResult.Completed = %d, want 1", drainResult.Completed)
+	}
+
+	vessel, err := env.queue.FindByID("issue-8")
+	if err != nil {
+		t.Fatalf("FindByID(issue-8) error = %v", err)
+	}
+	if vessel.State != queue.StateCompleted {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 8), []string{"bug", "done"})
+
+	state := loadState(t, env.store)
+	if got := len(state.RepositoryBySlug("owner/repo").Worktrees); got != 0 {
+		t.Fatalf("len(Worktrees) = %d, want 0 after completion", got)
+	}
+
+	events := readEvents(t, env.store)
+	fetchResults := filterShimEvents(events, dtu.EventKindShimResult, "git", []string{"fetch", "origin", "main"})
+	if len(fetchResults) != 1 {
+		t.Fatalf("len(fetch results) = %d, want 1", len(fetchResults))
+	}
+	worktreeResults := filterShimEvents(events, dtu.EventKindShimResult, "git", []string{"worktree", "add"})
+	if len(worktreeResults) != 2 {
+		t.Fatalf("len(worktree add results) = %d, want 2", len(worktreeResults))
+	}
+	gotAttempts := make([]int, 0, len(worktreeResults))
+	gotCodes := make([]int, 0, len(worktreeResults))
+	for _, event := range worktreeResults {
+		gotAttempts = append(gotAttempts, event.Shim.Attempt)
+		if event.Shim.ExitCode == nil {
+			gotCodes = append(gotCodes, 0)
+			continue
+		}
+		gotCodes = append(gotCodes, *event.Shim.ExitCode)
+	}
+	if !reflect.DeepEqual(gotAttempts, []int{1, 2}) {
+		t.Fatalf("worktree add attempts = %v, want [1 2]", gotAttempts)
+	}
+	if !reflect.DeepEqual(gotCodes, []int{255, 0}) {
+		t.Fatalf("worktree add exit codes = %v, want [255 0]", gotCodes)
+	}
+}
+
 func TestScenarioIssueMalformedGHOutputFailsScan(t *testing.T) {
 	env := newScenarioEnv(t, "issue-gh-malformed.yaml")
 	defer withWorkingDir(t, env.repoDir)()
@@ -926,6 +1143,145 @@ func TestScenarioIssueMalformedGHOutputFailsScan(t *testing.T) {
 	}
 	if searchResults[0].Shim.ExitCode == nil || *searchResults[0].Shim.ExitCode != 0 {
 		t.Fatalf("search result exit code = %#v, want 0", searchResults[0].Shim.ExitCode)
+	}
+}
+
+func TestScenarioIssueGHAuthFailureFailsScan(t *testing.T) {
+	env := newScenarioEnv(t, "issue-gh-auth-scan-failure.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"issues": {
+			Type: "github",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+				},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	_, err := scan.Scan(context.Background())
+	if err == nil {
+		t.Fatal("Scan() error = nil, want gh auth failure")
+	}
+	if !strings.Contains(err.Error(), "gh search issues") {
+		t.Fatalf("Scan() error = %v, want gh search issues", err)
+	}
+	if !strings.Contains(err.Error(), "authentication required") {
+		t.Fatalf("Scan() error = %v, want authentication required", err)
+	}
+
+	vessels, listErr := env.queue.List()
+	if listErr != nil {
+		t.Fatalf("List() error = %v", listErr)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("len(vessels) = %d, want 0", len(vessels))
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 5), []string{"bug"})
+
+	events := readEvents(t, env.store)
+	searchResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"search", "issues"})
+	if len(searchResults) != 1 {
+		t.Fatalf("len(search results) = %d, want 1", len(searchResults))
+	}
+	if searchResults[0].Shim.ExitCode == nil || *searchResults[0].Shim.ExitCode != 1 {
+		t.Fatalf("search result exit code = %#v, want 1", searchResults[0].Shim.ExitCode)
+	}
+}
+
+func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
+	env := newScenarioEnv(t, "issue-gh-rate-limit-on-enqueue.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "fix-bug", []scenarioPhase{
+		{name: "fix", prompt: "Fix issue {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"issues": {
+			Type: "github",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+					StatusLabels: &config.StatusLabels{
+						Queued:    "queued",
+						Running:   "in-progress",
+						Completed: "done",
+					},
+				},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+
+	vessel, err := env.queue.FindByID("issue-6")
+	if err != nil {
+		t.Fatalf("FindByID(issue-6) error = %v", err)
+	}
+	if vessel.State != queue.StatePending {
+		t.Fatalf("vessel.State after scan = %q, want %q", vessel.State, queue.StatePending)
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 6), []string{"bug"})
+
+	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Completed != 1 {
+		t.Fatalf("DrainResult.Completed = %d, want 1", drainResult.Completed)
+	}
+
+	vessel, err = env.queue.FindByID("issue-6")
+	if err != nil {
+		t.Fatalf("FindByID(issue-6) final error = %v", err)
+	}
+	if vessel.State != queue.StateCompleted {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 6), []string{"bug", "done"})
+
+	state := loadState(t, env.store)
+	if got := len(state.RepositoryBySlug("owner/repo").Worktrees); got != 0 {
+		t.Fatalf("len(Worktrees) = %d, want 0 after completion", got)
+	}
+
+	events := readEvents(t, env.store)
+	editResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"issue", "edit", "6", "--repo", "owner/repo"})
+	if len(editResults) != 3 {
+		t.Fatalf("len(issue edit results) = %d, want 3", len(editResults))
+	}
+	if !reflect.DeepEqual(editResults[0].Shim.Args, []string{"issue", "edit", "6", "--repo", "owner/repo", "--add-label", "queued"}) {
+		t.Fatalf("first issue edit args = %v, want queued-label mutation", editResults[0].Shim.Args)
+	}
+	gotCodes := make([]int, 0, len(editResults))
+	for _, event := range editResults {
+		if event.Shim.ExitCode == nil {
+			gotCodes = append(gotCodes, 0)
+			continue
+		}
+		gotCodes = append(gotCodes, *event.Shim.ExitCode)
+	}
+	if !reflect.DeepEqual(gotCodes, []int{1, 0, 0}) {
+		t.Fatalf("issue edit exit codes = %v, want [1 0 0]", gotCodes)
 	}
 }
 

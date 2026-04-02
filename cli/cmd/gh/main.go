@@ -8,5 +8,5 @@ import (
 )
 
 func main() {
-	os.Exit(dtushim.Execute(context.Background(), "gh", os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Environ()))
+	os.Exit(dtushim.Execute(context.Background(), os.Args[0], os.Args[1:], os.Stdin, os.Stdout, os.Stderr, os.Environ()))
 }

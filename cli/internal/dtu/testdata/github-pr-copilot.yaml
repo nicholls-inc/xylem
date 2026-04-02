@@ -19,6 +19,12 @@ repositories:
         head_sha: abc12345deadbeef
 providers:
   scripts:
+    - name: live-verification-review
+      provider: copilot
+      match:
+        prompt_exact: "HARNESS HEADER\n\nReview this change"
+      allowed_tools: ["Read,Write"]
+      stdout: copilot verification complete
     - name: review
       provider: copilot
       match:

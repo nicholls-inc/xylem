@@ -1,0 +1,21 @@
+metadata:
+  name: issue-gh-auth-scan-failure
+  scenario: gh authentication failure aborts issue scan
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+    issues:
+      - number: 5
+        title: gh auth required
+        body: scanner cannot enumerate issues without authentication
+        labels: [bug]
+shim_faults:
+  - name: gh-search-auth-failure
+    command: gh
+    match:
+      args_prefix: [search, issues]
+    stderr: "gh: authentication required"
+    exit_code: 1

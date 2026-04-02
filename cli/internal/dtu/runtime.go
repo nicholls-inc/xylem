@@ -49,3 +49,21 @@ func DefaultEventLogPath(stateDir, universeID string) (string, error) {
 func DefaultShimDir(stateDir string) string {
 	return filepath.Join(stateDir, "dtu", "shims")
 }
+
+// RecordRuntimeEvent appends a DTU event to the active runtime store when one is configured.
+func RecordRuntimeEvent(event *Event) error {
+	if event == nil {
+		return fmt.Errorf("record DTU runtime event: event must not be nil")
+	}
+	store, ok, err := runtimeStore()
+	if err != nil {
+		return fmt.Errorf("record DTU runtime event: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	if err := store.RecordEvent(event); err != nil {
+		return fmt.Errorf("record DTU runtime event: %w", err)
+	}
+	return nil
+}

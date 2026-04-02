@@ -42,6 +42,18 @@ func verificationBinaryPath(t *testing.T) string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", "..", "cmd", "xylem"))
 }
 
+func reportByName(t *testing.T, reports []VerificationCaseReport, name string) VerificationCaseReport {
+	t.Helper()
+
+	for _, report := range reports {
+		if report.Name == name {
+			return report
+		}
+	}
+	t.Fatalf("verification report %q not found in %#v", name, reports)
+	return VerificationCaseReport{}
+}
+
 func TestRunLiveVerificationDifferentialMismatchUsesRegistryAndPolicy(t *testing.T) {
 	t.Parallel()
 
@@ -106,7 +118,7 @@ func TestRunLiveVerificationDifferentialMismatchUsesRegistryAndPolicy(t *testing
 	if report.Summary.Mismatches != 1 {
 		t.Fatalf("Mismatches = %d, want 1", report.Summary.Mismatches)
 	}
-	first := report.Differential[0]
+	first := reportByName(t, report.Differential, "gh-search-issues-open-bug")
 	if first.Status != VerificationStatusMismatch {
 		t.Fatalf("Status = %q, want %q", first.Status, VerificationStatusMismatch)
 	}
@@ -118,6 +130,86 @@ func TestRunLiveVerificationDifferentialMismatchUsesRegistryAndPolicy(t *testing
 	}
 	if first.Live == nil || first.Twin == nil || first.Live.CanonicalJSON == first.Twin.CanonicalJSON {
 		t.Fatalf("expected differing normalized outputs, got live=%#v twin=%#v", first.Live, first.Twin)
+	}
+}
+
+func TestRunLiveVerificationGitAndProviderDifferentialsMatch(t *testing.T) {
+	t.Parallel()
+
+	suite, err := LoadLiveVerificationSuite(verificationAssetPath(t, "live-verification.yaml"))
+	if err != nil {
+		t.Fatalf("LoadLiveVerificationSuite() error = %v", err)
+	}
+
+	report, err := RunLiveVerification(context.Background(), suite, nil, nil, VerificationRunOptions{
+		StateDir:        t.TempDir(),
+		WorkDir:         t.TempDir(),
+		XylemExecutable: verificationBinaryPath(t),
+		Environment:     os.Environ(),
+		EnvLookup: func(key string) (string, bool) {
+			switch key {
+			case "XYLEM_DTU_LIVE_GIT_DIFFERENTIAL", "XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL":
+				return "1", true
+			default:
+				return "", false
+			}
+		},
+		Runner: stubVerificationRunner{results: map[string]stubVerificationResult{
+			key("git", "ls-remote", "--heads", "origin", "main"): {
+				result: VerificationCommandResult{Stdout: "deadbeef\trefs/heads/main\n"},
+			},
+			key(verificationBinaryPath(t), "shim-dispatch", "git", "ls-remote", "--heads", "origin", "main"): {
+				result: VerificationCommandResult{Stdout: "cafebabe\trefs/heads/main\n"},
+			},
+			key("copilot", "-p", "HARNESS HEADER\n\nReview this change", "-s", "--available-tools", "Read,Write", "--allow-all-tools"): {
+				result: VerificationCommandResult{Stdout: "live copilot response\n"},
+			},
+			key(verificationBinaryPath(t), "shim-dispatch", "copilot", "-p", "HARNESS HEADER\n\nReview this change", "-s", "--available-tools", "Read,Write", "--allow-all-tools"): {
+				result: VerificationCommandResult{Stdout: "fixture copilot response\n"},
+			},
+			key("claude", "-p", "smoke test", "--max-turns", "1"): {
+				result: VerificationCommandResult{Stdout: "live claude response\n"},
+			},
+			key(verificationBinaryPath(t), "shim-dispatch", "claude", "-p", "smoke test", "--max-turns", "1"): {
+				result: VerificationCommandResult{Stdout: "fixture claude response\n"},
+			},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("RunLiveVerification() error = %v", err)
+	}
+	if report.Summary.DifferentialRun != 3 {
+		t.Fatalf("DifferentialRun = %d, want 3", report.Summary.DifferentialRun)
+	}
+	if report.Summary.Matches != 3 {
+		t.Fatalf("Matches = %d, want 3", report.Summary.Matches)
+	}
+
+	gitCase := reportByName(t, report.Differential, "git-ls-remote-main")
+	if gitCase.Status != VerificationStatusMatched {
+		t.Fatalf("git Status = %q, want %q", gitCase.Status, VerificationStatusMatched)
+	}
+	if gitCase.Live == nil || gitCase.Twin == nil {
+		t.Fatalf("git case missing executions: %#v", gitCase)
+	}
+	if gitCase.Live.CanonicalJSON != `["refs/heads/main"]` || gitCase.Twin.CanonicalJSON != `["refs/heads/main"]` {
+		t.Fatalf("git canonical JSON = live %q twin %q, want main ref only", gitCase.Live.CanonicalJSON, gitCase.Twin.CanonicalJSON)
+	}
+
+	copilotCase := reportByName(t, report.Differential, "provider-headless-shape")
+	if copilotCase.Status != VerificationStatusMatched {
+		t.Fatalf("copilot Status = %q, want %q", copilotCase.Status, VerificationStatusMatched)
+	}
+	if copilotCase.Live == nil || copilotCase.Twin == nil || copilotCase.Live.CanonicalJSON != copilotCase.Twin.CanonicalJSON {
+		t.Fatalf("copilot canonical JSON mismatch: live=%#v twin=%#v", copilotCase.Live, copilotCase.Twin)
+	}
+
+	claudeCase := reportByName(t, report.Differential, "claude-headless-shape")
+	if claudeCase.Status != VerificationStatusMatched {
+		t.Fatalf("claude Status = %q, want %q", claudeCase.Status, VerificationStatusMatched)
+	}
+	if claudeCase.Live == nil || claudeCase.Twin == nil || claudeCase.Live.CanonicalJSON != claudeCase.Twin.CanonicalJSON {
+		t.Fatalf("claude canonical JSON mismatch: live=%#v twin=%#v", claudeCase.Live, claudeCase.Twin)
 	}
 }
 
@@ -152,6 +244,9 @@ func TestRunLiveVerificationCanaryDriftUsesRegistry(t *testing.T) {
 			key("gh", "repo", "view", "--json", "defaultBranchRef"): {
 				result: VerificationCommandResult{Stdout: `{"defaultBranchRef":{"name":"main"}}`},
 			},
+			key("git", "symbolic-ref", "refs/remotes/origin/HEAD"): {
+				result: VerificationCommandResult{Stdout: "refs/remotes/origin/main\n"},
+			},
 			key("claude", "-p", "smoke test", "--max-turns", "1"): {
 				result: VerificationCommandResult{Stderr: "provider offline", ExitCode: 1},
 			},
@@ -163,20 +258,29 @@ func TestRunLiveVerificationCanaryDriftUsesRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RunLiveVerification() error = %v", err)
 	}
-	if report.Summary.CanariesRun != 3 {
-		t.Fatalf("CanariesRun = %d, want 3", report.Summary.CanariesRun)
+	if report.Summary.CanariesRun != 4 {
+		t.Fatalf("CanariesRun = %d, want 4", report.Summary.CanariesRun)
 	}
 	if report.Summary.Drifts != 1 {
 		t.Fatalf("Drifts = %d, want 1", report.Summary.Drifts)
 	}
-	if report.Canaries[1].Status != VerificationStatusDrift {
-		t.Fatalf("Status = %q, want %q", report.Canaries[1].Status, VerificationStatusDrift)
+	claudeCanary := reportByName(t, report.Canaries, "claude-headless-smoke")
+	if claudeCanary.Status != VerificationStatusDrift {
+		t.Fatalf("Status = %q, want %q", claudeCanary.Status, VerificationStatusDrift)
 	}
-	if len(report.Canaries[1].Divergences) != 1 {
-		t.Fatalf("claude canary divergences = %v, want 1", report.Canaries[1].Divergences)
+	if len(claudeCanary.Divergences) != 1 {
+		t.Fatalf("claude canary divergences = %v, want 1", claudeCanary.Divergences)
 	}
-	if report.Canaries[1].AttributionRule == nil || report.Canaries[1].AttributionRule.Classification != AttributionClassificationMissingFidelity {
-		t.Fatalf("AttributionRule = %#v, want missing_fidelity", report.Canaries[1].AttributionRule)
+	if claudeCanary.AttributionRule == nil || claudeCanary.AttributionRule.Classification != AttributionClassificationMissingFidelity {
+		t.Fatalf("AttributionRule = %#v, want missing_fidelity", claudeCanary.AttributionRule)
+	}
+
+	gitCanary := reportByName(t, report.Canaries, "git-origin-head-symbolic-ref")
+	if gitCanary.Status != VerificationStatusPassed {
+		t.Fatalf("git canary Status = %q, want %q", gitCanary.Status, VerificationStatusPassed)
+	}
+	if gitCanary.Live == nil || gitCanary.Live.CanonicalJSON != `"refs/remotes/origin/main"` {
+		t.Fatalf("git canary canonical JSON = %#v, want origin/main ref", gitCanary.Live)
 	}
 }
 

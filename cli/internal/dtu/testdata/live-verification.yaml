@@ -21,13 +21,27 @@ differential:
     args: [issue, view, "1", --repo, owner/repo, --json, labels]
     normalizer: labels_only
     fixture: issue-label-gate.yaml
+  - name: git-ls-remote-main
+    boundary: git
+    enabled_env: XYLEM_DTU_LIVE_GIT_DIFFERENTIAL
+    command: git
+    args: [ls-remote, --heads, origin, main]
+    normalizer: git_ls_remote_heads
+    fixture: issue-happy-path.yaml
   - name: provider-headless-shape
     boundary: copilot
     enabled_env: XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL
     command: copilot
-    args: [-p, "HARNESS HEADER\n\nReview this change", -s, --available-tools, Read,Write, --allow-all-tools]
-    normalizer: provider_stdout_stderr_exit
+    args: [-p, "HARNESS HEADER\n\nReview this change", -s, --available-tools, "Read,Write", --allow-all-tools]
+    normalizer: provider_process_shape
     fixture: github-pr-copilot.yaml
+  - name: claude-headless-shape
+    boundary: claude
+    enabled_env: XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL
+    command: claude
+    args: [-p, smoke test, --max-turns, "1"]
+    normalizer: provider_process_shape
+    fixture: issue-happy-path.yaml
 canaries:
   - name: gh-repo-view-default-branch
     boundary: gh
@@ -35,6 +49,12 @@ canaries:
     command: gh
     args: [repo, view, --json, defaultBranchRef]
     fixture: issue-label-gate.yaml
+  - name: git-origin-head-symbolic-ref
+    boundary: git
+    enabled_env: XYLEM_DTU_LIVE_CANARY
+    command: git
+    args: [symbolic-ref, refs/remotes/origin/HEAD]
+    normalizer: git_symbolic_ref
   - name: claude-headless-smoke
     boundary: claude
     enabled_env: XYLEM_DTU_LIVE_CANARY

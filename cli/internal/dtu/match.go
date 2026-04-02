@@ -10,6 +10,7 @@ import (
 type ProviderInvocation struct {
 	Provider     Provider
 	ScriptName   string
+	Scenario     string
 	Phase        string
 	Attempt      int
 	Prompt       string
@@ -29,6 +30,9 @@ type ShimInvocation struct {
 
 // Matches reports whether the provider script match accepts the invocation.
 func (m ProviderScriptMatch) Matches(inv ProviderInvocation) bool {
+	if m.Scenario != "" && m.Scenario != inv.Scenario {
+		return false
+	}
 	if m.Phase != "" && m.Phase != inv.Phase {
 		return false
 	}
@@ -140,7 +144,10 @@ func (s *State) SelectProviderScript(inv ProviderInvocation) (*ProviderScript, e
 	if !inv.Provider.Valid() {
 		return nil, fmt.Errorf("provider %q is invalid", inv.Provider)
 	}
-	if inv.ScriptName != "" && s.hasProviderScriptNamed(inv.Provider, inv.ScriptName) {
+	if inv.Scenario == "" {
+		inv.Scenario = strings.TrimSpace(s.Metadata.Scenario)
+	}
+	if inv.ScriptName != "" && s.hasProviderScriptNamed(inv.Provider, inv.Scenario, inv.ScriptName) {
 		script := s.bestMatchingProviderScript(inv)
 		if script != nil {
 			return script, nil
@@ -205,6 +212,9 @@ func providerScriptSpecificity(script *ProviderScript, inv ProviderInvocation) i
 		return -1
 	}
 	score := 0
+	if script.Match.Scenario != "" && script.Match.Scenario == inv.Scenario {
+		score += 500
+	}
 	if script.Match.Attempt > 0 && script.Match.Attempt == inv.Attempt {
 		score += 1000
 	}
@@ -226,10 +236,15 @@ func providerScriptSpecificity(script *ProviderScript, inv ProviderInvocation) i
 	return score
 }
 
-func (s *State) hasProviderScriptNamed(provider Provider, name string) bool {
+func (s *State) hasProviderScriptNamed(provider Provider, scenario string, name string) bool {
+	scenario = strings.TrimSpace(scenario)
 	for i := range s.Providers.Scripts {
 		script := &s.Providers.Scripts[i]
-		if script.Provider == provider && script.Name == name {
+		if script.Provider != provider || script.Name != name {
+			continue
+		}
+		scriptScenario := strings.TrimSpace(script.Match.Scenario)
+		if scriptScenario == "" || scriptScenario == scenario {
 			return true
 		}
 	}

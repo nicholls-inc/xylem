@@ -1,9 +1,9 @@
 # DTU live canary suite — detects drift between DTU twins and real external
-# boundaries (gh, claude, copilot) before it pollutes normal xylem debugging.
+# boundaries (gh, git, claude, copilot) before it pollutes normal xylem debugging.
 #
 # Runs weekly on Monday 6 AM UTC and on manual dispatch. Two modes:
 #   - canary-only (default): sets XYLEM_DTU_LIVE_CANARY only
-#   - full: also enables differential checks (needs GH_TOKEN with repo scope)
+#   - full: also enables gh/git/provider differential checks (needs GH_TOKEN with repo scope)
 
 name: DTU Canary
 
@@ -43,6 +43,7 @@ jobs:
         env:
           XYLEM_DTU_LIVE_CANARY: "1"
           XYLEM_DTU_LIVE_GH_DIFFERENTIAL: ${{ inputs.mode == 'full' && '1' || '' }}
+          XYLEM_DTU_LIVE_GIT_DIFFERENTIAL: ${{ inputs.mode == 'full' && '1' || '' }}
           XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL: ${{ inputs.mode == 'full' && '1' || '' }}
           GH_TOKEN: ${{ secrets.DTU_GH_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.DTU_ANTHROPIC_API_KEY }}

@@ -136,6 +136,8 @@ By default, `verify` loads:
 
 The command prints a summary plus per-case details. It exits non-zero if any mismatch, drift alarm, or execution/normalization error occurs.
 
+The checked-in suite currently contains six differential cases (three `gh`, one `git ls-remote`, and two provider-process-shape checks for `claude`/`copilot`) plus four canaries (`gh`, `git`, `claude`, `copilot`). `XYLEM_DTU_LIVE_CANARY=1` enables the canaries. `XYLEM_DTU_LIVE_GH_DIFFERENTIAL=1`, `XYLEM_DTU_LIVE_GIT_DIFFERENTIAL=1`, and `XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL=1` enable the current differential groups.
+
 ### `xylem dtu load`
 
 ```bash

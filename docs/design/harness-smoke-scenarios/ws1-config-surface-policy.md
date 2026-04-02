@@ -603,6 +603,8 @@ jq '.repositories[0].issues[0].title' "$XYLEM_DTU_STATE_PATH"
 
 **Manifest:** `ws1-policy-deny-blocks-phase.yaml`
 
+> **Current checked-in DTU result (2026-04-02): FAIL.** The latest smoke run showed `drain` exiting `0`, the vessel not failing, and the provider still running despite the documented deny rule. Treat this as a known xylem bug until policy blocking is fixed.
+
 **Run:**
 ```bash
 eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-deny-blocks-phase.yaml)"
@@ -626,6 +628,8 @@ eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-deny-block
 
 **Manifest:** `ws1-policy-require-approval.yaml`
 
+> **Current checked-in DTU result (2026-04-02): FAIL.** The latest smoke run showed `drain` exiting `0`, the vessel not failing, and the provider still running despite the documented `require_approval` rule. Treat this as a known xylem bug until approval blocking is fixed.
+
 **Run:**
 ```bash
 eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-require-approval.yaml)"
@@ -648,6 +652,8 @@ eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-require-ap
 **What it tests:** Phase execution mutates a protected surface (.xylem.yml); post-verification detects the violation; vessel fails with "violated protected surfaces" error.
 
 **Manifest:** `ws1-surface-violation.yaml`
+
+> **Current checked-in DTU result (2026-04-02): FAIL.** The latest smoke run showed `drain` exiting `0`, the vessel not failing, and no protected-surface error surfacing for the documented `.xylem.yml` mutation. Treat this as a known xylem bug until surface verification is enforced.
 
 **Run:**
 ```bash

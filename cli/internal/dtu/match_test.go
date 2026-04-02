@@ -111,6 +111,32 @@ func TestSelectProviderScriptPreservesExplicitNameBehavior(t *testing.T) {
 	}
 }
 
+func TestSelectProviderScriptPrefersMatchingScenario(t *testing.T) {
+	t.Parallel()
+
+	state := &State{
+		UniverseID: "universe-1",
+		Metadata:   ManifestMetadata{Name: "sample", Scenario: "issue workflow"},
+		Providers: Providers{Scripts: []ProviderScript{
+			{Name: "reply", Provider: ProviderClaude, Stdout: "generic"},
+			{Name: "reply", Provider: ProviderClaude, Match: ProviderScriptMatch{Scenario: "issue workflow"}, Stdout: "scenario"},
+			{Name: "reply", Provider: ProviderClaude, Match: ProviderScriptMatch{Scenario: "merge workflow"}, Stdout: "other"},
+		}},
+		Counters: Counters{NextCommentID: 1, NextReviewID: 1, NextCheckID: 1},
+	}
+	state.normalize()
+
+	script, err := state.SelectProviderScript(ProviderInvocation{
+		Provider: ProviderClaude,
+	})
+	if err != nil {
+		t.Fatalf("SelectProviderScript() error = %v", err)
+	}
+	if script.Stdout != "scenario" {
+		t.Fatalf("Stdout = %q, want scenario", script.Stdout)
+	}
+}
+
 func TestSelectShimFaultPrefersExactArgsAndAttempt(t *testing.T) {
 	t.Parallel()
 

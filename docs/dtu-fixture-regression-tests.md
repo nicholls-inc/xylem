@@ -17,7 +17,7 @@ Choose fixture-backed regression tests when you want to:
 | --- | --- | --- |
 | `scanner`, `source`, `queue`, `runner`, `worktree` | **Real** | The scenario harness calls the real xylem packages. |
 | DTU store, manifest loading, scheduler, event log | **Real** | State persistence and scheduled mutations are part of the tested system. |
-| `gh`, `git`, `claude`, `copilot` boundaries | **Twinned** | Behavior comes from the DTU manifest, not live tools or APIs. |
+| `gh`, `git`, `claude`, `copilot` boundaries | **Twinned** | Behavior comes from the DTU manifest and materialized shim wrappers, not live tools or APIs. |
 | GitHub network/auth/rate limits | **Twinned** | Only the modeled behavior is exercised. |
 | Provider streaming/timing semantics | **Twinned** | Output is modeled as deterministic final stdout/stderr/exit behavior. |
 | Shell command gates (`sh -c ...`) | **Covered when kept repo-local and deterministic** | Scenario tests can execute real local shell gates while DTU still twins `gh`, `git`, `claude`, and `copilot`. |
@@ -35,12 +35,12 @@ If the test passes, you can trust that:
 
 If the test passes, you **cannot** conclude that:
 
-- live GitHub or live provider CLIs behave exactly the same way
-- auth, latency, network jitter, or rate limiting match production behavior
+- live `gh`, `git`, or provider CLIs behave exactly the same way
+- auth, git transport latency, network jitter, or rate limiting match production behavior
 - command gates or other shell-driven workflow behavior are covered
-- live GitHub/provider timing will match the authored DTU clock behavior
+- live `gh`/`git`/provider timing will match the authored DTU clock behavior
 
-In short: **trust fixture-backed tests for xylem logic downstream of a modeled boundary transcript, not for proving live boundary fidelity.**
+In short: **trust fixture-backed tests for xylem logic downstream of a modeled boundary transcript, not for proving live `gh`/`git`/provider fidelity.**
 
 ## How to create a fixture-backed regression test
 
@@ -52,7 +52,7 @@ Start from one of the existing examples:
 
 - `issue-label-gate.yaml`
 - `issue-label-gate-timeout.yaml`
-- `issue-daemon-recovery.yaml`
+- `issue-daemon-recovery.yaml` — use this for stale-running daemon recovery; the corresponding Guide 4B manual smoke path is currently unreliable and can degenerate into a normal timeout
 - `issue-provider-failure.yaml`
 - `issue-git-fetch-retry.yaml`
 - `issue-gh-malformed.yaml`
@@ -201,6 +201,7 @@ Use this sequence:
 1. **Check the shim events first.** If the logged `shim_result` is not what the fixture intended, the problem is likely in DTU matching, DTU state, or the fixture itself.
 2. **If the shim events are right, check xylem state next.** If the boundary transcript is correct but queue state or runner behavior is wrong, the problem is likely in xylem.
 3. **Check the divergence registry before treating a mismatch as a bug.** Some differences are intentional and documented in `cli/internal/dtu/testdata/divergence-registry.yaml`.
+   Today that registry includes an intentional `git fetch origin <default-branch>` latency divergence: DTU fully twins `git` through the shim runtime, but it does not try to reproduce live fetch transport jitter or packfile timing.
 
 The repository's attribution policy in `cli/internal/dtu/testdata/attribution-policy.yaml` is the intended triage rule:
 
