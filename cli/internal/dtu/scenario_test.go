@@ -18,6 +18,7 @@ import (
 	dtu "github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/dtushim"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	runnerpkg "github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
@@ -925,5 +926,115 @@ func TestScenarioIssueMalformedGHOutputFailsScan(t *testing.T) {
 	}
 	if searchResults[0].Shim.ExitCode == nil || *searchResults[0].Shim.ExitCode != 0 {
 		t.Fatalf("search result exit code = %#v, want 0", searchResults[0].Shim.ExitCode)
+	}
+}
+
+func TestScenarioIssueHappyPath(t *testing.T) {
+	env := newScenarioEnv(t, "issue-happy-path.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "fix-bug", []scenarioPhase{
+		{name: "plan", prompt: "Plan issue {{.Issue.Number}}"},
+		{name: "implement", prompt: "Implement issue {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"issues": {
+			Type: "github",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+					StatusLabels: &config.StatusLabels{
+						Queued:    "queued",
+						Running:   "in-progress",
+						Completed: "done",
+					},
+				},
+			},
+		},
+	}
+
+	// --- Scan ---
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "queued"})
+
+	// --- Drain ---
+	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainer.Reporter = &reporter.Reporter{Runner: env.cmdRunner, Repo: "owner/repo"}
+
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Completed != 1 {
+		t.Fatalf("DrainResult.Completed = %d, want 1", drainResult.Completed)
+	}
+
+	// --- Assert vessel completed ---
+	vessel, err := env.queue.FindByID("issue-1")
+	if err != nil {
+		t.Fatalf("FindByID(issue-1) error = %v", err)
+	}
+	if vessel.State != queue.StateCompleted {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
+	}
+
+	// --- Assert status labels ---
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "done"})
+
+	// --- Assert completion comment posted ---
+	state := loadState(t, env.store)
+	issue := state.RepositoryBySlug("owner/repo").IssueByNumber(1)
+	if issue == nil {
+		t.Fatal("IssueByNumber(1) = nil")
+	}
+	// Expect 3 comments: phase plan complete, phase implement complete, vessel completed summary
+	if len(issue.Comments) != 3 {
+		t.Fatalf("len(issue.Comments) = %d, want 3", len(issue.Comments))
+	}
+	if got := issue.Comments[0].Body; !strings.Contains(got, "**xylem — phase `plan` completed**") {
+		t.Fatalf("comment[0] = %q, want plan phase-complete comment", got)
+	}
+	if got := issue.Comments[1].Body; !strings.Contains(got, "**xylem — phase `implement` completed**") {
+		t.Fatalf("comment[1] = %q, want implement phase-complete comment", got)
+	}
+	if got := issue.Comments[2].Body; !strings.Contains(got, "**xylem — all phases completed**") {
+		t.Fatalf("comment[2] = %q, want vessel-completed summary comment", got)
+	}
+	// Summary comment should contain the phase table
+	summaryComment := issue.Comments[2].Body
+	if !strings.Contains(summaryComment, "| plan |") || !strings.Contains(summaryComment, "| implement |") {
+		t.Fatalf("summary comment missing phase table: %q", summaryComment)
+	}
+
+	// --- Assert worktree cleaned up ---
+	repo := state.RepositoryBySlug("owner/repo")
+	if len(repo.Worktrees) != 0 {
+		t.Fatalf("len(Worktrees) = %d, want 0 after completion", len(repo.Worktrees))
+	}
+
+	// --- Assert events ---
+	events := readEvents(t, env.store)
+	claudeInvocations := filterShimEvents(events, dtu.EventKindShimInvocation, "claude", nil)
+	if len(claudeInvocations) != 2 {
+		t.Fatalf("len(claude invocations) = %d, want 2", len(claudeInvocations))
+	}
+	if claudeInvocations[0].Shim.Phase != "plan" || claudeInvocations[1].Shim.Phase != "implement" {
+		t.Fatalf("unexpected claude phases: %#v", claudeInvocations)
+	}
+	commentCalls := filterShimEvents(events, dtu.EventKindShimInvocation, "gh", []string{"issue", "comment", "1", "--repo", "owner/repo", "--body"})
+	if len(commentCalls) != 3 {
+		t.Fatalf("len(issue comment invocations) = %d, want 3", len(commentCalls))
 	}
 }
