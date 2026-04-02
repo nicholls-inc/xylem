@@ -31,11 +31,13 @@ func setupTestDeps(t *testing.T) {
 func TestCobraSubcommandRegistration(t *testing.T) {
 	cmd := newRootCmd()
 	names := make(map[string]bool)
+	hidden := make(map[string]bool)
 	for _, sub := range cmd.Commands() {
 		names[sub.Name()] = true
+		hidden[sub.Name()] = sub.Hidden
 	}
 
-	expected := []string{"init", "scan", "drain", "status", "pause", "resume", "cancel", "cleanup", "enqueue", "daemon", "retry"}
+	expected := []string{"init", "dtu", "shim-dispatch", "scan", "drain", "status", "pause", "resume", "cancel", "cleanup", "enqueue", "daemon", "retry"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("expected subcommand %q to be registered", name)
@@ -43,6 +45,9 @@ func TestCobraSubcommandRegistration(t *testing.T) {
 	}
 	if len(cmd.Commands()) != len(expected) {
 		t.Errorf("expected %d subcommands, got %d", len(expected), len(cmd.Commands()))
+	}
+	if !hidden["shim-dispatch"] {
+		t.Errorf("expected shim-dispatch to be hidden")
 	}
 }
 
@@ -59,7 +64,6 @@ func TestCobraStatusJsonFlag(t *testing.T) {
 		}
 	})
 
-	// --json with empty queue should output []
 	trimmed := strings.TrimSpace(out)
 	if trimmed != "[]" {
 		t.Errorf("expected '[]' for --json empty status, got: %q", trimmed)

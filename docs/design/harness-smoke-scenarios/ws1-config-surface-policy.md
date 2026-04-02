@@ -524,3 +524,163 @@ violations := []surface.Violation{
 **Expected outcome:** `r.Intermediary` is non-nil. `r.AuditLog` is non-nil. Both match the same construction logic as `cmdDrain` — same policy set, same audit log path derivation.
 
 **Verification:** In a unit test or integration test, assert `r.Intermediary != nil` and `r.AuditLog != nil` after `runDrain` runs setup (before the drain loop).
+
+---
+
+## Manual Smoke Tests
+
+For interactive verification of WS1 scenarios, use the DTU-based manual smoke tests below. These test the **real xylem CLI** against **twinned boundaries** defined in YAML manifests.
+
+**See also:** [Running Manual Smoke Tests](running-manual-smoke-tests.md) — General DTU setup and probe guide.
+
+### Quick Reference
+
+| Scenario IDs | Manifest | Test Focus | Manifest Path |
+|---|---|---|---|
+| S1, S8, S20, S22, S24–S25, S27–S28 | `ws1-policy-allow-happy-path` | Policy allow, two-phase workflow, defaults | `cli/internal/dtu/testdata/ws1-policy-allow-happy-path.yaml` |
+| S2, S29, S30 | `ws1-config-defaults-only` | Config with no harness section, defaults activate | `cli/internal/dtu/testdata/ws1-config-defaults-only.yaml` |
+| S6, S18 | `ws1-policy-deny-blocks-phase` | Policy deny prevents phase execution | `cli/internal/dtu/testdata/ws1-policy-deny-blocks-phase.yaml` |
+| S7, S19 | `ws1-policy-require-approval` | Policy require_approval blocks phase | `cli/internal/dtu/testdata/ws1-policy-require-approval.yaml` |
+| S10, S14, S21, S23 | `ws1-surface-violation` | Protected surface mutation detection | `cli/internal/dtu/testdata/ws1-surface-violation.yaml` |
+
+### Setup (all scenarios)
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+go build ./cmd/xylem
+```
+
+### S1, S8, S20, S22, S24–S25, S27–S28: Policy Allow + Happy Path
+
+**What it tests:** Policy allows phase execution; vessel completes normally; two-phase workflow (plan, implement).
+
+**Manifest:** `ws1-policy-allow-happy-path.yaml`
+
+**Run:**
+```bash
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+```
+
+**Expected output:**
+- `scan` finds 1 issue (#10) labeled "bug"
+- `drain` dequeues the vessel, executes "plan" phase (mocked output: "Fixed the bug"), then "implement" phase (mocked output: "Implemented the fix")
+- Vessel completes with state "completed"
+
+**Verify:**
+```bash
+./xylem --config ../.xylem.yml status
+jq '.repositories[0].issues[0] | {number, labels}' "$XYLEM_DTU_STATE_PATH"
+```
+
+### S2, S29, S30: Config Defaults (No Harness Section)
+
+**What it tests:** `.xylem.yml` with no harness, observability, or cost sections; all defaults activate; vessel completes normally.
+
+**Manifest:** `ws1-config-defaults-only.yaml`
+
+**Run:**
+```bash
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-config-defaults-only.yaml)"
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+```
+
+**Expected output:**
+- `scan` finds 1 issue (#50) labeled "bug"
+- `drain` dequeues and executes single-phase "fix" workflow (mocked output: "Fixed the bug. Added nil check.")
+- Vessel completes with state "completed"
+
+**Verify:**
+```bash
+jq '.repositories[0].issues[0].title' "$XYLEM_DTU_STATE_PATH"
+```
+
+### S6, S18: Policy Deny Blocks Phase
+
+**What it tests:** Policy rule denies phase_execute action; vessel fails before provider is invoked.
+
+**Manifest:** `ws1-policy-deny-blocks-phase.yaml`
+
+**Run:**
+```bash
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-deny-blocks-phase.yaml)"
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+```
+
+**Expected output:**
+- `scan` finds 1 issue (#20) labeled "bug"
+- `drain` dequeues the vessel, **blocks the phase with "denied by policy" error** before invoking the provider
+- Vessel fails with state "failed"
+
+**Verify:**
+```bash
+./xylem --config ../.xylem.yml status | grep -i failed
+```
+
+### S7, S19: Policy Require Approval
+
+**What it tests:** Policy rule blocks phase with "requires approval" effect; vessel fails because automatic approval is not yet supported.
+
+**Manifest:** `ws1-policy-require-approval.yaml`
+
+**Run:**
+```bash
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-require-approval.yaml)"
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+```
+
+**Expected output:**
+- `scan` finds 1 issue (#30) labeled "bug"
+- `drain` dequeues the vessel, **blocks the phase with "requires approval" error** before invoking the provider
+- Vessel fails with state "failed"
+
+**Verify:**
+```bash
+./xylem --config ../.xylem.yml status | grep -i approval
+```
+
+### S10, S14, S21, S23: Protected Surface Violation
+
+**What it tests:** Phase execution mutates a protected surface (.xylem.yml); post-verification detects the violation; vessel fails with "violated protected surfaces" error.
+
+**Manifest:** `ws1-surface-violation.yaml`
+
+**Run:**
+```bash
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-surface-violation.yaml)"
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+```
+
+**Expected output:**
+- `scan` finds 1 issue (#40) labeled "bug"
+- `drain` dequeues the vessel, **detects mutation of .xylem.yml after command phase runs**
+- Vessel fails with state "failed" and error containing "violated protected surfaces"
+
+**Verify:**
+```bash
+./xylem --config ../.xylem.yml status | grep -i violation
+```
+
+### Probing boundaries
+
+If a test fails, probe the boundary to separate xylem bugs from DTU issues:
+
+```bash
+# After eval'ing a DTU environment:
+
+# Check if gh shim works
+./xylem shim-dispatch gh --help
+
+# View the event log (all shim results)
+jq -c 'select(.kind=="shim_result")' "$XYLEM_DTU_EVENT_LOG_PATH"
+
+# View the DTU state (issue labels, provider scripts)
+jq '.repositories[0] | {issues, providers}' "$XYLEM_DTU_STATE_PATH"
+```
+
+**Rule:** If direct shim probes fail, the problem is in the manifest or DTU matching, not xylem. See [Running Manual Smoke Tests](running-manual-smoke-tests.md#probing-boundaries-directly) for detailed probe instructions.

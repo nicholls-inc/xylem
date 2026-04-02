@@ -1,0 +1,31 @@
+metadata:
+  name: issue-happy-path
+  scenario: issue scanned, worktree created, all phases complete, comment summary posted
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+    issues:
+      - number: 1
+        title: simple bug
+        body: fix the thing
+        labels: [bug]
+clock:
+  now: "2026-01-02T03:04:05Z"
+providers:
+  scripts:
+    - name: plan
+      provider: claude
+      match:
+        phase: plan
+      stdout: plan output
+    - name: implement
+      provider: claude
+      match:
+        phase: implement
+      stdout: implementation output

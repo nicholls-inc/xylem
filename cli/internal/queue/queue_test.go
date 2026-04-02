@@ -946,9 +946,9 @@ func TestWaitingState(t *testing.T) {
 			wantState: StateWaiting,
 		},
 		{
-			name:      "waiting to running (resume)",
-			toState:   StateRunning,
-			wantState: StateRunning,
+			name:      "waiting to pending (resume)",
+			toState:   StatePending,
+			wantState: StatePending,
 		},
 		{
 			name:      "waiting to timed_out",
@@ -1051,6 +1051,53 @@ func TestWaitingStateDoesNotSetEndedAt(t *testing.T) {
 	}
 	if vessels[0].EndedAt != nil {
 		t.Fatal("expected EndedAt to be nil for waiting state")
+	}
+}
+
+func TestUpdateWaitingToPendingClearsWaitingMetadata(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(504)
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	helperTransitionToWaiting(t, q, vessel.ID)
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list before resume: %v", err)
+	}
+	vessels[0].GateRetries = 2
+	vessels[0].FailedPhase = "plan"
+	vessels[0].GateOutput = "missing label"
+	if err := q.UpdateVessel(vessels[0]); err != nil {
+		t.Fatalf("UpdateVessel before resume: %v", err)
+	}
+
+	if err := q.Update(vessel.ID, StatePending, ""); err != nil {
+		t.Fatalf("resume to pending: %v", err)
+	}
+
+	got, err := q.FindByID(vessel.ID)
+	if err != nil {
+		t.Fatalf("FindByID after resume: %v", err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("expected pending, got %s", got.State)
+	}
+	if got.WaitingSince != nil {
+		t.Fatal("expected WaitingSince to be cleared")
+	}
+	if got.WaitingFor != "" {
+		t.Fatalf("expected WaitingFor cleared, got %q", got.WaitingFor)
+	}
+	if got.GateRetries != 0 {
+		t.Fatalf("expected GateRetries reset, got %d", got.GateRetries)
+	}
+	if got.FailedPhase != "" {
+		t.Fatalf("expected FailedPhase cleared, got %q", got.FailedPhase)
+	}
+	if got.GateOutput != "" {
+		t.Fatalf("expected GateOutput cleared, got %q", got.GateOutput)
 	}
 }
 

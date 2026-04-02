@@ -1,0 +1,25 @@
+metadata:
+  name: issue-label-gate-timeout
+  scenario: github issue label gate timeout
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: timed-out
+      - name: plan-approved
+    issues:
+      - number: 3
+        title: missing approval
+        body: wait forever
+        labels: [bug]
+providers:
+  scripts:
+    - name: plan
+      provider: claude
+      match:
+        phase: plan
+      stdout: plan complete

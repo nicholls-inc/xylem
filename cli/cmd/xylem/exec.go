@@ -107,6 +107,15 @@ func (r *realCmdRunner) RunProcess(ctx context.Context, dir string, name string,
 	return cmd.Run()
 }
 
+func (r *realCmdRunner) RunProcessWithEnv(ctx context.Context, dir string, extraEnv []string, name string, args ...string) error {
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Dir = dir
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Env = append(os.Environ(), extraEnv...)
+	return cmd.Run()
+}
+
 func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir

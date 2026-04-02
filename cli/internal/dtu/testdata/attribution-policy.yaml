@@ -1,0 +1,18 @@
+version: v1
+rules:
+  - name: twin-and-live-match
+    when: Fails in twin and live with the same normalized boundary behavior.
+    classification: xylem_bug
+    next_step: Debug xylem against the recorded boundary transcript and add a regression test at the failing layer.
+  - name: twin-only-failure
+    when: Fails only in the twin while the same live differential case passes.
+    classification: twin_bug
+    next_step: Fix the twin or fixture, then rerun the differential before touching xylem logic.
+  - name: boundary-mismatch
+    when: Twin and live disagree at the boundary before xylem consumes the result.
+    classification: fidelity_bug
+    next_step: Correct the boundary contract in the twin, add a divergence entry if intentional, and rerun the scenario.
+  - name: live-only-uncovered
+    when: Fails only in live and no matching differential coverage exists yet.
+    classification: missing_fidelity
+    next_step: Capture the live transcript, add a new contract and scenario fixture, then decide whether xylem or the twin needs the fix.

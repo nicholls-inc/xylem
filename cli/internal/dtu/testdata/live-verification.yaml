@@ -1,0 +1,47 @@
+version: v1
+differential:
+  - name: gh-search-issues-open-bug
+    boundary: gh
+    enabled_env: XYLEM_DTU_LIVE_GH_DIFFERENTIAL
+    command: gh
+    args: [search, issues, --repo, owner/repo, --state, open, --json, number,title,body,url,labels, --limit, "20", --label, bug]
+    normalizer: issue_list
+    fixture: issue-label-gate.yaml
+  - name: gh-pr-list-open
+    boundary: gh
+    enabled_env: XYLEM_DTU_LIVE_GH_DIFFERENTIAL
+    command: gh
+    args: [pr, list, --repo, owner/repo, --state, open, --json, number,title,body,url,labels,headRefName, --limit, "20"]
+    normalizer: pr_list
+    fixture: github-pr-copilot.yaml
+  - name: gh-issue-view-labels
+    boundary: gh
+    enabled_env: XYLEM_DTU_LIVE_GH_DIFFERENTIAL
+    command: gh
+    args: [issue, view, "1", --repo, owner/repo, --json, labels]
+    normalizer: labels_only
+    fixture: issue-label-gate.yaml
+  - name: provider-headless-shape
+    boundary: copilot
+    enabled_env: XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL
+    command: copilot
+    args: [-p, "HARNESS HEADER\n\nReview this change", -s, --available-tools, Read,Write, --allow-all-tools]
+    normalizer: provider_stdout_stderr_exit
+    fixture: github-pr-copilot.yaml
+canaries:
+  - name: gh-repo-view-default-branch
+    boundary: gh
+    enabled_env: XYLEM_DTU_LIVE_CANARY
+    command: gh
+    args: [repo, view, --json, defaultBranchRef]
+    fixture: issue-label-gate.yaml
+  - name: claude-headless-smoke
+    boundary: claude
+    enabled_env: XYLEM_DTU_LIVE_CANARY
+    command: claude
+    args: [-p, smoke test, --max-turns, "1"]
+  - name: copilot-headless-smoke
+    boundary: copilot
+    enabled_env: XYLEM_DTU_LIVE_CANARY
+    command: copilot
+    args: [-p, smoke test, -s]

@@ -1,0 +1,41 @@
+metadata:
+  name: issue-label-gate
+  scenario: github issue label gate resume
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+      - name: plan-approved
+    issues:
+      - number: 1
+        title: flaky gate
+        body: wait for plan approval
+        labels: [bug]
+providers:
+  scripts:
+    - name: plan
+      provider: claude
+      match:
+        phase: plan
+      stdout: plan complete
+    - name: implement
+      provider: claude
+      match:
+        phase: implement
+      stdout: implementation complete
+scheduled_mutations:
+  - name: add-plan-approved-after-third-poll
+    trigger:
+      command: gh
+      args_exact: [issue, view, "1", --repo, owner/repo, --json, labels]
+      after: 2
+    operations:
+      - type: issue_add_label
+        repo: owner/repo
+        number: 1
+        label: plan-approved

@@ -1,0 +1,21 @@
+metadata:
+  name: issue-dedup-open-pr-exists
+  scenario: github issue scan skips when matching open PR already exists
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+    pull_requests:
+      - number: 120
+        title: existing open fix
+        state: open
+        base_branch: main
+        head_branch: fix/issue-12-existing-open-pr
+        head_sha: deadbeef
+    issues:
+      - number: 12
+        title: open pr exists
+        body: should be skipped because open pr exists
+        labels: [bug]

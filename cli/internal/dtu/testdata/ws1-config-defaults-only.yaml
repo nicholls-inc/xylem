@@ -1,0 +1,36 @@
+# WS1 Smoke Scenarios: S2, S3, S29, S30
+# End-to-end: minimal config with no harness/observability/cost sections →
+# defaults activate → default policy applied → default protected surfaces →
+# scan → drain → vessel completes normally.
+#
+# Verifies that the system works correctly when the user has not configured
+# any harness settings — all defaults must kick in transparently.
+metadata:
+  name: ws1-config-defaults-only
+  description: No harness config section, all defaults activate, vessel completes normally
+  scenario: defaults-only config through full pipeline
+  tags: [ws1, config, defaults]
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+    issues:
+      - number: 50
+        title: Simple bug with default config
+        body: A straightforward fix that exercises the default harness settings.
+        labels: [bug]
+
+providers:
+  scripts:
+    - name: fix-response
+      provider: claude
+      match:
+        phase: fix
+      stdout: |
+        Fixed the bug. Added nil check.

@@ -146,6 +146,7 @@ See the [Workflows Guide](docs/workflows.md) for template variables, custom work
 | `xylem pause` / `resume` | Pause and resume scanning |
 | `xylem cancel` | Cancel a pending vessel |
 | `xylem cleanup` | Remove stale worktrees, old phase outputs, and compact stale queue records |
+| `xylem dtu ...` | Initialize a DTU manifest, materialize runtime state, and run xylem under DTU shims |
 
 ```bash
 # Common patterns
@@ -154,6 +155,9 @@ xylem daemon                        # Continuous operation
 xylem enqueue --workflow fix-bug \
   --ref "https://github.com/owner/repo/issues/99"  # Ad-hoc task
 xylem status --json | jq '.[] | select(.state == "failed")'  # Query failures
+xylem dtu load --manifest cli/internal/dtu/testdata/issue-label-gate.yaml        # Seed DTU state from the repo's example fixture
+xylem dtu materialize --manifest cli/internal/dtu/testdata/issue-label-gate.yaml # Prepare DTU runtime and shims
+xylem dtu run --manifest /path/to/universe.yaml --workdir "$PWD" -- scan         # Run xylem inside DTU from the current repo
 ```
 
 See the [CLI Reference](docs/cli-reference.md) for all flags, examples, and exit codes.
@@ -226,6 +230,8 @@ The formatting and lint hooks use the system `goimports` and `golangci-lint` bin
 - [Configuration Reference](docs/configuration.md) -- all `.xylem.yml` fields, defaults, and validation
 - [Workflows Guide](docs/workflows.md) -- phases, gates, prompt templates, and custom workflows
 - [CLI Reference](docs/cli-reference.md) -- every command with flags, examples, and exit codes
+- [DTU Guide 4A: Fixture Regression Tests](docs/dtu-fixture-regression-tests.md) -- author deterministic DTU-backed Go regression tests and understand their trust boundary
+- [DTU Guide 4B: Manual Smoke Tests](docs/dtu-manual-smoke-tests.md) -- run the real xylem CLI under DTU shims and understand what those smoke tests do and do not prove
 - [Architecture](docs/architecture.md) -- system design, data flow, and package map
 
 ## Known limitations

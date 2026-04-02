@@ -1,0 +1,26 @@
+metadata:
+  name: github-pr-events-provider-failure
+  scenario: provider failure during github pr events workflow
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: review-me
+    pull_requests:
+      - number: 30
+        title: new endpoint
+        body: add a new API endpoint
+        state: open
+        labels: [review-me]
+        base_branch: main
+        head_branch: feature-new-endpoint
+        head_sha: aabbccdd11223344
+providers:
+  scripts:
+    - name: review
+      provider: claude
+      match:
+        phase: review
+      stderr: provider crashed unexpectedly
+      exit_code: 1

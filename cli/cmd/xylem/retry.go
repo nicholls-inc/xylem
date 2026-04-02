@@ -7,7 +7,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -64,7 +63,7 @@ func cmdRetry(q *queue.Queue, cfg *config.Config, id string, fromScratch bool) e
 		Prompt:      vessel.Prompt,
 		Meta:        meta,
 		State:       queue.StatePending,
-		CreatedAt:   time.Now().UTC(),
+		CreatedAt:   commandNow(),
 		RetryOf:     vessel.ID,
 		FailedPhase: vessel.FailedPhase,
 		GateOutput:  vessel.GateOutput,

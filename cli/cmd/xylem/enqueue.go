@@ -10,6 +10,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -70,13 +71,21 @@ func cmdEnqueue(q *queue.Queue, stateDir, workflow, ref, prompt, promptFile, src
 		Workflow:  workflow,
 		Prompt:    prompt,
 		State:     queue.StatePending,
-		CreatedAt: time.Now().UTC(),
+		CreatedAt: commandNow(),
 	}
 	if _, err := q.Enqueue(vessel); err != nil {
 		return fmt.Errorf("enqueue error: %w", err)
 	}
 	fmt.Printf("Enqueued vessel %s (workflow=%s, source=%s)\n", vessel.ID, vessel.Workflow, vessel.Source)
 	return nil
+}
+
+func commandNow() time.Time {
+	now, err := dtu.RuntimeNow()
+	if err != nil {
+		return time.Now().UTC()
+	}
+	return now.UTC()
 }
 
 func validateWorkflow(stateDir, name string) error {

@@ -1,0 +1,14 @@
+metadata:
+  name: issue-dedup-failed-fingerprint
+  scenario: github issue scan skips unchanged failed issue fingerprint
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+    issues:
+      - number: 14
+        title: failed fingerprint issue
+        body: unchanged input should remain skipped after failure
+        labels: [bug]

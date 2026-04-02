@@ -1,0 +1,28 @@
+metadata:
+  name: issue-provider-failure
+  scenario: provider failure during issue workflow
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: failed
+    issues:
+      - number: 2
+        title: provider crash
+        body: the implement phase should fail
+        labels: [bug]
+providers:
+  scripts:
+    - name: plan
+      provider: claude
+      match:
+        phase: plan
+      stdout: plan ready
+    - name: implement
+      provider: claude
+      match:
+        phase: implement
+      stderr: provider crashed
+      exit_code: 2

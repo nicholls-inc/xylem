@@ -26,6 +26,8 @@ Smoke scenarios for the [xylem harness implementation spec](../xylem-harness-imp
 
 **Writing tests?** Scenarios map directly to test cases. The scenario ID (e.g. S14) is stable within each file and can be referenced in test names (e.g. `TestS14_CompareDetectsModifiedFile`).
 
+**Running manual smoke tests?** Each workstream file includes scenario-specific instructions for interactive testing with DTU (Deterministic Test Universe). Start with [Running Manual Smoke Tests](running-manual-smoke-tests.md) for the general DTU setup guide, then see the scenario file's "Manual Smoke Tests" section for specific manifests and expected behavior.
+
 **Reviewing a PR?** Check whether the PR's workstream scenarios are all covered by the implementation's test suite.
 
 ## Scenario format

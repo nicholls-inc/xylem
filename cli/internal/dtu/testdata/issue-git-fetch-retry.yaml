@@ -1,0 +1,36 @@
+metadata:
+  name: issue-git-fetch-retry
+  scenario: git fetch transient failures recover on retry
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+    issues:
+      - number: 3
+        title: flaky fetch
+        body: worktree creation should retry git fetch
+        labels: [bug]
+providers:
+  scripts:
+    - name: fix
+      provider: claude
+      match:
+        phase: fix
+      stdout: fetch recovered
+shim_faults:
+  - name: fetch-flake-1
+    command: git
+    match:
+      args_exact: [fetch, origin, main]
+      attempt: 1
+    stderr: temporary network failure
+    exit_code: 128
+  - name: fetch-flake-2
+    command: git
+    match:
+      args_exact: [fetch, origin, main]
+      attempt: 2
+    stderr: temporary network failure
+    exit_code: 128

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 )
 
 type VesselState string
@@ -41,7 +42,7 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 		StateTimedOut:  true, // hung vessel timeout
 	},
 	StateWaiting: { // label gate pause state
-		StateRunning:   true, // label gate passed, resume
+		StatePending:   true, // label gate passed, resume via normal dequeue flow
 		StateTimedOut:  true, // label gate timed out
 		StateCancelled: true, // manually cancelled while waiting
 	},
@@ -139,7 +140,7 @@ func (q *Queue) Dequeue() (*Vessel, error) {
 			if vessels[i].State != StatePending {
 				continue
 			}
-			now := time.Now().UTC()
+			now := queueNow()
 			vessels[i].State = StateRunning
 			vessels[i].StartedAt = &now
 			vessels[i].Error = ""
@@ -177,9 +178,17 @@ func (q *Queue) Update(id string, state VesselState, errMsg string) error {
 				return fmt.Errorf("%w: cannot move vessel %s from %s to %s", ErrInvalidTransition, id, vessels[i].State, state)
 			}
 
-			now := time.Now().UTC()
+			now := queueNow()
 			vessels[i].State = state
 			switch state {
+			case StatePending:
+				vessels[i].EndedAt = nil
+				vessels[i].Error = ""
+				vessels[i].GateRetries = 0
+				vessels[i].WaitingSince = nil
+				vessels[i].WaitingFor = ""
+				vessels[i].FailedPhase = ""
+				vessels[i].GateOutput = ""
 			case StateRunning:
 				if vessels[i].StartedAt == nil {
 					vessels[i].StartedAt = &now
@@ -310,7 +319,7 @@ func (q *Queue) Cancel(id string) error {
 			if !knownState || !allowed[StateCancelled] {
 				return fmt.Errorf("cannot cancel vessel %s in state %s", id, vessels[i].State)
 			}
-			now := time.Now().UTC()
+			now := queueNow()
 			vessels[i].State = StateCancelled
 			vessels[i].EndedAt = &now
 			vessels[i].Error = ""
@@ -500,6 +509,15 @@ func migrateLegacyVessel(v *Vessel, raw []byte) {
 			v.Meta["issue_num"] = strconv.Itoa(legacy.IssueNum)
 		}
 	}
+}
+
+func queueNow() time.Time {
+	now, err := dtu.RuntimeNow()
+	if err != nil {
+		log.Printf("warn: queue: resolve runtime clock: %v", err)
+		return time.Now().UTC()
+	}
+	return now.UTC()
 }
 
 func (q *Queue) writeAllVessels(vessels []Vessel) error {

@@ -1,0 +1,23 @@
+metadata:
+  name: github-merge-happy
+  scenario: github merge post-merge workflow
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    pull_requests:
+      - number: 30
+        title: merged cleanup
+        body: run post merge tasks
+        state: merged
+        merged: true
+        base_branch: main
+        head_branch: feature-merged-cleanup
+        head_sha: cafebabefeedface
+providers:
+  scripts:
+    - name: postmerge
+      provider: claude
+      match:
+        phase: postmerge
+      stdout: merge processed

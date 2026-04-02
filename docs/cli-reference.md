@@ -73,6 +73,117 @@ xylem init --config my-config.yml
 
 ---
 
+## xylem dtu
+
+Manage Digital Twin Universe manifests, materialized state, and runtime wiring for offline scenario execution.
+
+The `dtu` family focuses on the shared CLI glue around the twin runtime:
+
+- `load` validates a manifest and writes normalized DTU state to `<state_dir>/dtu/<universe>/state.json`
+- `materialize` creates the universe runtime directories (`runtime`, `workdir`, shim dir) and installs `gh`, `git`, `claude`, and `copilot` wrappers into the shim dir
+- `env` prints the environment variables needed by xylem and DTU shims
+- `run` re-executes `xylem` with those DTU environment variables applied
+- `verify` executes env-gated live differentials and canaries, comparing live output to DTU shim output where applicable
+
+The `dtu` subcommands themselves do not require a normal `.xylem.yml`. The command re-executed by `xylem dtu run` still does, so point `--workdir` at a repo that already has `.xylem.yml` and `.xylem/workflows/`, or populate the materialized workdir first.
+
+Example manifests used by this repository's DTU tests live under `cli/internal/dtu/testdata/*.yaml`. Outside this repo, pass the path to your own DTU manifest.
+
+For testing workflows and trust boundaries, see:
+
+- [DTU Guide 4A: Fixture-Backed Regression Tests](dtu-fixture-regression-tests.md)
+- [DTU Guide 4B: Manual Smoke Tests Under DTU](dtu-manual-smoke-tests.md)
+
+### Usage
+
+```bash
+xylem dtu <subcommand> [flags]
+```
+
+### Shared flags
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--manifest` | `string` | Path to the DTU manifest YAML file. Required for all current subcommands. |
+| `--universe` | `string` | Override the universe ID. Defaults to a sanitized form of `metadata.name`. |
+| `--state-dir` | `string` | Override the state directory. Defaults to `.xylem` or the configured `state_dir`. |
+| `--shim-dir` | `string` | Override the shim directory prepended to `PATH`. Defaults to `<state_dir>/dtu/shims`. |
+| `--workdir` | `string` | Override the materialized working directory. Defaults to `<state_dir>/dtu/<universe>/workdir`. |
+
+### `xylem dtu verify`
+
+```bash
+xylem dtu verify
+xylem dtu verify --verify-workdir "$PWD"
+xylem dtu verify --suite cli/internal/dtu/testdata/live-verification.yaml
+```
+
+Runs the env-gated executable DTU verification suite. For each enabled differential case, xylem:
+
+1. runs the declared live command directly,
+2. materializes the matching DTU fixture,
+3. runs the equivalent twin command through `xylem shim-dispatch`,
+4. applies the declared normalizer from `internal/dtu/normalizers.go`, and
+5. reports any normalized mismatch with divergence-registry and attribution-policy context.
+
+Enabled canaries run live only. They act as drift alarms and do not perform twin-vs-live comparison.
+
+By default, `verify` loads:
+
+- `cli/internal/dtu/testdata/live-verification.yaml`
+- `cli/internal/dtu/testdata/divergence-registry.yaml`
+- `cli/internal/dtu/testdata/attribution-policy.yaml`
+
+The command prints a summary plus per-case details. It exits non-zero if any mismatch, drift alarm, or execution/normalization error occurs.
+
+### `xylem dtu load`
+
+```bash
+xylem dtu load --manifest /path/to/universe.yaml
+xylem dtu load --manifest cli/internal/dtu/testdata/issue-label-gate.yaml
+```
+
+Loads the manifest, validates it through `internal/dtu`, and writes normalized DTU state. This is useful when you want to inspect or pre-seed state without running anything yet.
+
+### `xylem dtu materialize`
+
+```bash
+xylem dtu materialize --manifest /path/to/universe.yaml
+```
+
+Does everything `load` does, then ensures the runtime directories exist and installs runnable `gh`, `git`, `claude`, and `copilot` shim wrappers into the shim directory. Those wrappers dispatch back through the current `xylem` binary so the DTU runtime stays portable without checking in prebuilt helper binaries.
+
+### `xylem dtu env`
+
+```bash
+xylem dtu env --manifest /path/to/universe.yaml
+xylem dtu env --manifest /path/to/universe.yaml --shell=false
+```
+
+Prints:
+
+- `XYLEM_DTU_UNIVERSE_ID`
+- `XYLEM_DTU_STATE_PATH`
+- `XYLEM_DTU_STATE_DIR`
+- `XYLEM_DTU_MANIFEST`
+- `XYLEM_DTU_EVENT_LOG_PATH`
+- `XYLEM_DTU_SHIM_DIR`
+- `PATH` with the shim dir prepended
+
+By default, `env` prints `export ...` lines for shell evaluation. Use `--shell=false` to print raw `KEY=VALUE` lines instead.
+
+### `xylem dtu run`
+
+```bash
+xylem dtu run --manifest /path/to/universe.yaml --workdir "$PWD" -- scan
+xylem dtu run --manifest /path/to/universe.yaml --workdir "$PWD" -- drain
+xylem dtu run --manifest /path/to/universe.yaml --workdir "$PWD" -- scan --dry-run
+```
+
+Materializes DTU state and then re-runs the current `xylem` binary with the provided subcommand arguments under the DTU environment. The inner command runs from `--workdir` (default: `<state_dir>/dtu/<universe>/workdir`) and still performs normal xylem config/workflow loading, so use a workdir that already contains `.xylem.yml` and `.xylem/workflows/` when you want to run `scan`, `drain`, or `daemon`.
+
+---
+
 ## xylem scan
 
 Query all configured sources for actionable tasks and enqueue new vessels.

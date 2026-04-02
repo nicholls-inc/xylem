@@ -1,0 +1,28 @@
+metadata:
+  name: github-pr-copilot
+  scenario: github pr scan and copilot drain
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: ready
+      - name: reviewed
+    pull_requests:
+      - number: 10
+        title: api responses
+        body: review the generated response handling
+        state: open
+        labels: [ready]
+        base_branch: main
+        head_branch: feature-api-responses
+        head_sha: abc12345deadbeef
+providers:
+  scripts:
+    - name: review
+      provider: copilot
+      match:
+        phase: review
+        prompt_contains: HARNESS HEADER
+      allowed_tools: ["Read,Write"]
+      stdout: copilot review complete

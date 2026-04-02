@@ -1073,6 +1073,28 @@ func TestRetryGitCmdSucceedsFirstAttempt(t *testing.T) {
 	}
 }
 
+func TestRetryGitCmdAppendsDTUAttemptWhenActive(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", "/tmp/dtu/state.json")
+
+	s := newSequenceRunner()
+	s.addResult("git fetch origin main --dtu-attempt 1", nil, &exitError{code: 128, msg: "index lock"})
+	s.addResult("git fetch origin main --dtu-attempt 2", []byte("ok"), nil)
+
+	out, err := retryGitCmd(context.Background(), s, 3, "fetch", "origin", "main")
+	if err != nil {
+		t.Fatalf("expected success on retry, got: %v", err)
+	}
+	if string(out) != "ok" {
+		t.Errorf("expected output 'ok', got %q", string(out))
+	}
+	if got := s.callCount("git", "fetch", "origin", "main", "--dtu-attempt", "1"); got != 1 {
+		t.Errorf("expected 1 first-attempt DTU call, got %d", got)
+	}
+	if got := s.callCount("git", "fetch", "origin", "main", "--dtu-attempt", "2"); got != 1 {
+		t.Errorf("expected 1 second-attempt DTU call, got %d", got)
+	}
+}
+
 func TestIsRetryableGitError(t *testing.T) {
 	tests := []struct {
 		name      string
