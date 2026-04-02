@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
@@ -80,7 +79,7 @@ func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					"pr_head_branch": pr.HeadRefName,
 				},
 				State:     queue.StatePending,
-				CreatedAt: time.Now().UTC(),
+				CreatedAt: sourceNow(),
 			})
 		}
 	}

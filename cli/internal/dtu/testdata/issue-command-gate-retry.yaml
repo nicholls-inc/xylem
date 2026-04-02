@@ -1,0 +1,35 @@
+metadata:
+  name: issue-command-gate-retry
+  scenario: command gate fails once then passes after retry
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: done
+    issues:
+      - number: 7
+        title: gate retry issue
+        body: implement should retry after command gate failure
+        labels: [bug]
+providers:
+  scripts:
+    - name: implement
+      provider: claude
+      match:
+        phase: implement
+        attempt: 1
+      stdout: needs-fix
+    - name: implement
+      provider: claude
+      match:
+        phase: implement
+        attempt: 2
+        prompt_contains: "gate output: missing fixed marker"
+      stdout: fixed
+    - name: pr
+      provider: claude
+      match:
+        phase: pr
+      stdout: pr opened

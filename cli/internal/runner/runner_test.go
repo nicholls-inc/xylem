@@ -251,6 +251,15 @@ func makeGitHubSource() *source.GitHub {
 	}
 }
 
+func containsArgSequence(args []string, flag string, value string) bool {
+	for i := 0; i+1 < len(args); i++ {
+		if args[i] == flag && args[i+1] == value {
+			return true
+		}
+	}
+	return false
+}
+
 func TestBuildCommand(t *testing.T) {
 	cfg := &config.Config{
 		MaxTurns: 50,
@@ -878,6 +887,8 @@ func TestDrainGateRetriesNotBleedBetweenPhases(t *testing.T) {
 }
 
 func TestDrainCommandGateFailsWithRetries(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", "/tmp/dtu/state.json")
+
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -923,6 +934,12 @@ func TestDrainCommandGateFailsWithRetries(t *testing.T) {
 	for i := 1; i < len(cmdRunner.phaseCalls); i++ {
 		if !strings.Contains(cmdRunner.phaseCalls[i].prompt, "gate check failed") {
 			t.Errorf("retry %d prompt should contain gate failure context, got: %s", i, cmdRunner.phaseCalls[i].prompt)
+		}
+	}
+	for i, call := range cmdRunner.phaseCalls {
+		wantAttempt := strconv.Itoa(i + 1)
+		if !containsArgSequence(call.args, "--dtu-attempt", wantAttempt) {
+			t.Errorf("phase call %d args = %v, want --dtu-attempt %s", i, call.args, wantAttempt)
 		}
 	}
 }
@@ -975,6 +992,105 @@ func TestDrainLabelGateTransitionsToWaiting(t *testing.T) {
 	}
 	if vessels[0].WaitingSince == nil {
 		t.Error("expected WaitingSince to be set")
+	}
+}
+
+func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	labelViewJSON := `{"labels":[{"name":"plan-approved"}]}`
+	cmdRunner := &mockCmdRunner{
+		outputData: []byte(labelViewJSON),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	first, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("first Drain() error = %v", err)
+	}
+	if first.Waiting != 1 {
+		t.Fatalf("first Drain().Waiting = %d, want 1", first.Waiting)
+	}
+
+	waiting, err := q.FindByID("issue-1")
+	if err != nil {
+		t.Fatalf("FindByID(waiting) error = %v", err)
+	}
+	if waiting.State != queue.StateWaiting {
+		t.Fatalf("state after first drain = %s, want waiting", waiting.State)
+	}
+	if waiting.CurrentPhase != 1 {
+		t.Fatalf("CurrentPhase after waiting = %d, want 1", waiting.CurrentPhase)
+	}
+	if waiting.WorktreePath == "" {
+		t.Fatal("expected WorktreePath to be persisted while waiting")
+	}
+
+	r.CheckWaitingVessels(context.Background())
+
+	resumed, err := q.FindByID("issue-1")
+	if err != nil {
+		t.Fatalf("FindByID(resumed) error = %v", err)
+	}
+	if resumed.State != queue.StatePending {
+		t.Fatalf("state after resume = %s, want pending", resumed.State)
+	}
+	if resumed.WaitingSince != nil {
+		t.Fatal("expected WaitingSince cleared after resume")
+	}
+	if resumed.WaitingFor != "" {
+		t.Fatalf("expected WaitingFor cleared after resume, got %q", resumed.WaitingFor)
+	}
+	if resumed.CurrentPhase != 1 {
+		t.Fatalf("CurrentPhase after resume = %d, want 1", resumed.CurrentPhase)
+	}
+	if resumed.WorktreePath != waiting.WorktreePath {
+		t.Fatalf("WorktreePath after resume = %q, want %q", resumed.WorktreePath, waiting.WorktreePath)
+	}
+
+	second, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("second Drain() error = %v", err)
+	}
+	if second.Completed != 1 {
+		t.Fatalf("second Drain().Completed = %d, want 1", second.Completed)
+	}
+
+	done, err := q.FindByID("issue-1")
+	if err != nil {
+		t.Fatalf("FindByID(done) error = %v", err)
+	}
+	if done.State != queue.StateCompleted {
+		t.Fatalf("final state = %s, want completed", done.State)
+	}
+	if len(cmdRunner.phaseCalls) != 2 {
+		t.Fatalf("phase call count = %d, want 2", len(cmdRunner.phaseCalls))
+	}
+	if !strings.Contains(cmdRunner.phaseCalls[1].prompt, "Implement after approval") {
+		t.Fatalf("second phase prompt = %q, want implement phase prompt", cmdRunner.phaseCalls[1].prompt)
+	}
+	if wt.removePath != waiting.WorktreePath {
+		t.Fatalf("removed worktree path = %q, want %q", wt.removePath, waiting.WorktreePath)
 	}
 }
 
@@ -1971,7 +2087,7 @@ func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
 	phase := &workflow.Phase{MaxTurns: 5}
 
 	t.Run("claude provider returns claude command and stdin", func(t *testing.T) {
-		cmd, args, stdin := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "test prompt")
+		cmd, args, stdin := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "test prompt", 1)
 		if cmd != claudeCmd {
 			t.Errorf("cmd = %q, want %q", cmd, claudeCmd)
 		}
@@ -1990,7 +2106,7 @@ func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
 	})
 
 	t.Run("copilot provider returns copilot command and nil stdin", func(t *testing.T) {
-		cmd, args, stdin := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "test prompt")
+		cmd, args, stdin := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "test prompt", 1)
 		if cmd != copilotCmd {
 			t.Errorf("cmd = %q, want %q", cmd, copilotCmd)
 		}
@@ -2007,6 +2123,36 @@ func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
 			}
 		}
 	})
+}
+
+func TestBuildProviderPhaseArgsAddsDTUMetadataWhenDTUActive(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", "/tmp/dtu/state.json")
+
+	cfg := &config.Config{
+		Claude:  config.ClaudeConfig{Command: "claude"},
+		Copilot: config.CopilotConfig{Command: "copilot"},
+	}
+	phase := &workflow.Phase{
+		Name:       "implement",
+		PromptFile: ".xylem/prompts/fix-bug/implement.md",
+		MaxTurns:   5,
+	}
+
+	_, claudeArgs, _ := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "prompt", 2)
+	if !containsArgSequence(claudeArgs, "--dtu-phase", "implement") {
+		t.Fatalf("claude args missing DTU phase: %v", claudeArgs)
+	}
+	if !containsArgSequence(claudeArgs, "--dtu-script", "implement") {
+		t.Fatalf("claude args missing DTU script: %v", claudeArgs)
+	}
+	if !containsArgSequence(claudeArgs, "--dtu-attempt", "2") {
+		t.Fatalf("claude args missing DTU attempt: %v", claudeArgs)
+	}
+
+	_, copilotArgs, _ := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "prompt", 3)
+	if !containsArgSequence(copilotArgs, "--dtu-attempt", "3") {
+		t.Fatalf("copilot args missing DTU attempt: %v", copilotArgs)
+	}
 }
 
 func TestBuildCommandCopilotDirect(t *testing.T) {

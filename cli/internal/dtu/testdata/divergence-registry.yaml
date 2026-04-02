@@ -1,0 +1,20 @@
+version: v1
+divergences:
+  - boundary: gh
+    command_or_case: gh pr list --state merged --json mergeCommit
+    divergence_type: field_omission
+    status: intentional
+    rationale: DTU synthesizes mergeCommit.oid from head_sha because xylem only requires a stable non-empty OID for merged PR detection.
+    live_reference: canary:gh-pr-list-merged
+  - boundary: git
+    command_or_case: git fetch origin <default-branch>
+    divergence_type: latency
+    status: intentional
+    rationale: DTU models deterministic exit codes and retries but does not attempt to mirror live network jitter, remote packfile sizes, or transport latency.
+    live_reference: canary:git-fetch-default-branch
+  - boundary: claude
+    command_or_case: claude -p prompt streaming
+    divergence_type: side_effect
+    status: intentional
+    rationale: DTU returns buffered stdout and stderr because xylem consumes final process output rather than token-by-token stream timing.
+    live_reference: canary:claude-headless-smoke

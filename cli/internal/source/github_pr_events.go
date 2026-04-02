@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
@@ -84,7 +83,7 @@ func (g *GitHubPREvents) Scan(ctx context.Context) ([]queue.Vessel, error) {
 									"pr_head_branch": pr.HeadRefName,
 								},
 								State:     queue.StatePending,
-								CreatedAt: time.Now().UTC(),
+								CreatedAt: sourceNow(),
 							})
 						}
 					}
@@ -153,7 +152,7 @@ func (g *GitHubPREvents) scanReviews(ctx context.Context, pr ghPR, task PREvents
 					"pr_head_branch": pr.HeadRefName,
 				},
 				State:     queue.StatePending,
-				CreatedAt: time.Now().UTC(),
+				CreatedAt: sourceNow(),
 			})
 		}
 	}
@@ -227,7 +226,7 @@ func (g *GitHubPREvents) scanChecksFailed(ctx context.Context, pr ghPR, task PRE
 				"pr_head_branch": pr.HeadRefName,
 			},
 			State:     queue.StatePending,
-			CreatedAt: time.Now().UTC(),
+			CreatedAt: sourceNow(),
 		},
 	}, nil
 }
@@ -262,7 +261,7 @@ func (g *GitHubPREvents) scanComments(ctx context.Context, pr ghPR, task PREvent
 					"pr_head_branch": pr.HeadRefName,
 				},
 				State:     queue.StatePending,
-				CreatedAt: time.Now().UTC(),
+				CreatedAt: sourceNow(),
 			})
 		}
 	}

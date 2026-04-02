@@ -1,0 +1,32 @@
+# WS1 Smoke Scenarios: S6, S18
+# End-to-end: policy with deny-all rule → scan → drain → policy denies
+# phase_execute → vessel fails with "denied by policy" → provider never
+# invoked → audit log records deny decision.
+metadata:
+  name: ws1-policy-deny-blocks-phase
+  description: Deny-all policy prevents phase execution, vessel fails before provider invocation
+  scenario: policy deny blocks phase execution
+  tags: [ws1, policy, deny]
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: failed
+    issues:
+      - number: 20
+        title: Blocked by policy
+        body: This issue should be denied by the intermediary policy.
+        labels: [bug]
+
+# Provider scripts defined but should never be reached due to deny policy.
+providers:
+  scripts:
+    - name: solve-response
+      provider: claude
+      match:
+        phase: solve
+      stdout: This output should never appear

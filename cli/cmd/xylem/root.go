@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -28,7 +29,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "init" {
+			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.CommandPath() == "xylem dtu" || strings.HasPrefix(cmd.CommandPath(), "xylem dtu ") {
 				return nil
 			}
 
@@ -68,6 +69,8 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(
 		newInitCmd(),
+		newDtuCmd(),
+		newShimDispatchCmd(),
 		newScanCmd(),
 		newDrainCmd(),
 		newEnqueueCmd(),

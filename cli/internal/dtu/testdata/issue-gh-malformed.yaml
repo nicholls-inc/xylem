@@ -1,0 +1,21 @@
+metadata:
+  name: issue-gh-malformed
+  scenario: malformed gh search output
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+    issues:
+      - number: 4
+        title: malformed search
+        body: scanner should fail on invalid gh json
+        labels: [bug]
+shim_faults:
+  - name: malformed-search
+    command: gh
+    match:
+      args_prefix: [search, issues]
+    stdout: '{"number":'
+    exit_code: 0

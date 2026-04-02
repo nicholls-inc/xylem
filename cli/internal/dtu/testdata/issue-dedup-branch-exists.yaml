@@ -1,0 +1,17 @@
+metadata:
+  name: issue-dedup-branch-exists
+  scenario: github issue scan skips when matching branch already exists
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+    branches:
+      - name: fix/issue-11-existing-branch
+        sha: abc123
+    issues:
+      - number: 11
+        title: existing branch
+        body: should be skipped because branch exists
+        labels: [bug]

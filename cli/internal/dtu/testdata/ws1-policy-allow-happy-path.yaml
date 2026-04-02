@@ -1,0 +1,41 @@
+# WS1 Smoke Scenarios: S1, S2, S8, S17, S20, S22, S24-S25, S27-S28
+# End-to-end: config with harness section → policy allows phase_execute →
+# surface pre-snapshot taken → provider invoked → vessel completes →
+# audit log records allow decision.
+metadata:
+  name: ws1-policy-allow-happy-path
+  description: Full harness config loads, policy allows prompt and command phases, surface snapshots taken, audit log records decisions
+  scenario: policy allow happy path with surface verification
+  tags: [ws1, policy, surface, audit]
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+    issues:
+      - number: 10
+        title: Fix null pointer in widget parser
+        body: |
+          The parser crashes when the input map is empty.
+          Steps to reproduce: call Parse(nil).
+        labels: [bug]
+
+providers:
+  scripts:
+    - name: plan-response
+      provider: claude
+      match:
+        phase: plan
+      stdout: |
+        Plan: Add nil guard in Parse(). Write test for empty input.
+    - name: implement-response
+      provider: claude
+      match:
+        phase: implement
+      stdout: |
+        Added nil check in parser.go:42. Test added in parser_test.go.

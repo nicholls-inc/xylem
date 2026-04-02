@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
@@ -141,7 +142,8 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 					}
 				}
 			}
-			if time.Since(*vessel.WaitingSince) > timeoutDur {
+			waited := r.runtimeSince(*vessel.WaitingSince)
+			if waited > timeoutDur {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 				}
@@ -155,7 +157,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
 					r.logReporterError("post label-timeout comment", vessel.ID,
-						r.Reporter.LabelTimeout(ctx, issueNum, vessel.WaitingFor, vessel.FailedPhase, time.Since(*vessel.WaitingSince)))
+						r.Reporter.LabelTimeout(ctx, issueNum, vessel.WaitingFor, vessel.FailedPhase, waited))
 				}
 				continue
 			}
@@ -175,8 +177,9 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 		}
 		if found {
 			// Advance past the gated phase — CurrentPhase was already incremented
-			// when the vessel entered waiting state.
-			if err := r.Queue.Update(vessel.ID, queue.StateRunning, ""); err != nil {
+			// when the vessel entered waiting state. Resume via pending so Drain can
+			// pick the vessel back up through the normal dequeue flow.
+			if err := r.Queue.Update(vessel.ID, queue.StatePending, ""); err != nil {
 				log.Printf("warn: failed to resume vessel %s: %v", vessel.ID, err)
 			}
 		}
@@ -274,7 +277,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 		// Gate retry loop: may re-run the same phase with gate output appended
 		for {
 			log.Printf("%sphase %q starting (%d/%d)", vesselLabel(vessel), p.Name, i+1, len(sk.Phases))
-			phaseStart := time.Now()
+			phaseStart := r.runtimeNow()
 
 			// Build template data
 			td := phase.TemplateData{
@@ -351,7 +354,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				}
 				srcCfg := r.sourceConfigFromMeta(vessel)
 				provider := resolveProvider(r.Config, srcCfg, sk, &p)
-				cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, sk, &p, harnessContent, provider, rendered)
+				attempt := providerAttempt(&p, vessel.GateRetries)
+				cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, sk, &p, harnessContent, provider, rendered, attempt)
 				output, runErr = r.Runner.RunPhase(ctx, worktreePath, phaseStdin, cmd, args...)
 			}
 
@@ -362,7 +366,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 			}
 			fmt.Printf("Phase %s complete: %s\n", p.Name, outputPath)
 
-			phaseDuration := time.Since(phaseStart)
+			phaseDuration := r.runtimeSince(phaseStart)
 
 			if runErr != nil {
 				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
@@ -465,22 +469,27 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) string {
 				// Re-render prompt with gate output context
 				gateResult = fmt.Sprintf("The following gate check failed after the previous phase. Fix the issues and try again:\n\n%s", gateOut)
 
-				time.Sleep(retryDelay)
+				if err := r.runtimeSleep(ctx, retryDelay); err != nil {
+					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
+					if failErr := src.OnFail(ctx, vessel); failErr != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+					}
+					return "failed"
+				}
 				continue // re-run same phase
 
 			case "label":
 				log.Printf("%swaiting for label %q after phase %q", vesselLabel(vessel), p.Gate.WaitFor, p.Name)
 				// Set vessel to waiting state
+				vessel.FailedPhase = p.Name
 				vessel.WaitingFor = p.Gate.WaitFor
-				now := time.Now().UTC()
+				now := r.runtimeNow()
 				vessel.WaitingSince = &now
+				vessel.CurrentPhase = i + 1
 				vessel.State = queue.StateWaiting
 				if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
 					log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
-				}
-				// Update queue state
-				if updateErr := r.Queue.Update(vessel.ID, queue.StateWaiting, ""); updateErr != nil {
-					log.Printf("warn: failed to set vessel %s to waiting: %v", vessel.ID, updateErr)
+					return "failed"
 				}
 				return "waiting"
 			}
@@ -756,7 +765,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		gateRetries = p.Gate.Retries
 	}
 
-	phaseStart := time.Now()
+	phaseStart := r.runtimeNow()
 
 	for {
 		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
@@ -781,7 +790,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if failErr := src.OnFail(ctx, vessel); failErr != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
 			}
-			return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+			return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 		}
 
 		var output []byte
@@ -794,14 +803,14 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
-				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
 			if err := validateCommandRender(p.Name, rendered); err != nil {
 				r.failVessel(vessel.ID, err.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
-				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
 			if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write command file: %v", wErr)
@@ -816,7 +825,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
-				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
 			rendered, err := phase.RenderPrompt(string(promptContent), td)
 			if err != nil {
@@ -832,7 +841,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			srcCfg := r.sourceConfigFromMeta(vessel)
 			provider := resolveProvider(r.Config, srcCfg, wf, &p)
-			cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, wf, &p, harnessContent, provider, rendered)
+			attempt := providerAttempt(&p, gateRetries)
+			cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, wf, &p, harnessContent, provider, rendered, attempt)
 			output, runErr = r.Runner.RunPhase(ctx, worktreePath, phaseStdin, cmd, args...)
 		}
 
@@ -855,7 +865,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				r.logReporterError("post vessel-failed comment", vessel.ID,
 					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
 			}
-			return singlePhaseResult{status: "failed", duration: time.Since(phaseStart)}
+			return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 		}
 
 		// Report phase completion.
@@ -863,19 +873,19 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		if phaseMatchedNoOp(&p, string(output)) {
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post phase-complete comment", vessel.ID,
-					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output)))
+					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, r.runtimeSince(phaseStart), string(output)))
 			}
-			return singlePhaseResult{output: string(output), status: "no-op", duration: time.Since(phaseStart)}
+			return singlePhaseResult{output: string(output), status: "no-op", duration: r.runtimeSince(phaseStart)}
 		}
 
 		if issueNum > 0 && r.Reporter != nil {
 			r.logReporterError("post phase-complete comment", vessel.ID,
-				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, time.Since(phaseStart), string(output)))
+				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, r.runtimeSince(phaseStart), string(output)))
 		}
 
 		// Handle gate.
 		if p.Gate == nil {
-			return singlePhaseResult{output: string(output), status: "completed", duration: time.Since(phaseStart)}
+			return singlePhaseResult{output: string(output), status: "completed", duration: r.runtimeSince(phaseStart)}
 		}
 
 		switch p.Gate.Type {
@@ -886,11 +896,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
-				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart), gateOut: gateOut}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart), gateOut: gateOut}
 			}
 			if passed {
 				log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
-				return singlePhaseResult{output: string(output), status: "completed", duration: time.Since(phaseStart)}
+				return singlePhaseResult{output: string(output), status: "completed", duration: r.runtimeSince(phaseStart)}
 			}
 
 			// Gate failed — retry or fail.
@@ -912,32 +922,37 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					r.logReporterError("post vessel-failed comment", vessel.ID,
 						r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut))
 				}
-				return singlePhaseResult{status: "failed", duration: time.Since(phaseStart), gateOut: gateOut}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart), gateOut: gateOut}
 			}
 			gateRetries--
 			log.Printf("%sgate failed for phase %q, retries remaining=%d", vesselLabel(vessel), p.Name, gateRetries)
 			gateResult = fmt.Sprintf("The following gate check failed after the previous phase. Fix the issues and try again:\n\n%s", gateOut)
-			time.Sleep(retryDelay)
+			if err := r.runtimeSleep(ctx, retryDelay); err != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
+				if failErr := src.OnFail(ctx, vessel); failErr != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+				}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart), gateOut: gateOut}
+			}
 			continue // re-run phase
 
 		case "label":
 			log.Printf("%swaiting for label %q after phase %q", vesselLabel(vessel), p.Gate.WaitFor, p.Name)
+			vessel.FailedPhase = p.Name
 			vessel.WaitingFor = p.Gate.WaitFor
-			now := time.Now().UTC()
+			now := r.runtimeNow()
 			vessel.WaitingSince = &now
 			vessel.State = queue.StateWaiting
 			vessel.CurrentPhase = phaseIdx + 1
 			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
 				log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			if updateErr := r.Queue.Update(vessel.ID, queue.StateWaiting, ""); updateErr != nil {
-				log.Printf("warn: failed to set vessel %s to waiting: %v", vessel.ID, updateErr)
-			}
-			return singlePhaseResult{output: string(output), status: "waiting", duration: time.Since(phaseStart)}
+			return singlePhaseResult{output: string(output), status: "waiting", duration: r.runtimeSince(phaseStart)}
 		}
 
 		// Unknown gate type: treat as passed.
-		return singlePhaseResult{output: string(output), status: "completed", duration: time.Since(phaseStart)}
+		return singlePhaseResult{output: string(output), status: "completed", duration: r.runtimeSince(phaseStart)}
 	}
 }
 
@@ -1178,7 +1193,7 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 		if vessel.StartedAt == nil {
 			continue
 		}
-		elapsed := time.Since(*vessel.StartedAt)
+		elapsed := r.runtimeSince(*vessel.StartedAt)
 		if elapsed <= timeout {
 			continue
 		}
@@ -1194,6 +1209,32 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 		// Clean up worktree (best-effort)
 		r.removeWorktree(vessel.WorktreePath, vessel.ID)
 	}
+}
+
+func (r *Runner) runtimeNow() time.Time {
+	now, err := dtu.RuntimeNow()
+	if err != nil {
+		log.Printf("warn: runner: resolve runtime clock: %v", err)
+		return time.Now().UTC()
+	}
+	return now.UTC()
+}
+
+func (r *Runner) runtimeSince(start time.Time) time.Duration {
+	elapsed, err := dtu.RuntimeSince(start)
+	if err != nil {
+		log.Printf("warn: runner: resolve runtime elapsed time: %v", err)
+		return time.Since(start)
+	}
+	return elapsed
+}
+
+func (r *Runner) runtimeSleep(ctx context.Context, delay time.Duration) error {
+	if err := dtu.RuntimeSleep(ctx, delay); err != nil {
+		log.Printf("warn: runner: runtime sleep: %v", err)
+		return err
+	}
+	return nil
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
@@ -1282,17 +1323,57 @@ func buildCopilotPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *
 // and returns the command binary, argument slice, and stdin reader for the phase invocation.
 // For providers that embed the prompt in CLI args (copilot -p <text>), stdin is nil.
 // For providers that read the prompt from stdin (claude -p), stdin carries the prompt.
-func buildProviderPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, renderedPrompt string) (string, []string, io.Reader) {
+func buildProviderPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, renderedPrompt string, attempt int) (string, []string, io.Reader) {
 	switch provider {
 	case "copilot":
-		return cfg.Copilot.Command, buildCopilotPhaseArgs(cfg, srcCfg, wf, p, harnessContent, renderedPrompt), nil
+		return cfg.Copilot.Command, appendDTUProviderArgs(buildCopilotPhaseArgs(cfg, srcCfg, wf, p, harnessContent, renderedPrompt), p, attempt), nil
 	default: // "claude"
 		var stdin io.Reader
 		if renderedPrompt != "" {
 			stdin = strings.NewReader(renderedPrompt)
 		}
-		return cfg.Claude.Command, buildPhaseArgs(cfg, srcCfg, wf, p, harnessContent), stdin
+		return cfg.Claude.Command, appendDTUProviderArgs(buildPhaseArgs(cfg, srcCfg, wf, p, harnessContent), p, attempt), stdin
 	}
+}
+
+func appendDTUProviderArgs(args []string, p *workflow.Phase, attempt int) []string {
+	if !isDTUProviderRun() {
+		return args
+	}
+	phaseName := ""
+	scriptName := ""
+	if p != nil {
+		phaseName = p.Name
+		if strings.TrimSpace(p.PromptFile) != "" {
+			scriptName = strings.TrimSuffix(filepath.Base(p.PromptFile), filepath.Ext(p.PromptFile))
+		}
+	}
+	out := append([]string(nil), args...)
+	if phaseName != "" {
+		out = append(out, "--dtu-phase", phaseName)
+	}
+	if scriptName != "" {
+		out = append(out, "--dtu-script", scriptName)
+	}
+	if attempt > 0 {
+		out = append(out, "--dtu-attempt", strconv.Itoa(attempt))
+	}
+	return out
+}
+
+func providerAttempt(p *workflow.Phase, retriesRemaining int) int {
+	if p == nil || p.Gate == nil || p.Gate.Type != "command" || p.Gate.Retries <= 0 {
+		return 1
+	}
+	attempt := p.Gate.Retries - retriesRemaining + 1
+	if attempt < 1 {
+		return 1
+	}
+	return attempt
+}
+
+func isDTUProviderRun() bool {
+	return strings.TrimSpace(os.Getenv(dtu.EnvStatePath)) != ""
 }
 
 // resolveProvider determines which LLM provider to use for a phase invocation.

@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
@@ -136,7 +137,7 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 		default:
 		}
 
-		now := time.Now()
+		now := daemonNow()
 
 		if now.Sub(lastScan) >= scanInterval {
 			scanResult, err := scan(ctx)
@@ -185,7 +186,7 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 				log.Println("daemon: drain shutdown timeout exceeded, exiting")
 			}
 			return nil
-		case <-time.After(tickInterval):
+		case <-daemonAfter(ctx, tickInterval):
 		}
 	}
 }
@@ -232,7 +233,7 @@ func reconcileStaleVessels(q *queue.Queue, timeout time.Duration) {
 		return
 	}
 
-	now := time.Now()
+	now := daemonNow()
 	for _, v := range vessels {
 		if v.State != queue.StateRunning {
 			continue
@@ -252,6 +253,26 @@ func reconcileStaleVessels(q *queue.Queue, timeout time.Duration) {
 			}
 		}
 	}
+}
+
+func daemonNow() time.Time {
+	now, err := dtu.RuntimeNow()
+	if err != nil {
+		log.Printf("warn: daemon: resolve runtime clock: %v", err)
+		return time.Now()
+	}
+	return now
+}
+
+func daemonAfter(ctx context.Context, delay time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	go func() {
+		if err := dtu.RuntimeSleep(ctx, delay); err != nil {
+			return
+		}
+		ch <- daemonNow()
+	}()
+	return ch
 }
 
 // acquireDaemonLock tries to acquire an exclusive file lock on the given PID

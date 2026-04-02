@@ -1,0 +1,271 @@
+# Running Manual Smoke Tests for Harness Scenarios
+
+This guide covers how to manually test harness scenarios using DTU (Deterministic Test Universe) environments. Use this for interactive verification of control-plane behavior against twinned external boundaries.
+
+**See also:**
+- [WS1 Scenario Manual Tests](ws1-config-surface-policy.md#manual-smoke-tests) — Scenario-specific instructions and manifests
+- [DTU Guide 4A: Fixture-Backed Regression Tests](../../dtu-fixture-regression-tests.md) — Checked-in `go test` scenarios
+- [DTU Guide 4B: Manual Smoke Tests](../../dtu-manual-smoke-tests.md) — Comprehensive DTU reference
+
+---
+
+## Quick Start
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+
+# Build the CLI
+go build ./cmd/xylem
+
+# Pick a scenario manifest and set up the DTU environment
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+
+# Run the scan-drain pipeline
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+./xylem --config ../.xylem.yml status
+
+# Inspect results
+cat "$XYLEM_DTU_STATE_PATH" | jq '.repositories'
+cat "$XYLEM_DTU_EVENT_LOG_PATH" | jq -c 'select(.kind=="shim_result")'
+```
+
+---
+
+## When to use manual smoke tests
+
+Choose manual smoke tests when you want to:
+
+- **Exercise the real `xylem` CLI** in a real repository layout
+- **Verify end-to-end behavior** with twinned external boundaries (gh, git, claude, copilot)
+- **Reproduce a bug interactively** with full state persistence across commands
+- **Debug control-plane logic** by inspecting queue, worktree, and event logs in real time
+
+---
+
+## What runs for real vs what is twinned
+
+| Surface | Real or Twinned? | Notes |
+|---------|---|---|
+| xylem CLI, config loading, workflows, HARNESS.md | **Real** | Your actual repository files and commands. |
+| Queue files, worktree directories, local filesystem | **Real** | State persists across scan/drain/status commands. |
+| Shell command gates (e.g., `go test`, `sh -c ...`) | **Real** | Arbitrary local commands execute live (not mocked). |
+| `gh`, `git`, `claude`, `copilot` boundaries | **Twinned** | Intercepted via DTU shim directory; behavior from manifest. |
+| GitHub APIs, provider streaming, network behavior | **Twinned** | Only modeled behavior in the manifest exists. |
+
+---
+
+## Setting up a DTU environment
+
+### 1. Build the xylem CLI
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+go build ./cmd/xylem
+```
+
+Verify the binary exists:
+```bash
+ls -lh xylem
+```
+
+### 2. Materialize the DTU universe
+
+Choose a manifest (see [WS1 Scenario Manual Tests](ws1-config-surface-policy.md#manual-smoke-tests) for the full list), then export the DTU environment:
+
+```bash
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+```
+
+This sets four environment variables:
+- `XYLEM_DTU_UNIVERSE_ID` — unique identifier for this DTU universe
+- `XYLEM_DTU_STATE_PATH` — path to the state file (JSON)
+- `XYLEM_DTU_EVENT_LOG_PATH` — path to the event log (JSONL)
+- `XYLEM_DTU_SHIM_DIR` — path to the gh/git/claude/copilot shims
+
+### 3. Verify the shim directory
+
+```bash
+ls "$XYLEM_DTU_SHIM_DIR"
+```
+
+You should see: `claude`, `copilot`, `gh`, `git`
+
+---
+
+## Running a multi-step smoke test
+
+After materializing the DTU environment, run the real xylem commands:
+
+```bash
+# Scan for issues to queue
+./xylem --config ../.xylem.yml scan
+
+# Dequeue and execute
+./xylem --config ../.xylem.yml drain
+
+# Check results
+./xylem --config ../.xylem.yml status
+```
+
+Each command preserves DTU state across invocations:
+- Event log appends to the same JSONL
+- State file updates in place
+- Observation counters increment (affects scheduled mutations)
+
+---
+
+## Probing boundaries directly
+
+When a smoke test fails, probe the boundary before assuming xylem is broken:
+
+```bash
+# Check what issues the gh shim sees
+./xylem shim-dispatch gh --help
+
+# Check gh issue list (if the manifest has issues)
+echo "Testing gh boundary..."
+
+# Check if claude shim responds
+echo "test prompt" | ./xylem shim-dispatch claude -p "respond"
+
+# Check git operations
+./xylem shim-dispatch git --help
+```
+
+**Rule:** If direct shim probes are wrong, the problem is in the DTU fixture or DTU matching, not xylem. Fix the manifest before adjusting xylem code.
+
+---
+
+## Inspecting evidence
+
+After running a smoke test, examine the DTU state and event log:
+
+### View the state file
+
+```bash
+cat "$XYLEM_DTU_STATE_PATH" | jq '.'
+```
+
+Look for:
+- Repositories, issues, labels
+- Provider scripts and their matches
+- Scheduled mutations and their triggers
+- Current clock state
+
+### View the event log
+
+```bash
+cat "$XYLEM_DTU_EVENT_LOG_PATH" | jq -c '.'
+```
+
+Look for:
+- `shim_invocation` events (what command was called)
+- `shim_result` events (what the shim returned)
+- Observation counters (triggers for mutations)
+- Prompt hashes (what text was sent to claude)
+
+### Common event kinds
+
+```bash
+# All shim invocations
+jq -c 'select(.kind=="shim_invocation")' "$XYLEM_DTU_EVENT_LOG_PATH"
+
+# All shim results
+jq -c 'select(.kind=="shim_result")' "$XYLEM_DTU_EVENT_LOG_PATH"
+
+# Mutation triggers
+jq -c 'select(.kind=="observation_matched")' "$XYLEM_DTU_EVENT_LOG_PATH"
+
+# Provider script matches
+jq -c 'select(.kind=="script_matched")' "$XYLEM_DTU_EVENT_LOG_PATH"
+```
+
+---
+
+## Interpreting results
+
+### If the smoke test passes
+
+**You can trust that:**
+- The real xylem CLI executes the scenario correctly in your repo
+- Your config, workflows, prompts, and HARNESS.md are wired correctly
+- The modeled boundary behavior is handled as expected
+
+**You cannot conclude that:**
+- Live GitHub or live providers behave identically
+- Your production auth, rate limits, or latency are correct
+- Every boundary edge case is covered
+
+### If a boundary probe fails
+
+**Example:** `./xylem shim-dispatch gh issue list --repo acme/widget --json number` returns an error or malformed JSON.
+
+**Root cause:** The DTU manifest or DTU matching is incorrect, not xylem.
+
+**Next step:** Check the manifest file and the DTU event log to see what shim invocation was made and why it failed.
+
+### If the boundary probe succeeds but xylem fails
+
+**Root cause:** Likely a bug in xylem's handling of the boundary response.
+
+**Next step:**
+1. Check the queue state: `./xylem --config ../.xylem.yml status`
+2. Check the worktree: `ls -la .xylem/worktrees/`
+3. Check the phase output: `cat .xylem/phases/*/phase-output`
+4. Compare to the event log to see what shim output xylem received
+
+---
+
+## Running the same test under different conditions
+
+Keep the xylem repo setup fixed and swap only the manifest:
+
+```bash
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+
+# Now try a different scenario
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-surface-violation.yaml)"
+./xylem --config ../.xylem.yml scan
+./xylem --config ../.xylem.yml drain
+```
+
+This lets you verify that the same xylem CLI and repo setup work (or fail predictably) across different boundary conditions.
+
+---
+
+## Scenario-specific instructions
+
+Each workstream's smoke scenarios have manifest-specific run instructions. See:
+
+- [WS1 Scenario Manual Tests](ws1-config-surface-policy.md#manual-smoke-tests) — Config, surface, policy scenarios (S1–S32)
+
+---
+
+## Cleanup
+
+DTU environments are ephemeral and isolated. To start fresh:
+
+```bash
+# The shim directory is shared; the state is per-universe
+rm -rf "/Users/harry.nicholls/repos/xylem/cli/.xylem/dtu/ws1-policy-allow-happy-path/"
+
+# Re-materialize the environment
+eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+```
+
+---
+
+## Trust boundary
+
+A passing manual DTU smoke test is meaningful evidence that:
+- xylem's control-plane logic (queue, runner, worktree, gates) works for that scenario
+- your config, workflows, and harness are wired correctly
+- your local shell command gates behave as intended
+
+It is **not** a replacement for:
+- live differential checks against real GitHub or real providers
+- manual smoke tests in a real repository with real boundaries
+- daemon timing/restart behavior verification

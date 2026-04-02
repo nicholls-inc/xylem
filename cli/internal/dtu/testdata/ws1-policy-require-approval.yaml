@@ -1,0 +1,31 @@
+# WS1 Smoke Scenarios: S7, S19
+# End-to-end: policy maps phase action to require_approval → scan → drain →
+# vessel fails with "requires approval" message → provider never invoked →
+# audit log records require_approval decision.
+metadata:
+  name: ws1-policy-require-approval
+  description: Require-approval policy blocks phase, vessel fails with approval message
+  scenario: policy require_approval blocks phase execution
+  tags: [ws1, policy, require-approval]
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: failed
+    issues:
+      - number: 30
+        title: Needs human approval
+        body: This issue requires approval before the deploy phase can proceed.
+        labels: [bug]
+
+providers:
+  scripts:
+    - name: deploy-response
+      provider: claude
+      match:
+        phase: deploy
+      stdout: This output should never appear

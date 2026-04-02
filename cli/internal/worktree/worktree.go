@@ -8,8 +8,11 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 )
 
 // CommandRunner abstracts shell command execution for testing.
@@ -151,7 +154,7 @@ func (m *Manager) hasRemote(ctx context.Context, name string) bool {
 func retryGitCmd(ctx context.Context, runner CommandRunner, maxAttempts int, args ...string) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		out, err := runner.Run(ctx, "git", args...)
+		out, err := runner.Run(ctx, "git", appendDTUGitArgs(args, attempt)...)
 		if err == nil {
 			return out, nil
 		}
@@ -160,16 +163,26 @@ func retryGitCmd(ctx context.Context, runner CommandRunner, maxAttempts int, arg
 			backoff := time.Duration(1<<(attempt-1)) * time.Second
 			log.Printf("worktree: retrying git %s (attempt %d/%d after %v): %v",
 				args[0], attempt, maxAttempts, backoff, err)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff):
+			if err := dtu.RuntimeSleep(ctx, backoff); err != nil {
+				return nil, err
 			}
 			continue
 		}
 		break
 	}
 	return nil, lastErr
+}
+
+func appendDTUGitArgs(args []string, attempt int) []string {
+	out := append([]string(nil), args...)
+	if !isDTUGitRun() {
+		return out
+	}
+	return append(out, "--dtu-attempt", strconv.Itoa(attempt))
+}
+
+func isDTUGitRun() bool {
+	return strings.TrimSpace(os.Getenv(dtu.EnvStatePath)) != ""
 }
 
 // exitCoder is satisfied by exec.ExitError and test doubles.

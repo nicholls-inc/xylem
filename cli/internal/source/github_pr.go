@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
@@ -97,7 +96,7 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					Workflow:  task.Workflow,
 					Meta:      meta,
 					State:     queue.StatePending,
-					CreatedAt: time.Now().UTC(),
+					CreatedAt: sourceNow(),
 				})
 			}
 		}

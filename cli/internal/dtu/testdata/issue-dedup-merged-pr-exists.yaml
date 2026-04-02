@@ -1,0 +1,22 @@
+metadata:
+  name: issue-dedup-merged-pr-exists
+  scenario: github issue scan skips when matching merged PR already exists
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+    pull_requests:
+      - number: 130
+        title: existing merged fix
+        state: merged
+        merged: true
+        base_branch: main
+        head_branch: fix/issue-13-existing-merged-pr
+        head_sha: cafe1234
+    issues:
+      - number: 13
+        title: merged pr exists
+        body: should be skipped because merged pr exists
+        labels: [bug]

@@ -1,0 +1,25 @@
+metadata:
+  name: github-pr-events-checks-failed
+  scenario: github pr events checks failed
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    pull_requests:
+      - number: 21
+        title: ci is red
+        body: fix the failing checks
+        state: open
+        base_branch: main
+        head_branch: feature-ci-red
+        head_sha: deadbeefcafebabe
+        checks:
+          - name: ci
+            state: failure
+providers:
+  scripts:
+    - name: respond
+      provider: claude
+      match:
+        phase: respond
+      stdout: checks handled

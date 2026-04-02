@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -107,7 +109,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					Workflow:  task.Workflow,
 					Meta:      meta,
 					State:     queue.StatePending,
-					CreatedAt: time.Now().UTC(),
+					CreatedAt: sourceNow(),
 				})
 			}
 		}
@@ -194,6 +196,15 @@ func (g *GitHub) hasExcludedLabel(issue ghIssue, excluded map[string]bool) bool 
 		}
 	}
 	return false
+}
+
+func sourceNow() time.Time {
+	now, err := dtu.RuntimeNow()
+	if err != nil {
+		log.Printf("warn: source: resolve runtime clock: %v", err)
+		return time.Now().UTC()
+	}
+	return now.UTC()
 }
 
 func (g *GitHub) hasMatchingFailedFingerprint(ref, fingerprint string) bool {

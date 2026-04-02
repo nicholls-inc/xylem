@@ -1,0 +1,39 @@
+# WS1 Smoke Scenarios: S10, S14, S21, S23
+# End-to-end: protected surfaces configured → scan → drain → policy allows →
+# surface pre-snapshot taken → command phase mutates protected file →
+# surface post-verification detects violation → vessel fails with
+# "violated protected surfaces" → audit log records surface violation.
+#
+# The command phase writes to .xylem.yml which is a default protected surface.
+# This simulates an agent that tampers with control-plane configuration.
+metadata:
+  name: ws1-surface-violation
+  description: Command phase mutates a protected surface, post-verification catches it, vessel fails
+  scenario: surface violation detection via command phase
+  tags: [ws1, surface, violation, audit]
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: failed
+    issues:
+      - number: 40
+        title: Agent tampers with config
+        body: |
+          This scenario uses a command phase to modify .xylem.yml,
+          triggering protected surface violation detection.
+        labels: [bug]
+
+# No provider scripts needed — the tamper phase is a command phase, and the
+# workflow stops before reaching the implement phase.
+providers:
+  scripts:
+    - name: implement-response
+      provider: claude
+      match:
+        phase: implement
+      stdout: This output should never appear because tamper phase triggers violation
