@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -164,7 +163,7 @@ func newDtuRunCmd(opts *dtuOptions) *cobra.Command {
 				return fmt.Errorf("resolve xylem executable: %w", err)
 			}
 			runner := &realCmdRunner{}
-			if err := runner.RunProcessWithEnv(context.Background(), resolved.WorkDir, resolved.env(resolved.ShimDir), binary, args...); err != nil {
+			if err := runner.RunProcessWithEnv(cmd.Context(), resolved.WorkDir, resolved.env(resolved.ShimDir), binary, args...); err != nil {
 				return fmt.Errorf("run xylem in dtu environment: %w", err)
 			}
 			return nil
@@ -223,7 +222,7 @@ func newDtuVerifyCmd(opts *dtuOptions) *cobra.Command {
 				StateDir:        resolved.StateDir,
 				WorkDir:         workDir,
 				XylemExecutable: binary,
-				Environment:     resolved.env(resolved.ShimDir),
+				Environment:     os.Environ(),
 				EnvLookup:       os.LookupEnv,
 			})
 			if err != nil {
