@@ -1,0 +1,49 @@
+# DTU live canary suite — detects drift between DTU twins and real external
+# boundaries (gh, claude, copilot) before it pollutes normal xylem debugging.
+#
+# Runs weekly on Monday 6 AM UTC and on manual dispatch. Two modes:
+#   - canary-only (default): sets XYLEM_DTU_LIVE_CANARY only
+#   - full: also enables differential checks (needs GH_TOKEN with repo scope)
+
+name: DTU Canary
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Monday 6 AM UTC
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Verification mode"
+        required: true
+        default: canary-only
+        type: choice
+        options:
+          - canary-only
+          - full
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: cli/go.mod
+          cache-dependency-path: cli/go.sum
+
+      - name: Build CLI
+        run: go build -o xylem ./cmd/xylem
+
+      - name: Run DTU verify
+        env:
+          XYLEM_DTU_LIVE_CANARY: "1"
+          XYLEM_DTU_LIVE_GH_DIFFERENTIAL: ${{ inputs.mode == 'full' && '1' || '' }}
+          XYLEM_DTU_LIVE_PROVIDER_DIFFERENTIAL: ${{ inputs.mode == 'full' && '1' || '' }}
+          GH_TOKEN: ${{ secrets.DTU_GH_TOKEN }}
+          ANTHROPIC_API_KEY: ${{ secrets.DTU_ANTHROPIC_API_KEY }}
+        run: ./xylem dtu verify
