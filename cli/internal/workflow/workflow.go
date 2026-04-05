@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"gopkg.in/yaml.v3"
 )
 
@@ -45,15 +46,24 @@ type NoOp struct {
 	Match string `yaml:"match"`
 }
 
+// GateEvidence describes the verification evidence metadata attached to a gate.
+type GateEvidence struct {
+	Claim         string `yaml:"claim,omitempty"`
+	Level         string `yaml:"level,omitempty"`
+	Checker       string `yaml:"checker,omitempty"`
+	TrustBoundary string `yaml:"trust_boundary,omitempty"`
+}
+
 // Gate defines an inter-phase quality gate that must pass before the next phase begins.
 type Gate struct {
-	Type         string `yaml:"type"`                    // "command" or "label"
-	Run          string `yaml:"run,omitempty"`           // shell command (type=command)
-	Retries      int    `yaml:"retries,omitempty"`       // default 0
-	RetryDelay   string `yaml:"retry_delay,omitempty"`   // default "10s"
-	WaitFor      string `yaml:"wait_for,omitempty"`      // label name (type=label)
-	Timeout      string `yaml:"timeout,omitempty"`       // default "24h" (type=label)
-	PollInterval string `yaml:"poll_interval,omitempty"` // default "60s" (type=label)
+	Type         string        `yaml:"type"`                    // "command" or "label"
+	Run          string        `yaml:"run,omitempty"`           // shell command (type=command)
+	Retries      int           `yaml:"retries,omitempty"`       // default 0
+	RetryDelay   string        `yaml:"retry_delay,omitempty"`   // default "10s"
+	WaitFor      string        `yaml:"wait_for,omitempty"`      // label name (type=label)
+	Timeout      string        `yaml:"timeout,omitempty"`       // default "24h" (type=label)
+	PollInterval string        `yaml:"poll_interval,omitempty"` // default "60s" (type=label)
+	Evidence     *GateEvidence `yaml:"evidence,omitempty"`
 }
 
 // Load reads and validates a workflow definition YAML file at path.
@@ -279,6 +289,13 @@ func validateGate(phaseName string, g *Gate) error {
 			if _, err := time.ParseDuration(d.value); err != nil {
 				return fmt.Errorf("phase %q: gate: invalid %s %q: %w", phaseName, d.name, d.value, err)
 			}
+		}
+	}
+
+	if g.Evidence != nil && g.Evidence.Level != "" {
+		level := evidence.Level(g.Evidence.Level)
+		if !level.Valid() || level == evidence.Untyped {
+			return fmt.Errorf("phase %q: gate evidence level %q is not valid (must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ)", phaseName, g.Evidence.Level)
 		}
 	}
 

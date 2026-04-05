@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 )
 
 type mockRunner struct {
@@ -152,7 +154,7 @@ func TestVesselCompleted(t *testing.T) {
 		{Name: "pr", Duration: time.Minute, Status: "completed"},
 	}
 
-	err := r.VesselCompleted(context.Background(), 5, phases)
+	err := r.VesselCompleted(context.Background(), 5, phases, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -175,6 +177,9 @@ func TestVesselCompleted(t *testing.T) {
 	if !strings.Contains(mock.lastBody, "| Phase | Duration | Status |") {
 		t.Errorf("expected table header in comment, got: %s", mock.lastBody)
 	}
+	if strings.Contains(mock.lastBody, "### Verification evidence") {
+		t.Errorf("expected no evidence section when manifest is nil, got: %s", mock.lastBody)
+	}
 }
 
 func TestVesselCompletedNoOp(t *testing.T) {
@@ -185,7 +190,7 @@ func TestVesselCompletedNoOp(t *testing.T) {
 		{Name: "analyze", Duration: 2 * time.Second, Status: "no-op"},
 	}
 
-	err := r.VesselCompleted(context.Background(), 5, phases)
+	err := r.VesselCompleted(context.Background(), 5, phases, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -195,6 +200,44 @@ func TestVesselCompletedNoOp(t *testing.T) {
 	}
 	if !strings.Contains(mock.lastBody, "| analyze | 2s | no-op |") {
 		t.Fatalf("expected no-op row in table, got: %s", mock.lastBody)
+	}
+}
+
+func TestVesselCompletedWithEvidence(t *testing.T) {
+	mock := &mockRunner{}
+	r := &Reporter{Runner: mock, Repo: "owner/repo"}
+
+	phases := []PhaseResult{
+		{Name: "implement", Duration: 5 * time.Second, Status: "completed"},
+	}
+
+	manifest := &evidence.Manifest{
+		Claims: []evidence.Claim{
+			{
+				Claim:         "All tests pass",
+				Level:         evidence.BehaviorallyChecked,
+				Checker:       "go test ./...",
+				TrustBoundary: "Package-level only",
+				Passed:        true,
+			},
+		},
+	}
+
+	if err := r.VesselCompleted(context.Background(), 5, phases, manifest); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	wantParts := []string{
+		"### Verification evidence",
+		"| Claim | Level | Checker | Result |",
+		"| All tests pass | behaviorally_checked | go test ./... | :white_check_mark: |",
+		"<summary>Trust boundaries</summary>",
+		"**All tests pass** — Package-level only",
+	}
+	for _, want := range wantParts {
+		if !strings.Contains(mock.lastBody, want) {
+			t.Fatalf("expected %q in comment body, got: %s", want, mock.lastBody)
+		}
 	}
 }
 
@@ -234,7 +277,7 @@ func TestGhFailureNonFatal(t *testing.T) {
 		{
 			name: "VesselCompleted",
 			call: func(r *Reporter) error {
-				return r.VesselCompleted(context.Background(), 1, []PhaseResult{{Name: "a", Duration: time.Second, Status: "completed"}})
+				return r.VesselCompleted(context.Background(), 1, []PhaseResult{{Name: "a", Duration: time.Second, Status: "completed"}}, nil)
 			},
 		},
 		{
@@ -370,7 +413,7 @@ func TestVesselCompletedTotalDuration(t *testing.T) {
 		{Name: "b", Duration: 90 * time.Second, Status: "completed"},
 	}
 
-	_ = r.VesselCompleted(context.Background(), 1, phases)
+	_ = r.VesselCompleted(context.Background(), 1, phases, nil)
 
 	if !strings.Contains(mock.lastBody, "Total: 2m0s") {
 		t.Errorf("expected total 2m0s, got: %s", mock.lastBody)

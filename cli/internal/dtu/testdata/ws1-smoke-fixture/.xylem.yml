@@ -1,0 +1,20 @@
+# WS1 happy-path manual smoke fixture
+sources:
+  issues:
+    type: github
+    repo: acme/widget
+    tasks:
+      bugs:
+        labels: [bug]
+        workflow: fix-bug-allow
+        status_labels:
+          queued: queued
+          running: in-progress
+          completed: done
+          failed: failed
+
+concurrency: 1
+max_turns: 5
+timeout: "1m"
+state_dir: ".xylem"
+default_branch: main

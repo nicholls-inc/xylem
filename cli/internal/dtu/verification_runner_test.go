@@ -291,6 +291,7 @@ func TestSanitizedLiveEnvironmentRemovesDTUKeysAndShimDirFromPath(t *testing.T) 
 		"PATH=/shim/bin" + string(os.PathListSeparator) + "/usr/bin",
 		EnvShimDir + "=/shim/bin",
 		EnvStateDir + "=/tmp/state",
+		EnvWorkDir + "=/workdir",
 		"HOME=/Users/test",
 	}
 	got := sanitizedLiveEnvironment(env)
@@ -299,6 +300,9 @@ func TestSanitizedLiveEnvironmentRemovesDTUKeysAndShimDirFromPath(t *testing.T) 
 	}
 	if _, ok := envValue(got, EnvStateDir); ok {
 		t.Fatal("expected DTU state env to be removed")
+	}
+	if _, ok := envValue(got, EnvWorkDir); ok {
+		t.Fatal("expected DTU workdir env to be removed")
 	}
 	pathValue, ok := envValue(got, "PATH")
 	if !ok {

@@ -280,3 +280,81 @@ orchestrated execution, and backwards compatibility.
 **Action:** `r.Reporter.VesselCompleted(ctx, issueNum, phaseResults, nil)` is called.
 **Expected outcome:** The GitHub comment posted is identical in content to what would have been posted by the pre-harness version of `VesselCompleted`. No evidence table or manifest section is appended.
 **Verification:** The comment body posted to GitHub matches a reference snapshot captured from the current code (before the manifest parameter was added). No "evidence" or "manifest" text appears in the output.
+
+---
+
+## Manual Smoke Tests
+
+Use the checked-in Guide 4B seed below instead of the live repo-root `.xylem`
+tree.
+
+| Scenario IDs | DTU status | Manifest | Seeded workdir | Notes |
+| --- | --- | --- | --- | --- |
+| S19-S22 | **Expected pass** | `cli/internal/dtu/testdata/ws6-cross-cutting.yaml` | `cli/internal/dtu/testdata/manual-smoke/ws6-cross-cutting/` | `scan`/`drain` runs an orchestrated `analyze -> {implement_a, implement_b}` workflow. Inspect `implement_b.prompt` to confirm it sees `analyze` output but not `implement_a`. |
+| S1-S18, S23-S30 | **Known-fail / manual-triage** | same | same | The seed also carries schema-aligned `harness.protected_surfaces.paths` plus `observability:` / `cost:` config and a prompt-only probe string, but the current CLI path still lacks policy, summary, evidence, span, and budget wiring for these scenarios. |
+
+The checked-in WS6 seed now expresses protected surfaces under
+`harness.protected_surfaces.paths` to match the current schema contract in the
+harness implementation spec. That alignment does not change the expected-pass
+slice: only S19-S22 are expected to pass today.
+
+### Run the issue-driven orchestration seed
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+go build ./cmd/xylem
+XYLEM_BIN="$PWD/xylem"
+MANIFEST="$PWD/internal/dtu/testdata/ws6-cross-cutting.yaml"
+WORKDIR="$PWD/internal/dtu/testdata/manual-smoke/ws6-cross-cutting"
+STATE_DIR="$WORKDIR/.xylem-state"
+
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest "$MANIFEST" \
+  --state-dir "$STATE_DIR" \
+  --workdir "$WORKDIR")"
+
+(
+  cd "$WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml scan
+  "$XYLEM_BIN" --config .xylem.yml drain
+)
+```
+
+### Verify the expected-pass orchestration slice
+
+```bash
+cd "$WORKDIR" || exit 1
+find .xylem-state/phases -maxdepth 2 -type f | sort
+cat .xylem-state/phases/*/implement_b.prompt
+```
+
+**Expected pass right now**
+- `analyze.prompt`, `analyze.output`, `implement_a.prompt`, `implement_a.output`,
+  `implement_b.prompt`, and `implement_b.output` all exist.
+- `implement_b.prompt` contains the rendered `analyze` output but leaves the
+  `implement_a` slot empty, which proves the context firewall for non-dependent
+  phases.
+
+### Prompt-only gap probe
+
+```bash
+(
+  cd "$WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml enqueue \
+    --source manual \
+    --id ws6-prompt-only \
+    --prompt "WS6 prompt-only smoke"
+  "$XYLEM_BIN" --config .xylem.yml drain
+)
+
+find "$WORKDIR/.xylem-state/phases" -maxdepth 2 -type f | sort
+```
+
+**Known-fail / manual-triage right now**
+- The prompt-only vessel should complete, but there is still no
+  `summary.json`, `evidence-manifest.json`, span output, or budget artifact to
+  inspect afterward.
+- The seeded `harness.protected_surfaces.paths` block plus the
+  `observability:` / `cost:` sections remain gap probes for the
+  error-precedence and backward-compatibility scenarios until those surfaces
+  are wired into the CLI path.

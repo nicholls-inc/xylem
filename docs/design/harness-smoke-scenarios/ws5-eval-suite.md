@@ -496,3 +496,53 @@ assert os.path.isdir('.xylem/eval/scenarios/'), 'scenarios/ directory missing'
 print('OK')
 "
 ```
+
+---
+
+## Manual Smoke Tests
+
+Use the checked-in Guide 4B seed below instead of the live repo-root `.xylem`
+tree.
+
+| Scenario IDs | DTU status | Manifest | Seeded workdir | Notes |
+| --- | --- | --- | --- | --- |
+| S1-S18 | **Expected pass** | `cli/internal/dtu/testdata/ws5-eval-suite.yaml` | `cli/internal/dtu/testdata/manual-smoke/ws5-eval-suite/` | `scaffold_check` validates the copied `.xylem/eval/` scaffold (helpers, rubrics, scenario files, deferred omissions), then the seeded prompt phase still completes. |
+
+### Run the seed
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+go build ./cmd/xylem
+XYLEM_BIN="$PWD/xylem"
+MANIFEST="$PWD/internal/dtu/testdata/ws5-eval-suite.yaml"
+WORKDIR="$PWD/internal/dtu/testdata/manual-smoke/ws5-eval-suite"
+STATE_DIR="$WORKDIR/.xylem-state"
+
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest "$MANIFEST" \
+  --state-dir "$STATE_DIR" \
+  --workdir "$WORKDIR")"
+
+(
+  cd "$WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml scan
+  "$XYLEM_BIN" --config .xylem.yml drain
+)
+```
+
+### Verify
+
+```bash
+cd "$WORKDIR" || exit 1
+cat .xylem-state/phases/*/scaffold_check.output
+find .xylem/eval -maxdepth 4 -type f | sort
+```
+
+**Expected pass right now**
+- `scaffold_check.output` prints `WS5 eval scaffold checks passed`.
+- The copied scaffold under `.xylem/eval/` includes `harbor.yaml`, helpers,
+  rubrics, `scenarios/widget-bug/`, and `tests/test.sh`.
+- `fix.output` exists under `.xylem-state/phases/<vessel>/`, proving the seeded
+  repo can still run a normal prompt phase after the scaffold checks.
+- There is no WS5-specific known-fail / manual-triage row in this seed today;
+  treat any failure here as a regression in the checked-in scaffold or fixture.

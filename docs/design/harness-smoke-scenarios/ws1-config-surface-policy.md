@@ -18,7 +18,7 @@
 
 **Action:** Call `config.Load(".xylem.yml")`.
 
-**Expected outcome:** Returns a non-nil `*Config` with no error. `cfg.Harness.AuditLog` equals `".xylem/audit.jsonl"`. `cfg.Harness.ProtectedSurfaces.Paths` contains four entries. `cfg.Harness.Policy.Rules` contains four entries. `cfg.Observability.Enabled` is non-nil and `*cfg.Observability.Enabled` is `true`. `cfg.Observability.SampleRate` equals `1.0`. `cfg.Cost.Budget` is non-nil with `MaxCostUSD == 10.0` and `MaxTokens == 1000000`.
+**Expected outcome:** Returns a non-nil `*Config` with no error. `cfg.Harness.AuditLog` equals `"audit.jsonl"`. `cfg.Harness.ProtectedSurfaces.Paths` contains four entries. `cfg.Harness.Policy.Rules` contains four entries. `cfg.Observability.Enabled` is non-nil and `*cfg.Observability.Enabled` is `true`. `cfg.Observability.SampleRate` equals `1.0`. `cfg.Cost.Budget` is non-nil with `MaxCostUSD == 10.0` and `MaxTokens == 1000000`.
 
 **Verification:** Assert no error returned; assert each field value using direct struct access.
 
@@ -531,23 +531,28 @@ violations := []surface.Violation{
 
 For interactive verification of WS1 scenarios, use the DTU-based manual smoke tests below. These test the **real xylem CLI** against **twinned boundaries** defined in YAML manifests.
 
+All WS1 manual smokes in this section now run from the checked-in fixture repo at `cli/internal/dtu/testdata/ws1-smoke-fixture/`. Do **not** reuse the live repo root `.xylem` tree here — that config targets `nicholls-inc/xylem` and different workflow layouts than the WS1 manifests.
+
 **See also:** [Running Manual Smoke Tests](running-manual-smoke-tests.md) — General DTU setup and probe guide.
 
 ### Quick Reference
 
-| Scenario IDs | Manifest | Test Focus | Manifest Path |
-|---|---|---|---|
-| S1, S8, S20, S22, S24–S25, S27–S28 | `ws1-policy-allow-happy-path` | Policy allow, two-phase workflow, defaults | `cli/internal/dtu/testdata/ws1-policy-allow-happy-path.yaml` |
-| S2, S29, S30 | `ws1-config-defaults-only` | Config with no harness section, defaults activate | `cli/internal/dtu/testdata/ws1-config-defaults-only.yaml` |
-| S6, S18 | `ws1-policy-deny-blocks-phase` | Policy deny prevents phase execution | `cli/internal/dtu/testdata/ws1-policy-deny-blocks-phase.yaml` |
-| S7, S19 | `ws1-policy-require-approval` | Policy require_approval blocks phase | `cli/internal/dtu/testdata/ws1-policy-require-approval.yaml` |
-| S10, S14, S21, S23 | `ws1-surface-violation` | Protected surface mutation detection | `cli/internal/dtu/testdata/ws1-surface-violation.yaml` |
+| Scenario IDs | Manifest | Fixture Config | Workflow | Test Focus | Manifest Path |
+|---|---|---|---|---|---|
+| S1, S8, S20, S22, S24–S25, S27–S28 | `ws1-policy-allow-happy-path` | `.xylem.yml` | `fix-bug-allow` | Policy allow, two-phase workflow, defaults | `cli/internal/dtu/testdata/ws1-policy-allow-happy-path.yaml` |
+| S2, S29, S30 | `ws1-config-defaults-only` | `.xylem.defaults-only.yml` | `fix-bug-defaults` | Config with no harness section, defaults activate | `cli/internal/dtu/testdata/ws1-config-defaults-only.yaml` |
+| S6, S18 | `ws1-policy-deny-blocks-phase` | `.xylem.policy-deny.yml` | `fix-bug-deny` | Policy deny prevents phase execution | `cli/internal/dtu/testdata/ws1-policy-deny-blocks-phase.yaml` |
+| S7, S19 | `ws1-policy-require-approval` | `.xylem.require-approval.yml` | `fix-bug-require-approval` | Policy require_approval blocks phase | `cli/internal/dtu/testdata/ws1-policy-require-approval.yaml` |
+| S10, S14, S21, S23 | `ws1-surface-violation` | `.xylem.surface-violation.yml` | `fix-bug-surface-violation` | Protected surface mutation detection | `cli/internal/dtu/testdata/ws1-surface-violation.yaml` |
 
 ### Setup (all scenarios)
 
 ```bash
 cd /Users/harry.nicholls/repos/xylem/cli
 go build ./cmd/xylem
+XYLEM="$(pwd)/xylem"
+FIXTURE_DIR="$(pwd)/internal/dtu/testdata/ws1-smoke-fixture"
+cd "$FIXTURE_DIR"
 ```
 
 ### S1, S8, S20, S22, S24–S25, S27–S28: Policy Allow + Happy Path
@@ -558,38 +563,39 @@ go build ./cmd/xylem
 
 **Run:**
 ```bash
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
+eval "$("$XYLEM" dtu env --manifest ../ws1-policy-allow-happy-path.yaml)"
+"$XYLEM" scan
+"$XYLEM" drain
 ```
 
 **Expected output:**
 - `scan` finds 1 issue (#10) labeled "bug"
-- `drain` dequeues the vessel, executes "plan" phase (mocked output: "Fixed the bug"), then "implement" phase (mocked output: "Implemented the fix")
+- `drain` dequeues the vessel, executes the fixture's `fix-bug-allow` workflow (`plan`, then `implement`)
 - Vessel completes with state "completed"
 
 **Verify:**
 ```bash
-./xylem --config ../.xylem.yml status
+"$XYLEM" status
 jq '.repositories[0].issues[0] | {number, labels}' "$XYLEM_DTU_STATE_PATH"
 ```
 
 ### S2, S29, S30: Config Defaults (No Harness Section)
 
-**What it tests:** `.xylem.yml` with no harness, observability, or cost sections; all defaults activate; vessel completes normally.
+**What it tests:** The fixture's `.xylem.defaults-only.yml` with no harness, observability, or cost sections; all defaults activate; vessel completes normally.
 
 **Manifest:** `ws1-config-defaults-only.yaml`
 
 **Run:**
 ```bash
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-config-defaults-only.yaml)"
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
+CONFIG=.xylem.defaults-only.yml
+eval "$("$XYLEM" --config "$CONFIG" dtu env --manifest ../ws1-config-defaults-only.yaml)"
+"$XYLEM" --config "$CONFIG" scan
+"$XYLEM" --config "$CONFIG" drain
 ```
 
 **Expected output:**
 - `scan` finds 1 issue (#50) labeled "bug"
-- `drain` dequeues and executes single-phase "fix" workflow (mocked output: "Fixed the bug. Added nil check.")
+- `drain` dequeues and executes the fixture's single-phase `fix-bug-defaults` workflow
 - Vessel completes with state "completed"
 
 **Verify:**
@@ -603,23 +609,24 @@ jq '.repositories[0].issues[0].title' "$XYLEM_DTU_STATE_PATH"
 
 **Manifest:** `ws1-policy-deny-blocks-phase.yaml`
 
-> **Current checked-in DTU result (2026-04-02): FAIL.** The latest smoke run showed `drain` exiting `0`, the vessel not failing, and the provider still running despite the documented deny rule. Treat this as a known xylem bug until policy blocking is fixed.
+> **Targeted rerun update (2026-04-03): PASS.** The checked-in `.xylem.policy-deny.yml` now defines an explicit deny rule, so `drain` fails the vessel with `"phase solve denied by policy"` before the provider is invoked.
 
 **Run:**
 ```bash
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-deny-blocks-phase.yaml)"
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
+CONFIG=.xylem.policy-deny.yml
+eval "$("$XYLEM" --config "$CONFIG" dtu env --manifest ../ws1-policy-deny-blocks-phase.yaml)"
+"$XYLEM" --config "$CONFIG" scan
+"$XYLEM" --config "$CONFIG" drain
 ```
 
 **Expected output:**
 - `scan` finds 1 issue (#20) labeled "bug"
-- `drain` dequeues the vessel, **blocks the phase with "denied by policy" error** before invoking the provider
+- `drain` dequeues the vessel, enters the fixture's `fix-bug-deny` workflow, and **should block the `solve` phase with "denied by policy"** before invoking the provider
 - Vessel fails with state "failed"
 
 **Verify:**
 ```bash
-./xylem --config ../.xylem.yml status | grep -i failed
+"$XYLEM" --config "$CONFIG" status | grep -i failed
 ```
 
 ### S7, S19: Policy Require Approval
@@ -628,23 +635,24 @@ eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-deny-block
 
 **Manifest:** `ws1-policy-require-approval.yaml`
 
-> **Current checked-in DTU result (2026-04-02): FAIL.** The latest smoke run showed `drain` exiting `0`, the vessel not failing, and the provider still running despite the documented `require_approval` rule. Treat this as a known xylem bug until approval blocking is fixed.
+> **Targeted rerun update (2026-04-03): PASS.** The checked-in `.xylem.require-approval.yml` now defines an explicit `phase_execute -> require_approval` rule, so `drain` fails the vessel with the documented approval message before the provider is invoked.
 
 **Run:**
 ```bash
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-require-approval.yaml)"
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
+CONFIG=.xylem.require-approval.yml
+eval "$("$XYLEM" --config "$CONFIG" dtu env --manifest ../ws1-policy-require-approval.yaml)"
+"$XYLEM" --config "$CONFIG" scan
+"$XYLEM" --config "$CONFIG" drain
 ```
 
 **Expected output:**
 - `scan` finds 1 issue (#30) labeled "bug"
-- `drain` dequeues the vessel, **blocks the phase with "requires approval" error** before invoking the provider
+- `drain` dequeues the vessel, enters the fixture's `fix-bug-require-approval` workflow, and **should block the `deploy` phase with "requires approval"** before invoking the provider
 - Vessel fails with state "failed"
 
 **Verify:**
 ```bash
-./xylem --config ../.xylem.yml status | grep -i approval
+"$XYLEM" --config "$CONFIG" status | grep -i approval
 ```
 
 ### S10, S14, S21, S23: Protected Surface Violation
@@ -657,19 +665,20 @@ eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-require-ap
 
 **Run:**
 ```bash
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-surface-violation.yaml)"
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
+CONFIG=.xylem.surface-violation.yml
+eval "$("$XYLEM" --config "$CONFIG" dtu env --manifest ../ws1-surface-violation.yaml)"
+"$XYLEM" --config "$CONFIG" scan
+"$XYLEM" --config "$CONFIG" drain
 ```
 
 **Expected output:**
 - `scan` finds 1 issue (#40) labeled "bug"
-- `drain` dequeues the vessel, **detects mutation of .xylem.yml after command phase runs**
+- `drain` dequeues the vessel, runs the fixture's `tamper` command phase, and **should detect mutation of the fixture repo's `.xylem.yml`**
 - Vessel fails with state "failed" and error containing "violated protected surfaces"
 
 **Verify:**
 ```bash
-./xylem --config ../.xylem.yml status | grep -i violation
+"$XYLEM" --config "$CONFIG" status | grep -i violation
 ```
 
 ### Probing boundaries
@@ -680,7 +689,7 @@ If a test fails, probe the boundary to separate xylem bugs from DTU issues:
 # After eval'ing a DTU environment:
 
 # Check if gh shim works
-./xylem shim-dispatch gh --help
+"$XYLEM" shim-dispatch gh --help
 
 # View the event log (all shim results)
 jq -c 'select(.kind=="shim_result")' "$XYLEM_DTU_EVENT_LOG_PATH"

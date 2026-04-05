@@ -1,0 +1,22 @@
+sources:
+  bugs:
+    type: github
+    repo: acme/widget
+    tasks:
+      ws4-evidence-model:
+        labels: [bug]
+        workflow: evidence-model
+        status_labels:
+          queued: queued
+          running: in-progress
+          completed: done
+          failed: failed
+
+concurrency: 1
+max_turns: 5
+timeout: "5m"
+state_dir: ".xylem-state"
+
+llm: claude
+claude:
+  command: "claude"

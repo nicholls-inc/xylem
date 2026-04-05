@@ -276,7 +276,7 @@ func TestScenarioIssueCommandGateRetryPassesOnRetry(t *testing.T) {
 	}
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
-	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 	drainResult, err := drainer.Drain(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)

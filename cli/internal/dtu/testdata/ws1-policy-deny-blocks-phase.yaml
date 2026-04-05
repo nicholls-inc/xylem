@@ -2,6 +2,8 @@
 # End-to-end: policy with deny-all rule → scan → drain → policy denies
 # phase_execute → vessel fails with "denied by policy" → provider never
 # invoked → audit log records deny decision.
+# Manual smoke fixture repo: ws1-smoke-fixture/.xylem.policy-deny.yml
+# Manual smoke workflow seed: ws1-smoke-fixture/.xylem/workflows/fix-bug-deny.yaml
 metadata:
   name: ws1-policy-deny-blocks-phase
   description: Deny-all policy prevents phase execution, vessel fails before provider invocation

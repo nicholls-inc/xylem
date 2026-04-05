@@ -2,13 +2,16 @@ package main
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
 
 func makeDrainConfig(dir string) *config.Config {
@@ -131,5 +134,50 @@ func TestDrainDryRunQueueReadError(t *testing.T) {
 	}
 	if ee.code != 2 {
 		t.Errorf("expected exit code 2, got %d", ee.code)
+	}
+}
+
+func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	cmdRunner := newCmdRunner(cfg)
+
+	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	defer cleanup()
+
+	if r.Intermediary == nil {
+		t.Fatal("r.Intermediary = nil, want intermediary")
+	}
+	if r.AuditLog == nil {
+		t.Fatal("r.AuditLog = nil, want audit log")
+	}
+	if r.Tracer == nil {
+		t.Fatal("r.Tracer = nil, want tracer")
+	}
+
+	result := r.Intermediary.Evaluate(intermediary.Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "issue-1",
+	})
+	if result.Effect != intermediary.Deny {
+		t.Fatalf("default protected-surface effect = %q, want %q", result.Effect, intermediary.Deny)
+	}
+
+	entry := intermediary.AuditEntry{
+		Intent: intermediary.Intent{
+			Action:   "phase_execute",
+			Resource: "fix",
+			AgentID:  "issue-1",
+		},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Now().UTC(),
+	}
+	if err := r.AuditLog.Append(entry); err != nil {
+		t.Fatalf("AuditLog.Append() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "audit.jsonl")); err != nil {
+		t.Fatalf("Stat(audit.jsonl) error = %v", err)
 	}
 }

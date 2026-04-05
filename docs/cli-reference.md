@@ -169,10 +169,11 @@ Prints:
 - `XYLEM_DTU_STATE_DIR`
 - `XYLEM_DTU_MANIFEST`
 - `XYLEM_DTU_EVENT_LOG_PATH`
+- `XYLEM_DTU_WORKDIR`
 - `XYLEM_DTU_SHIM_DIR`
 - `PATH` with the shim dir prepended
 
-By default, `env` prints `export ...` lines for shell evaluation. Use `--shell=false` to print raw `KEY=VALUE` lines instead.
+By default, `env` prints `export ...` lines to stdout for shell evaluation. Use `--shell=false` to print raw `KEY=VALUE` lines instead.
 
 ### `xylem dtu run`
 

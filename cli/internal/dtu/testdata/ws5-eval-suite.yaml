@@ -1,0 +1,34 @@
+# WS5 smoke scenarios: Harbor-native eval scaffold smoke seed.
+metadata:
+  name: ws5-eval-suite
+  description: Eval scaffold smoke seed with checked-in harbor assets and one prompt phase
+  scenario: eval suite scaffold smoke seed
+  tags: [ws5, eval, harbor]
+
+clock:
+  now: "2026-01-02T03:04:05Z"
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+      - name: failed
+    issues:
+      - number: 80
+        title: Verify the eval scaffold layout
+        body: Confirm the seeded Harbor-native eval assets are present and the basic workflow still runs.
+        labels: [bug]
+
+providers:
+  scripts:
+    - name: fix-response
+      provider: claude
+      match:
+        phase: fix
+      stdout: |
+        Fixed the issue. Eval helpers should be available in the seeded smoke repo.

@@ -6,6 +6,8 @@
 #
 # The command phase writes to .xylem.yml which is a default protected surface.
 # This simulates an agent that tampers with control-plane configuration.
+# Manual smoke fixture repo: ws1-smoke-fixture/.xylem.surface-violation.yml
+# Manual smoke workflow seed: ws1-smoke-fixture/.xylem/workflows/fix-bug-surface-violation.yaml
 metadata:
   name: ws1-surface-violation
   description: Command phase mutates a protected surface, post-verification catches it, vessel fails

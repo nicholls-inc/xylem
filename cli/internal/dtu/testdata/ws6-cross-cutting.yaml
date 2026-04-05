@@ -1,0 +1,52 @@
+# WS6 smoke scenarios: cross-cutting wiring and backward-compatibility smoke seed.
+metadata:
+  name: ws6-cross-cutting
+  description: Dependency-driven workflow with prompt-only and orchestration probes for cross-cutting smoke coverage
+  scenario: cross-cutting wiring smoke seed
+  tags: [ws6, cross-cutting, compatibility]
+
+clock:
+  now: "2026-01-02T03:04:05Z"
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+      - name: failed
+    issues:
+      - number: 90
+        title: Exercise cross-cutting harness paths
+        body: Probe policy, summary, and backwards-compatible issue workflow behaviour from a seeded repo.
+        labels: [bug]
+
+providers:
+  scripts:
+    - name: analyze-response
+      provider: claude
+      match:
+        phase: analyze
+      stdout: |
+        Root-cause notes recorded for the cross-cutting smoke issue.
+    - name: implement-a-response
+      provider: claude
+      match:
+        phase: implement_a
+      stdout: |
+        Implement-A completed after analyzing the shared dependency output.
+    - name: implement-b-response
+      provider: claude
+      match:
+        phase: implement_b
+      stdout: |
+        Implement-B completed without inheriting Implement-A output.
+    - name: prompt-only-response
+      provider: claude
+      match:
+        prompt_exact: WS6 prompt-only smoke
+      stdout: |
+        Prompt-only smoke completed without workflow metadata.

@@ -5,6 +5,8 @@
 #
 # Verifies that the system works correctly when the user has not configured
 # any harness settings — all defaults must kick in transparently.
+# Manual smoke fixture repo: ws1-smoke-fixture/.xylem.defaults-only.yml
+# Manual smoke workflow seed: ws1-smoke-fixture/.xylem/workflows/fix-bug-defaults.yaml
 metadata:
   name: ws1-config-defaults-only
   description: No harness config section, all defaults activate, vessel completes normally

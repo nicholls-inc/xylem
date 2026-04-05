@@ -3,12 +3,16 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
@@ -38,8 +42,8 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	defer stop()
 
 	cmdRunner := newCmdRunner(cfg)
-	r := runner.New(cfg, q, wt, cmdRunner)
-	r.Sources = buildSourceMap(cfg, q, cmdRunner)
+	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
+	defer cleanup()
 	r.Reporter = buildReporter(cfg, cmdRunner)
 
 	// Check waiting vessels before draining pending ones
@@ -54,6 +58,57 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 		return &exitError{code: 1}
 	}
 	return nil
+}
+
+func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeManager, cmdRunner *realCmdRunner) (*runner.Runner, func()) {
+	tracer := buildConfiguredTracer(cfg)
+
+	r := runner.New(cfg, q, wt, cmdRunner)
+	r.Sources = buildSourceMap(cfg, q, cmdRunner)
+	wireRunnerScaffolding(cfg, r, tracer)
+
+	return r, func() {
+		shutdownConfiguredTracer(tracer)
+	}
+}
+
+func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observability.Tracer) {
+	auditLogPath := filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath())
+	auditLog := intermediary.NewAuditLog(auditLogPath)
+
+	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+	r.AuditLog = auditLog
+	r.Tracer = tracer
+}
+
+func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
+	if !cfg.ObservabilityEnabled() {
+		return nil
+	}
+
+	tracer, err := observability.NewTracer(observability.TracerConfig{
+		ServiceName:    "xylem",
+		ServiceVersion: "",
+		Endpoint:       cfg.Observability.Endpoint,
+		Insecure:       cfg.Observability.Insecure,
+		SampleRate:     cfg.ObservabilitySampleRate(),
+	})
+	if err != nil {
+		log.Printf("warn: %v", fmt.Errorf("initialize tracer: %w", err))
+		return nil
+	}
+
+	return tracer
+}
+
+func shutdownConfiguredTracer(tracer *observability.Tracer) {
+	if tracer == nil {
+		return
+	}
+
+	if err := tracer.Shutdown(context.Background()); err != nil {
+		log.Printf("warn: %v", fmt.Errorf("shutdown tracer: %w", err))
+	}
 }
 
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {

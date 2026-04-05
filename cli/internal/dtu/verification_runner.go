@@ -331,6 +331,7 @@ func executeTwinVerificationCase(ctx context.Context, verificationCase LiveVerif
 		EnvStateDir+"="+opts.StateDir,
 		EnvManifestPath+"="+fixturePath,
 		EnvEventLogPath+"="+store.EventLogPath(),
+		EnvWorkDir+"="+opts.WorkDir,
 	)
 	return executeVerificationCommand(ctx, opts.Runner, VerificationInvocation{
 		Command: opts.XylemExecutable,
@@ -445,6 +446,7 @@ func sanitizedLiveEnvironment(env []string) []string {
 		EnvStateDir:     {},
 		EnvManifestPath: {},
 		EnvEventLogPath: {},
+		EnvWorkDir:      {},
 		EnvShimDir:      {},
 		EnvPhase:        {},
 		EnvScript:       {},

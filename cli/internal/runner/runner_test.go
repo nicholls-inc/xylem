@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
@@ -37,9 +38,11 @@ type mockCmdRunner struct {
 	// Per-call gate results; when non-nil, overrides gateOutput/gateErr by call index
 	gateCallResults []gateCallResult
 	gateCallCount   int32
+	runOutputHook   func(name string, args ...string) ([]byte, error, bool)
 	// Track calls for assertion
 	phaseCalls []phaseCall
 	outputArgs [][]string
+	lastBody   string
 }
 
 type gateCallResult struct {
@@ -57,7 +60,17 @@ type phaseCall struct {
 func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string) ([]byte, error) {
 	m.mu.Lock()
 	m.outputArgs = append(m.outputArgs, append([]string{name}, args...))
+	for i, arg := range args {
+		if arg == "--body" && i+1 < len(args) {
+			m.lastBody = args[i+1]
+		}
+	}
 	m.mu.Unlock()
+	if m.runOutputHook != nil {
+		if out, err, handled := m.runOutputHook(name, args...); handled {
+			return out, err
+		}
+	}
 	// Detect gate commands by matching the exact shape produced by gate.RunCommandGate:
 	// RunOutput("sh", "-c", "cd <dir> && <cmd>")
 	isGate := name == "sh" && len(args) >= 2 && args[0] == "-c" && strings.Contains(args[1], "cd ")
@@ -260,6 +273,19 @@ func containsArgSequence(args []string, flag string, value string) bool {
 	return false
 }
 
+func countRunOutputCalls(m *mockCmdRunner, name string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	count := 0
+	for _, args := range m.outputArgs {
+		if len(args) > 0 && args[0] == name {
+			count++
+		}
+	}
+	return count
+}
+
 func TestBuildCommand(t *testing.T) {
 	cfg := &config.Config{
 		MaxTurns: 50,
@@ -447,6 +473,33 @@ type testPhase struct {
 }
 
 // --- Tests ---
+
+func TestPhaseActionType(t *testing.T) {
+	tests := []struct {
+		name  string
+		phase *workflow.Phase
+		want  string
+	}{
+		{
+			name:  "prompt phase",
+			phase: &workflow.Phase{Name: "plan"},
+			want:  "phase_execute",
+		},
+		{
+			name:  "command phase",
+			phase: &workflow.Phase{Name: "lint", Type: "command"},
+			want:  "external_command",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := phaseActionType(tt.phase); got != tt.want {
+				t.Fatalf("phaseActionType(%+v) = %q, want %q", tt.phase, got, tt.want)
+			}
+		})
+	}
+}
 
 func TestDrainSingleVessel(t *testing.T) {
 	dir := t.TempDir()
@@ -2917,6 +2970,290 @@ func TestDrainOrchestratedParallelFailureNoRace(t *testing.T) {
 	}
 	if result.Failed != 1 {
 		t.Errorf("expected 1 failed vessel, got failed=%d completed=%d", result.Failed, result.Completed)
+	}
+}
+
+func TestDrainPolicyBlocksPhaseBeforeExecution(t *testing.T) {
+	tests := []struct {
+		name          string
+		phase         testPhase
+		policy        intermediary.Effect
+		wantErrorPart string
+		assertBlocked func(t *testing.T, cmdRunner *mockCmdRunner)
+	}{
+		{
+			name:          "deny prompt phase",
+			phase:         testPhase{name: "solve", promptContent: "Solve the issue", maxTurns: 5},
+			policy:        intermediary.Deny,
+			wantErrorPart: "denied by policy",
+			assertBlocked: func(t *testing.T, cmdRunner *mockCmdRunner) {
+				t.Helper()
+				if len(cmdRunner.phaseCalls) != 0 {
+					t.Fatalf("len(phaseCalls) = %d, want 0", len(cmdRunner.phaseCalls))
+				}
+			},
+		},
+		{
+			name:          "require approval command phase",
+			phase:         testPhase{name: "deploy", phaseType: "command", run: "echo deploy"},
+			policy:        intermediary.RequireApproval,
+			wantErrorPart: "automatic approval not yet supported",
+			assertBlocked: func(t *testing.T, cmdRunner *mockCmdRunner) {
+				t.Helper()
+				if got := countRunOutputCalls(cmdRunner, "sh"); got != 0 {
+					t.Fatalf("countRunOutputCalls(sh) = %d, want 0", got)
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := makeTestConfig(dir, 2)
+			cfg.StateDir = filepath.Join(dir, ".xylem")
+			q := queue.New(filepath.Join(dir, "queue.jsonl"))
+			_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+			writeWorkflowFile(t, dir, "fix-bug", []testPhase{tt.phase})
+
+			oldWd, _ := os.Getwd()
+			os.Chdir(dir)
+			defer os.Chdir(oldWd)
+
+			cmdRunner := &mockCmdRunner{}
+			wt := &mockWorktree{path: dir}
+			r := New(cfg, q, wt, cmdRunner)
+			r.Sources = map[string]source.Source{
+				"github-issue": makeGitHubSource(),
+			}
+
+			auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+			r.AuditLog = auditLog
+			r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+				Name:  "block-all",
+				Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: tt.policy}},
+			}}, auditLog, nil)
+
+			result, err := r.Drain(context.Background())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result.Failed != 1 {
+				t.Fatalf("expected 1 failed vessel, got failed=%d completed=%d", result.Failed, result.Completed)
+			}
+
+			vessels, err := q.List()
+			if err != nil {
+				t.Fatalf("List() error = %v", err)
+			}
+			if len(vessels) != 1 {
+				t.Fatalf("len(vessels) = %d, want 1", len(vessels))
+			}
+			if vessels[0].State != queue.StateFailed {
+				t.Fatalf("vessel.State = %q, want %q", vessels[0].State, queue.StateFailed)
+			}
+			if !strings.Contains(vessels[0].Error, tt.wantErrorPart) {
+				t.Fatalf("vessel.Error = %q, want to contain %q", vessels[0].Error, tt.wantErrorPart)
+			}
+
+			summary := loadSummary(t, cfg.StateDir, "issue-1")
+			if summary.State != "failed" {
+				t.Fatalf("summary.State = %q, want failed", summary.State)
+			}
+			if len(summary.Phases) != 0 {
+				t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
+			}
+			if summary.EvidenceManifestPath != "" {
+				t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+			}
+
+			tt.assertBlocked(t, cmdRunner)
+
+			entries, err := auditLog.Entries()
+			if err != nil {
+				t.Fatalf("AuditLog.Entries() error = %v", err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("len(entries) = %d, want 1", len(entries))
+			}
+			if entries[0].Decision != tt.policy {
+				t.Fatalf("entry.Decision = %q, want %q", entries[0].Decision, tt.policy)
+			}
+		})
+	}
+}
+
+func TestDrainOrchestratedPolicyBlocksSinglePhaseWave(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "orchestrated-policy"))
+
+	writeWorkflowFile(t, dir, "orchestrated-policy", []testPhase{
+		{name: "plan", promptContent: "Plan", maxTurns: 5},
+		{name: "implement", promptContent: "Implement", maxTurns: 5, dependsOn: []string{"plan"}},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	wt := &mockWorktree{path: dir}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "deny-all",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
+	}}, auditLog, nil)
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("expected 1 failed vessel, got failed=%d completed=%d", result.Failed, result.Completed)
+	}
+	if len(cmdRunner.phaseCalls) != 0 {
+		t.Fatalf("len(phaseCalls) = %d, want 0", len(cmdRunner.phaseCalls))
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if !strings.Contains(vessels[0].Error, "denied by policy") {
+		t.Fatalf("vessel.Error = %q, want to contain %q", vessels[0].Error, "denied by policy")
+	}
+
+	summary := loadSummary(t, cfg.StateDir, "issue-1")
+	if summary.State != "failed" {
+		t.Fatalf("summary.State = %q, want failed", summary.State)
+	}
+	if len(summary.Phases) != 0 {
+		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
+	}
+	if summary.EvidenceManifestPath != "" {
+		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	}
+
+	entries, err := auditLog.Entries()
+	if err != nil {
+		t.Fatalf("AuditLog.Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(entries) = %d, want 1", len(entries))
+	}
+	if entries[0].Decision != intermediary.Deny {
+		t.Fatalf("entry.Decision = %q, want %q", entries[0].Decision, intermediary.Deny)
+	}
+}
+
+func TestDrainOrchestratedProtectedSurfaceViolationFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "orchestrated-surface"))
+
+	writeWorkflowFile(t, dir, "orchestrated-surface", []testPhase{
+		{name: "tamper", phaseType: "command", run: "echo tampered > .xylem.yml"},
+		{name: "implement", promptContent: "Implement", maxTurns: 5, dependsOn: []string{"tamper"}},
+	})
+	if err := os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.xylem.yml) error = %v", err)
+	}
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "sh" || len(args) < 2 {
+				return nil, nil, false
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
+				return nil, err, true
+			}
+			return []byte("tampered"), nil, true
+		},
+	}
+	wt := &mockWorktree{path: dir}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "allow-all",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
+	}}, auditLog, nil)
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("expected 1 failed vessel, got failed=%d completed=%d", result.Failed, result.Completed)
+	}
+	if got := countRunOutputCalls(cmdRunner, "sh"); got != 1 {
+		t.Fatalf("countRunOutputCalls(sh) = %d, want 1 command invocation", got)
+	}
+	if len(cmdRunner.phaseCalls) != 0 {
+		t.Fatalf("len(phaseCalls) = %d, want 0 dependent phase invocations", len(cmdRunner.phaseCalls))
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if !strings.Contains(vessels[0].Error, "violated protected surfaces") {
+		t.Fatalf("vessel.Error = %q, want to contain %q", vessels[0].Error, "violated protected surfaces")
+	}
+	if !strings.Contains(vessels[0].Error, ".xylem.yml") {
+		t.Fatalf("vessel.Error = %q, want to contain %q", vessels[0].Error, ".xylem.yml")
+	}
+
+	summary := loadSummary(t, cfg.StateDir, "issue-1")
+	if summary.State != "failed" {
+		t.Fatalf("summary.State = %q, want failed", summary.State)
+	}
+	if len(summary.Phases) != 1 {
+		t.Fatalf("len(summary.Phases) = %d, want 1", len(summary.Phases))
+	}
+	if summary.Phases[0].Name != "tamper" {
+		t.Fatalf("summary.Phases[0].Name = %q, want tamper", summary.Phases[0].Name)
+	}
+	if summary.Phases[0].Status != "failed" {
+		t.Fatalf("summary.Phases[0].Status = %q, want failed", summary.Phases[0].Status)
+	}
+	if summary.EvidenceManifestPath != "" {
+		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	}
+
+	entries, err := auditLog.Entries()
+	if err != nil {
+		t.Fatalf("AuditLog.Entries() error = %v", err)
+	}
+	if len(entries) < 2 {
+		t.Fatalf("len(entries) = %d, want at least 2", len(entries))
+	}
+	last := entries[len(entries)-1]
+	if last.Decision != intermediary.Deny {
+		t.Fatalf("last entry decision = %q, want %q", last.Decision, intermediary.Deny)
+	}
+	if !strings.Contains(last.Error, "violated protected surfaces") {
+		t.Fatalf("last entry error = %q, want to contain %q", last.Error, "violated protected surfaces")
 	}
 }
 

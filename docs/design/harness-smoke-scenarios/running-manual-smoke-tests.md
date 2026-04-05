@@ -16,14 +16,20 @@ cd /Users/harry.nicholls/repos/xylem/cli
 
 # Build the CLI
 go build ./cmd/xylem
+XYLEM_BIN="$PWD/xylem"
 
-# Pick a scenario manifest and set up the DTU environment
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+# Pick a scenario manifest plus its matching seeded workdir and set up the DTU environment
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml \
+  --workdir ./internal/dtu/testdata/ws1-smoke-fixture)"
 
-# Run the scan-drain pipeline
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
-./xylem --config ../.xylem.yml status
+# Run the scan-drain pipeline from the seeded repo
+(
+  cd "$XYLEM_DTU_WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml scan
+  "$XYLEM_BIN" --config .xylem.yml drain
+  "$XYLEM_BIN" --config .xylem.yml status
+)
 
 # Inspect results
 cat "$XYLEM_DTU_STATE_PATH" | jq '.repositories'
@@ -36,11 +42,13 @@ cat "$XYLEM_DTU_EVENT_LOG_PATH" | jq -c 'select(.kind=="shim_result")'
 
 Latest finalized DTU smoke summary (2026-04-02): **22 PASS, 4 FAIL, 1 ERROR** across the checked-in manifests.
 
+That tally predates the new WS3-WS6 seeded workdirs. Treat those newer manifests as fixture-sanity / manual-triage probes until they are rebaselined.
+
 **Current known failures:**
 - `issue-gh-auth-scan-failure` fails because the `gh` shim returns `gh: authentication required`, but `xylem scan --dry-run` only surfaces exit status `1`.
-- `ws1-policy-deny-blocks-phase` fails because the documented policy deny block does not trigger; the provider still runs.
-- `ws1-policy-require-approval` fails because the documented approval block does not trigger; the provider still runs.
 - `ws1-surface-violation` fails because the documented protected-surface failure does not trigger.
+
+Targeted rerun update (2026-04-03): `ws1-policy-deny-blocks-phase` and `ws1-policy-require-approval` now PASS after the WS1 shared smoke fixture added explicit `harness.policy.rules` for those configs.
 
 **Current manual-smoke limitation:**
 - `issue-daemon-recovery` is not a reliable Guide 4B manual smoke path. In the latest run it degenerated into a normal timeout, so treat that scenario as [Guide 4A fixture-backed regression test](../../dtu-fixture-regression-tests.md) territory instead.
@@ -64,7 +72,7 @@ Choose manual smoke tests when you want to:
 
 | Surface | Real or Twinned? | Notes |
 |---------|---|---|
-| xylem CLI, config loading, workflows, HARNESS.md | **Real** | Your actual repository files and commands. |
+| xylem CLI, config loading, workflows, HARNESS.md | **Real** | The selected seeded repo (or your own chosen workdir) is used as-is. |
 | Queue files, worktree directories, local filesystem | **Real** | State persists across scan/drain/status commands. |
 | Shell command gates (e.g., `go test`, `sh -c ...`) | **Real** | Arbitrary local commands execute live (not mocked). |
 | `gh`, `git`, `claude`, `copilot` boundaries | **Twinned** | Intercepted via DTU shim directory; behavior from manifest. |
@@ -88,16 +96,20 @@ ls -lh xylem
 
 ### 2. Materialize the DTU universe
 
-Choose a manifest (see [WS1 Scenario Manual Tests](ws1-config-surface-policy.md#manual-smoke-tests) for the full list), then export the DTU environment:
+Choose a manifest plus its matching seeded workdir (see the workstream docs for the exact pairings), then export the DTU environment:
 
 ```bash
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+XYLEM_BIN="$PWD/xylem"
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml \
+  --workdir ./internal/dtu/testdata/ws1-smoke-fixture)"
 ```
 
-This sets four environment variables:
+This sets five operator-facing environment variables:
 - `XYLEM_DTU_UNIVERSE_ID` — unique identifier for this DTU universe
 - `XYLEM_DTU_STATE_PATH` — path to the state file (JSON)
 - `XYLEM_DTU_EVENT_LOG_PATH` — path to the event log (JSONL)
+- `XYLEM_DTU_WORKDIR` — path to the seeded repo used for the smoke
 - `XYLEM_DTU_SHIM_DIR` — path to the gh/git/claude/copilot shims
 
 ### 3. Verify the shim directory
@@ -112,17 +124,21 @@ You should see: `claude`, `copilot`, `gh`, `git`
 
 ## Running a multi-step smoke test
 
-After materializing the DTU environment, run the real xylem commands:
+After materializing the DTU environment, run the real xylem commands from the selected seeded repo:
 
 ```bash
-# Scan for issues to queue
-./xylem --config ../.xylem.yml scan
+(
+  cd "$XYLEM_DTU_WORKDIR" || exit 1
 
-# Dequeue and execute
-./xylem --config ../.xylem.yml drain
+  # Scan for issues to queue
+  "$XYLEM_BIN" --config .xylem.yml scan
 
-# Check results
-./xylem --config ../.xylem.yml status
+  # Dequeue and execute
+  "$XYLEM_BIN" --config .xylem.yml drain
+
+  # Check results
+  "$XYLEM_BIN" --config .xylem.yml status
+)
 ```
 
 Each command preserves DTU state across invocations:
@@ -227,26 +243,36 @@ jq -c 'select(.kind=="script_matched")' "$XYLEM_DTU_EVENT_LOG_PATH"
 **Root cause:** Likely a bug in xylem's handling of the boundary response.
 
 **Next step:**
-1. Check the queue state: `./xylem --config ../.xylem.yml status`
-2. Check the worktree: `ls -la .xylem/worktrees/`
-3. Check the phase output: `cat .xylem/phases/*/phase-output`
+1. Check the queue state: `(cd "$XYLEM_DTU_WORKDIR" && "$XYLEM_BIN" --config .xylem.yml status)`
+2. Check the worktree: `ls -la "$XYLEM_DTU_WORKDIR/.xylem/worktrees/"`
+3. Check the phase output: `cat "$XYLEM_DTU_WORKDIR"/.xylem/phases/*/phase-output`
 4. Compare to the event log to see what shim output xylem received
 
 ---
 
 ## Running the same test under different conditions
 
-Keep the xylem repo setup fixed and swap only the manifest:
+Keep the matching fixture repo setup fixed and swap only the manifest/config pair described in the workstream doc:
 
 ```bash
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml \
+  --workdir ./internal/dtu/testdata/ws1-smoke-fixture)"
+(
+  cd "$XYLEM_DTU_WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml scan
+  "$XYLEM_BIN" --config .xylem.yml drain
+)
 
 # Now try a different scenario
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-surface-violation.yaml)"
-./xylem --config ../.xylem.yml scan
-./xylem --config ../.xylem.yml drain
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest ./internal/dtu/testdata/ws1-surface-violation.yaml \
+  --workdir ./internal/dtu/testdata/ws1-smoke-fixture)"
+(
+  cd "$XYLEM_DTU_WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.surface-violation.yml scan
+  "$XYLEM_BIN" --config .xylem.surface-violation.yml drain
+)
 ```
 
 This lets you verify that the same xylem CLI and repo setup work (or fail predictably) across different boundary conditions.
@@ -258,6 +284,11 @@ This lets you verify that the same xylem CLI and repo setup work (or fail predic
 Each workstream's smoke scenarios have manifest-specific run instructions. See:
 
 - [WS1 Scenario Manual Tests](ws1-config-surface-policy.md#manual-smoke-tests) — Config, surface, policy scenarios (S1–S32)
+- [WS3 Observability and Cost](ws3-observability-cost.md#manual-smoke-tests) — Span and budget smoke seeds
+- [WS3 Summary Artifacts](ws3-summary-artifacts.md#manual-smoke-tests) — Per-vessel summary smoke seed
+- [WS4 Evidence Model](ws4-evidence-model.md#manual-smoke-tests) — Gate-evidence smoke seed
+- [WS5 Eval Suite](ws5-eval-suite.md#manual-smoke-tests) — Harbor-native scaffold smoke seed
+- [WS6 Cross-Cutting](ws6-cross-cutting.md#manual-smoke-tests) — Cross-cutting smoke seed
 
 ---
 
@@ -268,9 +299,13 @@ DTU environments are ephemeral and isolated. To start fresh:
 ```bash
 # The shim directory is shared; the state is per-universe
 rm -rf "/Users/harry.nicholls/repos/xylem/cli/.xylem/dtu/ws1-policy-allow-happy-path/"
+rm -rf "$XYLEM_DTU_WORKDIR/.xylem/phases" "$XYLEM_DTU_WORKDIR/.xylem/worktrees"
+rm -f "$XYLEM_DTU_WORKDIR/.xylem/queue.jsonl" "$XYLEM_DTU_WORKDIR/.xylem/queue.jsonl.lock"
 
 # Re-materialize the environment
-eval "$(./xylem dtu env --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml)"
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest ./internal/dtu/testdata/ws1-policy-allow-happy-path.yaml \
+  --workdir ./internal/dtu/testdata/ws1-smoke-fixture)"
 ```
 
 ---

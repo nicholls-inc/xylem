@@ -55,7 +55,7 @@ func TestScenarioIssueLabelGateTimesOut(t *testing.T) {
 	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 3), []string{"bug", "queued"})
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
-	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 	drainer.Reporter = &reporter.Reporter{Runner: env.cmdRunner, Repo: "owner/repo"}
 
 	drainResult, err := drainer.Drain(context.Background())

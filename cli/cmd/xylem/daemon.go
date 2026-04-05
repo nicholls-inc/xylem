@@ -199,8 +199,8 @@ func runScan(ctx context.Context, cfg *config.Config, q *queue.Queue) (scanner.S
 
 func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager) (runner.DrainResult, error) {
 	cmdRunner := newCmdRunner(cfg)
-	r := runner.New(cfg, q, wt, cmdRunner)
-	r.Sources = buildSourceMap(cfg, q, cmdRunner)
+	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
+	defer cleanup()
 	return r.Drain(ctx)
 }
 

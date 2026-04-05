@@ -1,3 +1,4 @@
+➜ curl -X POST https://lib.harrynicholls.com/api/inbox -H "Authorization: Bearer yEPUqWjxJS5IUj0XXGvgx8kY+Zptt6EOGSCPvMJSm8s=" -H "CF-Access-Client-Id: 70cc19faebbd07891e1db8a7cd846477.access" -H "CF-Access-Client-Secret: 653107757010fc23513ca414bb0c77210c2c43a28130807d60f72bfb3f8008a1" -H "Content-Type: application/json" -d '{"title": "catch-29"}'
 # DTU Guide 4B: Manual Smoke Tests Under DTU
 
 Use this method when you want to **drive the real `xylem` CLI in a real repository** while replacing external `gh`, `git`, `claude`, and `copilot` boundaries with DTU-controlled behavior.
@@ -290,11 +291,3 @@ Those live cases are now executable through `xylem dtu verify`. Manual DTU smoke
 
 1. reproducible offline smoke tests in a real repo, and
 2. a triage tool for separating xylem bugs from DTU or fixture bugs before running live differentials.
-
-Latest finalized checked-in smoke run (2026-04-02): **22 PASS, 4 FAIL, 1 ERROR**.
-
-Current findings to remember:
-
-- `issue-gh-auth-scan-failure`: the `gh` shim returns `gh: authentication required`, but `xylem scan --dry-run` currently surfaces only exit status `1`. Treat this as a current xylem scan error-reporting gap when using manual smoke for auth failures.
-- `ws1-policy-deny-blocks-phase`, `ws1-policy-require-approval`, and `ws1-surface-violation`: these checked-in Guide 4B scenarios currently do not produce the documented blocking/failure behavior. The provider still runs, so these are currently known xylem failures, not passing smoke coverage.
-- `issue-daemon-recovery`: do **not** rely on Guide 4B manual smoke for stale-running daemon recovery. In the latest run, the scenario degenerated into a normal timeout instead of the stale-restart reconciliation path. Cover this path with the checked-in Guide 4A regression harness instead.

@@ -6,6 +6,8 @@ import (
 	"log"
 	"strings"
 	"time"
+
+	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 )
 
 // MaxOutputLen is the maximum length of phase output included in comments.
@@ -60,7 +62,7 @@ func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName str
 }
 
 // VesselCompleted posts a summary comment when all phases complete.
-func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []PhaseResult) error {
+func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []PhaseResult, manifest *evidence.Manifest) error {
 	var sb strings.Builder
 	if workflowCompletedViaNoOp(phases) {
 		sb.WriteString("**xylem — workflow completed early via no-op**\n\n")
@@ -78,6 +80,10 @@ func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []P
 	}
 
 	fmt.Fprintf(&sb, "\nTotal: %s", total)
+	if evidenceSection := formatEvidenceSection(manifest); evidenceSection != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(evidenceSection)
+	}
 
 	if err := postComment(ctx, r.Runner, r.Repo, issueNum, sb.String()); err != nil {
 		log.Printf("warn: failed to post vessel-completed comment for issue %d: %v", issueNum, err)

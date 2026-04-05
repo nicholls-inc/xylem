@@ -360,3 +360,50 @@ before calling `SaveVesselSummary`.
 
 **Verification:** Parse `summary.json`; assert `*BudgetMaxCostUSD == 1.0` and
 `*BudgetMaxTokens == 50000`.
+
+---
+
+## Manual Smoke Tests
+
+Use the checked-in Guide 4B seed below instead of the live repo-root `.xylem`
+tree.
+
+| Scenario IDs | DTU status | Manifest | Seeded workdir | Notes |
+| --- | --- | --- | --- | --- |
+| S1-S20 | **Known-fail / manual-triage** | `cli/internal/dtu/testdata/ws3-summary-artifacts.yaml` | `cli/internal/dtu/testdata/manual-smoke/ws3-summary-artifacts/` | The seeded two-phase workflow reaches `.xylem-state/phases/<vessel>/`, but the current runner still never writes `summary.json` or `evidence-manifest.json`. Use this seed to demonstrate the missing artifact boundary, not a passing WS3 artifact run. |
+
+### Run the seed
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+go build ./cmd/xylem
+XYLEM_BIN="$PWD/xylem"
+MANIFEST="$PWD/internal/dtu/testdata/ws3-summary-artifacts.yaml"
+WORKDIR="$PWD/internal/dtu/testdata/manual-smoke/ws3-summary-artifacts"
+STATE_DIR="$WORKDIR/.xylem-state"
+
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest "$MANIFEST" \
+  --state-dir "$STATE_DIR" \
+  --workdir "$WORKDIR")"
+
+(
+  cd "$WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml scan
+  "$XYLEM_BIN" --config .xylem.yml drain
+)
+```
+
+### Verify
+
+```bash
+cd "$WORKDIR" || exit 1
+find .xylem-state/phases -maxdepth 2 -type f | sort
+test -f .xylem-state/phases/*/summary.json && cat .xylem-state/phases/*/summary.json || echo "summary.json missing"
+```
+
+**Current interpretation**
+- `analyze.output` and `implement.output` prove the seeded repo, manifest, and
+  workflow wiring are correct.
+- `summary.json` remaining absent is the WS3 summary-artifact gap this seed is
+  meant to surface today.

@@ -1,0 +1,40 @@
+# WS3 smoke scenarios: per-vessel summary artifact smoke seed.
+metadata:
+  name: ws3-summary-artifacts
+  description: Two-phase workflow for summary artifact smoke coverage
+  scenario: vessel summary artifact smoke seed
+  tags: [ws3, summary, artifacts]
+
+clock:
+  now: "2026-01-02T03:04:05Z"
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+      - name: failed
+    issues:
+      - number: 61
+        title: Persist a vessel summary after a fix run
+        body: Exercise the summary artifact path for a multi-phase workflow.
+        labels: [bug]
+
+providers:
+  scripts:
+    - name: analyze-response
+      provider: claude
+      match:
+        phase: analyze
+      stdout: |
+        Analysis: the fixture should accumulate a summary across both phases.
+    - name: implement-response
+      provider: claude
+      match:
+        phase: implement
+      stdout: |
+        Implementation complete. Summary should include both phase results when wired.

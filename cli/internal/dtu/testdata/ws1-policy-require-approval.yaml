@@ -2,6 +2,8 @@
 # End-to-end: policy maps phase action to require_approval → scan → drain →
 # vessel fails with "requires approval" message → provider never invoked →
 # audit log records require_approval decision.
+# Manual smoke fixture repo: ws1-smoke-fixture/.xylem.require-approval.yml
+# Manual smoke workflow seed: ws1-smoke-fixture/.xylem/workflows/fix-bug-require-approval.yaml
 metadata:
   name: ws1-policy-require-approval
   description: Require-approval policy blocks phase, vessel fails with approval message

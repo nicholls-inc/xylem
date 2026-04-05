@@ -2,6 +2,8 @@
 # End-to-end: config with harness section → policy allows phase_execute →
 # surface pre-snapshot taken → provider invoked → vessel completes →
 # audit log records allow decision.
+# Manual smoke fixture repo: ws1-smoke-fixture/.xylem.yml
+# Manual smoke workflow seed: ws1-smoke-fixture/.xylem/workflows/fix-bug-allow.yaml
 metadata:
   name: ws1-policy-allow-happy-path
   description: Full harness config loads, policy allows prompt and command phases, surface snapshots taken, audit log records decisions

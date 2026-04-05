@@ -4,9 +4,8 @@ package dtu_test
 // behaviors described in docs/design/harness-smoke-scenarios/ws1-config-surface-policy.md.
 //
 // These tests drive the full scan→drain pipeline through DTU-shimmed boundaries.
-// Tests targeting runner fields that are not yet wired (Intermediary, AuditLog,
-// ProtectedSurfaces) are gated by build-tag or struct-field checks so they
-// compile today and activate when the implementation lands.
+// Shared runner scaffolding is wired through the real runner path so these
+// scenarios exercise policy enforcement and protected-surface verification.
 
 import (
 	"context"
@@ -14,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	dtu "github.com/nicholls-inc/xylem/cli/internal/dtu"
@@ -22,6 +22,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
+	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
 
 // ---------------------------------------------------------------------------
@@ -63,7 +64,7 @@ func ws1Drain(t *testing.T, env *dtuScenarioEnv, cfg *config.Config) (scanner.Sc
 	}
 
 	src := &source.GitHub{Repo: "acme/widget", CmdRunner: env.cmdRunner}
-	drainer := newDrainRunner(cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 	drainResult, err := drainer.Drain(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
@@ -140,17 +141,13 @@ func TestWS1PolicyAllowHappyPath(t *testing.T) {
 	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 10), []string{"bug", "done"})
 }
 
-// TestWS1PolicyAllowHappyPathAuditLog verifies that when the runner has an
-// Intermediary wired, the audit log contains allow decisions for each phase.
-// This test is skipped until the Runner gains Intermediary/AuditLog fields.
+// TestWS1PolicyAllowHappyPathAuditLog verifies that when the runner appends
+// policy decisions, the audit log contains allow decisions for each phase.
 //
 // Covers: S22 (audit log records policy decisions)
 //
 //	S27 (drain.go creates Intermediary from config)
 func TestWS1PolicyAllowHappyPathAuditLog(t *testing.T) {
-	// Gate: skip until Runner has Intermediary field.
-	t.Skip("WS1: Runner.Intermediary not yet wired — enable when §4.3 lands")
-
 	env := newScenarioEnv(t, "ws1-policy-allow-happy-path.yaml")
 	defer withWorkingDir(t, env.repoDir)()
 
@@ -164,8 +161,6 @@ func TestWS1PolicyAllowHappyPathAuditLog(t *testing.T) {
 	// When the runner is wired, the audit log should be written to the state dir.
 	auditLogPath := filepath.Join(env.stateDir, "audit.jsonl")
 	auditLog := intermediary.NewAuditLog(auditLogPath)
-
-	_ = auditLog // TODO: wire into runner when Runner.AuditLog exists
 
 	_, drainResult := ws1Drain(t, env, cfg)
 	if drainResult.Completed != 1 {
@@ -200,9 +195,6 @@ func TestWS1PolicyAllowHappyPathAuditLog(t *testing.T) {
 //
 //	S18 (runner policy denies phase — vessel fails with "denied by policy")
 func TestWS1PolicyDenyBlocksPhase(t *testing.T) {
-	// Gate: skip until Runner has Intermediary field.
-	t.Skip("WS1: Runner.Intermediary not yet wired — enable when §4.3 lands")
-
 	env := newScenarioEnv(t, "ws1-policy-deny-blocks-phase.yaml")
 	defer withWorkingDir(t, env.repoDir)()
 
@@ -211,12 +203,11 @@ func TestWS1PolicyDenyBlocksPhase(t *testing.T) {
 	})
 
 	cfg := ws1Config(env.stateDir, "fix-bug")
-
-	// TODO: when Runner gains Intermediary, configure it with a deny-all policy:
-	//   policies := []intermediary.Policy{{
-	//       Name: "deny-all",
-	//       Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
-	//   }}
+	cfg.Harness.Policy.Rules = []config.PolicyRuleConfig{{
+		Action:   "*",
+		Resource: "*",
+		Effect:   string(intermediary.Deny),
+	}}
 
 	_, drainResult := ws1Drain(t, env, cfg)
 	if drainResult.Failed != 1 {
@@ -232,6 +223,17 @@ func TestWS1PolicyDenyBlocksPhase(t *testing.T) {
 	}
 	if !strings.Contains(vessel.Error, "denied by policy") {
 		t.Fatalf("vessel.Error = %q, want to contain %q", vessel.Error, "denied by policy")
+	}
+
+	summary := loadVesselSummary(t, env.stateDir, "issue-20")
+	if summary.State != string(queue.StateFailed) {
+		t.Fatalf("summary.State = %q, want %q", summary.State, queue.StateFailed)
+	}
+	if len(summary.Phases) != 0 {
+		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
+	}
+	if summary.EvidenceManifestPath != "" {
+		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
 	}
 
 	// Verify the provider was never invoked.
@@ -253,9 +255,6 @@ func TestWS1PolicyDenyBlocksPhase(t *testing.T) {
 //
 //	S19 (runner policy require_approval — vessel fails with approval message)
 func TestWS1PolicyRequireApproval(t *testing.T) {
-	// Gate: skip until Runner has Intermediary field.
-	t.Skip("WS1: Runner.Intermediary not yet wired — enable when §4.3 lands")
-
 	env := newScenarioEnv(t, "ws1-policy-require-approval.yaml")
 	defer withWorkingDir(t, env.repoDir)()
 
@@ -264,12 +263,11 @@ func TestWS1PolicyRequireApproval(t *testing.T) {
 	})
 
 	cfg := ws1Config(env.stateDir, "fix-bug")
-
-	// TODO: when Runner gains Intermediary, configure it with require_approval:
-	//   policies := []intermediary.Policy{{
-	//       Name: "require-approval",
-	//       Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.RequireApproval}},
-	//   }}
+	cfg.Harness.Policy.Rules = []config.PolicyRuleConfig{{
+		Action:   "phase_execute",
+		Resource: "*",
+		Effect:   string(intermediary.RequireApproval),
+	}}
 
 	_, drainResult := ws1Drain(t, env, cfg)
 	if drainResult.Failed != 1 {
@@ -312,9 +310,6 @@ func TestWS1PolicyRequireApproval(t *testing.T) {
 //	S21 (surface post-verification detects mutation — vessel fails)
 //	S23 (audit log records surface violations)
 func TestWS1SurfaceViolationDetected(t *testing.T) {
-	// Gate: skip until Runner integrates surface verification.
-	t.Skip("WS1: Runner surface verification not yet wired — enable when §4.3 lands")
-
 	env := newScenarioEnv(t, "ws1-surface-violation.yaml")
 	defer withWorkingDir(t, env.repoDir)()
 
@@ -352,6 +347,7 @@ phases:
 	}
 
 	cfg := ws1Config(env.stateDir, "fix-bug")
+	auditLog := intermediary.NewAuditLog(filepath.Join(env.stateDir, "audit.jsonl"))
 	_, drainResult := ws1Drain(t, env, cfg)
 
 	if drainResult.Failed != 1 {
@@ -372,11 +368,45 @@ phases:
 		t.Fatalf("vessel.Error = %q, want to contain %q", vessel.Error, ".xylem.yml")
 	}
 
+	summary := loadVesselSummary(t, env.stateDir, "issue-40")
+	if summary.State != string(queue.StateFailed) {
+		t.Fatalf("summary.State = %q, want %q", summary.State, queue.StateFailed)
+	}
+	if len(summary.Phases) != 1 {
+		t.Fatalf("len(summary.Phases) = %d, want 1", len(summary.Phases))
+	}
+	if summary.Phases[0].Name != "tamper" {
+		t.Fatalf("summary.Phases[0].Name = %q, want %q", summary.Phases[0].Name, "tamper")
+	}
+	if summary.Phases[0].Status != "failed" {
+		t.Fatalf("summary.Phases[0].Status = %q, want failed", summary.Phases[0].Status)
+	}
+	if summary.EvidenceManifestPath != "" {
+		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	}
+
 	// Verify the implement phase was never invoked (violation stops after tamper).
 	events := readEvents(t, env.store)
 	claudeInvocations := filterShimEvents(events, dtu.EventKindShimInvocation, "claude", nil)
 	if len(claudeInvocations) != 0 {
 		t.Fatalf("len(claude invocations) = %d, want 0 (surface violation should block)", len(claudeInvocations))
+	}
+
+	entries, err := auditLog.Entries()
+	if err != nil {
+		t.Fatalf("AuditLog.Entries() error = %v", err)
+	}
+	foundViolation := false
+	for _, entry := range entries {
+		if entry.Decision == intermediary.Deny &&
+			strings.Contains(entry.Error, "violated protected surfaces") &&
+			strings.Contains(entry.Error, ".xylem.yml") {
+			foundViolation = true
+			break
+		}
+	}
+	if !foundViolation {
+		t.Fatalf("audit log entries = %+v, want a deny entry describing the protected surface violation", entries)
 	}
 }
 
@@ -557,6 +587,97 @@ func TestWS1ConfigDefaultsOnlyCompletesNormally(t *testing.T) {
 	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 50), []string{"bug", "done"})
 }
 
+func TestWS1CheckedInSmokeFixtureConfigsLoad(t *testing.T) {
+	fixtureDir := scenarioFixturePath(t, "ws1-smoke-fixture")
+	defer withWorkingDir(t, fixtureDir)()
+
+	if _, err := os.Stat(filepath.Join(".xylem", "HARNESS.md")); err != nil {
+		t.Fatalf("Stat(.xylem/HARNESS.md): %v", err)
+	}
+
+	testCases := []struct {
+		name         string
+		configPath   string
+		workflowName string
+	}{
+		{name: "policy allow", configPath: ".xylem.yml", workflowName: "fix-bug-allow"},
+		{name: "defaults only", configPath: ".xylem.defaults-only.yml", workflowName: "fix-bug-defaults"},
+		{name: "policy deny", configPath: ".xylem.policy-deny.yml", workflowName: "fix-bug-deny"},
+		{name: "require approval", configPath: ".xylem.require-approval.yml", workflowName: "fix-bug-require-approval"},
+		{name: "surface violation", configPath: ".xylem.surface-violation.yml", workflowName: "fix-bug-surface-violation"},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := config.Load(tc.configPath)
+			if err != nil {
+				t.Fatalf("Load(%q): %v", tc.configPath, err)
+			}
+			if cfg.StateDir != ".xylem" {
+				t.Fatalf("cfg.StateDir = %q, want %q", cfg.StateDir, ".xylem")
+			}
+			src, ok := cfg.Sources["issues"]
+			if !ok {
+				t.Fatalf("cfg.Sources missing %q entry", "issues")
+			}
+			if src.Repo != "acme/widget" {
+				t.Fatalf("cfg.Sources[issues].Repo = %q, want %q", src.Repo, "acme/widget")
+			}
+			task, ok := src.Tasks["bugs"]
+			if !ok {
+				t.Fatalf("cfg.Sources[issues].Tasks missing %q entry", "bugs")
+			}
+			if task.Workflow != tc.workflowName {
+				t.Fatalf("task.Workflow = %q, want %q", task.Workflow, tc.workflowName)
+			}
+			if _, err := workflow.Load(filepath.Join(".xylem", "workflows", task.Workflow+".yaml")); err != nil {
+				t.Fatalf("Load workflow %q: %v", task.Workflow, err)
+			}
+		})
+	}
+}
+
+func TestWS1CheckedInSmokeFixtureHappyPath(t *testing.T) {
+	env := newScenarioEnv(t, "ws1-policy-allow-happy-path.yaml")
+	copyScenarioRepoFixture(t, "ws1-smoke-fixture", env.repoDir)
+	defer withWorkingDir(t, env.repoDir)()
+
+	cfg, err := config.Load(".xylem.yml")
+	if err != nil {
+		t.Fatalf("Load(.xylem.yml): %v", err)
+	}
+
+	scanResult, drainResult := ws1Drain(t, env, cfg)
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+	if drainResult.Completed != 1 {
+		t.Fatalf("DrainResult.Completed = %d, want 1", drainResult.Completed)
+	}
+
+	vessel, err := env.queue.FindByID("issue-10")
+	if err != nil {
+		t.Fatalf("FindByID(issue-10) error = %v", err)
+	}
+	if vessel.State != queue.StateCompleted {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
+	}
+
+	events := readEvents(t, env.store)
+	claudeInvocations := filterShimEvents(events, dtu.EventKindShimInvocation, "claude", nil)
+	if len(claudeInvocations) != 2 {
+		t.Fatalf("len(claude invocations) = %d, want 2", len(claudeInvocations))
+	}
+	if claudeInvocations[0].Shim.Phase != "plan" {
+		t.Fatalf("first claude phase = %q, want %q", claudeInvocations[0].Shim.Phase, "plan")
+	}
+	if claudeInvocations[1].Shim.Phase != "implement" {
+		t.Fatalf("second claude phase = %q, want %q", claudeInvocations[1].Shim.Phase, "implement")
+	}
+
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 10), []string{"bug", "done"})
+}
+
 // TestWS1ConfigDefaultsIntermediaryWiring verifies that when no harness config
 // is present, the runner still constructs an Intermediary with the default policy.
 //
@@ -564,8 +685,6 @@ func TestWS1ConfigDefaultsOnlyCompletesNormally(t *testing.T) {
 //
 //	S27 (drain.go creates Intermediary from config)
 func TestWS1ConfigDefaultsIntermediaryWiring(t *testing.T) {
-	t.Skip("WS1: Runner.Intermediary not yet wired — enable when §4.3 lands")
-
 	env := newScenarioEnv(t, "ws1-config-defaults-only.yaml")
 	defer withWorkingDir(t, env.repoDir)()
 
@@ -574,30 +693,51 @@ func TestWS1ConfigDefaultsIntermediaryWiring(t *testing.T) {
 	})
 
 	cfg := ws1Config(env.stateDir, "fix-bug")
+	src := &source.GitHub{Repo: "acme/widget", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 
-	auditLogPath := filepath.Join(env.stateDir, "audit.jsonl")
-	auditLog := intermediary.NewAuditLog(auditLogPath)
-	_ = auditLog // TODO: wire into runner when Runner.AuditLog exists
-
-	_, drainResult := ws1Drain(t, env, cfg)
-	if drainResult.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", drainResult.Completed)
+	if drainer.Intermediary == nil {
+		t.Fatal("drainer.Intermediary = nil, want default intermediary")
+	}
+	if drainer.AuditLog == nil {
+		t.Fatal("drainer.AuditLog = nil, want audit log")
+	}
+	if drainer.Tracer == nil {
+		t.Fatal("drainer.Tracer = nil, want tracer when observability defaults are enabled")
 	}
 
-	entries, err := auditLog.Entries()
-	if err != nil {
-		t.Fatalf("AuditLog.Entries() error = %v", err)
+	deny := drainer.Intermediary.Evaluate(intermediary.Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "issue-50",
+	})
+	if deny.Effect != intermediary.Deny {
+		t.Fatalf("default protected-surface effect = %q, want %q", deny.Effect, intermediary.Deny)
 	}
-	// Default policy should allow phase_execute, so at least one allow entry.
-	hasAllow := false
-	for _, entry := range entries {
-		if entry.Decision == intermediary.Allow && entry.Intent.Action == "phase_execute" {
-			hasAllow = true
-			break
-		}
+
+	allow := drainer.Intermediary.Evaluate(intermediary.Intent{
+		Action:   "phase_execute",
+		Resource: "fix",
+		AgentID:  "issue-50",
+	})
+	if allow.Effect != intermediary.Allow {
+		t.Fatalf("default phase_execute effect = %q, want %q", allow.Effect, intermediary.Allow)
 	}
-	if !hasAllow {
-		t.Fatal("no allow entry for phase_execute in audit log — default policy should allow it")
+
+	entry := intermediary.AuditEntry{
+		Intent: intermediary.Intent{
+			Action:   "phase_execute",
+			Resource: "fix",
+			AgentID:  "issue-50",
+		},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Now().UTC(),
+	}
+	if err := drainer.AuditLog.Append(entry); err != nil {
+		t.Fatalf("AuditLog.Append() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(env.stateDir, "audit.jsonl")); err != nil {
+		t.Fatalf("Stat(audit.jsonl) error = %v", err)
 	}
 }
 

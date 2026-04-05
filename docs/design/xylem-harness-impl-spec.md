@@ -274,7 +274,7 @@ if err := c.validateCost(); err != nil {
 
 ```yaml
 harness:
-  audit_log: ".xylem/audit.jsonl"
+  audit_log: "audit.jsonl"
   protected_surfaces:
     paths:
       - ".xylem/HARNESS.md"
@@ -307,6 +307,9 @@ cost:
     max_cost_usd: 10.0
     max_tokens: 1000000
 ```
+
+`harness.audit_log` is resolved beneath `state_dir`, so configure just the file
+name instead of repeating the `state_dir` prefix.
 
 **Minimal (safe defaults, zero changes to existing configs):**
 

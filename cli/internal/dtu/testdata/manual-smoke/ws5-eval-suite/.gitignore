@@ -1,0 +1,5 @@
+/.claude/
+/.xylem-state/
+/.xylem/eval/scenarios/*/reward.txt
+/.xylem/eval/scenarios/*/reward.json
+**/__pycache__/

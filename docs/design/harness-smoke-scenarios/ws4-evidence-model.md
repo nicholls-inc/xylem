@@ -230,3 +230,56 @@ with no `checker` or `trust_boundary` fields.
 **Action:** Update all call sites in `reporter_test.go` to pass `nil` as the new fourth `*evidence.Manifest` argument. Run `go test ./internal/reporter/...`.
 **Expected outcome:** All existing reporter tests pass without modification to their assertions. No test output changes — the nil manifest case is backward-compatible.
 **Verification:** `go test ./internal/reporter/...` exits with status 0 and no test failures.
+
+---
+
+## Manual Smoke Tests
+
+Use the checked-in Guide 4B seed below instead of the live repo-root `.xylem`
+tree.
+
+| Scenario IDs | DTU status | Manifest | Seeded workdir | Notes |
+| --- | --- | --- | --- | --- |
+| S1-S10 | **Expected pass** | `cli/internal/dtu/testdata/ws4-evidence-model.yaml` | `cli/internal/dtu/testdata/manual-smoke/ws4-evidence-model/` | `package_probes` runs targeted `go test ./internal/evidence`, then the seeded prompt phase and command gate complete in the dedicated smoke repo. |
+| S11-S24 | **Known-fail / manual-triage** | same | same | The seeded workflow carries `gate.evidence` metadata, but the current workflow/runner/reporter path still does not persist `evidence-manifest.json` or append verification-evidence tables. |
+
+### Run the seed
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+go build ./cmd/xylem
+XYLEM_BIN="$PWD/xylem"
+MANIFEST="$PWD/internal/dtu/testdata/ws4-evidence-model.yaml"
+WORKDIR="$PWD/internal/dtu/testdata/manual-smoke/ws4-evidence-model"
+STATE_DIR="$WORKDIR/.xylem-state"
+
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest "$MANIFEST" \
+  --state-dir "$STATE_DIR" \
+  --workdir "$WORKDIR")"
+
+(
+  cd "$WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml scan
+  "$XYLEM_BIN" --config .xylem.yml drain
+)
+```
+
+### Verify
+
+```bash
+cd "$WORKDIR" || exit 1
+cat .xylem-state/phases/*/package_probes.output
+find .xylem-state/phases -maxdepth 2 -type f | sort
+test -f .xylem-state/phases/*/evidence-manifest.json && cat .xylem-state/phases/*/evidence-manifest.json || echo "evidence-manifest.json missing"
+```
+
+**Expected pass right now**
+- `package_probes.output` contains a passing `go test ./internal/evidence` run.
+- `implement.output` exists and the seeded gate command succeeds inside the
+  dedicated smoke repo.
+
+**Known-fail / manual-triage right now**
+- No `evidence-manifest.json` is written under `.xylem-state/phases/<vessel>/`.
+- Reporter output remains the legacy phase table only; there is no verification
+  evidence section yet.

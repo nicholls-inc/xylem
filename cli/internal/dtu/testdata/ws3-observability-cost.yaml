@@ -1,0 +1,40 @@
+# WS3 smoke scenarios: observability span hierarchy and cost budget smoke seed.
+metadata:
+  name: ws3-observability-cost
+  description: Two-phase workflow with a command gate for observability and cost smoke coverage
+  scenario: observability and cost wiring smoke seed
+  tags: [ws3, observability, cost]
+
+clock:
+  now: "2026-01-02T03:04:05Z"
+
+repositories:
+  - owner: acme
+    name: widget
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: done
+      - name: failed
+    issues:
+      - number: 60
+        title: Trace and budget a two-phase fix
+        body: Capture drain, vessel, phase, gate, and budget behaviour during a normal fix workflow.
+        labels: [bug]
+
+providers:
+  scripts:
+    - name: plan-response
+      provider: claude
+      match:
+        phase: plan
+      stdout: |
+        Plan: record a clean phase span and budget estimate before implementation.
+    - name: implement-response
+      provider: claude
+      match:
+        phase: implement
+      stdout: |
+        Implemented the fix and recorded placeholder budget information.

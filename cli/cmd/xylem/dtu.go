@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -122,14 +123,8 @@ func newDtuEnvCmd(opts *dtuOptions) *cobra.Command {
 			if err := materializeDTURuntime(resolved); err != nil {
 				return err
 			}
-
-			for _, entry := range resolved.env(resolved.ShimDir) {
-				if shell {
-					key, value, _ := strings.Cut(entry, "=")
-					cmd.Printf("export %s=%s\n", key, shellEscape(value))
-					continue
-				}
-				cmd.Println(entry)
+			if err := writeDTUEnv(cmd.OutOrStdout(), resolved.env(resolved.ShimDir), shell); err != nil {
+				return fmt.Errorf("write DTU env exports: %w", err)
 			}
 			return nil
 		},
@@ -426,9 +421,27 @@ func (r *resolvedDTUOptions) env(pathPrefix string) []string {
 		dtu.EnvStateDir + "=" + r.StateDir,
 		dtu.EnvManifestPath + "=" + r.ManifestPath,
 		dtu.EnvEventLogPath + "=" + r.Store.EventLogPath(),
+		dtu.EnvWorkDir + "=" + r.WorkDir,
 		dtu.EnvShimDir + "=" + r.ShimDir,
 		"PATH=" + pathValue,
 	}
+}
+
+func writeDTUEnv(w io.Writer, entries []string, shell bool) error {
+	for _, entry := range entries {
+		line := entry
+		if shell {
+			key, value, ok := strings.Cut(entry, "=")
+			if !ok {
+				return fmt.Errorf("format DTU env export %q: missing '='", entry)
+			}
+			line = fmt.Sprintf("export %s=%s", key, shellEscape(value))
+		}
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return fmt.Errorf("write DTU env export %q: %w", entry, err)
+		}
+	}
+	return nil
 }
 
 func configuredStateDir(configPath string) (string, error) {

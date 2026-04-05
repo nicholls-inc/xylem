@@ -18,6 +18,8 @@ const (
 	EnvShimDir = "XYLEM_DTU_SHIM_DIR"
 	// EnvEventLogPath points to the append-only DTU event log.
 	EnvEventLogPath = "XYLEM_DTU_EVENT_LOG_PATH"
+	// EnvWorkDir points to the resolved DTU workdir for operator workflows.
+	EnvWorkDir = "XYLEM_DTU_WORKDIR"
 	// EnvPhase identifies the active DTU phase for provider and shim matching.
 	EnvPhase = "XYLEM_DTU_PHASE"
 	// EnvScript identifies the active DTU script name for provider and shim matching.

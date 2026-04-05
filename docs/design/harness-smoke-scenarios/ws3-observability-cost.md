@@ -454,3 +454,56 @@ Covers spec sections 5 (observability integration) and 6 (cost estimation and bu
 **Expected outcome:** Even on early exit, the deferred `Shutdown` call fires and flushes any pending spans to the exporter. No spans are lost in the stdout output — all started spans appear as completed entries.
 
 **Verification:** Count spans in stdout output after an interrupted drain. Assert all started spans (drain_run + one vessel span per dequeued vessel) appear as completed entries in the flushed output.
+
+---
+
+## Manual Smoke Tests
+
+Use the checked-in Guide 4B seed below instead of the live repo-root `.xylem`
+tree.
+
+| Scenario IDs | DTU status | Manifest | Seeded workdir | Notes |
+| --- | --- | --- | --- | --- |
+| S1-S8, S17-S24 | **Expected pass** | `cli/internal/dtu/testdata/ws3-observability-cost.yaml` | `cli/internal/dtu/testdata/manual-smoke/ws3-observability-cost/` | `package_probes` runs targeted `go test` coverage for `internal/observability` and `internal/cost`, then the seeded prompt workflow completes. |
+| S9-S16, S25-S32 | **Known-fail / manual-triage** | same | same | The seed carries `observability:` and `cost:` config, but the current CLI path still does not emit drain/vessel/phase spans or persist per-vessel budget artifacts during a smoke run. |
+
+### Run the seed
+
+```bash
+cd /Users/harry.nicholls/repos/xylem/cli
+go build ./cmd/xylem
+XYLEM_BIN="$PWD/xylem"
+MANIFEST="$PWD/internal/dtu/testdata/ws3-observability-cost.yaml"
+WORKDIR="$PWD/internal/dtu/testdata/manual-smoke/ws3-observability-cost"
+STATE_DIR="$WORKDIR/.xylem-state"
+
+eval "$("$XYLEM_BIN" dtu env \
+  --manifest "$MANIFEST" \
+  --state-dir "$STATE_DIR" \
+  --workdir "$WORKDIR")"
+
+(
+  cd "$WORKDIR" || exit 1
+  "$XYLEM_BIN" --config .xylem.yml scan
+  "$XYLEM_BIN" --config .xylem.yml drain
+)
+```
+
+### Verify
+
+```bash
+cd "$WORKDIR" || exit 1
+cat .xylem-state/phases/*/package_probes.output
+find .xylem-state/phases -maxdepth 2 -type f | sort
+```
+
+**Expected pass right now**
+- `package_probes.output` contains passing `go test` lines for
+  `./internal/observability` and `./internal/cost`.
+- `plan.output` and `implement.output` exist under `.xylem-state/phases/<vessel>/`.
+
+**Known-fail / manual-triage right now**
+- No `summary.json` is written under `.xylem-state/phases/<vessel>/`.
+- The seeded `observability:` / `cost:` blocks are currently inert in the CLI
+  path, so there is no end-to-end span stream or vessel budget artifact to
+  inspect yet.
