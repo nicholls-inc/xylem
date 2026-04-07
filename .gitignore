@@ -4,13 +4,10 @@ cli/copilot
 cli/gh
 cli/xylem
 .xylem/
-<<<<<<< HEAD
+
+# DTU checked-in fixtures intentionally seed .xylem scaffolding.
 !cli/internal/dtu/testdata/**/.xylem/
 !cli/internal/dtu/testdata/**/.xylem/**
-=======
-!cli/internal/dtu/testdata/ws1-smoke-fixture/.xylem/
-!cli/internal/dtu/testdata/ws1-smoke-fixture/.xylem/**
->>>>>>> 143f269 (fix: address review feedback on #113)
 field-reports/
 .claude/worktrees/
 .copilot-worktrees/

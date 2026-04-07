@@ -1,4 +1,5 @@
 name: fix-bug-defaults
+description: "WS1 defaults-only workflow"
 phases:
   - name: fix
     prompt_file: .xylem/prompts/fix-bug-defaults/fix.md

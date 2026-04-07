@@ -423,7 +423,7 @@ Implement the changes now. Follow the plan precisely.
 
 ### Example: PR creation prompt
 
-This template uses outputs from multiple previous phases to provide full context when creating the pull request:
+This template uses outputs from multiple previous phases to provide full context when creating the pull request. It is a generic prompt-style example: a repo-specific workflow can instead use a deterministic command phase for PR creation. The YAML below mirrors the checked-in `.xylem/workflows/implement-harness.yaml`. The checked-in `implement-harness` workflow includes an explicit, deterministic `pr_create` command phase that validates `pr_draft.json`, appends `Fixes #{{.Issue.Number}}` to the PR body when appropriate, and passes repository-specific flags to `gh pr create`. This section documents the actual checked-in behavior (not only a generic example).
 
 ```
 Create a pull request for the changes.
@@ -530,6 +530,7 @@ phases:
 ### implement-harness (repo-specific)
 
 Implements a harness spec step with verification, testing, and smoke scenarios in 8 phases. Uses mixed LLM providers: Copilot (`gpt-5.4`) for implementation-heavy phases, and Claude for planning and verification.
+The YAML below mirrors the checked-in `.xylem/workflows/implement-harness.yaml`, including the deterministic `pr_create` command phase.
 
 ```yaml
 name: implement-harness
