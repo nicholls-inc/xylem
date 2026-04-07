@@ -1,0 +1,31 @@
+metadata:
+  name: issue-git-worktree-add-exhaust-exit-128
+  scenario: git worktree add exit code 128 exhausts all retries and fails vessel
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: xylem-failed
+    issues:
+      - number: 10
+        title: worktree add exhaust retries
+        body: worktree creation fails permanently after all retries exhausted
+        labels: [bug]
+providers:
+  scripts:
+    - name: fix
+      provider: claude
+      match:
+        phase: fix
+      stdout: should never run
+shim_faults:
+  - name: worktree-add-exit-128-all
+    command: git
+    match:
+      args_prefix: [worktree, add]
+    stderr: "fatal: could not create worktree dir: File exists"
+    exit_code: 128

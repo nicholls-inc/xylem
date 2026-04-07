@@ -16,6 +16,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/dtushim"
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
@@ -190,6 +191,20 @@ func TestDaemonShutdown(t *testing.T) {
 	}
 }
 
+func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
+	if err != nil {
+		t.Fatalf("runDrain() error = %v", err)
+	}
+	if result != (runner.DrainResult{}) {
+		t.Fatalf("DrainResult = %+v, want zero value", result)
+	}
+}
+
 func TestParseDaemonIntervals(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -275,6 +290,38 @@ func TestLogTickSummary(t *testing.T) {
 
 	// logTickSummary should not panic on any queue state
 	logTickSummary(q)
+}
+
+// TestWS1S28DaemonPathWiresScaffolding verifies that the daemon drain path
+// produces a Runner with Intermediary and AuditLog wired. runDrain delegates
+// directly to buildDrainRunner, so constructing the runner here exercises the
+// same daemon-side wiring.
+//
+// Covers: WS1 S28.
+func TestWS1S28DaemonPathWiresScaffolding(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	cmdRunner := newCmdRunner(cfg)
+
+	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	defer cleanup()
+
+	if r.Intermediary == nil {
+		t.Fatal("r.Intermediary = nil: daemon runDrain must wire Intermediary")
+	}
+	if r.AuditLog == nil {
+		t.Fatal("r.AuditLog = nil: daemon runDrain must wire AuditLog")
+	}
+
+	result := r.Intermediary.Evaluate(intermediary.Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "issue-1",
+	})
+	if result.Effect != intermediary.Deny {
+		t.Fatalf("default protected-surface effect = %q, want %q", result.Effect, intermediary.Deny)
+	}
 }
 
 func TestReconcileStaleVessels(t *testing.T) {

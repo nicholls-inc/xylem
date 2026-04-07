@@ -53,6 +53,27 @@ func combinedAttrs() []SpanAttribute {
 	return attrs
 }
 
+func TestProp_DrainSpanAttributesAlwaysTwoKeys(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		concurrency := rapid.IntRange(0, 1024).Draw(t, "concurrency")
+		timeout := rapid.StringMatching(`[a-zA-Z0-9:._-]{0,40}`).Draw(t, "timeout")
+
+		attrs := DrainSpanAttributes(DrainSpanData{
+			Concurrency: concurrency,
+			Timeout:     timeout,
+		})
+		if len(attrs) != 2 {
+			t.Fatalf("expected 2 attributes, got %d", len(attrs))
+		}
+		if attrs[0].Key != "xylem.drain.concurrency" {
+			t.Fatalf("attrs[0].Key = %q, want %q", attrs[0].Key, "xylem.drain.concurrency")
+		}
+		if attrs[1].Key != "xylem.drain.timeout" {
+			t.Fatalf("attrs[1].Key = %q, want %q", attrs[1].Key, "xylem.drain.timeout")
+		}
+	})
+}
+
 func TestPropVesselAttrsLengthRefPresent(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		id := genVesselString().Draw(t, "id")

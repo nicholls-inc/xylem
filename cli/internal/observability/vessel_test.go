@@ -151,3 +151,33 @@ func TestPhaseResultAttributesFormatsNegativeDuration(t *testing.T) {
 		t.Fatalf("xylem.phase.cost_usd_est = %q, want %q", got["xylem.phase.cost_usd_est"], "3.500000")
 	}
 }
+
+func TestDrainSpanAttributes_Keys(t *testing.T) {
+	attrs := DrainSpanAttributes(DrainSpanData{
+		Concurrency: 4,
+		Timeout:     "30m",
+	})
+	got := attrMap(attrs)
+
+	if len(attrs) != 2 {
+		t.Fatalf("expected 2 attributes, got %d", len(attrs))
+	}
+	if got["xylem.drain.concurrency"] != "4" {
+		t.Fatalf("xylem.drain.concurrency = %q, want %q", got["xylem.drain.concurrency"], "4")
+	}
+	if got["xylem.drain.timeout"] != "30m" {
+		t.Fatalf("xylem.drain.timeout = %q, want %q", got["xylem.drain.timeout"], "30m")
+	}
+}
+
+func TestDrainSpanAttributes_ConcurrencyFormatted(t *testing.T) {
+	attrs := DrainSpanAttributes(DrainSpanData{
+		Concurrency: 17,
+		Timeout:     "90s",
+	})
+	got := attrMap(attrs)
+
+	if got["xylem.drain.concurrency"] != "17" {
+		t.Fatalf("xylem.drain.concurrency = %q, want %q", got["xylem.drain.concurrency"], "17")
+	}
+}

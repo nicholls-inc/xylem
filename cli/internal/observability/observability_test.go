@@ -279,6 +279,33 @@ func TestNewTracerShutdown(t *testing.T) {
 	}
 }
 
+func TestSmoke_S6_TracerInitDefaultUsesStdout(t *testing.T) {
+	tracer, err := NewTracer(DefaultTracerConfig())
+	if err != nil {
+		t.Fatalf("NewTracer(DefaultTracerConfig()) error = %v", err)
+	}
+	if tracer == nil {
+		t.Fatal("expected non-nil tracer")
+	}
+	_ = tracer.Shutdown(context.Background())
+}
+
+func TestSmoke_S7_TracerInitOTLPEndpointConfigured(t *testing.T) {
+	tracer, err := NewTracer(TracerConfig{
+		ServiceName: "xylem-test",
+		SampleRate:  1.0,
+		Endpoint:    "localhost:4317",
+		Insecure:    true,
+	})
+	if err != nil {
+		t.Fatalf("NewTracer() error = %v", err)
+	}
+	if tracer == nil {
+		t.Fatal("expected non-nil tracer")
+	}
+	_ = tracer.Shutdown(context.Background())
+}
+
 func TestStartSpanAndEnd(t *testing.T) {
 	tracer, _ := newTestTracer(t)
 	defer tracer.Shutdown(context.Background())

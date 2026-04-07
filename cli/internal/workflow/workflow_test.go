@@ -56,6 +56,37 @@ func chdirTemp(t *testing.T, dir string) {
 	t.Cleanup(func() { os.Chdir(orig) })
 }
 
+// TestWS6S27WorkflowGateWithoutEvidenceLoads verifies that a workflow gate
+// without evidence metadata still loads and leaves Gate.Evidence unset.
+//
+// Covers: WS6 S27.
+func TestWS6S27WorkflowGateWithoutEvidenceLoads(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+`)
+
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if got.Phases[0].Gate == nil {
+		t.Fatal("Gate = nil, want non-nil gate")
+	}
+	if got.Phases[0].Gate.Evidence != nil {
+		t.Fatalf("Gate.Evidence = %#v, want nil", got.Phases[0].Gate.Evidence)
+	}
+}
+
 func TestLoad(t *testing.T) {
 	tests := []struct {
 		name         string

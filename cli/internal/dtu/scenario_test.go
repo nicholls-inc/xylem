@@ -1191,6 +1191,160 @@ func TestScenarioIssueGitWorktreeAddRetryExitCode255Succeeds(t *testing.T) {
 	}
 }
 
+func TestScenarioIssueGitWorktreeAddRetryExitCode128Succeeds(t *testing.T) {
+	env := newScenarioEnv(t, "issue-git-worktree-add-retry-exit-128.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "fix-bug", []scenarioPhase{
+		{name: "fix", prompt: "Fix issue {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"issues": {
+			Type: "github",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+					StatusLabels: &config.StatusLabels{
+						Queued:    "queued",
+						Running:   "in-progress",
+						Completed: "done",
+					},
+				},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+
+	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Completed != 1 {
+		t.Fatalf("DrainResult.Completed = %d, want 1", drainResult.Completed)
+	}
+
+	vessel, err := env.queue.FindByID("issue-9")
+	if err != nil {
+		t.Fatalf("FindByID(issue-9) error = %v", err)
+	}
+	if vessel.State != queue.StateCompleted {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
+	}
+
+	events := readEvents(t, env.store)
+	worktreeResults := filterShimEvents(events, dtu.EventKindShimResult, "git", []string{"worktree", "add"})
+	if len(worktreeResults) != 2 {
+		t.Fatalf("len(worktree add results) = %d, want 2", len(worktreeResults))
+	}
+	gotAttempts := make([]int, 0, len(worktreeResults))
+	gotCodes := make([]int, 0, len(worktreeResults))
+	for _, event := range worktreeResults {
+		gotAttempts = append(gotAttempts, event.Shim.Attempt)
+		if event.Shim.ExitCode == nil {
+			gotCodes = append(gotCodes, 0)
+			continue
+		}
+		gotCodes = append(gotCodes, *event.Shim.ExitCode)
+	}
+	if !reflect.DeepEqual(gotAttempts, []int{1, 2}) {
+		t.Fatalf("worktree add attempts = %v, want [1 2]", gotAttempts)
+	}
+	if !reflect.DeepEqual(gotCodes, []int{128, 0}) {
+		t.Fatalf("worktree add exit codes = %v, want [128 0]", gotCodes)
+	}
+}
+
+func TestScenarioIssueGitWorktreeAddExhaustRetriesExitCode128Fails(t *testing.T) {
+	env := newScenarioEnv(t, "issue-git-worktree-add-exhaust-exit-128.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "fix-bug", []scenarioPhase{
+		{name: "fix", prompt: "Fix issue {{.Issue.Number}}"},
+	})
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"issues": {
+			Type: "github",
+			Repo: "owner/repo",
+			Tasks: map[string]config.Task{
+				"bugs": {
+					Labels:   []string{"bug"},
+					Workflow: "fix-bug",
+					StatusLabels: &config.StatusLabels{
+						Queued:  "queued",
+						Running: "in-progress",
+						Failed:  "xylem-failed",
+					},
+				},
+			},
+		},
+	}
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if scanResult.Added != 1 {
+		t.Fatalf("ScanResult.Added = %d, want 1", scanResult.Added)
+	}
+
+	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if drainResult.Failed != 1 {
+		t.Fatalf("DrainResult.Failed = %d, want 1", drainResult.Failed)
+	}
+
+	vessel, err := env.queue.FindByID("issue-10")
+	if err != nil {
+		t.Fatalf("FindByID(issue-10) error = %v", err)
+	}
+	if vessel.State != queue.StateFailed {
+		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateFailed)
+	}
+	if !strings.Contains(vessel.Error, "git worktree add") {
+		t.Fatalf("vessel.Error = %q, want it to contain 'git worktree add'", vessel.Error)
+	}
+
+	// Verify the failed label was applied
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 10), []string{"bug", "xylem-failed"})
+
+	// All 3 retry attempts should have exit code 128
+	events := readEvents(t, env.store)
+	worktreeResults := filterShimEvents(events, dtu.EventKindShimResult, "git", []string{"worktree", "add"})
+	if len(worktreeResults) != 3 {
+		t.Fatalf("len(worktree add results) = %d, want 3 (all retries exhausted)", len(worktreeResults))
+	}
+	for i, event := range worktreeResults {
+		if event.Shim.ExitCode == nil || *event.Shim.ExitCode != 128 {
+			code := 0
+			if event.Shim.ExitCode != nil {
+				code = *event.Shim.ExitCode
+			}
+			t.Fatalf("worktree add attempt %d exit code = %d, want 128", i+1, code)
+		}
+	}
+}
+
 func TestScenarioIssueMalformedGHOutputFailsScan(t *testing.T) {
 	env := newScenarioEnv(t, "issue-gh-malformed.yaml")
 	defer withWorkingDir(t, env.repoDir)()

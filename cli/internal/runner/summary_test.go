@@ -1,11 +1,15 @@
 package runner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +20,8 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
+
+var standardLoggerMu sync.Mutex
 
 func TestSaveVesselSummaryWritesPrettyPrintedJSON(t *testing.T) {
 	stateDir := t.TempDir()
@@ -168,6 +174,65 @@ func TestBuildGateClaimUsesDefaultsWithoutEvidence(t *testing.T) {
 	}
 }
 
+func TestSmoke_WS6S6_EvidenceCollectionFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	vessel := makeVessel(6, "test-workflow")
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	buf := captureStandardLogger(t)
+
+	now := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
+	claims := []evidence.Claim{{
+		Claim:     "gate check",
+		Level:     evidence.Level("bogus-level"),
+		Phase:     "implement",
+		Passed:    true,
+		Timestamp: now,
+	}}
+	vrs := newVesselRunState(cfg, vessel, now)
+
+	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, claims, now)
+
+	if !strings.Contains(buf.String(), "warn: save evidence manifest:") {
+		t.Fatalf("expected warning log for evidence manifest save failure, got %q", buf.String())
+	}
+
+	manifestPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no evidence manifest on disk after save failure, got err=%v", err)
+	}
+}
+
+func TestSmoke_WS6S7_SummaryWriteFailureIsNonFatal(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	vessel := makeVessel(7, "test-workflow")
+	summaryAsDir := filepath.Join(cfg.StateDir, "phases", vessel.ID, summaryFileName)
+	if err := os.MkdirAll(summaryAsDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	buf := captureStandardLogger(t)
+
+	now := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	vrs := newVesselRunState(cfg, vessel, now)
+
+	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, nil, now)
+
+	if !strings.Contains(buf.String(), "warn: save vessel summary:") {
+		t.Fatalf("expected warning log for summary write failure, got %q", buf.String())
+	}
+}
+
 func TestDrainPromptOnlyWritesSummaryArtifact(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
@@ -294,6 +359,122 @@ func TestDrainWritesFailureSummaryAndEvidenceManifest(t *testing.T) {
 		if claim.Phase == "implement" {
 			t.Fatalf("unexpected claim for failed phase: %+v", claim)
 		}
+	}
+}
+
+func TestSmoke_WS6S8_ClaimsFromPriorPhasesPreservedWhenLaterPhaseFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(8, "ws6-s8"))
+
+	writeWorkflowFile(t, dir, "ws6-s8", []testPhase{
+		{
+			name:          "analyze",
+			promptContent: "Analyze the bug",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make analyze\"\n      evidence:\n        claim: \"Analyze gate passed\"\n        level: behaviorally_checked\n        checker: \"make analyze\"",
+		},
+		{
+			name:          "implement",
+			promptContent: "Implement the fix",
+			maxTurns:      5,
+		},
+	})
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze the bug": []byte("analysis done"),
+		},
+		phaseErrByPrompt: map[string]error{
+			"Implement the fix": errors.New("phase execution failed"),
+		},
+		gateCallResults: []gateCallResult{
+			{output: []byte("analyze gate ok"), err: nil},
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("Failed = %d, want 1", result.Failed)
+	}
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, "issue-8")
+	if err != nil {
+		t.Fatalf("LoadManifest() error = %v", err)
+	}
+	if len(manifest.Claims) != 1 {
+		t.Fatalf("len(Claims) = %d, want 1", len(manifest.Claims))
+	}
+	if manifest.Claims[0].Phase != "analyze" {
+		t.Fatalf("Claims[0].Phase = %q, want analyze", manifest.Claims[0].Phase)
+	}
+	for _, claim := range manifest.Claims {
+		if claim.Phase == "implement" {
+			t.Fatalf("unexpected claim for failed phase: %+v", claim)
+		}
+	}
+}
+
+func TestSmoke_WS6S9_ClaimsFromFailedPhaseAreDiscarded(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(9, "ws6-s9"))
+
+	writeWorkflowFile(t, dir, "ws6-s9", []testPhase{
+		{
+			name:          "implement",
+			promptContent: "Implement the feature",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make test\"\n      evidence:\n        claim: \"Tests pass\"\n        level: behaviorally_checked",
+		},
+	})
+
+	oldWd, _ := os.Getwd()
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("chdir: %v", err)
+	}
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseErrByPrompt: map[string]error{
+			"Implement the feature": errors.New("phase execution failed"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("Failed = %d, want 1", result.Failed)
+	}
+
+	manifestPath := filepath.Join(cfg.StateDir, "phases", "issue-9", "evidence-manifest.json")
+	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
+		t.Fatalf("expected no evidence manifest for vessel with failed phase, got err=%v", err)
 	}
 }
 
@@ -467,4 +648,19 @@ func loadSummary(t *testing.T, stateDir, vesselID string) VesselSummary {
 	}
 
 	return summary
+}
+
+func captureStandardLogger(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	standardLoggerMu.Lock()
+	buf := &bytes.Buffer{}
+	prevWriter := log.Writer()
+	log.SetOutput(buf)
+	t.Cleanup(func() {
+		log.SetOutput(prevWriter)
+		standardLoggerMu.Unlock()
+	})
+
+	return buf
 }

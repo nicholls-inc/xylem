@@ -99,6 +99,44 @@ func TestEnqueue(t *testing.T) {
 	}
 }
 
+// TestWS6S28VesselJSONLNoNewFields verifies that queue JSONL records remain
+// free of harness-specific fields.
+//
+// Covers: WS6 S28.
+func TestWS6S28VesselJSONLNoNewFields(t *testing.T) {
+	q, path := newTestQueue(t)
+	now := time.Now().UTC()
+	vessel := Vessel{
+		ID:        "compat-v3-test",
+		Source:    "github-issue",
+		Ref:       "https://github.com/example/repo/issues/1",
+		Workflow:  "fix-bug",
+		State:     StatePending,
+		CreatedAt: now,
+	}
+
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	line := strings.TrimSpace(string(raw))
+
+	for _, field := range []string{`"id"`, `"source"`, `"state"`, `"created_at"`} {
+		if !strings.Contains(line, field) {
+			t.Errorf("JSONL line missing expected field %s", field)
+		}
+	}
+	for _, forbidden := range []string{`"intermediary"`, `"audit_log"`, `"tracer"`, `"budget"`, `"trace_id"`} {
+		if strings.Contains(line, forbidden) {
+			t.Errorf("JSONL line contains forbidden field %s: %s", forbidden, line)
+		}
+	}
+}
+
 func TestDequeue(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(1)

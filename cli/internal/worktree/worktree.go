@@ -123,10 +123,15 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 
 	// Remove stale worktree at this path from a previous run (e.g., re-enqueued vessel).
 	// The -B flag handles branch name collisions, but git worktree add still fails
-	// if the worktree PATH is already registered.
+	// if the worktree PATH is already registered or exists on disk.
 	if m.branchForWorktree(ctx, worktreePath) != "" {
 		if _, removeErr := m.Runner.Run(ctx, "git", "worktree", "remove", worktreePath, "--force"); removeErr != nil {
 			return "", fmt.Errorf("remove stale worktree %s: %w", worktreePath, removeErr)
+		}
+	} else if _, err := os.Stat(worktreePath); err == nil {
+		// Directory exists on disk but isn't registered as a git worktree (orphaned).
+		if removeErr := os.RemoveAll(worktreePath); removeErr != nil {
+			return "", fmt.Errorf("remove orphaned worktree dir %s: %w", worktreePath, removeErr)
 		}
 	}
 
@@ -137,6 +142,12 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 	// Copy .claude/ config files from repo root into worktree (non-fatal)
 	if err := m.copyClaudeConfig(worktreePath); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: copy .claude/ config: %v\n", err)
+	}
+
+	// Mark .xylem/ protected surfaces as read-only to prevent agents from
+	// accidentally deleting or modifying workflow/prompt definitions.
+	if err := protectXylemSurfaces(worktreePath); err != nil {
+		fmt.Fprintf(os.Stderr, "warn: protect .xylem/ surfaces: %v\n", err)
 	}
 
 	return worktreePath, nil
@@ -241,6 +252,37 @@ func (m *Manager) copyClaudeConfig(worktreePath string) error {
 		}
 	}
 	return nil
+}
+
+// protectXylemSurfaces marks tracked .xylem/ files as read-only in the worktree
+// so agents running in the worktree cannot accidentally delete or modify them.
+// It also writes a .claude/rules/ file instructing Claude agents to leave them alone.
+func protectXylemSurfaces(worktreePath string) error {
+	// Glob patterns matching the default protected surfaces.
+	patterns := []string{
+		filepath.Join(worktreePath, ".xylem.yml"),
+		filepath.Join(worktreePath, ".xylem", "workflows", "*.yaml"),
+		filepath.Join(worktreePath, ".xylem", "prompts", "*", "*.md"),
+		filepath.Join(worktreePath, ".xylem", "HARNESS.md"),
+	}
+	for _, pattern := range patterns {
+		matches, err := filepath.Glob(pattern)
+		if err != nil {
+			continue
+		}
+		for _, match := range matches {
+			os.Chmod(match, 0o444) //nolint:errcheck
+		}
+	}
+
+	// Write a rule file so Claude agents know not to touch .xylem/ files.
+	rulesDir := filepath.Join(worktreePath, ".claude", "rules")
+	if err := os.MkdirAll(rulesDir, 0o755); err != nil {
+		return err
+	}
+	rule := "Do not modify, delete, or move any files under .xylem/ or the .xylem.yml config file. " +
+		"These are protected workflow and prompt definitions managed by the xylem control plane.\n"
+	return os.WriteFile(filepath.Join(rulesDir, "protected-surfaces.md"), []byte(rule), 0o644)
 }
 
 // Remove removes a git worktree and its branch.

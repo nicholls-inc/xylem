@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -10,8 +11,11 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func makeDrainConfig(dir string) *config.Config {
@@ -32,6 +36,19 @@ func makeDrainConfig(dir string) *config.Config {
 			},
 		},
 	}
+}
+
+type recordingExporter struct {
+	shutdownCalled bool
+}
+
+func (e *recordingExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+	return nil
+}
+
+func (e *recordingExporter) Shutdown(context.Context) error {
+	e.shutdownCalled = true
+	return nil
 }
 
 func TestDrainDryRun(t *testing.T) {
@@ -137,6 +154,7 @@ func TestDrainDryRunQueueReadError(t *testing.T) {
 	}
 }
 
+// Covers: WS1 S27.
 func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
@@ -179,5 +197,50 @@ func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "audit.jsonl")); err != nil {
 		t.Fatalf("Stat(audit.jsonl) error = %v", err)
+	}
+}
+
+func TestSmoke_S8_TracerInitFailureRunnerContinues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	cmdRunner := newCmdRunner(cfg)
+
+	runnerInstance, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	defer cleanup()
+	runnerInstance.Tracer = nil
+
+	result, err := runnerInstance.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result != (runner.DrainResult{}) {
+		t.Fatalf("DrainResult = %+v, want zero value", result)
+	}
+}
+
+func TestSmoke_S30_TracerWiredInDrainCmd(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	cmdRunner := newCmdRunner(cfg)
+
+	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	defer cleanup()
+
+	if r.Tracer == nil {
+		t.Fatal("r.Tracer = nil, want tracer")
+	}
+}
+
+func TestSmoke_S32_TracerShutdownDeferred(t *testing.T) {
+	exporter := &recordingExporter{}
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	tracer := observability.NewTracerFromProvider(tp)
+
+	shutdownConfiguredTracer(tracer)
+
+	if !exporter.shutdownCalled {
+		t.Fatal("exporter shutdown was not called")
 	}
 }

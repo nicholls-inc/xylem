@@ -212,7 +212,8 @@ func (g *GitHub) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
 	if err != nil || latest == nil {
 		return false
 	}
-	return latest.State == queue.StateFailed && latest.Meta["source_input_fingerprint"] == fingerprint
+	isTerminalFailure := latest.State == queue.StateFailed || latest.State == queue.StateTimedOut
+	return isTerminalFailure && latest.Meta["source_input_fingerprint"] == fingerprint
 }
 
 func issueLabelNames(labels []struct {

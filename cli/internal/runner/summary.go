@@ -177,14 +177,27 @@ func (s *vesselRunState) recordLLMUsage(model, inputText, outputText string, rec
 	return inputTokens, outputTokens, costUSDEst
 }
 
-func (s *vesselRunState) recordPromptOnlyUsage(model, prompt, output string, recordedAt time.Time) {
+func (s *vesselRunState) recordPromptOnlyUsage(model, prompt, output string, recordedAt time.Time) (int, int, float64) {
 	inputTokens, outputTokens, costUSDEst := s.recordLLMUsage(model, prompt, output, recordedAt)
 	s.extraInputTokensEst += inputTokens
 	s.extraOutputTokensEst += outputTokens
 	s.extraCostUSDEst += costUSDEst
+	return inputTokens, outputTokens, costUSDEst
 }
 
-func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, harnessContent, renderedPrompt, output string, duration time.Duration, status string, gatePassed *bool, errMsg string, recordedAt time.Time) PhaseSummary {
+// recordPhaseTokens records LLM usage for a prompt-type phase and returns the
+// estimated token counts and cost. Command phases do not consume model tokens.
+func (s *vesselRunState) recordPhaseTokens(
+	p workflow.Phase, model, renderedPrompt, output string, recordedAt time.Time,
+) (inputTokensEst, outputTokensEst int, costUSDEst float64) {
+	if p.Type == "command" {
+		return 0, 0, 0.0
+	}
+
+	return s.recordLLMUsage(model, renderedPrompt, output, recordedAt)
+}
+
+func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, harnessContent string, inputTokensEst, outputTokensEst int, costUSDEst float64, duration time.Duration, status string, gatePassed *bool, errMsg string) PhaseSummary {
 	summary := PhaseSummary{
 		Name:       p.Name,
 		Type:       phaseTypeLabel(p),
@@ -204,16 +217,10 @@ func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceC
 
 	provider := resolveProvider(cfg, srcCfg, wf, &p)
 	model := resolveModel(cfg, srcCfg, wf, &p, provider)
-	promptText := renderedPrompt
-	if harnessContent != "" {
-		promptText = harnessContent + "\n\n" + renderedPrompt
-	}
-
-	inputTokens, outputTokens, costUSDEst := s.recordLLMUsage(model, promptText, output, recordedAt)
 	summary.Provider = provider
 	summary.Model = model
-	summary.InputTokensEst = inputTokens
-	summary.OutputTokensEst = outputTokens
+	summary.InputTokensEst = inputTokensEst
+	summary.OutputTokensEst = outputTokensEst
 	summary.CostUSDEst = costUSDEst
 
 	return summary

@@ -5,5 +5,5 @@ cli/gh
 cli/xylem
 .xylem/
 field-reports/
-.claude/worktrees
+.claude/worktrees/
 .copilot-worktrees/

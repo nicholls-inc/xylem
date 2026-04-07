@@ -685,6 +685,62 @@ func TestConfigHarnessDefaultsHelpers(t *testing.T) {
 	}
 }
 
+// TestWS6S26LegacyConfigBackwardsCompat verifies that configs without
+// harness, observability, or cost sections still load cleanly and expose safe
+// helper defaults.
+//
+// Covers: WS6 S26.
+func TestWS6S26LegacyConfigBackwardsCompat(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: claude
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v, want nil for legacy config", err)
+	}
+	if cfg.Concurrency != 2 {
+		t.Errorf("Concurrency = %d, want 2", cfg.Concurrency)
+	}
+	if cfg.MaxTurns != 50 {
+		t.Errorf("MaxTurns = %d, want 50", cfg.MaxTurns)
+	}
+	if surfaces := cfg.EffectiveProtectedSurfaces(); !reflect.DeepEqual(surfaces, DefaultProtectedSurfaces) {
+		t.Errorf("EffectiveProtectedSurfaces() = %#v, want %#v", surfaces, DefaultProtectedSurfaces)
+	}
+	if got := cfg.EffectiveAuditLogPath(); got != DefaultAuditLogPath {
+		t.Errorf("EffectiveAuditLogPath() = %q, want %q", got, DefaultAuditLogPath)
+	}
+	if !cfg.ObservabilityEnabled() {
+		t.Error("ObservabilityEnabled() = false, want true")
+	}
+	if got := cfg.ObservabilitySampleRate(); got != 1.0 {
+		t.Errorf("ObservabilitySampleRate() = %v, want 1.0", got)
+	}
+	if budget := cfg.VesselBudget(); budget != nil {
+		t.Errorf("VesselBudget() = %#v, want nil", budget)
+	}
+
+	policies := cfg.BuildIntermediaryPolicies()
+	if len(policies) != 1 {
+		t.Fatalf("len(BuildIntermediaryPolicies()) = %d, want 1", len(policies))
+	}
+	if policies[0].Name != "default" {
+		t.Errorf("BuildIntermediaryPolicies()[0].Name = %q, want %q", policies[0].Name, "default")
+	}
+}
+
 func TestEffectiveProtectedSurfacesNoneDisablesProtection(t *testing.T) {
 	cfg := validConfig()
 	cfg.Harness.ProtectedSurfaces.Paths = []string{"none"}

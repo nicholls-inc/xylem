@@ -24,6 +24,20 @@ func VesselSpanAttributes(data VesselSpanData) []SpanAttribute {
 	return attrs
 }
 
+// DrainSpanData holds drain-run information for attribute extraction.
+type DrainSpanData struct {
+	Concurrency int    `json:"concurrency"`
+	Timeout     string `json:"timeout"`
+}
+
+// DrainSpanAttributes returns span attributes for a drain span.
+func DrainSpanAttributes(data DrainSpanData) []SpanAttribute {
+	return []SpanAttribute{
+		{Key: "xylem.drain.concurrency", Value: fmt.Sprintf("%d", data.Concurrency)},
+		{Key: "xylem.drain.timeout", Value: data.Timeout},
+	}
+}
+
 // PhaseSpanData holds phase information for attribute extraction.
 type PhaseSpanData struct {
 	Name     string `json:"name"`

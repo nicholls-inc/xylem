@@ -5,6 +5,7 @@ import (
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
 	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -95,6 +96,14 @@ func NewTracer(config TracerConfig) (*Tracer, error) {
 	}, nil
 }
 
+// NewTracerFromProvider wraps an existing TracerProvider. Used in tests.
+func NewTracerFromProvider(provider *sdktrace.TracerProvider) *Tracer {
+	return &Tracer{
+		provider: provider,
+		tracer:   provider.Tracer("xylem"),
+	}
+}
+
 // Shutdown flushes pending spans and shuts down the TracerProvider.
 func (t *Tracer) Shutdown(ctx context.Context) error {
 	return t.provider.Shutdown(ctx)
@@ -121,6 +130,7 @@ func (sc SpanContext) End() {
 // RecordError records an error on the span without ending it.
 func (sc SpanContext) RecordError(err error) {
 	sc.span.RecordError(err)
+	sc.span.SetStatus(codes.Error, err.Error())
 }
 
 // Context returns the context carrying the span, suitable for propagation
