@@ -106,6 +106,7 @@ phases:
 | `noop` | No | Early-success completion rule checked against the phase output before any gate runs. |
 | `allowed_tools` | No | Tool restriction string for prompt phases. Passed through to the provider CLI. Use this instead of top-level `claude.allowed_tools`, which is rejected by config validation. |
 | `gate` | No | Quality gate that must pass after this phase completes. |
+| `depends_on` | No | List of phase names this phase depends on. Enables parallel execution -- phases without dependency relationships can execute concurrently. Validated for duplicate entries, self-references, references to unknown phase names, and dependency cycles. |
 
 **No-op fields:**
 
@@ -130,6 +131,29 @@ phases:
 | `wait_for` | Yes | -- | GitHub label name to poll for. |
 | `timeout` | No | `"24h"` | Maximum time to wait for the label. |
 | `poll_interval` | No | `"60s"` | How often to check for the label. |
+
+**Gate evidence fields (optional metadata):**
+
+Gates can optionally carry verification evidence metadata describing the assurance level of the gate check.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `evidence.claim` | No | Description of what the gate verifies. |
+| `evidence.level` | No | Assurance level. Valid values: `proved`, `mechanically_checked`, `behaviorally_checked`, `observed_in_situ`. |
+| `evidence.checker` | No | Tool or person that performed the verification. |
+| `evidence.trust_boundary` | No | Description of the trust boundary this gate enforces. |
+
+```yaml
+gate:
+  type: command
+  run: "make test"
+  retries: 2
+  evidence:
+    claim: "All unit tests pass"
+    level: mechanically_checked
+    checker: "go test"
+    trust_boundary: "code correctness"
+```
 
 ## Phases
 
@@ -171,6 +195,47 @@ For prompt phases, the `max_turns` field controls how many turns the selected pr
 - **PR phases** (committing and pushing): 3-10 turns
 
 If the provider exhausts its turn limit, the phase ends with whatever output was produced. The workflow continues to the next phase (or gate) regardless.
+
+### Phase dependencies and parallel execution
+
+By default, phases execute sequentially in the order they are listed. The `depends_on` field enables parallel execution by declaring explicit dependency relationships between phases.
+
+When any phase in a workflow declares `depends_on`, the runner uses the dependency graph to schedule phases. Phases whose dependencies have all completed can execute concurrently, up to the configured concurrency limit.
+
+```yaml
+name: parallel-workflow
+description: "Workflow with parallel phases"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/my-workflow/analyze.md
+    max_turns: 5
+
+  - name: implement_api
+    prompt_file: .xylem/prompts/my-workflow/implement-api.md
+    max_turns: 15
+    depends_on: [analyze]
+
+  - name: implement_ui
+    prompt_file: .xylem/prompts/my-workflow/implement-ui.md
+    max_turns: 15
+    depends_on: [analyze]
+
+  - name: integrate
+    prompt_file: .xylem/prompts/my-workflow/integrate.md
+    max_turns: 10
+    depends_on: [implement_api, implement_ui]
+```
+
+In this example, `analyze` runs first. Once it completes, `implement_api` and `implement_ui` run in parallel. After both finish, `integrate` runs.
+
+**Validation rules for `depends_on`:**
+
+- Phase names in `depends_on` must reference phases defined in the same workflow.
+- Self-references are rejected (a phase cannot depend on itself).
+- Duplicate entries within a single `depends_on` list are rejected.
+- Circular dependencies are detected and rejected (e.g., A depends on B, B depends on A).
+
+If no phase in a workflow uses `depends_on`, phases execute sequentially as before.
 
 ## Gates
 
@@ -603,6 +668,7 @@ Run `xylem scan --dry-run` to verify that xylem can load and validate your workf
 - `allowed_tools`, if set, is not empty.
 - Gate fields are valid for their type.
 - Duration strings (`retry_delay`, `timeout`, `poll_interval`) parse correctly.
+- `depends_on` entries are valid: no duplicates, no self-references, no unknown phase names, no dependency cycles.
 
 ## Tips for writing effective prompts
 
