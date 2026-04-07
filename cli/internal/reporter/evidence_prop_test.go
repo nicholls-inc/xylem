@@ -9,13 +9,13 @@ import (
 	"pgregory.net/rapid"
 )
 
-func TestPropFormatEvidenceCellNoRawPipeOrNewline(t *testing.T) {
+func TestPropFormatEvidenceCellNoRawPipeOrLineBreak(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		input := rapid.StringOf(rapid.Rune()).Draw(t, "input")
 		got := formatEvidenceCell(input)
 
-		if strings.Contains(got, "\n") {
-			t.Fatalf("raw newline in output: %q", got)
+		if strings.ContainsAny(got, "\r\n") {
+			t.Fatalf("raw line break in output: %q", got)
 		}
 
 		unescaped := strings.ReplaceAll(got, `\|`, "")
