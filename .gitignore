@@ -4,6 +4,8 @@ cli/copilot
 cli/gh
 cli/xylem
 .xylem/
+!cli/internal/dtu/testdata/**/.xylem/
+!cli/internal/dtu/testdata/**/.xylem/**
 field-reports/
 .claude/worktrees
 .copilot-worktrees/

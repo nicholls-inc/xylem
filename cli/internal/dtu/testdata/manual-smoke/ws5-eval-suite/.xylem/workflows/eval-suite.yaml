@@ -1,0 +1,31 @@
+name: eval-suite
+phases:
+  - name: scaffold_check
+    type: command
+    run: |
+      python3 - <<'PY'
+      import os
+      import stat
+
+      base = "cli/internal/dtu/testdata/manual-smoke/ws5-eval-suite/.xylem/eval"
+      required = [
+          "harbor.yaml",
+          "helpers/xylem_verify.py",
+          "helpers/conftest.py",
+          "rubrics/plan_quality.toml",
+          "rubrics/evidence_quality.toml",
+          "scenarios/widget-bug/instruction.md",
+          "scenarios/widget-bug/task.toml",
+          "scenarios/widget-bug/tests/test.sh",
+          "scenarios/widget-bug/tests/test_verification.py",
+      ]
+      for rel in required:
+          path = os.path.join(base, rel)
+          assert os.path.exists(path), f"Missing: {path}"
+      mode = os.stat(os.path.join(base, "scenarios/widget-bug/tests/test.sh")).st_mode
+      assert mode & stat.S_IXUSR, "test.sh not executable"
+      print("WS5 eval scaffold checks passed")
+      PY
+  - name: fix
+    prompt_file: .xylem/prompts/eval-suite/fix.md
+    max_turns: 3

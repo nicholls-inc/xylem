@@ -1,0 +1,5 @@
+name: fix-bug-defaults
+phases:
+  - name: fix
+    prompt_file: .xylem/prompts/fix-bug-defaults/fix.md
+    max_turns: 3

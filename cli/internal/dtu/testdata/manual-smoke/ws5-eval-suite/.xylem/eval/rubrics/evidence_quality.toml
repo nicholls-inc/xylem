@@ -1,0 +1,17 @@
+[rubric]
+name = "evidence_quality"
+
+[[rubric.criteria]]
+name = "artifact_presence"
+weight = 0.5
+description = "Expected execution artifacts are present."
+
+[[rubric.criteria]]
+name = "claim_strength"
+weight = 0.3
+description = "Evidence uses strong, machine-verifiable claims where possible."
+
+[[rubric.criteria]]
+name = "boundary_clarity"
+weight = 0.2
+description = "Trust boundaries are stated clearly alongside the evidence."

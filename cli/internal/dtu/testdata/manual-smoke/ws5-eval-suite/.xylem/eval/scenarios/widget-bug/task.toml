@@ -1,0 +1,5 @@
+[task]
+id = "widget-bug"
+
+[task.environment]
+timeout_seconds = 300
