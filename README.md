@@ -88,7 +88,7 @@ daemon:
   drain_interval: "30s"
 ```
 
-See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
+This example covers the most common fields. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
 
 ## Workflows
 
@@ -128,7 +128,7 @@ Use `noop.match` on a phase to let that phase complete the workflow early when i
 **Built-in workflows:**
 
 - **fix-bug** -- Analyze, Plan, Implement (with test gate), PR
-- **implement-feature** -- Analyze, Plan (with label gate for approval), Implement, PR
+- **implement-feature** -- Analyze, Plan (with label gate for approval), Implement (with test gate), PR
 
 See the [Workflows Guide](docs/workflows.md) for template variables, custom workflows, and prompt authoring tips.
 
@@ -194,6 +194,8 @@ The CLI includes standalone packages under `cli/internal/` implementing foundati
 | `bootstrap` | Repo analysis and AGENTS.md generation |
 | `catalog` | Tool catalog with overlap detection and permission scopes |
 | `observability` | OpenTelemetry span attributes for missions, agents, and signals |
+| `evidence` | Verification claims and evidence manifests with typed assurance levels |
+| `surface` | SHA256 surface integrity for protected files |
 
 See the [Architecture](docs/architecture.md) document for details on the control flow, isolation model, and how these packages fit together.
 

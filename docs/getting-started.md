@@ -23,18 +23,16 @@ If you use Claude with `--bare`, you also need an Anthropic API key. Set it in y
 
 ## Installation
 
-Install xylem in two steps: install the LLM CLI you want to use, then install the Go CLI binary.
+Install the xylem Go CLI binary:
 
 ```bash
-# 1. If you use Claude, add the marketplace and install the plugin
-claude plugin marketplace add nicholls-inc/claude-code-marketplace
-claude plugin install xylem@nicholls
-
-# 2. Install the Go CLI
 go install github.com/nicholls-inc/xylem/cli/cmd/xylem@latest
 ```
 
-If you use GitHub Copilot instead, install the Copilot CLI separately and make sure the `copilot` binary is on your PATH before running xylem.
+You also need at least one supported LLM CLI on your PATH:
+
+- **Claude Code**: Install from [docs.anthropic.com](https://docs.anthropic.com/en/docs/claude-code)
+- **GitHub Copilot CLI**: Install separately and ensure `copilot` is on your PATH
 
 Verify the installation:
 
