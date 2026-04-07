@@ -377,7 +377,7 @@ When truncation occurs, a suffix is appended: `[... output truncated at N charac
 
 ### Example: analysis prompt
 
-This template is the first phase in both built-in workflows. It receives the issue data and asks the agent to analyze the codebase:
+This template is the first phase in the built-in workflows below. It receives the issue data and asks the agent to analyze the codebase:
 
 ```
 Analyze the following GitHub issue and identify the relevant code.
@@ -443,7 +443,7 @@ gh pr create --title "<descriptive title>" --body "<summary of changes, linking 
 
 ## Built-in workflows
 
-xylem ships with two workflows, scaffolded into your repo by `xylem init` alongside `.xylem/HARNESS.md` and matching prompt templates.
+xylem ships with three workflows, scaffolded into your repo by `xylem init` alongside `.xylem/HARNESS.md` and matching prompt templates.
 
 ### fix-bug
 
@@ -527,6 +527,91 @@ phases:
 
 **Customization:** After running `xylem init`, update the label gate and test command to match your process. For example, you might use a different approval label than `plan-approved`, or replace `make test` with `go test ./...`, `npm test`, or `pytest`.
 
+### implement-harness
+
+Implements a harness spec step with verification, testing, and smoke scenarios in 8 phases. Uses mixed LLM providers: Copilot (`gpt-5.4`) for implementation-heavy phases, and Claude for planning and verification.
+
+```yaml
+name: implement-harness
+description: "Implement a harness spec step with verification, testing, and smoke scenarios"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/implement-harness/analyze.md
+    max_turns: 30
+    llm: copilot
+    model: gpt-5.4
+    noop:
+      match: XYLEM_NOOP
+  - name: plan
+    prompt_file: .xylem/prompts/implement-harness/plan.md
+    max_turns: 30
+    llm: claude
+  - name: implement
+    prompt_file: .xylem/prompts/implement-harness/implement.md
+    max_turns: 80
+    llm: copilot
+    model: gpt-5.4
+    gate:
+      type: command
+      run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
+      retries: 3
+  - name: verify
+    prompt_file: .xylem/prompts/implement-harness/verify.md
+    max_turns: 80
+    llm: claude
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 2
+  - name: test_critic
+    prompt_file: .xylem/prompts/implement-harness/test_critic.md
+    max_turns: 30
+    llm: copilot
+    model: gpt-5.4
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 1
+  - name: smoke
+    prompt_file: .xylem/prompts/implement-harness/smoke.md
+    max_turns: 60
+    llm: copilot
+    model: gpt-5.4
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 2
+  - name: pr_draft
+    prompt_file: .xylem/prompts/implement-harness/pr_draft.md
+    max_turns: 15
+    llm: copilot
+    model: gpt-5.4
+  - name: pr_create
+    type: command
+    run: |
+      set -euo pipefail
+      TITLE=$(jq -r '.title' pr_draft.json)
+      BODY=$(jq -r '.body' pr_draft.json)
+      gh pr create --title "$TITLE" --body "$BODY" --label "harness-impl"
+```
+
+The checked-in `pr_create` phase in `.xylem/workflows/implement-harness.yaml` also validates that `pr_draft.json` exists and that required fields are present before calling `gh pr create`.
+
+**Phase flow:**
+
+1. **analyze** -- Reads the spec step, the issue, and the codebase to understand what must change and why. If the output contains `XYLEM_NOOP`, the workflow exits early -- nothing to implement.
+2. **plan** -- Produces a file-by-file implementation plan: function signatures, test cases mapped to smoke scenarios, implementation order, and edge cases.
+3. **implement** -- Executes the plan: writes production code, then unit tests, then property-based tests. Gated on `go vet + go build + go test` with 3 retries, feeding failure output back via `{{.GateResult}}` each time.
+4. **verify** -- Independent second pass: checks correctness of tests, looks for uncovered paths, and fixes any issues missed by the implementer. Gated on `go test` with 2 retries.
+5. **test_critic** -- Reviews the test suite for test theatre: tests that pass but do not exercise real behavior. Gated on `go test` with 1 retry.
+6. **smoke** -- Executes the assigned smoke scenarios end-to-end and writes evidence to `.xylem/phases/<id>/smoke/`. Gated on `go test` with 2 retries.
+7. **pr_draft** -- Writes `pr_draft.json` (a `{"title": "...", "body": "..."}` file) for review before PR creation.
+8. **pr_create** -- Reads `pr_draft.json` and calls `gh pr create`. No turns are consumed; this phase cannot be retried via gate. If `pr_draft.json` is missing or malformed, the checked-in workflow fails with a clear error.
+
+**When to use:** Assign this workflow to issues labeled `harness-impl` -- spec steps that require code changes, tests, and smoke scenarios verified in CI. It is designed for this repo's own development process, not for general use in target repos.
+
+**Customization:** The gate command (`cd cli && go vet ./... && go build ./cmd/xylem && go test ./...`) is specific to this repository. If you adapt this workflow for a different project, update the `run` fields in each gate to match that project's build and test commands. The `pr_create` phase reads `pr_draft.json` from the worktree root -- if your PR process requires additional flags (for example, a base branch or reviewer assignment), extend the `gh pr create` call there.
+
 ## Prompt file organization
 
 Prompt files are organized in `.xylem/prompts/` under a subdirectory named after the workflow:
@@ -537,6 +622,7 @@ Prompt files are organized in `.xylem/prompts/` under a subdirectory named after
   workflows/
     fix-bug.yaml
     implement-feature.yaml
+    implement-harness.yaml
   prompts/
     fix-bug/
       analyze.md
@@ -548,11 +634,19 @@ Prompt files are organized in `.xylem/prompts/` under a subdirectory named after
       plan.md
       implement.md
       pr.md
+    implement-harness/
+      analyze.md
+      plan.md
+      implement.md
+      verify.md
+      test_critic.md
+      smoke.md
+      pr_draft.md
 ```
 
 This convention is not enforced -- `prompt_file` can point anywhere relative to the repo root. But grouping prompts by workflow keeps things navigable as you add more workflows.
 
-`xylem init` scaffolds this structure with working defaults for both built-in workflows and a starter `HARNESS.md`.
+`xylem init` scaffolds this structure with working defaults for the built-in workflows and a starter `HARNESS.md`.
 
 ## Creating a custom workflow
 
