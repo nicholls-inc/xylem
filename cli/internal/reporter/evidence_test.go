@@ -122,3 +122,26 @@ func TestFormatEvidenceCellEscapesMarkdownTableSeparators(t *testing.T) {
 		}
 	}
 }
+
+func TestFormatEvidenceCellNormalizesCRLFAndCR(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "crlf", input: "line 1\r\nline 2", want: "line 1<br>line 2"},
+		{name: "cr", input: "line 1\rline 2", want: "line 1<br>line 2"},
+		{name: "crlf with pipe", input: "A | B\r\nline 2", want: `A \| B<br>line 2`},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			if got := formatEvidenceCell(tt.input); got != tt.want {
+				t.Fatalf("formatEvidenceCell(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}

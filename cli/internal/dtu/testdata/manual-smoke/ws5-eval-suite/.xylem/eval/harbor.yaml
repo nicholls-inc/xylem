@@ -1,0 +1,5 @@
+agent: claude-code
+model: claude-sonnet-4.5
+path: scenarios/
+n_attempts: 1
+n_concurrent: 1

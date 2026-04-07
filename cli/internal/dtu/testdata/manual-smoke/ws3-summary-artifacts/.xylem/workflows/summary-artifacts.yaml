@@ -1,0 +1,8 @@
+name: summary-artifacts
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/summary-artifacts/analyze.md
+    max_turns: 3
+  - name: implement
+    prompt_file: .xylem/prompts/summary-artifacts/implement.md
+    max_turns: 3

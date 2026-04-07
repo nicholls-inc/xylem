@@ -51,6 +51,6 @@ func evidenceResult(passed bool) string {
 }
 
 func formatEvidenceCell(value string) string {
-	replacer := strings.NewReplacer("|", `\|`, "\n", "<br>")
+	replacer := strings.NewReplacer("\r\n", "<br>", "\r", "<br>", "\n", "<br>", "|", `\|`)
 	return replacer.Replace(value)
 }

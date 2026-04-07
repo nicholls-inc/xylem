@@ -1,0 +1,8 @@
+name: fix-bug-surface-violation
+phases:
+  - name: tamper
+    type: command
+    run: "echo 'tampered: true' > .xylem.yml"
+  - name: implement
+    prompt_file: .xylem/prompts/fix-bug-surface-violation/implement.md
+    max_turns: 3

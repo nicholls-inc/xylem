@@ -1,0 +1,15 @@
+name: cross-cutting
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/cross-cutting/analyze.md
+    max_turns: 3
+  - name: implement_a
+    prompt_file: .xylem/prompts/cross-cutting/implement_a.md
+    max_turns: 3
+    depends_on:
+      - analyze
+  - name: implement_b
+    prompt_file: .xylem/prompts/cross-cutting/implement_b.md
+    max_turns: 3
+    depends_on:
+      - analyze

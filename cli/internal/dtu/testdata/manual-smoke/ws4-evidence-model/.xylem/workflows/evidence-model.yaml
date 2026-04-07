@@ -1,0 +1,16 @@
+name: evidence-model
+phases:
+  - name: package_probes
+    type: command
+    run: "go test ./internal/evidence"
+  - name: implement
+    prompt_file: .xylem/prompts/evidence-model/implement.md
+    max_turns: 3
+    gate:
+      type: command
+      run: "go test ./internal/reporter"
+      evidence:
+        claim: Reporter renders verification evidence tables for passing gates
+        level: behaviorally_checked
+        checker: go test ./internal/reporter
+        trust_boundary: Reporter package behavior only

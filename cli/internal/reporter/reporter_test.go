@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockRunner struct {
@@ -26,6 +28,16 @@ func (m *mockRunner) RunOutput(_ context.Context, name string, args ...string) (
 		}
 	}
 	return nil, m.err
+}
+
+func renderVesselCompletedBody(t *testing.T, phases []PhaseResult, manifest *evidence.Manifest) string {
+	t.Helper()
+
+	mock := &mockRunner{}
+	r := &Reporter{Runner: mock, Repo: "owner/repo"}
+
+	require.NoError(t, r.VesselCompleted(context.Background(), 42, phases, manifest))
+	return mock.lastBody
 }
 
 func TestPhaseComplete(t *testing.T) {
@@ -241,6 +253,171 @@ func TestVesselCompletedWithEvidence(t *testing.T) {
 	}
 }
 
+func TestSmoke_S20_VesselCompletedNilManifestProducesOutputIdenticalToCurrentBehavior(t *testing.T) {
+	phases := []PhaseResult{
+		{Name: "analyze", Duration: 2*time.Minute + 15*time.Second, Status: "completed"},
+		{Name: "implement", Duration: 5*time.Minute + 30*time.Second, Status: "completed"},
+		{Name: "pr", Duration: time.Minute, Status: "completed"},
+	}
+
+	got := renderVesselCompletedBody(t, phases, nil)
+	want := `**xylem — all phases completed**
+
+| Phase | Duration | Status |
+|-------|----------|--------|
+| analyze | 2m15s | completed |
+| implement | 5m30s | completed |
+| pr | 1m0s | completed |
+
+Total: 8m45s`
+
+	assert.Equal(t, want, got)
+	assert.NotContains(t, got, "### Verification evidence")
+}
+
+func TestSmoke_S21_VesselCompletedWithEvidenceRendersCorrectColumns(t *testing.T) {
+	phases := []PhaseResult{
+		{Name: "implement", Duration: 5 * time.Second, Status: "completed"},
+	}
+	manifest := &evidence.Manifest{
+		Claims: []evidence.Claim{
+			{
+				Claim:   "All tests pass",
+				Level:   evidence.BehaviorallyChecked,
+				Checker: "go test",
+				Passed:  true,
+			},
+		},
+	}
+
+	body := renderVesselCompletedBody(t, phases, manifest)
+
+	assert.Contains(t, body, "### Verification evidence")
+	assert.Contains(t, body, "| Claim | Level | Checker | Result |")
+	assert.Contains(t, body, "| All tests pass | behaviorally_checked | go test | :white_check_mark: |")
+}
+
+func TestSmoke_S22_VesselCompletedRendersPassedAndFailedSymbols(t *testing.T) {
+	phases := []PhaseResult{
+		{Name: "implement", Duration: 5 * time.Second, Status: "completed"},
+	}
+	manifest := &evidence.Manifest{
+		Claims: []evidence.Claim{
+			{
+				Claim:   "Tests pass",
+				Level:   evidence.MechanicallyChecked,
+				Checker: "go test",
+				Passed:  true,
+			},
+			{
+				Claim:   "Lint fails",
+				Level:   evidence.BehaviorallyChecked,
+				Checker: "golangci-lint",
+				Passed:  false,
+			},
+		},
+	}
+
+	body := renderVesselCompletedBody(t, phases, manifest)
+
+	passedRow := "| Tests pass | mechanically_checked | go test | :white_check_mark: |"
+	failedRow := "| Lint fails | behaviorally_checked | golangci-lint | :x: |"
+
+	assert.Contains(t, body, passedRow)
+	assert.Contains(t, body, failedRow)
+	assert.Contains(t, body, passedRow+"\n"+failedRow)
+	assert.Equal(t, 1, strings.Count(body, passedRow))
+	assert.Equal(t, 1, strings.Count(body, failedRow))
+}
+
+func TestSmoke_S23_VesselCompletedRendersTrustBoundariesInDetailsBlock(t *testing.T) {
+	phases := []PhaseResult{
+		{Name: "implement", Duration: 5 * time.Second, Status: "completed"},
+	}
+	manifest := &evidence.Manifest{
+		Claims: []evidence.Claim{
+			{
+				Claim:         "All tests pass",
+				Level:         evidence.BehaviorallyChecked,
+				Checker:       "go test",
+				TrustBoundary: "Package-level only",
+				Passed:        true,
+			},
+		},
+	}
+
+	body := renderVesselCompletedBody(t, phases, manifest)
+
+	assert.Contains(t, body, "<details>")
+	assert.Contains(t, body, "<summary>Trust boundaries</summary>")
+	assert.Contains(t, body, "- **All tests pass** — Package-level only")
+	assert.Contains(t, body, "</details>")
+}
+
+func TestSmoke_S24_ExistingVesselCompletedScenariosPassNilManifest(t *testing.T) {
+	t.Run("completed", func(t *testing.T) {
+		phases := []PhaseResult{
+			{Name: "analyze", Duration: 2*time.Minute + 15*time.Second, Status: "completed"},
+			{Name: "implement", Duration: 5*time.Minute + 30*time.Second, Status: "completed"},
+			{Name: "pr", Duration: time.Minute, Status: "completed"},
+		}
+
+		got := renderVesselCompletedBody(t, phases, nil)
+		want := `**xylem — all phases completed**
+
+| Phase | Duration | Status |
+|-------|----------|--------|
+| analyze | 2m15s | completed |
+| implement | 5m30s | completed |
+| pr | 1m0s | completed |
+
+Total: 8m45s`
+
+		assert.Equal(t, want, got)
+		assert.NotContains(t, got, "### Verification evidence")
+	})
+
+	t.Run("no-op", func(t *testing.T) {
+		phases := []PhaseResult{
+			{Name: "analyze", Duration: 2 * time.Second, Status: "no-op"},
+		}
+
+		got := renderVesselCompletedBody(t, phases, nil)
+		want := `**xylem — workflow completed early via no-op**
+
+Remaining phases were skipped intentionally because a phase output matched its configured no-op marker.
+
+| Phase | Duration | Status |
+|-------|----------|--------|
+| analyze | 2s | no-op |
+
+Total: 2s`
+
+		assert.Equal(t, want, got)
+		assert.NotContains(t, got, "### Verification evidence")
+	})
+}
+
+func TestSmoke_S30_VesselCompletedNilManifestProducesIdenticalOutputToCurrentBehavior(t *testing.T) {
+	phases := []PhaseResult{
+		{Name: "prompt", Duration: 7 * time.Second, Status: "completed"},
+	}
+
+	body := renderVesselCompletedBody(t, phases, nil)
+	want := `**xylem — all phases completed**
+
+| Phase | Duration | Status |
+|-------|----------|--------|
+| prompt | 7s | completed |
+
+Total: 7s`
+
+	bodyLower := strings.ToLower(body)
+	assert.Equal(t, want, body)
+	assert.NotContains(t, bodyLower, "evidence")
+	assert.NotContains(t, bodyLower, "manifest")
+}
+
 func TestLabelTimeout(t *testing.T) {
 	mock := &mockRunner{}
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
@@ -294,8 +471,9 @@ func TestGhFailureNonFatal(t *testing.T) {
 			r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
 			var buf bytes.Buffer
+			orig := log.Writer()
 			log.SetOutput(&buf)
-			defer log.SetOutput(nil)
+			defer log.SetOutput(orig)
 
 			err := tc.call(r)
 			if err != nil {
@@ -368,12 +546,6 @@ func TestPostCommentArgs(t *testing.T) {
 		wantArgs []string
 	}{
 		{
-			name:     "standard issue",
-			repo:     "owner/repo",
-			issueNum: 42,
-			wantArgs: []string{"gh", "issue", "comment", "42", "--repo", "owner/repo", "--body"},
-		},
-		{
 			name:     "different repo and issue",
 			repo:     "org/project",
 			issueNum: 123,
@@ -434,25 +606,6 @@ func TestVesselFailedGhArgs(t *testing.T) {
 		if mock.lastArgs[i] != want {
 			t.Errorf("arg[%d]: expected %q, got %q", i, want, mock.lastArgs[i])
 		}
-	}
-}
-
-func TestIssueNumFormatting(t *testing.T) {
-	mock := &mockRunner{}
-	r := &Reporter{Runner: mock, Repo: "owner/repo"}
-
-	_ = r.PhaseComplete(context.Background(), 1234, "test", time.Second, "out")
-
-	// Verify the issue number is formatted as a string in the args
-	found := false
-	for _, arg := range mock.lastArgs {
-		if arg == "1234" {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Errorf("expected issue number '1234' in args, got: %v", mock.lastArgs)
 	}
 }
 

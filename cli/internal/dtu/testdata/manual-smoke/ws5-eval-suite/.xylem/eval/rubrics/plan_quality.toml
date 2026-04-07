@@ -1,0 +1,17 @@
+[rubric]
+name = "plan_quality"
+
+[[rubric.criteria]]
+name = "problem_understanding"
+weight = 0.4
+description = "The plan identifies the issue and proposes a bounded fix."
+
+[[rubric.criteria]]
+name = "execution_steps"
+weight = 0.4
+description = "The plan provides concrete implementation steps."
+
+[[rubric.criteria]]
+name = "verification_scope"
+weight = 0.2
+description = "The plan explains what should be checked after the change."

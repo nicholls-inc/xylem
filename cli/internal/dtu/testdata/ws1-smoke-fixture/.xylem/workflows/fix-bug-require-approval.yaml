@@ -1,0 +1,5 @@
+name: fix-bug-require-approval
+phases:
+  - name: deploy
+    prompt_file: .xylem/prompts/fix-bug-require-approval/deploy.md
+    max_turns: 3

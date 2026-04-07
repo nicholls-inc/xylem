@@ -1,0 +1,14 @@
+name: observability-cost
+phases:
+  - name: package_probes
+    type: command
+    run: "go test ./internal/observability ./internal/cost"
+  - name: plan
+    prompt_file: .xylem/prompts/observability-cost/plan.md
+    max_turns: 3
+  - name: implement
+    prompt_file: .xylem/prompts/observability-cost/implement.md
+    max_turns: 3
+    gate:
+      type: command
+      run: "test -f go.mod"

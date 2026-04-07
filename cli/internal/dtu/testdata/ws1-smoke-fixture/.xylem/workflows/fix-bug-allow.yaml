@@ -1,0 +1,8 @@
+name: fix-bug-allow
+phases:
+  - name: plan
+    prompt_file: .xylem/prompts/fix-bug-allow/plan.md
+    max_turns: 3
+  - name: implement
+    prompt_file: .xylem/prompts/fix-bug-allow/implement.md
+    max_turns: 3

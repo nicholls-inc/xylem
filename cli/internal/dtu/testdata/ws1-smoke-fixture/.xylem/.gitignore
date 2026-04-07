@@ -1,0 +1,6 @@
+# Checked-in scaffold files live alongside runtime state in this fixture.
+/audit.jsonl
+/phases/
+/queue.jsonl
+/queue.jsonl.lock
+/worktrees/

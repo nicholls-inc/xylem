@@ -1,0 +1,5 @@
+name: fix-bug-deny
+phases:
+  - name: solve
+    prompt_file: .xylem/prompts/fix-bug-deny/solve.md
+    max_turns: 3
