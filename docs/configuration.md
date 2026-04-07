@@ -547,7 +547,7 @@ The following rules are enforced when loading `.xylem.yml`. If any rule fails, `
 | `github-pr-events` tasks must include an `on` block | `source "<name>" task "<task>": must include an 'on' block...` |
 | `github-pr-events` `on` blocks must include at least one trigger | `source "<name>" task "<task>": 'on' block must specify at least one trigger...` |
 | Every task must have a non-empty workflow | `source "<name>" task "<task>": must include a workflow` |
-| Source-level `llm`, if set, must be `claude` or `copilot` | `source "<name>": llm must be "claude" or "copilot"` |
+| Source-level `llm`, if set, must be `claude` or `copilot` | `source "<name>": llm must be "claude" or "copilot", got "<value>"` |
 | `harness.protected_surfaces.paths` entries must be valid globs | `harness.protected_surfaces.paths: invalid glob "<pattern>": ...` |
 | `harness.policy.rules[].action` must be non-empty | `harness.policy.rules[N]: action is required` |
 | `harness.policy.rules[].resource` must be non-empty | `harness.policy.rules[N]: resource is required` |
