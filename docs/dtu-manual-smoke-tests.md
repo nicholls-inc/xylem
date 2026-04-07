@@ -1,4 +1,3 @@
-➜ curl -X POST https://lib.harrynicholls.com/api/inbox -H "Authorization: Bearer yEPUqWjxJS5IUj0XXGvgx8kY+Zptt6EOGSCPvMJSm8s=" -H "CF-Access-Client-Id: 70cc19faebbd07891e1db8a7cd846477.access" -H "CF-Access-Client-Secret: 653107757010fc23513ca414bb0c77210c2c43a28130807d60f72bfb3f8008a1" -H "Content-Type: application/json" -d '{"title": "catch-29"}'
 # DTU Guide 4B: Manual Smoke Tests Under DTU
 
 Use this method when you want to **drive the real `xylem` CLI in a real repository** while replacing external `gh`, `git`, `claude`, and `copilot` boundaries with DTU-controlled behavior.
