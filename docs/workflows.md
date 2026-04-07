@@ -228,6 +228,8 @@ phases:
 
 In this example, `analyze` runs first. Once it completes, `implement_api` and `implement_ui` run in parallel. After both finish, `integrate` runs.
 
+**Context firewall:** When `depends_on` is used, each phase's `{{.PreviousOutputs}}` template variable is restricted to outputs from its declared dependencies only. A phase that depends on `[analyze]` will only see `{{.PreviousOutputs.analyze}}` -- not outputs from sibling phases in the same wave. In sequential mode (no `depends_on`), all previous phase outputs remain visible for backward compatibility.
+
 **Validation rules for `depends_on`:**
 
 - Phase names in `depends_on` must reference phases defined in the same workflow.
