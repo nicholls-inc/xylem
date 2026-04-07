@@ -77,10 +77,12 @@ cleanup_after: "168h"   # remove worktrees older than this (default: 7 days)
 # Session runner settings
 # ---------------------------------------------------------------------------
 llm: claude
+model: ""                                     # optional default model for prompt phases
 
 claude:
   command: "claude"                           # Claude CLI binary name or path
   flags: "--bare --dangerously-skip-permissions"  # flags passed to every session
+  default_model: ""                           # optional default model for Claude phases
   env:                                        # parsed config map for Claude-related environment values
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"  # supports shell variable substitution
 
@@ -112,9 +114,13 @@ daemon:
 | `default_branch` | string | auto-detected | No | Git branch to create worktrees from. If omitted, xylem detects it from the repository. |
 | `cleanup_after` | string | `"168h"` | No | Age threshold for worktree cleanup. Must be a valid Go duration string. |
 | `llm` | string | `"claude"` | No | Default LLM provider. Valid values: `claude`, `copilot`. |
+| `model` | string | `""` | No | Default model for prompt phases. Provider-specific string (e.g., `claude-sonnet-4-5-20250514`). Overridden by source-level, workflow-level, or phase-level model settings. |
 | `claude` | object | see below | No | Claude CLI session settings. |
 | `copilot` | object | see below | No | GitHub Copilot CLI session settings. |
 | `daemon` | object | see below | No | Daemon mode polling intervals. |
+| `harness` | object | see below | No | Agent safety guardrails: protected file surfaces, policy rules, and audit logging. |
+| `observability` | object | see below | No | OpenTelemetry instrumentation settings. |
+| `cost` | object | see below | No | Token budget enforcement settings. |
 
 ### Sources
 
@@ -125,6 +131,8 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 | `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`. |
 | `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
+| `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
+| `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
 | `tasks` | map | -- | Yes | Map of task names to task configurations. At least one task is required per source. |
 
 ### Tasks
@@ -200,10 +208,19 @@ Supported triggers:
 
 1. phase-level `llm` in a workflow
 2. workflow-level `llm`
-3. top-level `.xylem.yml` `llm`
-4. default `claude`
+3. source-level `llm` in `.xylem.yml`
+4. top-level `.xylem.yml` `llm`
+5. default `claude`
 
 Valid values are `claude` and `copilot`.
+
+**Model resolution** follows a similar chain:
+
+1. phase-level `model`
+2. workflow-level `model`
+3. source-level `model`
+4. top-level `model`
+5. provider `default_model` (e.g., `claude.default_model`)
 
 ### Claude session settings
 
@@ -241,6 +258,63 @@ The `daemon` section controls polling intervals when running `xylem daemon`.
 |-------|------|---------|----------|-------------|
 | `daemon.scan_interval` | string | `"60s"` | No | How often the daemon scans sources for new work. Must be a valid Go duration string. |
 | `daemon.drain_interval` | string | `"30s"` | No | How often the daemon drains pending vessels from the queue. Must be a valid Go duration string. |
+
+### Harness settings
+
+The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, and audit logging.
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `harness.protected_surfaces.paths` | list of strings | `[".xylem/HARNESS.md", ".xylem.yml", ".xylem/workflows/*.yaml", ".xylem/prompts/*/*.md"]` | No | Glob patterns for files agents cannot modify. Set to `["none"]` to disable all surface protections. |
+| `harness.policy.rules` | list of objects | `[]` | No | Policy rules for action authorization. Each rule has `action`, `resource`, and `effect`. |
+| `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the state directory. |
+
+**Policy rule fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `action` | string | Yes | The action to match (e.g., `file_write`, `git_push`, `pr_create`, `*`). |
+| `resource` | string | Yes | The resource to match (e.g., `.xylem.yml`, `*`). Supports glob patterns. |
+| `effect` | string | Yes | The effect when matched. Valid values: `allow`, `deny`, `require_approval`. |
+
+```yaml
+harness:
+  protected_surfaces:
+    paths:
+      - ".xylem/HARNESS.md"
+      - ".xylem.yml"
+      - ".xylem/workflows/*.yaml"
+      - ".xylem/prompts/*/*.md"
+  policy:
+    rules:
+      - action: "file_write"
+        resource: ".xylem.yml"
+        effect: deny
+      - action: "git_push"
+        resource: "*"
+        effect: allow
+  audit_log: "audit.jsonl"
+```
+
+### Observability settings
+
+The `observability` section controls OpenTelemetry instrumentation for tracing agent execution.
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `observability.enabled` | bool | `true` | No | Enable or disable OpenTelemetry tracing. |
+| `observability.endpoint` | string | `""` | No | OTLP gRPC endpoint for trace export (e.g., `localhost:4317`). |
+| `observability.insecure` | bool | `false` | No | Allow insecure (non-TLS) connections to the OTLP endpoint. |
+| `observability.sample_rate` | float | `0.0` | No | Trace sampling rate between 0.0 and 1.0. Values outside this range are rejected. |
+
+### Cost settings
+
+The `cost` section configures token budget enforcement for agent sessions.
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `cost.budget.max_cost_usd` | float | `0` | No | Maximum cost in USD. Must be >= 0. Set to 0 to disable cost-based limits. |
+| `cost.budget.max_tokens` | integer | `0` | No | Maximum total tokens. Must be >= 0. Set to 0 to disable token-based limits. |
 
 ## Duration strings
 
@@ -473,3 +547,11 @@ The following rules are enforced when loading `.xylem.yml`. If any rule fails, `
 | `github-pr-events` tasks must include an `on` block | `source "<name>" task "<task>": must include an 'on' block...` |
 | `github-pr-events` `on` blocks must include at least one trigger | `source "<name>" task "<task>": 'on' block must specify at least one trigger...` |
 | Every task must have a non-empty workflow | `source "<name>" task "<task>": must include a workflow` |
+| Source-level `llm`, if set, must be `claude` or `copilot` | `source "<name>": llm must be "claude" or "copilot"` |
+| `harness.protected_surfaces.paths` entries must be valid globs | `harness.protected_surfaces.paths: invalid glob "<pattern>": ...` |
+| `harness.policy.rules[].action` must be non-empty | `harness.policy.rules[N]: action is required` |
+| `harness.policy.rules[].resource` must be non-empty | `harness.policy.rules[N]: resource is required` |
+| `harness.policy.rules[].effect` must be `allow`, `deny`, or `require_approval` | `harness.policy.rules[N]: invalid effect "<value>" (must be allow, deny, or require_approval)` |
+| `observability.sample_rate` must be in [0.0, 1.0] | `observability.sample_rate must be in [0.0, 1.0]` |
+| `cost.budget.max_cost_usd` must be >= 0 | `cost.budget.max_cost_usd must be non-negative` |
+| `cost.budget.max_tokens` must be >= 0 | `cost.budget.max_tokens must be non-negative` |
