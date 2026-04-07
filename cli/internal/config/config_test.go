@@ -3,11 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func writeConfigFile(t *testing.T, yaml string) string {
@@ -539,306 +540,12 @@ claude:
 	requireErrorContains(t, err, "claude.allowed_tools is no longer supported")
 }
 
-func TestLoadWithHarnessObservabilityAndCost(t *testing.T) {
-	path := writeConfigFile(t, `sources:
-  github:
-    type: github
-    repo: owner/name
-    tasks:
-      fix-bugs:
-        labels: [bug]
-        workflow: fix-bug
-concurrency: 2
-max_turns: 50
-timeout: "30m"
-state_dir: ".xylem"
-claude:
-  command: "claude"
-harness:
-  audit_log: "audit.jsonl"
-  protected_surfaces:
-    paths:
-      - ".xylem/HARNESS.md"
-      - ".xylem.yml"
-      - ".xylem/workflows/*.yaml"
-      - ".xylem/prompts/*/*.md"
-  policy:
-    rules:
-      - action: "file_write"
-        resource: ".xylem/*"
-        effect: "deny"
-      - action: "git_push"
-        resource: "*"
-        effect: "require_approval"
-      - action: "pr_create"
-        resource: "*"
-        effect: "require_approval"
-      - action: "*"
-        resource: "*"
-        effect: "allow"
-observability:
-  enabled: true
-  sample_rate: 1.0
-cost:
-  budget:
-    max_cost_usd: 10.0
-    max_tokens: 1000000
-`)
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-
-	if cfg.Harness.AuditLog != "audit.jsonl" {
-		t.Fatalf("Harness.AuditLog = %q, want %q", cfg.Harness.AuditLog, "audit.jsonl")
-	}
-	if len(cfg.Harness.ProtectedSurfaces.Paths) != 4 {
-		t.Fatalf("len(Harness.ProtectedSurfaces.Paths) = %d, want 4", len(cfg.Harness.ProtectedSurfaces.Paths))
-	}
-	if len(cfg.Harness.Policy.Rules) != 4 {
-		t.Fatalf("len(Harness.Policy.Rules) = %d, want 4", len(cfg.Harness.Policy.Rules))
-	}
-	if cfg.Observability.Enabled == nil || !*cfg.Observability.Enabled {
-		t.Fatalf("Observability.Enabled = %#v, want true pointer", cfg.Observability.Enabled)
-	}
-	if cfg.Observability.SampleRate != 1.0 {
-		t.Fatalf("Observability.SampleRate = %v, want 1.0", cfg.Observability.SampleRate)
-	}
-	if cfg.Cost.Budget == nil {
-		t.Fatal("Cost.Budget = nil, want budget config")
-	}
-	if cfg.Cost.Budget.MaxCostUSD != 10.0 {
-		t.Fatalf("Cost.Budget.MaxCostUSD = %v, want 10.0", cfg.Cost.Budget.MaxCostUSD)
-	}
-	if cfg.Cost.Budget.MaxTokens != 1000000 {
-		t.Fatalf("Cost.Budget.MaxTokens = %d, want 1000000", cfg.Cost.Budget.MaxTokens)
-	}
-
-	budget := cfg.VesselBudget()
-	if budget == nil {
-		t.Fatal("VesselBudget() = nil, want budget")
-	}
-	if budget.CostLimitUSD != 10.0 {
-		t.Fatalf("VesselBudget().CostLimitUSD = %v, want 10.0", budget.CostLimitUSD)
-	}
-	if budget.TokenLimit != 1000000 {
-		t.Fatalf("VesselBudget().TokenLimit = %d, want 1000000", budget.TokenLimit)
-	}
-}
-
-func TestConfigHarnessDefaultsHelpers(t *testing.T) {
+func TestValidateCostBudgetNegativeMaxTokens(t *testing.T) {
 	cfg := validConfig()
-
-	if got := cfg.EffectiveProtectedSurfaces(); !reflect.DeepEqual(got, DefaultProtectedSurfaces) {
-		t.Fatalf("EffectiveProtectedSurfaces() = %#v, want %#v", got, DefaultProtectedSurfaces)
-	}
-	if got := cfg.EffectiveAuditLogPath(); got != DefaultAuditLogPath {
-		t.Fatalf("EffectiveAuditLogPath() = %q, want %q", got, DefaultAuditLogPath)
-	}
-	if !cfg.ObservabilityEnabled() {
-		t.Fatal("ObservabilityEnabled() = false, want true")
-	}
-	if got := cfg.ObservabilitySampleRate(); got != 1.0 {
-		t.Fatalf("ObservabilitySampleRate() = %v, want 1.0", got)
-	}
-	if budget := cfg.VesselBudget(); budget != nil {
-		t.Fatalf("VesselBudget() = %#v, want nil", budget)
-	}
-
-	policies := cfg.BuildIntermediaryPolicies()
-	if len(policies) != 1 {
-		t.Fatalf("len(BuildIntermediaryPolicies()) = %d, want 1", len(policies))
-	}
-	if policies[0].Name != "default" {
-		t.Fatalf("BuildIntermediaryPolicies()[0].Name = %q, want %q", policies[0].Name, "default")
-	}
-
-	auditLog := intermediary.NewAuditLog(filepath.Join(t.TempDir(), "audit.jsonl"))
-	interm := intermediary.NewIntermediary(policies, auditLog, nil)
-
-	deny := interm.Evaluate(intermediary.Intent{
-		Action:   "file_write",
-		Resource: ".xylem/HARNESS.md",
-		AgentID:  "vessel-1",
-	})
-	if deny.Effect != intermediary.Deny {
-		t.Fatalf("default deny effect = %q, want %q", deny.Effect, intermediary.Deny)
-	}
-
-	requireApproval := interm.Evaluate(intermediary.Intent{
-		Action:   "git_push",
-		Resource: "main",
-		AgentID:  "vessel-2",
-	})
-	if requireApproval.Effect != intermediary.RequireApproval {
-		t.Fatalf("default require_approval effect = %q, want %q", requireApproval.Effect, intermediary.RequireApproval)
-	}
-
-	allow := interm.Evaluate(intermediary.Intent{
-		Action:   "phase_execute",
-		Resource: "fix",
-		AgentID:  "vessel-3",
-	})
-	if allow.Effect != intermediary.Allow {
-		t.Fatalf("default allow effect = %q, want %q", allow.Effect, intermediary.Allow)
-	}
-}
-
-// TestWS6S26LegacyConfigBackwardsCompat verifies that configs without
-// harness, observability, or cost sections still load cleanly and expose safe
-// helper defaults.
-//
-// Covers: WS6 S26.
-func TestWS6S26LegacyConfigBackwardsCompat(t *testing.T) {
-	path := writeConfigFile(t, `sources:
-  github:
-    type: github
-    repo: owner/name
-    tasks:
-      fix-bugs:
-        labels: [bug]
-        workflow: fix-bug
-concurrency: 2
-max_turns: 50
-timeout: "30m"
-claude:
-  command: claude
-`)
-
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error = %v, want nil for legacy config", err)
-	}
-	if cfg.Concurrency != 2 {
-		t.Errorf("Concurrency = %d, want 2", cfg.Concurrency)
-	}
-	if cfg.MaxTurns != 50 {
-		t.Errorf("MaxTurns = %d, want 50", cfg.MaxTurns)
-	}
-	if surfaces := cfg.EffectiveProtectedSurfaces(); !reflect.DeepEqual(surfaces, DefaultProtectedSurfaces) {
-		t.Errorf("EffectiveProtectedSurfaces() = %#v, want %#v", surfaces, DefaultProtectedSurfaces)
-	}
-	if got := cfg.EffectiveAuditLogPath(); got != DefaultAuditLogPath {
-		t.Errorf("EffectiveAuditLogPath() = %q, want %q", got, DefaultAuditLogPath)
-	}
-	if !cfg.ObservabilityEnabled() {
-		t.Error("ObservabilityEnabled() = false, want true")
-	}
-	if got := cfg.ObservabilitySampleRate(); got != 1.0 {
-		t.Errorf("ObservabilitySampleRate() = %v, want 1.0", got)
-	}
-	if budget := cfg.VesselBudget(); budget != nil {
-		t.Errorf("VesselBudget() = %#v, want nil", budget)
-	}
-
-	policies := cfg.BuildIntermediaryPolicies()
-	if len(policies) != 1 {
-		t.Fatalf("len(BuildIntermediaryPolicies()) = %d, want 1", len(policies))
-	}
-	if policies[0].Name != "default" {
-		t.Errorf("BuildIntermediaryPolicies()[0].Name = %q, want %q", policies[0].Name, "default")
-	}
-}
-
-func TestEffectiveProtectedSurfacesNoneDisablesProtection(t *testing.T) {
-	cfg := validConfig()
-	cfg.Harness.ProtectedSurfaces.Paths = []string{"none"}
-
-	if got := cfg.EffectiveProtectedSurfaces(); got != nil {
-		t.Fatalf("EffectiveProtectedSurfaces() = %#v, want nil", got)
-	}
-}
-
-func TestValidateHarnessProtectedSurfaceGlobInvalid(t *testing.T) {
-	path := writeConfigFile(t, `sources:
-  github:
-    type: github
-    repo: owner/name
-    tasks:
-      fix-bugs:
-        labels: [bug]
-        workflow: fix-bug
-concurrency: 2
-max_turns: 50
-timeout: "30m"
-claude:
-  command: "claude"
-harness:
-  protected_surfaces:
-    paths:
-      - "[invalid-glob"
-`)
-
-	_, err := Load(path)
-	requireErrorContains(t, err, "harness.protected_surfaces.paths")
-	requireErrorContains(t, err, "invalid glob")
-	requireErrorContains(t, err, "[invalid-glob")
-}
-
-func TestValidateHarnessPolicyEffectInvalid(t *testing.T) {
-	path := writeConfigFile(t, `sources:
-  github:
-    type: github
-    repo: owner/name
-    tasks:
-      fix-bugs:
-        labels: [bug]
-        workflow: fix-bug
-concurrency: 2
-max_turns: 50
-timeout: "30m"
-claude:
-  command: "claude"
-harness:
-  policy:
-    rules:
-      - action: "file_write"
-        resource: "*"
-        effect: "approve_maybe"
-`)
-
-	_, err := Load(path)
-	requireErrorContains(t, err, "harness.policy.rules[0]")
-	requireErrorContains(t, err, "invalid effect")
-	requireErrorContains(t, err, "approve_maybe")
-}
-
-func TestValidateObservabilitySampleRateInvalid(t *testing.T) {
-	cfg := validConfig()
-	cfg.Observability.SampleRate = -0.5
+	cfg.Cost.Budget = &BudgetConfig{MaxTokens: -1}
 
 	err := cfg.Validate()
-	requireErrorContains(t, err, "observability.sample_rate")
-}
-
-func TestValidateCostBudgetNegativeValues(t *testing.T) {
-	tests := []struct {
-		name   string
-		budget *BudgetConfig
-		want   string
-	}{
-		{
-			name:   "negative max cost",
-			budget: &BudgetConfig{MaxCostUSD: -1.0},
-			want:   "cost.budget.max_cost_usd",
-		},
-		{
-			name:   "negative max tokens",
-			budget: &BudgetConfig{MaxTokens: -1},
-			want:   "cost.budget.max_tokens",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.Cost.Budget = tt.budget
-
-			err := cfg.Validate()
-			requireErrorContains(t, err, tt.want)
-		})
-	}
+	requireErrorContains(t, err, "cost.budget.max_tokens")
 }
 
 func TestLoadDefaultModel(t *testing.T) {
@@ -1476,4 +1183,217 @@ func TestValidateSourceLLMInvalid(t *testing.T) {
 	}
 	err := cfg.Validate()
 	requireErrorContains(t, err, "llm must be")
+}
+
+func writeSmokeConfigFile(t *testing.T, extra string) string {
+	t.Helper()
+
+	return writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+`+extra)
+}
+
+func newSmokeIntermediary(t *testing.T, cfg *Config) *intermediary.Intermediary {
+	t.Helper()
+
+	auditLog := intermediary.NewAuditLog(filepath.Join(t.TempDir(), "audit.jsonl"))
+	return intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+}
+
+func TestSmoke_S1_FullConfigLoadsWithHarnessSection(t *testing.T) {
+	path := writeSmokeConfigFile(t, `state_dir: ".xylem"
+harness:
+  audit_log: "audit.jsonl"
+  protected_surfaces:
+    paths:
+      - ".xylem/HARNESS.md"
+      - ".xylem.yml"
+      - ".xylem/workflows/*.yaml"
+      - ".xylem/prompts/*/*.md"
+  policy:
+    rules:
+      - action: "file_write"
+        resource: ".xylem/*"
+        effect: "deny"
+      - action: "git_push"
+        resource: "*"
+        effect: "require_approval"
+      - action: "pr_create"
+        resource: "*"
+        effect: "require_approval"
+      - action: "*"
+        resource: "*"
+        effect: "allow"
+observability:
+  enabled: true
+  sample_rate: 1.0
+cost:
+  budget:
+    max_cost_usd: 10.0
+    max_tokens: 1000000
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "audit.jsonl", cfg.Harness.AuditLog)
+	require.Len(t, cfg.Harness.ProtectedSurfaces.Paths, 4)
+	require.Len(t, cfg.Harness.Policy.Rules, 4)
+	require.NotNil(t, cfg.Observability.Enabled)
+	assert.True(t, *cfg.Observability.Enabled)
+	assert.Equal(t, 1.0, cfg.Observability.SampleRate)
+	require.NotNil(t, cfg.Cost.Budget)
+	assert.Equal(t, 10.0, cfg.Cost.Budget.MaxCostUSD)
+	assert.Equal(t, 1000000, cfg.Cost.Budget.MaxTokens)
+}
+
+func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
+	cfg, err := Load(writeSmokeConfigFile(t, ""))
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.Equal(t, DefaultProtectedSurfaces, cfg.EffectiveProtectedSurfaces())
+	assert.Equal(t, DefaultAuditLogPath, cfg.EffectiveAuditLogPath())
+	assert.True(t, cfg.ObservabilityEnabled())
+	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
+	assert.Nil(t, cfg.VesselBudget())
+
+	policies := cfg.BuildIntermediaryPolicies()
+	require.Len(t, policies, 1)
+	assert.Equal(t, "default", policies[0].Name)
+}
+
+func TestSmoke_S3_PathsNoneDisablesProtection(t *testing.T) {
+	cfg, err := Load(writeSmokeConfigFile(t, `harness:
+  protected_surfaces:
+    paths: ["none"]
+`))
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Nil(t, cfg.EffectiveProtectedSurfaces())
+}
+
+func TestSmoke_S4_InvalidGlobRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  protected_surfaces:
+    paths:
+      - "[invalid-glob"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.protected_surfaces.paths")
+	assert.Contains(t, err.Error(), "invalid glob")
+	assert.Contains(t, err.Error(), "[invalid-glob")
+}
+
+func TestSmoke_S5_InvalidPolicyEffectRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  policy:
+    rules:
+      - action: "file_write"
+        resource: "*"
+        effect: "approve_maybe"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.policy.rules[0]")
+	assert.Contains(t, err.Error(), "invalid effect")
+	assert.Contains(t, err.Error(), "approve_maybe")
+}
+
+func TestSmoke_S6_DefaultPolicyDeniesHarnessWrite(t *testing.T) {
+	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "vessel-001",
+	})
+
+	assert.Equal(t, intermediary.Deny, result.Effect)
+	require.NotNil(t, result.MatchedRule)
+	assert.Equal(t, "file_write", result.MatchedRule.Action)
+	assert.Equal(t, ".xylem/HARNESS.md", result.MatchedRule.Resource)
+}
+
+func TestSmoke_S7_DefaultPolicyRequiresApprovalForGitPush(t *testing.T) {
+	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+		Action:   "git_push",
+		Resource: "main",
+		AgentID:  "vessel-002",
+	})
+
+	assert.Equal(t, intermediary.RequireApproval, result.Effect)
+	require.NotNil(t, result.MatchedRule)
+	assert.Equal(t, "git_push", result.MatchedRule.Action)
+	assert.Equal(t, "*", result.MatchedRule.Resource)
+}
+
+func TestSmoke_S8_DefaultPolicyAllowsPhaseExecute(t *testing.T) {
+	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+		Action:   "phase_execute",
+		Resource: "lint",
+		AgentID:  "vessel-003",
+	})
+
+	assert.Equal(t, intermediary.Allow, result.Effect)
+	require.NotNil(t, result.MatchedRule)
+	assert.Equal(t, "*", result.MatchedRule.Action)
+	assert.Equal(t, "*", result.MatchedRule.Resource)
+}
+
+func TestSmoke_S29_ObservabilityDefaultsWhenAbsent(t *testing.T) {
+	cfg := Config{}
+
+	assert.True(t, cfg.ObservabilityEnabled())
+	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
+}
+
+func TestSmoke_S30_CostBudgetLoadsCorrectly(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  budget:
+    max_cost_usd: 5.0
+    max_tokens: 500000
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	budget := cfg.VesselBudget()
+	require.NotNil(t, budget)
+	assert.Equal(t, 5.0, budget.CostLimitUSD)
+	assert.Equal(t, 500000, budget.TokenLimit)
+}
+
+func TestSmoke_S31_NegativeSampleRateRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `observability:
+  sample_rate: -0.5
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "observability.sample_rate")
+}
+
+func TestSmoke_S32_NegativeMaxCostRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  budget:
+    max_cost_usd: -1.0
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cost.budget.max_cost_usd")
 }
