@@ -173,7 +173,7 @@ type Source interface {
 | `GitHubMerge` | `github-merge` | `merge/pr-<N>-<slug>` | None |
 | `Manual` | `manual` | `task/<id>-<slug>` | None |
 
-All GitHub-based sources (`GitHub`, `GitHubPR`, `GitHubPREvents`, `GitHubMerge`) apply deduplication checks during scanning: excluded labels, existing queue entries with the same ref, remote branches matching the issue/PR number, and open PRs with matching branch prefixes. The exact checks vary by source -- for example, `GitHubMerge` deduplicates by merge commit OID, and `GitHubPREvents` deduplicates by event-specific ref fragments (label, review ID, comment ID, or head SHA for check failures).
+GitHub-backed sources perform source-specific deduplication during scanning rather than one uniform set of checks. `GitHub` and `GitHubPR` check excluded labels, existing queue entries with the same ref, remote branches matching the issue/PR number, and open PRs with matching branch prefixes. `GitHubMerge` primarily deduplicates via merge commit OID. `GitHubPREvents` deduplicates via event-specific ref fragments (label, review ID, comment ID, or head SHA for check failures).
 
 ### Workflow
 
@@ -509,8 +509,8 @@ The `memory` and other harness packages use `pgregory.net/rapid` for property-ba
 
 - Queue tests create temp directories for JSONL files, ensuring test isolation
 - Worktree tests create temp directories for mock git repositories
-- The `source` package has no unit tests by design -- it is tested through the scanner and runner integration tests
-- CI runs on every push and PR to `main` via `.github/workflows/ci.yml`. It checks formatting (`goimports`), runs `go vet`, lints with `golangci-lint`, builds the binary (`go build ./cmd/xylem`), and runs the test suite (`go test ./...`). Additional workflows handle releases (`release.yml`) and DTU canary checks (`dtu-canary.yml`). There is no Makefile
+- The `source` package includes unit tests for source-specific behavior and is also exercised through the scanner and runner integration tests
+- CI runs for pushes and PRs to `main` when changes touch `cli/**` or `.golangci.yml` via `.github/workflows/ci.yml`. It checks formatting (`goimports`), runs `go vet`, lints with `golangci-lint`, builds the binary (`go build ./cmd/xylem`), and runs the test suite (`go test ./...`). Additional workflows handle releases (`release.yml`) and DTU canary checks (`dtu-canary.yml`). There is no Makefile
 
 ### Running tests
 
