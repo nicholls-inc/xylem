@@ -1,1 +1,1 @@
-Deploy fix for issue {{.Issue.Number}}: {{.Issue.Title}}.
+Prepare the deploy for issue #{{.Issue.Number}}.

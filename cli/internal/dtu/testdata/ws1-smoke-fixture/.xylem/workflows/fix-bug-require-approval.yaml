@@ -1,5 +1,5 @@
 name: fix-bug-require-approval
-description: "WS1 require-approval workflow"
+description: WS1 require-approval smoke workflow.
 phases:
   - name: deploy
     prompt_file: .xylem/prompts/fix-bug-require-approval/deploy.md

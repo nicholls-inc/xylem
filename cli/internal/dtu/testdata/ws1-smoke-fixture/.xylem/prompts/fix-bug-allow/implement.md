@@ -1,1 +1,1 @@
-Implement fix for issue {{.Issue.Number}}: {{.Issue.Title}}.
+Implement the fix for issue #{{.Issue.Number}} and summarize the change.

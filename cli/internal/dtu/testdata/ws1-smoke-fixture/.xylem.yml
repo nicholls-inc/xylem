@@ -18,3 +18,32 @@ max_turns: 5
 timeout: "1m"
 state_dir: ".xylem"
 default_branch: main
+harness:
+  audit_log: "audit.jsonl"
+  protected_surfaces:
+    paths:
+      - ".xylem/HARNESS.md"
+      - ".xylem.yml"
+      - ".xylem/workflows/*.yaml"
+      - ".xylem/prompts/*/*.md"
+  policy:
+    rules:
+      - action: "file_write"
+        resource: ".xylem/*"
+        effect: "deny"
+      - action: "git_push"
+        resource: "*"
+        effect: "require_approval"
+      - action: "pr_create"
+        resource: "*"
+        effect: "require_approval"
+      - action: "*"
+        resource: "*"
+        effect: "allow"
+observability:
+  enabled: true
+  sample_rate: 1.0
+cost:
+  budget:
+    max_cost_usd: 10.0
+    max_tokens: 1000000

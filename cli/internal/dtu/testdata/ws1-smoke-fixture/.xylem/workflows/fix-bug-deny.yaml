@@ -1,5 +1,5 @@
 name: fix-bug-deny
-description: "WS1 deny-policy workflow"
+description: WS1 deny-policy smoke workflow.
 phases:
   - name: solve
     prompt_file: .xylem/prompts/fix-bug-deny/solve.md

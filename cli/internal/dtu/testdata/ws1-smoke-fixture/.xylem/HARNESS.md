@@ -1,3 +1,5 @@
 # WS1 smoke fixture harness
 
-This checked-in fixture seeds the `.xylem` control-plane files used by the WS1 DTU smoke tests.
+- Treat xylem control files as protected surfaces.
+- Prefer safe, reviewable changes in prompts and workflows.
+- Leave an audit trail for high-risk actions.
