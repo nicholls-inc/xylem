@@ -144,7 +144,11 @@ The `Source` interface defines how xylem discovers work. Each source implementat
 type Source interface {
     Name() string
     Scan(ctx context.Context) ([]queue.Vessel, error)
+    OnEnqueue(ctx context.Context, vessel queue.Vessel) error
     OnStart(ctx context.Context, vessel queue.Vessel) error
+    OnComplete(ctx context.Context, vessel queue.Vessel) error
+    OnFail(ctx context.Context, vessel queue.Vessel) error
+    OnTimedOut(ctx context.Context, vessel queue.Vessel) error
     BranchName(vessel queue.Vessel) string
 }
 ```
@@ -152,17 +156,24 @@ type Source interface {
 **Methods:**
 
 - `Scan()` -- Discover new tasks and return candidate vessels. Called by the scanner.
-- `OnStart()` -- Side effects when a vessel starts running. The GitHub source uses this to add an `in-progress` label. The Manual source is a no-op.
+- `OnEnqueue()` -- Side effects when a vessel is enqueued. The GitHub source uses this to add a configured `queued` status label.
+- `OnStart()` -- Side effects when a vessel starts running. The GitHub source adds a configured `running` status label (or falls back to `in-progress`).
+- `OnComplete()` -- Side effects when a vessel completes. The GitHub source adds a configured `completed` status label.
+- `OnFail()` -- Side effects when a vessel fails. The GitHub source adds a configured `failed` status label.
+- `OnTimedOut()` -- Side effects when a vessel's gate times out. The GitHub source adds a configured `timed_out` status label.
 - `BranchName()` -- Generate the git branch name for a vessel's worktree.
 
 **Implementations:**
 
 | Source | `Name()` | Branch pattern | `OnStart()` side effect |
 |--------|----------|----------------|------------------------|
-| `GitHub` | `github-issue` | `fix/issue-42-login-crash` or `feat/issue-42-add-search` | Adds `in-progress` label |
+| `GitHub` | `github-issue` | `fix/issue-<N>-<slug>` or `feat/issue-<N>-<slug>` | Adds status label (default: `in-progress`) |
+| `GitHubPR` | `github-pr` | `review/pr-<N>-<slug>` | Adds status label (default: `in-progress`) |
+| `GitHubPREvents` | `github-pr-events` | `event/pr-<N>-<eventType>-<slug>` | None |
+| `GitHubMerge` | `github-merge` | `merge/pr-<N>-<slug>` | None |
 | `Manual` | `manual` | `task/<id>-<slug>` | None |
 
-The GitHub source applies several deduplication checks during scanning: excluded labels, existing queue entries with the same ref, remote branches matching the issue number, and open PRs with matching branch prefixes.
+GitHub-backed sources perform source-specific deduplication during scanning rather than one uniform set of checks. `GitHub` and `GitHubPR` check excluded labels, existing queue entries with the same ref, remote branches matching the issue/PR number, and open PRs with matching branch prefixes. `GitHubMerge` primarily deduplicates via merge commit OID. `GitHubPREvents` deduplicates via event-specific ref fragments (label, review ID, comment ID, or head SHA for check failures).
 
 ### Workflow
 
@@ -214,7 +225,7 @@ Command gates enable automated quality enforcement (run tests, lint, type-check)
 
 ## Package map
 
-All Go code lives under `cli/`. The packages divide into two groups: **CLI packages** that power the `xylem` binary, and **agent harness packages** that are standalone building blocks not yet wired into CLI commands.
+All Go code lives under `cli/`. The packages divide into three groups: **CLI packages** that power the `xylem` binary, **agent harness packages** that are standalone building blocks not yet wired into CLI commands, and **test infrastructure packages** that support the DTU offline testing framework.
 
 ### CLI packages
 
@@ -227,7 +238,7 @@ These packages are used by the CLI commands (`scan`, `drain`, `daemon`, `enqueue
 | `queue` | JSONL-backed persistent work queue with file locking and vessel state machine |
 | `scanner` | Queries configured sources, deduplicates, enqueues vessels |
 | `runner` | Dequeues vessels, creates worktrees, executes workflow phases, handles gates |
-| `source` | `Source` interface + `GitHub` and `Manual` implementations |
+| `source` | `Source` interface + `GitHub`, `GitHubPR`, `GitHubPREvents`, `GitHubMerge`, and `Manual` implementations |
 | `workflow` | YAML workflow definition loader and validation |
 | `phase` | Go template rendering for prompt files with truncation limits |
 | `gate` | Command execution and GitHub label polling for inter-phase quality checks |
@@ -250,7 +261,18 @@ These packages are standalone, composable building blocks for agent orchestratio
 | `intermediary` | Deterministic intent validation with policy rules, audit logging, glob-based file permissions |
 | `bootstrap` | Repository analysis, AGENTS.md generation, documentation scaffolding, convention detection |
 | `catalog` | Tool catalog with descriptions, parameter types, overlap detection, permission scopes |
+| `evidence` | Verification claims and evidence manifests with typed assurance levels (proved, mechanically_checked, behaviorally_checked, observed_in_situ) |
+| `surface` | SHA256 surface integrity snapshots for protected files, violation detection against baseline |
 | `observability` | OpenTelemetry span attributes for missions, agents, and signals with OTLP gRPC export |
+
+### Test infrastructure packages
+
+These packages support the Digital Twin Universe (DTU) framework for offline scenario testing:
+
+| Package | Purpose |
+|---------|---------|
+| `dtu` | DTU manifest loading, clock simulation, event replay, verification suites, provider script generation |
+| `dtushim` | Shim dispatch for replacing external commands (`gh`, `git`, `claude`, `copilot`) with DTU-controlled behavior |
 
 ## Control flow
 
@@ -373,11 +395,13 @@ Every vessel runs in its own git worktree. This provides filesystem isolation be
 
 **Branch naming conventions:**
 
-| Source | Workflow contains "fix" | Pattern |
-|--------|------------------------|---------|
-| GitHub | Yes | `fix/issue-<N>-<slug>` |
-| GitHub | No | `feat/issue-<N>-<slug>` |
-| Manual | -- | `task/<id>-<slug>` |
+| Source | Pattern |
+|--------|---------|
+| GitHub | `fix/issue-<N>-<slug>` or `feat/issue-<N>-<slug>` (based on workflow name) |
+| GitHubPR | `review/pr-<N>-<slug>` |
+| GitHubPREvents | `event/pr-<N>-<eventType>-<slug>` |
+| GitHubMerge | `merge/pr-<N>-<slug>` |
+| Manual | `task/<id>-<slug>` |
 
 The slug is derived from the last path component of the reference URL, lowercased, non-alphanumeric characters replaced with hyphens, and truncated to 20 characters.
 
@@ -390,7 +414,8 @@ The `cli/internal/` tree contains a second group of packages that are **not used
 The distinction matters for contributors:
 
 - **CLI packages** (queue, runner, scanner, source, workflow, gate, phase, worktree, reporter, config) are the production system. Changes here affect the `xylem` binary directly.
-- **Harness packages** (orchestrator, mission, memory, signal, evaluator, cost, ctxmgr, intermediary, bootstrap, catalog, observability) are standalone libraries. They have their own test suites and no runtime coupling to the CLI.
+- **Harness packages** (orchestrator, mission, memory, signal, evaluator, cost, ctxmgr, intermediary, bootstrap, catalog, evidence, surface, observability) are standalone libraries. They have their own test suites and no runtime coupling to the CLI.
+- **Test infrastructure packages** (dtu, dtushim) support offline scenario testing via the Digital Twin Universe framework.
 
 ### What the harness enables
 
@@ -484,8 +509,8 @@ The `memory` and other harness packages use `pgregory.net/rapid` for property-ba
 
 - Queue tests create temp directories for JSONL files, ensuring test isolation
 - Worktree tests create temp directories for mock git repositories
-- The `source` package has no unit tests by design -- it is tested through the scanner and runner integration tests
-- There is no CI pipeline, Makefile, or linter configuration. The test command is `go test ./...` from the `cli/` directory
+- The `source` package includes unit tests for source-specific behavior and is also exercised through the scanner and runner integration tests
+- CI runs for pushes and PRs to `main` when changes touch `cli/**` or `.golangci.yml` via `.github/workflows/ci.yml`. It checks formatting (`goimports`), runs `go vet`, lints with `golangci-lint`, builds the binary (`go build ./cmd/xylem`), and runs the test suite (`go test ./...`). Additional workflows handle releases (`release.yml`) and DTU canary checks (`dtu-canary.yml`). There is no Makefile
 
 ### Running tests
 
