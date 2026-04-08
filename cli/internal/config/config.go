@@ -110,6 +110,7 @@ type CopilotConfig struct {
 type DaemonConfig struct {
 	ScanInterval  string `yaml:"scan_interval,omitempty"`
 	DrainInterval string `yaml:"drain_interval,omitempty"`
+	AutoUpgrade   bool   `yaml:"auto_upgrade,omitempty"`
 }
 
 type HarnessConfig struct {

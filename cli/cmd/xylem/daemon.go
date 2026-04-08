@@ -28,10 +28,6 @@ import (
 // finish after receiving a shutdown signal before returning anyway.
 const drainShutdownTimeout = 30 * time.Second
 
-// defaultStaleTimeout is the fallback timeout for considering a running vessel
-// stale when no explicit timeout is configured.
-const defaultStaleTimeout = 2 * time.Hour
-
 func newDaemonCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "daemon",
@@ -54,12 +50,23 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	}
 	defer unlock()
 
-	// P0-2: Reconcile any vessels left in running state from a previous daemon.
-	var timeout time.Duration
-	if cfg.Timeout != "" {
-		timeout, _ = time.ParseDuration(cfg.Timeout)
+	// Auto-upgrade: pull latest main, rebuild, exec() if binary changed.
+	// Runs after PID lock (prevents concurrent upgrades) and before any vessel
+	// processing. If exec() fires, the new process re-acquires the lock.
+	if cfg.Daemon.AutoUpgrade {
+		execPath, execErr := os.Executable()
+		if execErr != nil {
+			log.Printf("daemon: auto-upgrade: resolve executable path: %v (skipping upgrade)", execErr)
+		} else {
+			repoDir := filepath.Dir(filepath.Dir(execPath))
+			selfUpgrade(repoDir, execPath)
+		}
 	}
-	reconcileStaleVessels(q, timeout)
+
+	// P0-2: Reconcile any vessels left in running state from a previous daemon.
+	// The singleton lock guarantees no other daemon is running, so all running
+	// vessels are definitionally orphaned.
+	reconcileStaleVessels(q, wt)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -218,40 +225,38 @@ func logTickSummary(q *queue.Queue) {
 		counts[queue.StateCompleted], counts[queue.StateFailed])
 }
 
-// reconcileStaleVessels transitions any running vessels that have exceeded the
-// given timeout to failed state. This cleans up orphaned vessels left behind
-// when a previous daemon was killed. If timeout is zero, defaultStaleTimeout
-// is used.
-func reconcileStaleVessels(q *queue.Queue, timeout time.Duration) {
-	if timeout == 0 {
-		timeout = defaultStaleTimeout
-	}
-
+// reconcileStaleVessels transitions ALL running vessels to timed_out. The
+// singleton daemon lock guarantees that no other daemon is executing vessels
+// when this runs, so every running vessel is orphaned by definition. The
+// timed_out state supports retry via `xylem retry`.
+func reconcileStaleVessels(q *queue.Queue, wt *worktree.Manager) {
 	vessels, err := q.List()
 	if err != nil {
 		log.Printf("daemon: reconcile: failed to list vessels: %v", err)
 		return
 	}
 
-	now := daemonNow()
+	var recovered int
 	for _, v := range vessels {
 		if v.State != queue.StateRunning {
 			continue
 		}
-		if v.StartedAt == nil {
-			// No start time recorded — treat as stale.
-			log.Printf("daemon: reconcile: vessel %s in running state with no start time, marking failed", v.ID)
-			if err := q.Update(v.ID, queue.StateFailed, "orphaned by daemon restart"); err != nil {
-				log.Printf("daemon: reconcile: failed to update vessel %s: %v", v.ID, err)
-			}
+		log.Printf("daemon: reconcile: vessel %s orphaned in running state, marking timed_out", v.ID)
+		if err := q.Update(v.ID, queue.StateTimedOut, "orphaned by daemon restart"); err != nil {
+			log.Printf("daemon: reconcile: failed to update vessel %s: %v", v.ID, err)
 			continue
 		}
-		if v.StartedAt.Add(timeout).Before(now) {
-			log.Printf("daemon: reconcile: vessel %s started at %s exceeded timeout %s, marking failed", v.ID, v.StartedAt.Format(time.RFC3339), timeout)
-			if err := q.Update(v.ID, queue.StateFailed, "orphaned by daemon restart"); err != nil {
-				log.Printf("daemon: reconcile: failed to update vessel %s: %v", v.ID, err)
+		recovered++
+
+		// Best-effort worktree cleanup.
+		if v.WorktreePath != "" && wt != nil {
+			if err := wt.Remove(context.Background(), v.WorktreePath); err != nil {
+				log.Printf("daemon: reconcile: failed to remove worktree for %s: %v", v.ID, err)
 			}
 		}
+	}
+	if recovered > 0 {
+		log.Printf("daemon: reconcile: recovered %d orphaned vessel(s)", recovered)
 	}
 }
 
