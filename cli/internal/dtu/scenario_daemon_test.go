@@ -3,7 +3,6 @@ package dtu_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	dtu "github.com/nicholls-inc/xylem/cli/internal/dtu"
@@ -15,19 +14,12 @@ import (
 // reconcileStaleVesselsForTest replicates the daemon's stale-vessel
 // reconciliation logic (from cli/cmd/xylem/daemon.go) so the DTU scenario
 // test can exercise recovery without importing the main package.
-func reconcileStaleVesselsForTest(q *queue.Queue, timeout time.Duration) int {
-	if timeout == 0 {
-		timeout = 2 * time.Hour
-	}
-
+// The singleton daemon lock guarantees all running vessels are orphaned,
+// so no timeout heuristic is needed.
+func reconcileStaleVesselsForTest(q *queue.Queue) int {
 	vessels, err := q.List()
 	if err != nil {
 		return 0
-	}
-
-	now, err := dtu.RuntimeNow()
-	if err != nil {
-		now = time.Now().UTC()
 	}
 
 	reconciled := 0
@@ -35,15 +27,8 @@ func reconcileStaleVesselsForTest(q *queue.Queue, timeout time.Duration) int {
 		if v.State != queue.StateRunning {
 			continue
 		}
-		if v.StartedAt == nil {
-			q.Update(v.ID, queue.StateFailed, "orphaned by daemon restart") //nolint:errcheck
-			reconciled++
-			continue
-		}
-		if v.StartedAt.Add(timeout).Before(now) {
-			q.Update(v.ID, queue.StateFailed, "orphaned by daemon restart") //nolint:errcheck
-			reconciled++
-		}
+		q.Update(v.ID, queue.StateTimedOut, "orphaned by daemon restart") //nolint:errcheck
+		reconciled++
 	}
 	return reconciled
 }
@@ -110,24 +95,21 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 		t.Fatal("vessel.StartedAt = nil after Dequeue()")
 	}
 
-	// --- Phase 3: Simulate daemon crash by advancing time past the timeout ---
-	if err := dtu.AdvanceRuntimeClock(time.Hour); err != nil {
-		t.Fatalf("AdvanceRuntimeClock() error = %v", err)
-	}
-
-	// --- Phase 4: Daemon restarts and reconciles stale vessels ---
-	reconciled := reconcileStaleVesselsForTest(env.queue, 45*time.Minute)
+	// --- Phase 3: Daemon restarts and reconciles orphaned vessels ---
+	// No need to advance time — the singleton lock means all running vessels
+	// are orphaned by definition.
+	reconciled := reconcileStaleVesselsForTest(env.queue)
 	if reconciled != 1 {
 		t.Fatalf("reconciled = %d, want 1", reconciled)
 	}
 
-	// Verify the stale vessel transitioned to failed.
+	// Verify the orphaned vessel transitioned to timed_out.
 	updated, err := env.queue.FindByID("issue-4")
 	if err != nil {
 		t.Fatalf("FindByID(issue-4) error = %v", err)
 	}
-	if updated.State != queue.StateFailed {
-		t.Fatalf("updated.State = %q, want %q", updated.State, queue.StateFailed)
+	if updated.State != queue.StateTimedOut {
+		t.Fatalf("updated.State = %q, want %q", updated.State, queue.StateTimedOut)
 	}
 	if updated.Error != "orphaned by daemon restart" {
 		t.Fatalf("updated.Error = %q, want %q", updated.Error, "orphaned by daemon restart")
@@ -186,7 +168,7 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 		t.Fatalf("completed.State = %q, want %q", completed.State, queue.StateCompleted)
 	}
 
-	// Verify the full queue state: stale vessel still failed, new vessel completed.
+	// Verify the full queue state: orphaned vessel timed_out, new vessel completed.
 	vessels, err := env.queue.List()
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
@@ -195,8 +177,8 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 	for _, v := range vessels {
 		states[v.ID] = v.State
 	}
-	if states["issue-4"] != queue.StateFailed {
-		t.Fatalf("queue[issue-4] = %q, want %q", states["issue-4"], queue.StateFailed)
+	if states["issue-4"] != queue.StateTimedOut {
+		t.Fatalf("queue[issue-4] = %q, want %q", states["issue-4"], queue.StateTimedOut)
 	}
 	if states["manual-recovery-1"] != queue.StateCompleted {
 		t.Fatalf("queue[manual-recovery-1] = %q, want %q", states["manual-recovery-1"], queue.StateCompleted)

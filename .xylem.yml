@@ -13,6 +13,7 @@ sources:
         workflow: fix-bug
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   features:
     type: github
@@ -25,6 +26,7 @@ sources:
         workflow: implement-feature
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   triage:
     type: github
@@ -39,6 +41,7 @@ sources:
         workflow: triage
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   refinement:
     type: github
@@ -50,6 +53,7 @@ sources:
         workflow: refine-issue
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   # Harness implementation issues
   harness-impl:
@@ -64,6 +68,7 @@ sources:
         status_labels:
           running: in-progress
           failed: xylem-failed
+          timed_out: xylem-failed
 
   # PR review + CI failure monitoring for harness PRs
   # NOTE: review_submitted and checks_failed fire for ALL open PRs.

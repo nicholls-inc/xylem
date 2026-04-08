@@ -326,38 +326,33 @@ func TestWS1S28DaemonPathWiresScaffolding(t *testing.T) {
 }
 
 func TestReconcileStaleVessels(t *testing.T) {
-	t.Run("stale running vessel transitions to failed", func(t *testing.T) {
+	t.Run("orphaned running vessel transitions to timed_out", func(t *testing.T) {
 		dir := t.TempDir()
 		q := queue.New(filepath.Join(dir, "queue.jsonl"))
 		now := time.Now().UTC()
-		staleStart := now.Add(-3 * time.Hour)
 
-		// Enqueue then dequeue to move to running state (sets StartedAt).
 		q.Enqueue(queue.Vessel{ID: "stale-1", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
 		v, _ := q.Dequeue()
 		if v == nil {
 			t.Fatal("expected vessel from dequeue")
 			return
 		}
-		// Backdate StartedAt to make it stale.
-		v.StartedAt = &staleStart
-		q.UpdateVessel(*v) //nolint:errcheck
 
-		reconcileStaleVessels(q, 2*time.Hour)
+		reconcileStaleVessels(q, nil)
 
 		updated, err := q.FindByID("stale-1")
 		if err != nil {
 			t.Fatalf("failed to find vessel: %v", err)
 		}
-		if updated.State != queue.StateFailed {
-			t.Errorf("expected state %s, got %s", queue.StateFailed, updated.State)
+		if updated.State != queue.StateTimedOut {
+			t.Errorf("expected state %s, got %s", queue.StateTimedOut, updated.State)
 		}
 		if updated.Error != "orphaned by daemon restart" {
 			t.Errorf("expected error 'orphaned by daemon restart', got %q", updated.Error)
 		}
 	})
 
-	t.Run("recent running vessel is not reconciled", func(t *testing.T) {
+	t.Run("recently started running vessel is also recovered", func(t *testing.T) {
 		dir := t.TempDir()
 		q := queue.New(filepath.Join(dir, "queue.jsonl"))
 		now := time.Now().UTC()
@@ -368,16 +363,16 @@ func TestReconcileStaleVessels(t *testing.T) {
 			t.Fatal("expected vessel from dequeue")
 			return
 		}
-		// StartedAt is set to now by Dequeue — well within the timeout.
+		// StartedAt is set to now by Dequeue — singleton lock means it's still orphaned.
 
-		reconcileStaleVessels(q, 2*time.Hour)
+		reconcileStaleVessels(q, nil)
 
 		updated, err := q.FindByID("recent-1")
 		if err != nil {
 			t.Fatalf("failed to find vessel: %v", err)
 		}
-		if updated.State != queue.StateRunning {
-			t.Errorf("expected state %s, got %s", queue.StateRunning, updated.State)
+		if updated.State != queue.StateTimedOut {
+			t.Errorf("expected state %s, got %s", queue.StateTimedOut, updated.State)
 		}
 	})
 
@@ -389,7 +384,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 		q.Enqueue(queue.Vessel{ID: "pending-1", Source: "manual", State: queue.StatePending, CreatedAt: now})    //nolint:errcheck
 		q.Enqueue(queue.Vessel{ID: "complete-1", Source: "manual", State: queue.StateCompleted, CreatedAt: now}) //nolint:errcheck
 
-		reconcileStaleVessels(q, 1*time.Millisecond)
+		reconcileStaleVessels(q, nil)
 
 		pending, _ := q.FindByID("pending-1")
 		if pending.State != queue.StatePending {
@@ -401,42 +396,21 @@ func TestReconcileStaleVessels(t *testing.T) {
 		}
 	})
 
-	t.Run("zero timeout uses default", func(t *testing.T) {
-		dir := t.TempDir()
-		q := queue.New(filepath.Join(dir, "queue.jsonl"))
-		now := time.Now().UTC()
-		// Started 1 hour ago — less than the 2-hour default.
-		recentStart := now.Add(-1 * time.Hour)
-
-		q.Enqueue(queue.Vessel{ID: "v1", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
-		v, _ := q.Dequeue()
-		v.StartedAt = &recentStart
-		q.UpdateVessel(*v) //nolint:errcheck
-
-		reconcileStaleVessels(q, 0) // should use defaultStaleTimeout (2h)
-
-		updated, _ := q.FindByID("v1")
-		if updated.State != queue.StateRunning {
-			t.Errorf("expected vessel to remain running with default timeout, got %s", updated.State)
-		}
-	})
-
-	t.Run("running vessel with nil StartedAt is reconciled", func(t *testing.T) {
+	t.Run("running vessel with nil StartedAt is recovered", func(t *testing.T) {
 		dir := t.TempDir()
 		q := queue.New(filepath.Join(dir, "queue.jsonl"))
 		now := time.Now().UTC()
 
 		q.Enqueue(queue.Vessel{ID: "nil-start", Source: "manual", State: queue.StatePending, CreatedAt: now}) //nolint:errcheck
 		v, _ := q.Dequeue()
-		// Clear StartedAt to simulate a legacy/corrupt entry.
 		v.StartedAt = nil
 		q.UpdateVessel(*v) //nolint:errcheck
 
-		reconcileStaleVessels(q, 2*time.Hour)
+		reconcileStaleVessels(q, nil)
 
 		updated, _ := q.FindByID("nil-start")
-		if updated.State != queue.StateFailed {
-			t.Errorf("expected state failed for nil StartedAt, got %s", updated.State)
+		if updated.State != queue.StateTimedOut {
+			t.Errorf("expected state timed_out for nil StartedAt, got %s", updated.State)
 		}
 	})
 
@@ -514,18 +488,14 @@ func TestReconcileStaleVessels(t *testing.T) {
 			t.Fatalf("Stat(%q): %v", absWorktree, err)
 		}
 
-		if err := dtu.AdvanceRuntimeClock(time.Hour); err != nil {
-			t.Fatalf("AdvanceRuntimeClock() error = %v", err)
-		}
-
-		reconcileStaleVessels(q, 45*time.Minute)
+		reconcileStaleVessels(q, nil)
 
 		updated, err := q.FindByID("issue-4")
 		if err != nil {
 			t.Fatalf("FindByID(issue-4) error = %v", err)
 		}
-		if updated.State != queue.StateFailed {
-			t.Fatalf("updated.State = %q, want %q", updated.State, queue.StateFailed)
+		if updated.State != queue.StateTimedOut {
+			t.Fatalf("updated.State = %q, want %q", updated.State, queue.StateTimedOut)
 		}
 		if updated.Error != "orphaned by daemon restart" {
 			t.Fatalf("updated.Error = %q, want %q", updated.Error, "orphaned by daemon restart")
@@ -535,9 +505,6 @@ func TestReconcileStaleVessels(t *testing.T) {
 		}
 		if updated.StartedAt == nil {
 			t.Fatal("updated.StartedAt = nil, want start timestamp")
-		}
-		if updated.EndedAt.Sub(*updated.StartedAt) < time.Hour {
-			t.Fatalf("ended-started = %s, want at least 1h", updated.EndedAt.Sub(*updated.StartedAt))
 		}
 
 		assertLabelsEqual(t, readDaemonDTULabels(t, store, "owner/repo", 4), []string{"bug", "in-progress"})

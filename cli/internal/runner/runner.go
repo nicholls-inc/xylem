@@ -260,9 +260,28 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		r.persistRunArtifacts(vessel, string(queue.StateFailed), vrs, claims, r.runtimeNow())
 	}()
 
-	// Worktree: reuse if set (resuming from waiting), otherwise create
+	// Worktree: reuse if set (resuming from waiting), otherwise create.
+	// If set but missing on disk (e.g., retry after cleanup), recreate it.
 	worktreePath := vessel.WorktreePath
-	if worktreePath == "" {
+	if worktreePath != "" {
+		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
+			log.Printf("vessel %s: worktree %s missing on disk, recreating", vessel.ID, worktreePath)
+			branchName := src.BranchName(vessel)
+			recreated, recreateErr := r.Worktree.Create(ctx, branchName)
+			if recreateErr != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("recreate missing worktree: %v", recreateErr))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return "failed"
+			}
+			worktreePath = recreated
+			vessel.WorktreePath = worktreePath
+			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+				log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
+			}
+		}
+	} else {
 		branchName := src.BranchName(vessel)
 		var err error
 		worktreePath, err = r.Worktree.Create(ctx, branchName)
