@@ -2,7 +2,7 @@
 
 **Status:** Draft
 **Date:** 2026-03-31
-**Scope:** Workstreams 1, 3, 4, 5 from the [SoTA Harness Plan](../plans/sota-harness-plan.md)
+**Scope:** Workstreams 1, 3, 4, 5, and the WS8 recurring harness review slice from the [SoTA Harness Plan](../plans/sota-harness-plan.md)
 **Inputs:** [SoTA Agent Harness Spec](sota-agent-harness-spec.md), [Harness Scorecard Report](../reports/harness-scorecard-report-2.md)
 
 ## 1. Purpose
@@ -17,8 +17,9 @@ This document provides implementation-level specifications for the first four wo
 | WS3 | Wire run-level observability and cost telemetry into the CLI path | 7.1 (1/2), 10.1 (1/2) |
 | WS4 | Formalize verification contracts and evidence levels | 6.2 (1/2), 6.4 (1/2) |
 | WS5 | Harness eval suite interface (types and schemas only) | 7.2-7.4 (0/2 each) |
+| WS8 | Recurring harness review from persisted run artifacts | 7.5 (0/2), 10.3-10.5 (partial) |
 
-**Out of scope:** WS2 (OS-level containment, egress policy, secret scoping) — deferred until WS1 and WS3 are measured. WS6-8 (context compilation, evaluator separation, agent-readable observability) — deferred until Phase 1 is complete.
+**Out of scope:** WS2 (OS-level containment, egress policy, secret scoping) — deferred until WS1 and WS3 are measured. WS6-7 and the routing/model-ladder slice of WS8 remain deferred until Phase 1 is complete.
 
 ### 1.2 Technical decisions
 
@@ -1777,6 +1778,83 @@ The following are **not implemented** by agents working from this spec:
 7. **Comparison tooling** — a lightweight script to diff `harbor analyze` JSON outputs across runs
 
 **What agents DO implement (Step 6):** the directory structure, `harbor.yaml`, `xylem_verify.py` helper module, `conftest.py`, one verification script template per category (workflow-execution and surface-protection), and the rubric TOML files. This creates the scaffolding that humans then populate with scenarios.
+
+---
+
+## 9A. WS8 recurring harness review
+
+This issue implements the WS8 review loop as a **read-only aggregation layer** over the artifacts already emitted by WS3-WS5. It does **not** auto-prune features or mutate workflows.
+
+### 9A.1 Config surface
+
+Add `harness.review` under `HarnessConfig`:
+
+```yaml
+harness:
+  review:
+    enabled: true
+    cadence: every_n_runs   # manual | every_drain | every_n_runs
+    every_n_runs: 10
+    lookback_runs: 50
+    min_samples: 3
+    output_dir: reviews
+```
+
+Rules:
+
+- `xylem review` always works, even when `enabled` is `false`.
+- Automatic generation is best-effort and never fails `drain` or `daemon`.
+- `output_dir` is relative to `state_dir` and must not escape it.
+
+### 9A.2 Artifact contract
+
+`summary.json` remains the index artifact for each vessel and now links the structured review inputs:
+
+- `evidence_manifest_path`
+- `cost_report_path`
+- `budget_alerts_path`
+- `eval_report_path`
+- `review_artifacts` (structured mirror of the same paths for future expansion)
+
+File locations for the first implementation:
+
+- `<state_dir>/phases/<vessel>/summary.json`
+- `<state_dir>/phases/<vessel>/evidence-manifest.json`
+- `<state_dir>/phases/<vessel>/cost-report.json`
+- `<state_dir>/phases/<vessel>/budget-alerts.json`
+- `<state_dir>/phases/<vessel>/quality-report.json` (optional, only when an eval report already exists)
+
+### 9A.3 Review output
+
+Add a new package `cli/internal/review/` and a new command `xylem review`.
+
+The package:
+
+1. scans historical summaries under `<state_dir>/phases/`,
+2. loads any linked evidence/cost/budget/eval artifacts that exist,
+3. rolls up recurring signals by `source + workflow + phase`,
+4. uses `cost.DetectAnomalies(...)` to flag abnormal cost spikes within a workflow history, and
+5. emits deterministic recommendations:
+   - `insufficient-data`
+   - `keep`
+   - `investigate`
+   - `prune-candidate`
+
+Outputs:
+
+- `<state_dir>/<output_dir>/harness-review.json`
+- `<state_dir>/<output_dir>/harness-review.md`
+
+### 9A.4 Recommendation rules
+
+The initial rules are intentionally conservative:
+
+- fewer than `min_samples` reviewed runs → `insufficient-data`
+- any recurring failure, failed evidence claim, eval issue, budget alert, or detected cost anomaly → `investigate`
+- at least `min_samples` clean samples but fewer than `2 * min_samples` → `keep`
+- at least `2 * min_samples` clean samples with no recurring negative signals → `prune-candidate`
+
+`prune-candidate` is advisory only. Operators must decide whether to simplify prompts, gates, or other advanced harness features.
 
 ---
 

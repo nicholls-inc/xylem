@@ -201,7 +201,11 @@ func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *workt
 	cmdRunner := newCmdRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
-	return r.Drain(ctx)
+	result, err := r.Drain(ctx)
+	if err == nil {
+		maybeAutoGenerateHarnessReview(cfg, result)
+	}
+	return result, err
 }
 
 func logTickSummary(q *queue.Queue) {

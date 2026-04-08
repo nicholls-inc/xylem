@@ -33,9 +33,9 @@ func newRootCmd() *cobra.Command {
 				return nil
 			}
 
-			// visualize is a read-only command that only parses config and
-			// workflow YAML; it doesn't shell out to git or gh.
-			skipTooling := cmd.Name() == "visualize"
+			// visualize and review are read-only commands that only parse config
+			// and local state; they don't shell out to git or gh.
+			skipTooling := cmd.Name() == "visualize" || cmd.Name() == "review"
 
 			if !skipTooling {
 				if _, err := exec.LookPath("git"); err != nil {
@@ -79,6 +79,7 @@ func newRootCmd() *cobra.Command {
 		newShimDispatchCmd(),
 		newScanCmd(),
 		newDrainCmd(),
+		newReviewCmd(),
 		newEnqueueCmd(),
 		newStatusCmd(),
 		newPauseCmd(),
