@@ -132,6 +132,7 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			srcCfg := r.sourceConfigFromMeta(j)
 			vesselTimeout, resolveErr := resolveTimeout(r.Config, srcCfg)
 			if resolveErr != nil {
+				log.Printf("warn: resolve timeout for vessel %s (config_source=%q): %v; using global timeout %s", j.ID, r.sourceConfigNameFromMeta(j), resolveErr, timeout)
 				vesselTimeout = timeout // fallback to global
 			}
 
@@ -1753,10 +1754,7 @@ func (r *Runner) logReporterError(action string, vesselID string, err error) {
 // sourceConfigFromMeta returns the SourceConfig for a vessel by looking up
 // the config source name stored in vessel Meta at scan time.
 func (r *Runner) sourceConfigFromMeta(v queue.Vessel) *config.SourceConfig {
-	if v.Meta == nil {
-		return nil
-	}
-	name := v.Meta["config_source"]
+	name := r.sourceConfigNameFromMeta(v)
 	if name == "" {
 		return nil
 	}
@@ -1764,6 +1762,13 @@ func (r *Runner) sourceConfigFromMeta(v queue.Vessel) *config.SourceConfig {
 		return &sc
 	}
 	return nil
+}
+
+func (r *Runner) sourceConfigNameFromMeta(v queue.Vessel) string {
+	if v.Meta == nil {
+		return ""
+	}
+	return v.Meta["config_source"]
 }
 
 func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, error) {
@@ -1980,6 +1985,7 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 		srcCfg := r.sourceConfigFromMeta(vessel)
 		vesselTimeout, resolveErr := resolveTimeout(r.Config, srcCfg)
 		if resolveErr != nil {
+			log.Printf("warn: resolve timeout for vessel %s (config_source=%q): %v; using global timeout %s", vessel.ID, r.sourceConfigNameFromMeta(vessel), resolveErr, timeout)
 			vesselTimeout = timeout
 		}
 		elapsed := r.runtimeSince(*vessel.StartedAt)
