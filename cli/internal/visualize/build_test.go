@@ -299,6 +299,196 @@ phases:
 	}
 }
 
+func TestBuildReverseIndex(t *testing.T) {
+	tmp := t.TempDir()
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldCwd) //nolint:errcheck
+
+	writePrompt(t, "prompts/a.md")
+	writeWorkflowYAML(t, "workflows", "shared", `name: shared
+phases:
+  - name: only
+    prompt_file: prompts/a.md
+    max_turns: 1
+`)
+
+	// Two sources fire the same workflow; one source references a missing
+	// workflow. The reverse index should cover both.
+	cfg := &config.Config{
+		Sources: map[string]config.SourceConfig{
+			"bugs": {
+				Type: "github", Repo: "o/r",
+				Tasks: map[string]config.Task{
+					"fix": {
+						Labels:   []string{"bug"},
+						Workflow: "shared",
+						StatusLabels: &config.StatusLabels{
+							Running: "in-progress",
+							Failed:  "xylem-failed",
+						},
+					},
+				},
+			},
+			"features": {
+				Type: "github", Repo: "o/r",
+				Tasks: map[string]config.Task{
+					"impl": {
+						Labels:   []string{"enhancement"},
+						Workflow: "shared",
+					},
+				},
+			},
+			"gap": {
+				Type: "github", Repo: "o/r",
+				Tasks: map[string]config.Task{
+					"t": {
+						Labels:   []string{"x"},
+						Workflow: "does-not-exist",
+					},
+				},
+			},
+		},
+	}
+
+	g, err := Build(cfg, "workflows")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if g.TriggersPerWorkflow == nil {
+		t.Fatal("TriggersPerWorkflow was not populated")
+	}
+	sharedRefs, ok := g.TriggersPerWorkflow["shared"]
+	if !ok || len(sharedRefs) != 2 {
+		t.Fatalf("expected 2 triggers for shared, got %+v", sharedRefs)
+	}
+	// Sorted by (Source, Task) — bugs < features alphabetically.
+	if sharedRefs[0].Source != "bugs" || sharedRefs[0].Task != "fix" {
+		t.Errorf("first ref: got %+v, want bugs.fix", sharedRefs[0])
+	}
+	if sharedRefs[1].Source != "features" || sharedRefs[1].Task != "impl" {
+		t.Errorf("second ref: got %+v, want features.impl", sharedRefs[1])
+	}
+	// Status labels were lifted onto the trigger ref.
+	if sharedRefs[0].StatusLabels["running"] != "in-progress" {
+		t.Errorf("status label 'running' not lifted onto TriggerRef: %+v", sharedRefs[0].StatusLabels)
+	}
+	if sharedRefs[0].StatusLabels["failed"] != "xylem-failed" {
+		t.Errorf("status label 'failed' not lifted onto TriggerRef: %+v", sharedRefs[0].StatusLabels)
+	}
+
+	// Missing workflow still gets an entry in the reverse index so the
+	// audit can answer "which triggers point at the gap?".
+	missingRefs, ok := g.TriggersPerWorkflow["does-not-exist"]
+	if !ok || len(missingRefs) != 1 {
+		t.Fatalf("expected 1 trigger for missing workflow, got %+v", missingRefs)
+	}
+	if missingRefs[0].Source != "gap" {
+		t.Errorf("missing workflow ref: got %+v", missingRefs[0])
+	}
+
+	// Trigger.StatusLabels lifts the config map for the PR/state-machine path.
+	var bugs *Source
+	for i := range g.Sources {
+		if g.Sources[i].Name == "bugs" {
+			bugs = &g.Sources[i]
+			break
+		}
+	}
+	if bugs == nil {
+		t.Fatal("bugs source not found in graph")
+		return
+	}
+	if bugs.Triggers[0].StatusLabels["running"] != "in-progress" {
+		t.Errorf("Trigger.StatusLabels not populated: %+v", bugs.Triggers[0].StatusLabels)
+	}
+}
+
+func TestBuildDetectsOrphanWorkflows(t *testing.T) {
+	tmp := t.TempDir()
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldCwd) //nolint:errcheck
+
+	writePrompt(t, "prompts/a.md")
+	writeWorkflowYAML(t, "workflows", "used", `name: used
+phases:
+  - name: p
+    prompt_file: prompts/a.md
+    max_turns: 1
+`)
+	// Orphan: on disk but no task references it. Its prompt path is
+	// intentionally not created — the orphan scan must list the filename
+	// without loading the YAML, so a missing prompt doesn't fail the build.
+	writeWorkflowYAML(t, "workflows", "orphan", `name: orphan
+phases:
+  - name: p
+    prompt_file: prompts/missing.md
+    max_turns: 1
+`)
+
+	cfg := &config.Config{
+		Sources: map[string]config.SourceConfig{
+			"s": {
+				Type: "github", Repo: "o/r",
+				Tasks: map[string]config.Task{
+					"t": {Labels: []string{"x"}, Workflow: "used"},
+				},
+			},
+		},
+	}
+
+	g, err := Build(cfg, "workflows")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+
+	if len(g.OrphanedWorkflows) != 1 || g.OrphanedWorkflows[0] != "orphan" {
+		t.Errorf("expected [orphan] in OrphanedWorkflows, got %+v", g.OrphanedWorkflows)
+	}
+	// The "used" workflow should still be in g.Workflows (loaded normally).
+	if len(g.Workflows) != 1 || g.Workflows[0].Name != "used" {
+		t.Errorf("expected 1 loaded workflow 'used', got %+v", g.Workflows)
+	}
+}
+
+func TestBuildOrphanScanHandlesMissingDir(t *testing.T) {
+	tmp := t.TempDir()
+	oldCwd, _ := os.Getwd()
+	if err := os.Chdir(tmp); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(oldCwd) //nolint:errcheck
+
+	// No workflows directory exists. The build should still succeed with
+	// the referenced workflow recorded as missing.
+	cfg := &config.Config{
+		Sources: map[string]config.SourceConfig{
+			"s": {
+				Type: "github", Repo: "o/r",
+				Tasks: map[string]config.Task{
+					"t": {Labels: []string{"x"}, Workflow: "whatever"},
+				},
+			},
+		},
+	}
+	g, err := Build(cfg, "workflows")
+	if err != nil {
+		t.Fatalf("Build: %v", err)
+	}
+	if len(g.OrphanedWorkflows) != 0 {
+		t.Errorf("expected no orphans when dir is missing, got %+v", g.OrphanedWorkflows)
+	}
+	if len(g.MissingWorkflows) != 1 {
+		t.Errorf("expected 1 missing workflow, got %+v", g.MissingWorkflows)
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	cases := []struct {
 		in   string
