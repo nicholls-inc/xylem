@@ -5,7 +5,8 @@ sources:
   bugs:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
+    exclude:
+      [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
     tasks:
       fix-bugs:
         labels: [bug, ready-for-work]
@@ -16,7 +17,8 @@ sources:
   features:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
+    exclude:
+      [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
     tasks:
       implement-features:
         labels: [enhancement, ready-for-work]
@@ -27,7 +29,8 @@ sources:
   triage:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, needs-refinement, xylem-failed]
+    exclude:
+      [wontfix, duplicate, in-progress, no-bot, needs-refinement, xylem-failed]
     llm: claude
     model: claude-haiku-4-5
     tasks:
@@ -74,6 +77,14 @@ sources:
         workflow: respond-to-pr-review
         on:
           review_submitted: true
+          # Only respond to reviews authored by GitHub Copilot.
+          # Without this allowlist, xylem's own review responses (posted
+          # as the authenticated gh user) would trigger new vessels and
+          # create a runaway feedback loop.
+          # NOTE: the "[bot]" suffix is quoted for portability with
+          # strict YAML 1.1 parsers; yaml.v3 accepts either form.
+          author_allow:
+            - "copilot-pull-request-reviewer[bot]"
       fix-checks:
         workflow: fix-pr-checks
         on:
@@ -90,6 +101,8 @@ sources:
         workflow: merge-pr
         status_labels:
           running: pr-vessel-active
+          completed: pr-vessel-merged
+          failed: xylem-failed
 
   # Post-merge wave dependency unblocking
   # NOTE: github-merge has no label filtering. The unblock-wave prompt
@@ -100,6 +113,12 @@ sources:
     tasks:
       unblock-deps:
         workflow: unblock-wave
+
+observability:
+  enabled: true
+  endpoint: "localhost:4317"
+  insecure: true
+  sample_rate: 1.0
 
 concurrency: 3
 max_turns: 80
@@ -113,8 +132,8 @@ model: claude-sonnet-4-6
 claude:
   command: "claude"
   flags: "--dangerously-skip-permissions"
-  # env:
-  #   ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+  env:
+    ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
   # allowed_tools:
   #   - "Bash(gh issue view *)"
   #   - "Bash(gh pr create *)"

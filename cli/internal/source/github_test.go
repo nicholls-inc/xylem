@@ -220,6 +220,8 @@ func TestOnFailAppliesLabel(t *testing.T) {
 }
 
 func TestOnFailNoLabelsConfigured(t *testing.T) {
+	// When no status labels are configured, OnFail still removes the
+	// backward-compat "in-progress" label that OnStart would have added.
 	r := newMock()
 	g := &GitHub{
 		Repo:      "owner/repo",
@@ -237,8 +239,12 @@ func TestOnFailNoLabelsConfigured(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if len(r.calls) != 0 {
-		t.Errorf("expected no calls when no labels configured, got %v", r.calls)
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--remove-label in-progress") {
+		t.Errorf("expected --remove-label in-progress, got %q", joined)
 	}
 }
 

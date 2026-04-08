@@ -170,8 +170,9 @@ func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
 	if r.AuditLog == nil {
 		t.Fatal("r.AuditLog = nil, want audit log")
 	}
-	if r.Tracer == nil {
-		t.Fatal("r.Tracer = nil, want tracer")
+	// Tracer is nil when no OTLP endpoint is configured.
+	if r.Tracer != nil {
+		t.Fatal("r.Tracer != nil, want nil when no OTLP endpoint configured")
 	}
 
 	result := r.Intermediary.Evaluate(intermediary.Intent{
@@ -219,9 +220,11 @@ func TestSmoke_S8_TracerInitFailureRunnerContinues(t *testing.T) {
 	}
 }
 
-func TestSmoke_S30_TracerWiredInDrainCmd(t *testing.T) {
+func TestSmoke_S30_TracerWiredWhenEndpointConfigured(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
 
@@ -229,7 +232,7 @@ func TestSmoke_S30_TracerWiredInDrainCmd(t *testing.T) {
 	defer cleanup()
 
 	if r.Tracer == nil {
-		t.Fatal("r.Tracer = nil, want tracer")
+		t.Fatal("r.Tracer = nil, want tracer when endpoint configured")
 	}
 }
 

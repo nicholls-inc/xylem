@@ -1,0 +1,10 @@
+services:
+  jaeger:
+    image: jaegertracing/jaeger
+    ports:
+      - "4317:4317" # OTLP gRPC (xylem sends traces here)
+      - "4318:4318" # OTLP HTTP
+      - "16686:16686" # Jaeger UI + Query API
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    restart: unless-stopped

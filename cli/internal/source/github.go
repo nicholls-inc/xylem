@@ -131,32 +131,33 @@ func (g *GitHub) OnStart(ctx context.Context, vessel queue.Vessel) error {
 	if issueNum == "" {
 		return nil
 	}
-	running, hasRunning := vessel.Meta["status_label_running"]
-	if !hasRunning {
-		running = "in-progress" // backward-compat: preserve old behaviour
-	}
-	g.applyIssueLabel(ctx, issueNum, running, vessel.Meta["status_label_queued"])
+	g.applyIssueLabel(ctx, issueNum, ResolveRunningLabel(vessel), vessel.Meta["status_label_queued"])
 	return nil
 }
 
 func (g *GitHub) OnComplete(ctx context.Context, vessel queue.Vessel) error {
 	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
 		vessel.Meta["status_label_completed"],
-		vessel.Meta["status_label_running"])
+		ResolveRunningLabel(vessel))
 	return nil
 }
 
 func (g *GitHub) OnFail(ctx context.Context, vessel queue.Vessel) error {
 	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
 		vessel.Meta["status_label_failed"],
-		vessel.Meta["status_label_running"])
+		ResolveRunningLabel(vessel))
 	return nil
 }
 
 func (g *GitHub) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
 	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
 		vessel.Meta["status_label_timed_out"],
-		vessel.Meta["status_label_running"])
+		ResolveRunningLabel(vessel))
+	return nil
+}
+
+func (g *GitHub) RemoveRunningLabel(ctx context.Context, vessel queue.Vessel) error {
+	g.applyIssueLabel(ctx, vessel.Meta["issue_num"], "", ResolveRunningLabel(vessel))
 	return nil
 }
 

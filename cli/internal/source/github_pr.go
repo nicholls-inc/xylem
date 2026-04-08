@@ -118,32 +118,33 @@ func (g *GitHubPR) OnStart(ctx context.Context, vessel queue.Vessel) error {
 	if prNum == "" {
 		return nil
 	}
-	running, hasRunning := vessel.Meta["status_label_running"]
-	if !hasRunning {
-		running = "in-progress" // backward-compat: preserve old behaviour
-	}
-	g.applyPRLabel(ctx, prNum, running, vessel.Meta["status_label_queued"])
+	g.applyPRLabel(ctx, prNum, ResolveRunningLabel(vessel), vessel.Meta["status_label_queued"])
 	return nil
 }
 
 func (g *GitHubPR) OnComplete(ctx context.Context, vessel queue.Vessel) error {
 	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
 		vessel.Meta["status_label_completed"],
-		vessel.Meta["status_label_running"])
+		ResolveRunningLabel(vessel))
 	return nil
 }
 
 func (g *GitHubPR) OnFail(ctx context.Context, vessel queue.Vessel) error {
 	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
 		vessel.Meta["status_label_failed"],
-		vessel.Meta["status_label_running"])
+		ResolveRunningLabel(vessel))
 	return nil
 }
 
 func (g *GitHubPR) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
 	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
 		vessel.Meta["status_label_timed_out"],
-		vessel.Meta["status_label_running"])
+		ResolveRunningLabel(vessel))
+	return nil
+}
+
+func (g *GitHubPR) RemoveRunningLabel(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabel(ctx, vessel.Meta["pr_num"], "", ResolveRunningLabel(vessel))
 	return nil
 }
 

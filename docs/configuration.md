@@ -191,6 +191,9 @@ tasks:
       review_submitted: true
       checks_failed: true
       commented: true
+      author_allow:
+        - "copilot-pull-request-reviewer[bot]"
+      author_deny: []
 ```
 
 Supported triggers:
@@ -201,6 +204,19 @@ Supported triggers:
 | `review_submitted` | bool | Create a vessel for each submitted review, deduped by review ID. |
 | `checks_failed` | bool | Create a vessel when a PR has failed checks, deduped by head SHA. |
 | `commented` | bool | Create a vessel for each issue comment on the PR, deduped by comment ID. |
+| `author_allow` | list of strings | Allowlist of GitHub logins whose reviews/comments create vessels. If non-empty, events from any other login are skipped. Applied to `review_submitted` and `commented`. |
+| `author_deny` | list of strings | Denylist of GitHub logins whose reviews/comments are always skipped. Takes precedence over `author_allow`. Applied to `review_submitted` and `commented`. |
+
+**Mandatory author filter for authored-event triggers.** Any task with `review_submitted: true` or `commented: true` **must** specify at least one of `author_allow` / `author_deny`. This is enforced at config-load time to prevent self-trigger feedback loops — when xylem posts a review in response to another review, the response itself is a new `review_submitted` event, which would trigger another vessel, and so on. The allowlist/denylist filters these out.
+
+On top of the configured filters, xylem always drops any event authored by its own authenticated GitHub user (looked up via `gh api user`). This is a hard-coded safety net: even if the allowlist is misconfigured, xylem will never respond to itself.
+
+**Quote bot logins for portability**. GitHub bot accounts have a `[bot]` suffix (e.g. `copilot-pull-request-reviewer[bot]`). Xylem's YAML parser (`gopkg.in/yaml.v3`) accepts the unquoted form as a plain scalar, but some other YAML 1.1 parsers (notably Python's PyYAML) reject it because `[` starts a flow sequence. Quote bot logins so the same config file is portable:
+
+```yaml
+author_allow:
+  - "copilot-pull-request-reviewer[bot]"  # quoted for portability
+```
 
 ### LLM provider settings
 
@@ -298,14 +314,32 @@ harness:
 
 ### Observability settings
 
-The `observability` section controls OpenTelemetry instrumentation for tracing agent execution.
+The `observability` section controls OpenTelemetry instrumentation for tracing agent execution. Tracing requires an OTLP endpoint — when no endpoint is configured, tracing is silently disabled (no stdout fallback).
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
 | `observability.enabled` | bool | `true` | No | Enable or disable OpenTelemetry tracing. |
-| `observability.endpoint` | string | `""` | No | OTLP gRPC endpoint for trace export (e.g., `localhost:4317`). |
+| `observability.endpoint` | string | `""` | No | OTLP gRPC endpoint for trace export (e.g., `localhost:4317`). Tracing is disabled when empty. |
 | `observability.insecure` | bool | `false` | No | Allow insecure (non-TLS) connections to the OTLP endpoint. |
 | `observability.sample_rate` | float | `0.0` | No | Trace sampling rate between 0.0 and 1.0. Values outside this range are rejected. |
+
+For local development, run Jaeger via the included Docker Compose stack:
+
+```bash
+docker compose -f dev/docker-compose.yml up -d
+```
+
+Then configure your `.xylem.yml`:
+
+```yaml
+observability:
+  enabled: true
+  endpoint: "localhost:4317"
+  insecure: true
+  sample_rate: 1.0
+```
+
+Traces are visible at `http://localhost:16686` (Jaeger UI) and queryable via the Jaeger API at `http://localhost:16686/api/`.
 
 ### Cost settings
 
@@ -454,6 +488,9 @@ sources:
           review_submitted: true
           checks_failed: true
           commented: true
+          # Required for review_submitted / commented.
+          author_allow:
+            - "copilot-pull-request-reviewer[bot]"
 ```
 
 ### Scan merged pull requests
@@ -546,6 +583,7 @@ The following rules are enforced when loading `.xylem.yml`. If any rule fails, `
 | `github` and `github-pr` tasks must have at least one label | `source "<name>" task "<task>": must include at least one labels entry` |
 | `github-pr-events` tasks must include an `on` block | `source "<name>" task "<task>": must include an 'on' block...` |
 | `github-pr-events` `on` blocks must include at least one trigger | `source "<name>" task "<task>": 'on' block must specify at least one trigger...` |
+| `github-pr-events` tasks with `review_submitted` or `commented` must specify an author filter | `source "<name>" task "<task>": tasks with review_submitted or commented must specify author_allow or author_deny to prevent self-trigger loops` |
 | Every task must have a non-empty workflow | `source "<name>" task "<task>": must include a workflow` |
 | Source-level `llm`, if set, must be `claude` or `copilot` | `source "<name>": llm must be "claude" or "copilot", got "<value>"` |
 | `harness.protected_surfaces.paths` entries must be valid globs | `harness.protected_surfaces.paths: invalid glob "<pattern>": ...` |

@@ -158,6 +158,8 @@ func convertPREventsTasks(cfgTasks map[string]config.Task) map[string]source.PRE
 			task.ReviewSubmitted = t.On.ReviewSubmitted
 			task.ChecksFailed = t.On.ChecksFailed
 			task.Commented = t.On.Commented
+			task.AuthorAllow = t.On.AuthorAllow
+			task.AuthorDeny = t.On.AuthorDeny
 		}
 		tasks[name] = task
 	}

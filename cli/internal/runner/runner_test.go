@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -3975,6 +3976,164 @@ func TestDrainOrchestratedProtectedSurfaceViolationFails(t *testing.T) {
 	}
 	if !strings.Contains(last.Error, "violated protected surfaces") {
 		t.Fatalf("last entry error = %q, want to contain %q", last.Error, "violated protected surfaces")
+	}
+}
+
+// TestVerifyProtectedSurfacesSkipsWhenWorktreeMissing exercises the race
+// guard added to verifyProtectedSurfaces. If CheckHungVessels (or any other
+// cleanup path) removes the worktree directory between the before-snapshot
+// and the after-snapshot, the guard must treat the check as non-observable
+// and return nil rather than flag every protected file as "deleted".
+//
+// Regression: without this guard, 8 false-positive protected_surface_violation
+// events were recorded in production on 2026-04-07, each listing every
+// protected .xylem/ file as "deleted" despite vessels that had made no
+// edits (including one that produced XYLEM_NOOP).
+func TestVerifyProtectedSurfacesSkipsWhenWorktreeMissing(t *testing.T) {
+	worktreeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll workflows = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "prompts", "fix-bug"), 0o755); err != nil {
+		t.Fatalf("MkdirAll prompts = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile .xylem.yml = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml"), []byte("name: fix-bug\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile workflow = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem", "prompts", "fix-bug", "analyze.md"), []byte("analyze\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile prompt = %v", err)
+	}
+
+	stateDir := t.TempDir()
+	cfg := makeTestConfig(stateDir, 1)
+	cfg.StateDir = stateDir
+	auditPath := filepath.Join(stateDir, "audit.jsonl")
+	auditLog := intermediary.NewAuditLog(auditPath)
+	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(worktreeDir)
+	if err != nil {
+		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot() checkProtectedSurfaces = false, want true")
+	}
+	if len(before.Files) == 0 {
+		t.Fatalf("before snapshot has no files; fixture setup is broken")
+	}
+
+	// Simulate the race: something (CheckHungVessels) removed the worktree
+	// while the vessel goroutine was still executing a phase.
+	if err := os.RemoveAll(worktreeDir); err != nil {
+		t.Fatalf("RemoveAll(worktreeDir) = %v", err)
+	}
+
+	// Capture log output so we can assert the skip warning fired.
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldWriter)
+
+	vessel := queue.Vessel{ID: "issue-guard", Source: "github-issue", Workflow: "fix-bug"}
+	ph := workflow.Phase{Name: "analyze"}
+	if err := r.verifyProtectedSurfaces(vessel, ph, worktreeDir, before); err != nil {
+		t.Fatalf("verifyProtectedSurfaces() returned error on missing worktree, want nil: %v", err)
+	}
+
+	if !strings.Contains(logBuf.String(), "surface check skipped") {
+		t.Fatalf("expected skip warning in log, got: %q", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "no longer exists") {
+		t.Fatalf("expected 'no longer exists' in log, got: %q", logBuf.String())
+	}
+
+	// No audit entry should have been recorded — there was no violation.
+	entries, err := auditLog.Entries()
+	if err != nil {
+		t.Fatalf("AuditLog.Entries() = %v", err)
+	}
+	for _, e := range entries {
+		if e.Intent.Action == "protected_surface_violation" {
+			t.Fatalf("unexpected protected_surface_violation audit entry: %+v", e)
+		}
+	}
+}
+
+// TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists is
+// a regression guard for the defensive guard added to verifyProtectedSurfaces:
+// ensure that a genuine in-worktree deletion (worktree dir still present,
+// protected file gone) is still detected and recorded as a violation.
+func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *testing.T) {
+	worktreeDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll workflows = %v", err)
+	}
+	protectedFile := filepath.Join(worktreeDir, ".xylem.yml")
+	if err := os.WriteFile(protectedFile, []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile .xylem.yml = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml"), []byte("name: fix-bug\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile workflow = %v", err)
+	}
+
+	stateDir := t.TempDir()
+	cfg := makeTestConfig(stateDir, 1)
+	cfg.StateDir = stateDir
+	auditPath := filepath.Join(stateDir, "audit.jsonl")
+	auditLog := intermediary.NewAuditLog(auditPath)
+	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(worktreeDir)
+	if err != nil {
+		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot() checkProtectedSurfaces = false, want true")
+	}
+
+	// Simulate a real in-worktree deletion: worktree dir still exists but
+	// a protected file has been removed.
+	if err := os.Remove(protectedFile); err != nil {
+		t.Fatalf("Remove(protectedFile) = %v", err)
+	}
+
+	vessel := queue.Vessel{ID: "issue-legit", Source: "github-issue", Workflow: "fix-bug"}
+	ph := workflow.Phase{Name: "implement"}
+	verifyErr := r.verifyProtectedSurfaces(vessel, ph, worktreeDir, before)
+	if verifyErr == nil {
+		t.Fatalf("verifyProtectedSurfaces() returned nil, want violation error")
+	}
+	if !strings.Contains(verifyErr.Error(), "violated protected surfaces") {
+		t.Fatalf("verifyProtectedSurfaces() error = %q, want 'violated protected surfaces'", verifyErr)
+	}
+	if !strings.Contains(verifyErr.Error(), ".xylem.yml") {
+		t.Fatalf("verifyProtectedSurfaces() error = %q, want to mention .xylem.yml", verifyErr)
+	}
+	if !strings.Contains(verifyErr.Error(), "deleted") {
+		t.Fatalf("verifyProtectedSurfaces() error = %q, want to mention 'deleted'", verifyErr)
+	}
+
+	entries, err := auditLog.Entries()
+	if err != nil {
+		t.Fatalf("AuditLog.Entries() = %v", err)
+	}
+	found := false
+	for _, e := range entries {
+		if e.Intent.Action == "protected_surface_violation" && e.Decision == intermediary.Deny {
+			found = true
+			if !strings.Contains(e.Error, ".xylem.yml") {
+				t.Fatalf("audit entry error = %q, want to mention .xylem.yml", e.Error)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("no protected_surface_violation audit entry recorded; entries = %+v", entries)
 	}
 }
 

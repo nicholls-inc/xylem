@@ -635,7 +635,8 @@ func TestGitHubIssueOnStartConfiguredLabel(t *testing.T) {
 }
 
 func TestGitHubIssueOnCompleteNoLabels(t *testing.T) {
-	// When no status labels are configured, OnComplete should make no gh calls
+	// When no status labels are configured, OnComplete still removes the
+	// backward-compat "in-progress" label that OnStart would have added.
 	r := newMock()
 	src := &GitHub{Repo: "owner/repo", CmdRunner: r}
 	vessel := queue.Vessel{
@@ -645,8 +646,94 @@ func TestGitHubIssueOnCompleteNoLabels(t *testing.T) {
 	if err := src.OnComplete(context.Background(), vessel); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(r.calls) != 0 {
-		t.Errorf("expected no calls when no labels configured, got %v", r.calls)
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--remove-label in-progress") {
+		t.Errorf("expected --remove-label in-progress, got %q", joined)
+	}
+}
+
+func TestResolveRunningLabel(t *testing.T) {
+	tests := []struct {
+		name string
+		meta map[string]string
+		want string
+	}{
+		{"no meta key falls back to in-progress", map[string]string{}, "in-progress"},
+		{"configured label", map[string]string{"status_label_running": "wip"}, "wip"},
+		{"empty configured label", map[string]string{"status_label_running": ""}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			v := queue.Vessel{Meta: tt.meta}
+			got := ResolveRunningLabel(v)
+			if got != tt.want {
+				t.Errorf("ResolveRunningLabel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitHubPRRemoveRunningLabel(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10", "status_label_running": "wip"},
+	}
+	if err := src.RemoveRunningLabel(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--remove-label wip") {
+		t.Errorf("expected --remove-label wip, got %q", joined)
+	}
+	if strings.Contains(joined, "--add-label") {
+		t.Errorf("expected no --add-label, got %q", joined)
+	}
+}
+
+func TestGitHubPRRemoveRunningLabelBackwardCompat(t *testing.T) {
+	// Legacy vessel without status_label_running should remove "in-progress"
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "pr-10",
+		Meta: map[string]string{"pr_num": "10"},
+	}
+	if err := src.RemoveRunningLabel(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--remove-label in-progress") {
+		t.Errorf("expected --remove-label in-progress, got %q", joined)
+	}
+}
+
+func TestGitHubIssueRemoveRunningLabel(t *testing.T) {
+	r := newMock()
+	src := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:   "issue-1",
+		Meta: map[string]string{"issue_num": "1", "status_label_running": "wip"},
+	}
+	if err := src.RemoveRunningLabel(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--remove-label wip") {
+		t.Errorf("expected --remove-label wip, got %q", joined)
 	}
 }
 

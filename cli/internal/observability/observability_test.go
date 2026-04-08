@@ -258,19 +258,20 @@ func TestNewTracerWithEndpointShutdown(t *testing.T) {
 	}
 }
 
-func TestNewTracerDefault(t *testing.T) {
-	tracer, err := NewTracer(DefaultTracerConfig())
-	if err != nil {
-		t.Fatalf("NewTracer returned error: %v", err)
+func TestNewTracerNoEndpointReturnsError(t *testing.T) {
+	_, err := NewTracer(DefaultTracerConfig())
+	if err == nil {
+		t.Fatal("expected error when no endpoint is configured")
 	}
-	if tracer == nil {
-		t.Fatal("expected non-nil tracer")
-	}
-	_ = tracer.Shutdown(context.Background())
 }
 
 func TestNewTracerShutdown(t *testing.T) {
-	tracer, err := NewTracer(DefaultTracerConfig())
+	tracer, err := NewTracer(TracerConfig{
+		ServiceName: "xylem-test",
+		SampleRate:  1.0,
+		Endpoint:    "localhost:4317",
+		Insecure:    true,
+	})
 	if err != nil {
 		t.Fatalf("NewTracer returned error: %v", err)
 	}
@@ -279,15 +280,11 @@ func TestNewTracerShutdown(t *testing.T) {
 	}
 }
 
-func TestSmoke_S6_TracerInitDefaultUsesStdout(t *testing.T) {
-	tracer, err := NewTracer(DefaultTracerConfig())
-	if err != nil {
-		t.Fatalf("NewTracer(DefaultTracerConfig()) error = %v", err)
+func TestSmoke_S6_TracerInitNoEndpointReturnsError(t *testing.T) {
+	_, err := NewTracer(DefaultTracerConfig())
+	if err == nil {
+		t.Fatal("expected error from NewTracer(DefaultTracerConfig()) with no endpoint")
 	}
-	if tracer == nil {
-		t.Fatal("expected non-nil tracer")
-	}
-	_ = tracer.Shutdown(context.Background())
 }
 
 func TestSmoke_S7_TracerInitOTLPEndpointConfigured(t *testing.T) {

@@ -40,6 +40,17 @@ func GitHubTaskFromConfig(t config.Task) GitHubTask {
 	return task
 }
 
+// ResolveRunningLabel returns the running status label for a vessel,
+// applying the backward-compat fallback ("in-progress") when the
+// status_label_running meta key is absent.
+func ResolveRunningLabel(vessel queue.Vessel) string {
+	running, has := vessel.Meta["status_label_running"]
+	if !has {
+		return "in-progress"
+	}
+	return running
+}
+
 // Source discovers tasks and produces Vessels.
 type Source interface {
 	// Name returns the source identifier (e.g., "github-issue").
@@ -58,6 +69,10 @@ type Source interface {
 	OnFail(ctx context.Context, vessel queue.Vessel) error
 	// OnTimedOut is called when a vessel's label gate times out.
 	OnTimedOut(ctx context.Context, vessel queue.Vessel) error
+	// RemoveRunningLabel removes the running status label unconditionally.
+	// Called via defer to ensure the label is always removed when a vessel
+	// exits the running state, regardless of the exit reason.
+	RemoveRunningLabel(ctx context.Context, vessel queue.Vessel) error
 	// BranchName generates the git branch name for this vessel.
 	BranchName(vessel queue.Vessel) string
 }

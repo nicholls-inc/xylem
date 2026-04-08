@@ -62,11 +62,23 @@ type StatusLabels struct {
 }
 
 // PREventsConfig defines which PR events trigger a workflow.
+//
+// For authored events (review_submitted, commented), at least one of
+// AuthorAllow or AuthorDeny must be specified to prevent self-trigger
+// loops — see validateGitHubPREventsSource.
 type PREventsConfig struct {
 	Labels          []string `yaml:"labels,omitempty"`
 	ReviewSubmitted bool     `yaml:"review_submitted,omitempty"`
 	ChecksFailed    bool     `yaml:"checks_failed,omitempty"`
 	Commented       bool     `yaml:"commented,omitempty"`
+	// AuthorAllow is an allowlist of GitHub logins whose reviews/comments
+	// create vessels. If non-empty, events from any other login are skipped.
+	// YAML footgun: bot logins like "copilot-pull-request-reviewer[bot]"
+	// must be quoted because "[" starts a YAML flow sequence.
+	AuthorAllow []string `yaml:"author_allow,omitempty"`
+	// AuthorDeny is a denylist of GitHub logins whose reviews/comments
+	// never create vessels. AuthorDeny takes precedence over AuthorAllow.
+	AuthorDeny []string `yaml:"author_deny,omitempty"`
 }
 
 type Task struct {
@@ -496,6 +508,12 @@ func validateGitHubPREventsSource(name string, src SourceConfig) error {
 		}
 		if len(task.On.Labels) == 0 && !task.On.ReviewSubmitted && !task.On.ChecksFailed && !task.On.Commented {
 			return fmt.Errorf("source %q task %q: 'on' block must specify at least one trigger (labels, review_submitted, checks_failed, or commented)", name, tname)
+		}
+		// Authored-event triggers must specify an author filter to prevent
+		// self-trigger loops (e.g. xylem responds to its own review as hnipps,
+		// that review triggers another vessel, ad infinitum).
+		if (task.On.ReviewSubmitted || task.On.Commented) && len(task.On.AuthorAllow) == 0 && len(task.On.AuthorDeny) == 0 {
+			return fmt.Errorf("source %q task %q: tasks with review_submitted or commented must specify author_allow or author_deny to prevent self-trigger loops", name, tname)
 		}
 	}
 	return nil

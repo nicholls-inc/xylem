@@ -227,9 +227,22 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 	src := r.resolveSource(vessel.Source)
 
 	// Source-specific start hook (e.g., add in-progress label)
-	if err := src.OnStart(ctx, vessel); err != nil {
-		log.Printf("warn: source OnStart for %s: %v", vessel.ID, err)
+	startErr := src.OnStart(ctx, vessel)
+	if startErr != nil {
+		log.Printf("warn: source OnStart for %s: %v", vessel.ID, startErr)
 	}
+	// Unconditionally remove the running label when the vessel exits the
+	// running state, regardless of outcome (completed, failed, waiting, etc.).
+	// Uses context.Background because the vessel context may already be
+	// cancelled by the time this fires.
+	defer func() {
+		if startErr != nil {
+			return
+		}
+		if err := src.RemoveRunningLabel(context.Background(), vessel); err != nil {
+			log.Printf("warn: RemoveRunningLabel for %s: %v", vessel.ID, err)
+		}
+	}()
 
 	vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
 	var claims []evidence.Claim
@@ -1639,6 +1652,21 @@ func (r *Runner) takeProtectedSurfaceSnapshot(worktreePath string) (surface.Snap
 func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, worktreePath string, before surface.Snapshot) error {
 	patterns := r.Config.EffectiveProtectedSurfaces()
 	if len(patterns) == 0 {
+		return nil
+	}
+
+	// Race guard: CheckHungVessels may remove the worktree synchronously
+	// while this goroutine is still draining a stuck cmd.Wait() from a
+	// killed subprocess whose grandchildren still hold the stdout/stderr
+	// pipes open. If the worktree no longer exists, filepath.Glob inside
+	// surface.TakeSnapshot returns no matches with no error, producing an
+	// empty after-snapshot and a spurious "every protected file deleted"
+	// violation. Skip the check in that case — there is nothing observable
+	// left to verify. A legitimate in-worktree deletion of protected files
+	// (worktree dir still present, .xylem/ subtree gone) is still caught.
+	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
+		log.Printf("%sphase %q surface check skipped: worktree %s no longer exists (cleanup race)",
+			vesselLabel(vessel), p.Name, worktreePath)
 		return nil
 	}
 

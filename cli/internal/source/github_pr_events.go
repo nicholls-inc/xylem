@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -17,6 +18,12 @@ type PREventsTask struct {
 	ReviewSubmitted bool
 	ChecksFailed    bool
 	Commented       bool
+	// AuthorAllow restricts authored events (reviews, comments) to the
+	// listed GitHub logins. Empty slice = no allowlist.
+	AuthorAllow []string
+	// AuthorDeny skips authored events from these GitHub logins.
+	// AuthorDeny takes precedence over AuthorAllow.
+	AuthorDeny []string
 }
 
 // GitHubPREvents scans GitHub PRs for specific events and produces vessels.
@@ -26,6 +33,98 @@ type GitHubPREvents struct {
 	Exclude   []string
 	Queue     *queue.Queue
 	CmdRunner CommandRunner
+
+	// selfLogin is the authenticated gh CLI user's login, looked up once
+	// per Scan. Used to unconditionally filter out events authored by
+	// xylem itself, preventing self-trigger loops even if AuthorAllow /
+	// AuthorDeny are misconfigured. Empty string means unresolved or
+	// the lookup failed.
+	selfLogin         string
+	selfLoginResolved bool
+}
+
+// ghAuthoredEvent is a minimal shape emitted by gh api --jq for reviews
+// and issue comments. Login is empty when the GitHub user is null (rare,
+// e.g. a deleted account). Both empty Login and known Login flow through
+// the same filter rules.
+type ghAuthoredEvent struct {
+	ID    int64  `json:"id"`
+	Login string `json:"login"`
+	// Type is the GitHub user type ("Bot" or "User"). Not used today;
+	// reserved for future filtering (e.g. "all bots" allowlist).
+	Type string `json:"type"`
+}
+
+// resolveSelfLogin returns the authenticated gh user's login, looked up
+// at most once per Scan cycle. On failure it returns "" and disables the
+// self-filter for that scan; the mandatory author_allow / author_deny
+// config (see config.validateGitHubPREventsSource) is what actually
+// prevents loops, so a lookup failure is non-fatal.
+func (g *GitHubPREvents) resolveSelfLogin(ctx context.Context) string {
+	if g.selfLoginResolved {
+		return g.selfLogin
+	}
+	g.selfLoginResolved = true
+	out, err := g.CmdRunner.Run(ctx, "gh", "api", "user", "--jq", ".login")
+	if err != nil {
+		log.Printf("warn: github-pr-events: gh api user failed, self-filter disabled this scan: %v", err)
+		return ""
+	}
+	g.selfLogin = strings.TrimSpace(string(out))
+	return g.selfLogin
+}
+
+// shouldSkipAuthoredEvent returns true if a review/comment authored by
+// login should not spawn a vessel for this task. Rules (earlier wins):
+//
+//  1. login == selfLogin (non-empty) → skip. INVARIANT: the self-filter
+//     cannot be overridden by AuthorAllow; it is always-on.
+//  2. login in task.AuthorDeny → skip. Deny wins over allow.
+//  3. len(task.AuthorAllow) > 0 and login not in AuthorAllow → skip.
+//  4. Otherwise keep.
+//
+// An empty login (user: null from the API) passes rule 1 but fails rule 3
+// whenever an allowlist is set — which is mandatory for authored-event
+// triggers per config validation.
+func shouldSkipAuthoredEvent(login, selfLogin string, task PREventsTask) bool {
+	if selfLogin != "" && login == selfLogin {
+		return true
+	}
+	for _, deny := range task.AuthorDeny {
+		if login == deny {
+			return true
+		}
+	}
+	if len(task.AuthorAllow) > 0 {
+		for _, allow := range task.AuthorAllow {
+			if login == allow {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// parseAuthoredEvents decodes the JSON-lines output emitted by
+// `gh api ... --jq '.[] | {id, login, type}'`. Malformed lines are
+// skipped with a warning (fail-soft so a single bad record does not
+// block the entire scan).
+func parseAuthoredEvents(raw []byte) []ghAuthoredEvent {
+	var out []ghAuthoredEvent
+	for _, line := range strings.Split(strings.TrimSpace(string(raw)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var ev ghAuthoredEvent
+		if err := json.Unmarshal([]byte(line), &ev); err != nil {
+			log.Printf("warn: github-pr-events: skipping malformed authored event line: %v", err)
+			continue
+		}
+		out = append(out, ev)
+	}
+	return out
 }
 
 func (g *GitHubPREvents) Name() string { return "github-pr-events" }
@@ -126,35 +225,43 @@ func (g *GitHubPREvents) scanReviews(ctx context.Context, pr ghPR, task PREvents
 	args := []string{
 		"api",
 		fmt.Sprintf("repos/%s/pulls/%d/reviews", g.Repo, pr.Number),
-		"--jq", ".[].id",
+		"--jq", `.[] | {id: .id, login: .user.login, type: .user.type}`,
 	}
 	out, err := g.CmdRunner.Run(ctx, "gh", args...)
 	if err != nil {
 		return nil, nil // non-fatal: skip reviews on error
 	}
 
+	selfLogin := g.resolveSelfLogin(ctx)
+	events := parseAuthoredEvents(out)
+
 	var vessels []queue.Vessel
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		reviewID := strings.TrimSpace(line)
-		if reviewID == "" {
+	for _, ev := range events {
+		if ev.ID == 0 {
 			continue
 		}
-		ref := fmt.Sprintf("%s#review-%s", pr.URL, reviewID)
-		if !g.Queue.HasRefAny(ref) {
-			vessels = append(vessels, queue.Vessel{
-				ID:       fmt.Sprintf("pr-%d-review-%s", pr.Number, reviewID),
-				Source:   "github-pr-events",
-				Ref:      ref,
-				Workflow: task.Workflow,
-				Meta: map[string]string{
-					"pr_num":         strconv.Itoa(pr.Number),
-					"event_type":     "review_submitted",
-					"pr_head_branch": pr.HeadRefName,
-				},
-				State:     queue.StatePending,
-				CreatedAt: sourceNow(),
-			})
+		if shouldSkipAuthoredEvent(ev.Login, selfLogin, task) {
+			continue
 		}
+		reviewID := strconv.FormatInt(ev.ID, 10)
+		ref := fmt.Sprintf("%s#review-%s", pr.URL, reviewID)
+		if g.Queue.HasRefAny(ref) {
+			continue
+		}
+		vessels = append(vessels, queue.Vessel{
+			ID:       fmt.Sprintf("pr-%d-review-%s", pr.Number, reviewID),
+			Source:   "github-pr-events",
+			Ref:      ref,
+			Workflow: task.Workflow,
+			Meta: map[string]string{
+				"pr_num":         strconv.Itoa(pr.Number),
+				"event_type":     "review_submitted",
+				"pr_head_branch": pr.HeadRefName,
+				"review_author":  ev.Login,
+			},
+			State:     queue.StatePending,
+			CreatedAt: sourceNow(),
+		})
 	}
 	return vessels, nil
 }
@@ -235,44 +342,53 @@ func (g *GitHubPREvents) scanComments(ctx context.Context, pr ghPR, task PREvent
 	args := []string{
 		"api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", g.Repo, pr.Number),
-		"--jq", ".[].id",
+		"--jq", `.[] | {id: .id, login: .user.login, type: .user.type}`,
 	}
 	out, err := g.CmdRunner.Run(ctx, "gh", args...)
 	if err != nil {
 		return nil, nil // non-fatal
 	}
 
+	selfLogin := g.resolveSelfLogin(ctx)
+	events := parseAuthoredEvents(out)
+
 	var vessels []queue.Vessel
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		commentID := strings.TrimSpace(line)
-		if commentID == "" {
+	for _, ev := range events {
+		if ev.ID == 0 {
 			continue
 		}
-		ref := fmt.Sprintf("%s#comment-%s", pr.URL, commentID)
-		if !g.Queue.HasRefAny(ref) {
-			vessels = append(vessels, queue.Vessel{
-				ID:       fmt.Sprintf("pr-%d-comment-%s", pr.Number, commentID),
-				Source:   "github-pr-events",
-				Ref:      ref,
-				Workflow: task.Workflow,
-				Meta: map[string]string{
-					"pr_num":         strconv.Itoa(pr.Number),
-					"event_type":     "commented",
-					"pr_head_branch": pr.HeadRefName,
-				},
-				State:     queue.StatePending,
-				CreatedAt: sourceNow(),
-			})
+		if shouldSkipAuthoredEvent(ev.Login, selfLogin, task) {
+			continue
 		}
+		commentID := strconv.FormatInt(ev.ID, 10)
+		ref := fmt.Sprintf("%s#comment-%s", pr.URL, commentID)
+		if g.Queue.HasRefAny(ref) {
+			continue
+		}
+		vessels = append(vessels, queue.Vessel{
+			ID:       fmt.Sprintf("pr-%d-comment-%s", pr.Number, commentID),
+			Source:   "github-pr-events",
+			Ref:      ref,
+			Workflow: task.Workflow,
+			Meta: map[string]string{
+				"pr_num":         strconv.Itoa(pr.Number),
+				"event_type":     "commented",
+				"pr_head_branch": pr.HeadRefName,
+				"comment_author": ev.Login,
+			},
+			State:     queue.StatePending,
+			CreatedAt: sourceNow(),
+		})
 	}
 	return vessels, nil
 }
 
-func (g *GitHubPREvents) OnEnqueue(_ context.Context, _ queue.Vessel) error  { return nil }
-func (g *GitHubPREvents) OnStart(_ context.Context, _ queue.Vessel) error    { return nil }
-func (g *GitHubPREvents) OnComplete(_ context.Context, _ queue.Vessel) error { return nil }
-func (g *GitHubPREvents) OnFail(_ context.Context, _ queue.Vessel) error     { return nil }
-func (g *GitHubPREvents) OnTimedOut(_ context.Context, _ queue.Vessel) error { return nil }
+func (g *GitHubPREvents) OnEnqueue(_ context.Context, _ queue.Vessel) error          { return nil }
+func (g *GitHubPREvents) OnStart(_ context.Context, _ queue.Vessel) error            { return nil }
+func (g *GitHubPREvents) OnComplete(_ context.Context, _ queue.Vessel) error         { return nil }
+func (g *GitHubPREvents) OnFail(_ context.Context, _ queue.Vessel) error             { return nil }
+func (g *GitHubPREvents) OnTimedOut(_ context.Context, _ queue.Vessel) error         { return nil }
+func (g *GitHubPREvents) RemoveRunningLabel(_ context.Context, _ queue.Vessel) error { return nil }
 
 func (g *GitHubPREvents) BranchName(vessel queue.Vessel) string {
 	prNum := vessel.Meta["pr_num"]

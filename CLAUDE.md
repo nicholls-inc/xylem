@@ -80,6 +80,26 @@ Contains `WORKFLOW.md` files documenting the built-in workflows (`fix-bug`, `imp
 
 Loads `.xylem.yml`. Supports a legacy flat format (top-level `repo`/`tasks`/`exclude`) that `normalize()` auto-migrates to the multi-source format. `claude.template` and `claude.allowed_tools` at the top level are rejected with migration guidance.
 
+## Local observability
+
+A Jaeger all-in-one container provides trace collection, UI, and API for development:
+
+```bash
+# Start Jaeger (OTLP on :4317, UI on :16686)
+docker compose -f dev/docker-compose.yml up -d
+
+# Stop
+docker compose -f dev/docker-compose.yml down
+```
+
+`.xylem.yml` must have `observability.endpoint` set to `localhost:4317` for traces to export. Without an endpoint, tracing is silently disabled.
+
+- **UI**: http://localhost:16686
+- **API**: http://localhost:16686/api/
+  - `GET /api/services` — list services
+  - `GET /api/traces?service=xylem&limit=10` — recent traces
+  - `GET /api/traces/{traceID}` — full trace detail
+
 ## Testing patterns
 
 - Tests use interfaces and stubs extensively (e.g., `CommandRunner`, `WorktreeManager`) — no real subprocesses or git operations in tests

@@ -321,7 +321,7 @@ func newDrainRunner(t *testing.T, cfg *config.Config, q *queue.Queue, cmdRunner 
 	drainer.AuditLog = intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
 	drainer.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), drainer.AuditLog, nil)
 
-	if cfg.ObservabilityEnabled() {
+	if cfg.ObservabilityEnabled() && cfg.Observability.Endpoint != "" {
 		tracer, err := observability.NewTracer(observability.TracerConfig{
 			ServiceName:    "xylem",
 			ServiceVersion: "",
@@ -553,7 +553,9 @@ func TestScenarioIssueLabelGateWaitsThenResumes(t *testing.T) {
 	if vessel.WaitingFor != "" || vessel.WaitingSince != nil {
 		t.Fatalf("waiting metadata not cleared on resume: %+v", vessel)
 	}
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "in-progress", "plan-approved"})
+	// The "in-progress" label was removed when the vessel entered the waiting
+	// state (runVessel defer). It will be re-added when the vessel resumes.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "plan-approved"})
 
 	drainResult, err = drainer.Drain(context.Background())
 	if err != nil {
@@ -1510,8 +1512,10 @@ func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
 
 	events := readEvents(t, env.store)
 	editResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"issue", "edit", "6", "--repo", "owner/repo"})
-	if len(editResults) != 3 {
-		t.Fatalf("len(issue edit results) = %d, want 3", len(editResults))
+	// 4 calls: OnEnqueue (rate-limited), OnStart, OnComplete, RemoveRunningLabel (defer).
+	// The 4th call is a harmless double-removal of the running label.
+	if len(editResults) != 4 {
+		t.Fatalf("len(issue edit results) = %d, want 4", len(editResults))
 	}
 	if !reflect.DeepEqual(editResults[0].Shim.Args, []string{"issue", "edit", "6", "--repo", "owner/repo", "--add-label", "queued"}) {
 		t.Fatalf("first issue edit args = %v, want queued-label mutation", editResults[0].Shim.Args)
@@ -1524,8 +1528,8 @@ func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
 		}
 		gotCodes = append(gotCodes, *event.Shim.ExitCode)
 	}
-	if !reflect.DeepEqual(gotCodes, []int{1, 0, 0}) {
-		t.Fatalf("issue edit exit codes = %v, want [1 0 0]", gotCodes)
+	if !reflect.DeepEqual(gotCodes, []int{1, 0, 0, 0}) {
+		t.Fatalf("issue edit exit codes = %v, want [1 0 0 0]", gotCodes)
 	}
 }
 

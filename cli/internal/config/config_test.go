@@ -1162,6 +1162,7 @@ func TestValidateGitHubPREventsValid(t *testing.T) {
 						On: &PREventsConfig{
 							Labels:          []string{"needs-review"},
 							ReviewSubmitted: true,
+							AuthorAllow:     []string{"copilot-pull-request-reviewer[bot]"},
 						},
 					},
 				},
@@ -1170,6 +1171,106 @@ func TestValidateGitHubPREventsValid(t *testing.T) {
 	}
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected valid config, got: %v", err)
+	}
+}
+
+func TestValidateGitHubPREventsReviewSubmittedRequiresAuthorFilter(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "handle-review",
+						On:       &PREventsConfig{ReviewSubmitted: true},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "author_allow or author_deny")
+}
+
+func TestValidateGitHubPREventsCommentedRequiresAuthorFilter(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"comment": {
+						Workflow: "respond",
+						On:       &PREventsConfig{Commented: true},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "author_allow or author_deny")
+}
+
+func TestValidateGitHubPREventsAuthorDenyAloneIsEnough(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "handle-review",
+						On: &PREventsConfig{
+							ReviewSubmitted: true,
+							AuthorDeny:      []string{"some-bot"},
+						},
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid (author_deny alone is sufficient), got: %v", err)
+	}
+}
+
+// TestValidateGitHubPREventsChecksFailedNoAuthorFilter confirms that
+// checks_failed (a non-authored trigger) does not require author_allow /
+// author_deny — it scans CI state, not user-authored events.
+func TestValidateGitHubPREventsChecksFailedNoAuthorFilter(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"checks": {
+						Workflow: "fix-ci",
+						On:       &PREventsConfig{ChecksFailed: true},
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid, got: %v", err)
 	}
 }
 

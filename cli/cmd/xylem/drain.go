@@ -82,7 +82,7 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 }
 
 func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
-	if !cfg.ObservabilityEnabled() {
+	if !cfg.ObservabilityEnabled() || cfg.Observability.Endpoint == "" {
 		return nil
 	}
 
