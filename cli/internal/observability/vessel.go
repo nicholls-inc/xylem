@@ -78,6 +78,35 @@ func PhaseResultAttributes(data PhaseResultData) []SpanAttribute {
 	}
 }
 
+// CostReportData holds additive vessel-level cost artifact attributes.
+type CostReportData struct {
+	SummaryPath          string  `json:"summary_path"`
+	CostReportPath       string  `json:"cost_report_path"`
+	EvidenceManifestPath string  `json:"evidence_manifest_path"`
+	UsageSource          string  `json:"usage_source"`
+	TotalTokens          int     `json:"total_tokens"`
+	TotalCostUSD         float64 `json:"total_cost_usd"`
+	BudgetExceeded       bool    `json:"budget_exceeded"`
+	AlertCount           int     `json:"alert_count"`
+}
+
+// CostReportAttributes returns vessel-level attributes that align traces with persisted artifacts.
+func CostReportAttributes(data CostReportData) []SpanAttribute {
+	attrs := []SpanAttribute{
+		{Key: "xylem.artifact.summary_path", Value: data.SummaryPath},
+		{Key: "xylem.artifact.cost_report_path", Value: data.CostReportPath},
+		{Key: "xylem.cost.usage_source", Value: data.UsageSource},
+		{Key: "xylem.cost.total_tokens", Value: fmt.Sprintf("%d", data.TotalTokens)},
+		{Key: "xylem.cost.total_cost_usd", Value: fmt.Sprintf("%.6f", data.TotalCostUSD)},
+		{Key: "xylem.cost.budget_exceeded", Value: fmt.Sprintf("%t", data.BudgetExceeded)},
+		{Key: "xylem.cost.alert_count", Value: fmt.Sprintf("%d", data.AlertCount)},
+	}
+	if data.EvidenceManifestPath != "" {
+		attrs = append(attrs, SpanAttribute{Key: "xylem.artifact.evidence_manifest_path", Value: data.EvidenceManifestPath})
+	}
+	return attrs
+}
+
 // GateSpanData holds gate information for attribute extraction.
 type GateSpanData struct {
 	Type         string `json:"type"`

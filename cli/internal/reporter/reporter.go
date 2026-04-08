@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 )
 
@@ -47,9 +49,13 @@ func (r *Reporter) PhaseComplete(ctx context.Context, issueNum int, phaseName st
 }
 
 // VesselFailed posts a failure comment on the GitHub issue.
-func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName string, errMsg string, gateOutput string) error {
+func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName string, errMsg string, gateOutput string, reports ...*cost.CostReport) error {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "**xylem — failed at phase `%s`**\n\n**Error:** %s", phaseName, errMsg)
+	if costSection := formatCostSection(firstCostReport(reports)); costSection != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(costSection)
+	}
 
 	if gateOutput != "" {
 		fmt.Fprintf(&sb, "\n\n<details>\n<summary>Gate output (click to expand)</summary>\n\n%s\n\n</details>", gateOutput)
@@ -62,7 +68,7 @@ func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName str
 }
 
 // VesselCompleted posts a summary comment when all phases complete.
-func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []PhaseResult, manifest *evidence.Manifest) error {
+func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []PhaseResult, manifest *evidence.Manifest, reports ...*cost.CostReport) error {
 	var sb strings.Builder
 	if workflowCompletedViaNoOp(phases) {
 		sb.WriteString("**xylem — workflow completed early via no-op**\n\n")
@@ -80,6 +86,10 @@ func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []P
 	}
 
 	fmt.Fprintf(&sb, "\nTotal: %s", total)
+	if costSection := formatCostSection(firstCostReport(reports)); costSection != "" {
+		sb.WriteString("\n\n")
+		sb.WriteString(costSection)
+	}
 	if evidenceSection := formatEvidenceSection(manifest); evidenceSection != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(evidenceSection)
@@ -98,6 +108,63 @@ func workflowCompletedViaNoOp(phases []PhaseResult) bool {
 		}
 	}
 	return false
+}
+
+func firstCostReport(reports []*cost.CostReport) *cost.CostReport {
+	for _, report := range reports {
+		if report != nil {
+			return report
+		}
+	}
+	return nil
+}
+
+func formatCostSection(report *cost.CostReport) string {
+	if report == nil {
+		return ""
+	}
+
+	lines := []string{"### Cost"}
+	totalLine := fmt.Sprintf("- Total: $%.4f", report.TotalCostUSD)
+	if report.TotalTokens > 0 {
+		totalLine += fmt.Sprintf(" (%d tokens)", report.TotalTokens)
+	}
+	if report.UsageSource != "" {
+		totalLine += fmt.Sprintf(" — %s", report.UsageSource)
+	}
+	lines = append(lines, totalLine)
+
+	if report.UsageUnavailableReason != "" {
+		lines = append(lines, "- Usage note: "+report.UsageUnavailableReason)
+	}
+	if report.BudgetExceeded {
+		lines = append(lines, "- Budget status: exceeded")
+	}
+	for _, alert := range report.Alerts {
+		if alert.Type != "warning" {
+			continue
+		}
+		metric := alert.Metric
+		if metric == "" {
+			metric = "budget"
+		}
+		lines = append(lines, fmt.Sprintf("- Warning: %s at %.4f / %.4f", metric, alert.Current, alert.Limit))
+	}
+
+	if len(report.ByModel) > 0 {
+		models := make([]string, 0, len(report.ByModel))
+		for model := range report.ByModel {
+			models = append(models, model)
+		}
+		sort.Strings(models)
+		parts := make([]string, 0, len(models))
+		for _, model := range models {
+			parts = append(parts, fmt.Sprintf("%s ($%.4f)", model, report.ByModel[model]))
+		}
+		lines = append(lines, "- Models: "+strings.Join(parts, ", "))
+	}
+
+	return strings.Join(lines, "\n")
 }
 
 // LabelTimeout posts a timeout comment on the GitHub issue.

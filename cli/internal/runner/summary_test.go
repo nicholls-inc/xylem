@@ -861,7 +861,7 @@ func TestSmoke_WS6S6_EvidenceCollectionFailureIsNonFatal(t *testing.T) {
 	}}
 	vrs := newVesselRunState(cfg, vessel, now)
 
-	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, claims, now)
+	r.persistRunArtifacts(context.Background(), vessel, string(queue.StateCompleted), vrs, claims, now)
 
 	if !strings.Contains(buf.String(), "warn: save evidence manifest:") {
 		t.Fatalf("expected warning log for evidence manifest save failure, got %q", buf.String())
@@ -892,7 +892,7 @@ func TestSmoke_WS6S7_SummaryWriteFailureIsNonFatal(t *testing.T) {
 	now := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
 	vrs := newVesselRunState(cfg, vessel, now)
 
-	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, nil, now)
+	r.persistRunArtifacts(context.Background(), vessel, string(queue.StateCompleted), vrs, nil, now)
 
 	if !strings.Contains(buf.String(), "warn: save vessel summary:") {
 		t.Fatalf("expected warning log for summary write failure, got %q", buf.String())

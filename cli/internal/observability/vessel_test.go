@@ -181,3 +181,30 @@ func TestDrainSpanAttributes_ConcurrencyFormatted(t *testing.T) {
 		t.Fatalf("xylem.drain.concurrency = %q, want %q", got["xylem.drain.concurrency"], "17")
 	}
 }
+
+func TestCostReportAttributes(t *testing.T) {
+	attrs := CostReportAttributes(CostReportData{
+		SummaryPath:          "phases/issue-55/summary.json",
+		CostReportPath:       "phases/issue-55/cost-report.json",
+		EvidenceManifestPath: "phases/issue-55/evidence-manifest.json",
+		UsageSource:          "reported",
+		TotalTokens:          420,
+		TotalCostUSD:         0.0123,
+		BudgetExceeded:       false,
+		AlertCount:           1,
+	})
+	got := attrMap(attrs)
+
+	if got["xylem.artifact.summary_path"] != "phases/issue-55/summary.json" {
+		t.Fatalf("summary path = %q", got["xylem.artifact.summary_path"])
+	}
+	if got["xylem.artifact.cost_report_path"] != "phases/issue-55/cost-report.json" {
+		t.Fatalf("cost report path = %q", got["xylem.artifact.cost_report_path"])
+	}
+	if got["xylem.artifact.evidence_manifest_path"] != "phases/issue-55/evidence-manifest.json" {
+		t.Fatalf("evidence manifest path = %q", got["xylem.artifact.evidence_manifest_path"])
+	}
+	if got["xylem.cost.usage_source"] != "reported" {
+		t.Fatalf("usage source = %q", got["xylem.cost.usage_source"])
+	}
+}

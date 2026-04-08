@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
@@ -1604,6 +1605,13 @@ func TestSmoke_S27_CommandTypePhasesDoNotGenerateCostRecords(t *testing.T) {
 	assert.Zero(t, commandPhase.CostUSDEst)
 	assert.Equal(t, promptPhase.InputTokensEst+promptPhase.OutputTokensEst, summary.TotalTokensEst)
 	assert.Equal(t, promptPhase.CostUSDEst, summary.TotalCostUSDEst)
+	assert.Equal(t, cost.UsageSourceEstimated, summary.UsageSource)
+	assert.Contains(t, summary.UsageUnavailableReason, "structured usage metadata")
+
+	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", "issue-1", cost.ReportFileName))
+	require.NoError(t, err)
+	assert.Equal(t, cost.UsageSourceEstimated, report.UsageSource)
+	assert.Contains(t, report.UsageUnavailableReason, "structured usage metadata")
 }
 
 func TestSmoke_S28_BudgetEnforcementFailsVesselWhenBudgetIsExceeded(t *testing.T) {
@@ -5413,6 +5421,108 @@ func TestSmoke_WS6S11_ErrorRecordedBeforeEnd(t *testing.T) {
 	if phaseSpan.EndTime().IsZero() {
 		t.Fatal("phase span end time not set")
 	}
+}
+
+func TestPromptOnlyPersistsReportedUsageCostReport(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makePromptVessel(1, "reported usage prompt")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"reported usage prompt": []byte(`{"usage":{"input_tokens":120,"output_tokens":30,"cost_usd":0.0042}}`),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+
+	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", vessel.ID, cost.ReportFileName))
+	require.NoError(t, err)
+	require.Equal(t, cost.UsageSourceReported, report.UsageSource)
+	require.Equal(t, 150, report.TotalTokens)
+	require.InDelta(t, 0.0042, report.TotalCostUSD, 1e-9)
+	require.InDelta(t, 0.0042, report.ByRole[cost.RoleGenerator], 1e-9)
+	require.InDelta(t, 0.0042, report.ByPurpose[cost.PurposeReasoning], 1e-9)
+	require.InDelta(t, 0.0042, report.ByModel["claude-sonnet-4"], 1e-9)
+	require.Len(t, report.Phases, 1)
+	require.Equal(t, "prompt-only", report.Phases[0].Name)
+	require.Equal(t, cost.UsageSourceReported, report.Phases[0].UsageSource)
+}
+
+func TestPromptOnlyWarningPersistsWithoutFailing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
+	setBudget(cfg, 0, 100)
+
+	prompt := strings.Repeat("p", 200) // 50 estimated tokens
+	output := []byte(strings.Repeat("o", 120))
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makePromptVessel(2, prompt)
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			prompt: output,
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+
+	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", vessel.ID, cost.ReportFileName))
+	require.NoError(t, err)
+	require.False(t, report.BudgetExceeded)
+	require.Equal(t, cost.UsageSourceEstimated, report.UsageSource)
+	require.NotEmpty(t, report.Alerts)
+	require.Equal(t, "warning", report.Alerts[0].Type)
+	require.Equal(t, "tokens", report.Alerts[0].Metric)
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	require.False(t, summary.BudgetExceeded)
+}
+
+func TestCostReportIncludesTraceJoinFields(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makePromptVessel(3, "trace prompt")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	tracer, _ := newTestTracer(t)
+	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"trace prompt": []byte("done"),
+		},
+	})
+	r.Tracer = tracer
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+
+	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", vessel.ID, cost.ReportFileName))
+	require.NoError(t, err)
+	require.NotEmpty(t, report.Join.TraceID)
+	require.NotEmpty(t, report.Join.SpanID)
+	require.Equal(t, filepath.ToSlash(filepath.Join("phases", vessel.ID, summaryFileName)), report.Join.SummaryPath)
 }
 
 func TestIsRateLimitError(t *testing.T) {

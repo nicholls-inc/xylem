@@ -618,9 +618,14 @@ func TestSaveAndLoadReport(t *testing.T) {
 	path := filepath.Join(dir, "report.json")
 
 	original := &CostReport{
-		MissionID:    "m-42",
-		TotalTokens:  1500,
-		TotalCostUSD: 2.75,
+		MissionID:         "m-42",
+		VesselID:          "issue-55",
+		Workflow:          "fix-bug",
+		State:             "completed",
+		TotalInputTokens:  1200,
+		TotalOutputTokens: 300,
+		TotalTokens:       1500,
+		TotalCostUSD:      2.75,
 		ByRole: map[AgentRole]float64{
 			RolePlanner:   1.00,
 			RoleGenerator: 1.75,
@@ -632,8 +637,36 @@ func TestSaveAndLoadReport(t *testing.T) {
 		ByModel: map[string]float64{
 			"sonnet": 2.75,
 		},
-		RecordCount: 5,
-		GeneratedAt: time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		RecordCount:            5,
+		GeneratedAt:            time.Date(2026, 1, 15, 10, 0, 0, 0, time.UTC),
+		UsageSource:            UsageSourceMixed,
+		UsageUnavailableReason: "provider output did not include structured usage metadata",
+		Phases: []PhaseCostBreakdown{{
+			Name:                   "implement",
+			Type:                   "prompt",
+			Model:                  "sonnet",
+			InputTokens:            1200,
+			OutputTokens:           300,
+			TotalTokens:            1500,
+			CostUSD:                2.75,
+			UsageSource:            UsageSourceReported,
+			UsageUnavailableReason: "",
+		}},
+		Alerts: []BudgetAlert{{
+			Type:    "warning",
+			Metric:  "tokens",
+			Current: 1500,
+			Limit:   2000,
+		}},
+		BudgetMaxTokens: func() *int {
+			v := 2000
+			return &v
+		}(),
+		Join: ArtifactJoin{
+			TraceID:     "trace-123",
+			SpanID:      "span-456",
+			SummaryPath: "phases/issue-55/summary.json",
+		},
 	}
 
 	if err := SaveReport(path, original); err != nil {
@@ -657,9 +690,43 @@ func TestSaveAndLoadReport(t *testing.T) {
 	if loaded.RecordCount != original.RecordCount {
 		t.Fatalf("RecordCount = %d, want %d", loaded.RecordCount, original.RecordCount)
 	}
+	if loaded.VesselID != original.VesselID {
+		t.Fatalf("VesselID = %s, want %s", loaded.VesselID, original.VesselID)
+	}
+	if loaded.UsageSource != original.UsageSource {
+		t.Fatalf("UsageSource = %s, want %s", loaded.UsageSource, original.UsageSource)
+	}
+	if loaded.Join.TraceID != original.Join.TraceID {
+		t.Fatalf("Join.TraceID = %s, want %s", loaded.Join.TraceID, original.Join.TraceID)
+	}
+	if len(loaded.Alerts) != 1 || loaded.Alerts[0].Metric != "tokens" {
+		t.Fatalf("Alerts = %+v, want token warning", loaded.Alerts)
+	}
 	if !floatEqual(loaded.ByRole[RolePlanner], original.ByRole[RolePlanner]) {
 		t.Fatalf("ByRole[planner] mismatch")
 	}
+}
+
+func TestDeriveUsageSource(t *testing.T) {
+	t.Run("mixed", func(t *testing.T) {
+		got := DeriveUsageSource([]PhaseCostBreakdown{
+			{UsageSource: UsageSourceReported},
+			{UsageSource: UsageSourceEstimated},
+		})
+		if got != UsageSourceMixed {
+			t.Fatalf("DeriveUsageSource() = %s, want %s", got, UsageSourceMixed)
+		}
+	})
+
+	t.Run("unavailable reason", func(t *testing.T) {
+		got := FirstUsageUnavailableReason([]PhaseCostBreakdown{
+			{UsageSource: UsageSourceReported},
+			{UsageSource: UsageSourceUnavailable, UsageUnavailableReason: "missing usage"},
+		})
+		if got != "missing usage" {
+			t.Fatalf("FirstUsageUnavailableReason() = %q, want %q", got, "missing usage")
+		}
+	})
 }
 
 func TestLoadReportNotFound(t *testing.T) {

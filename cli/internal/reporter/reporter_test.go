@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -590,6 +591,28 @@ func TestVesselCompletedTotalDuration(t *testing.T) {
 	if !strings.Contains(mock.lastBody, "Total: 2m0s") {
 		t.Errorf("expected total 2m0s, got: %s", mock.lastBody)
 	}
+}
+
+func TestVesselCompletedIncludesCostSectionWhenProvided(t *testing.T) {
+	mock := &mockRunner{}
+	r := &Reporter{Runner: mock, Repo: "owner/repo"}
+
+	report := &cost.CostReport{
+		TotalTokens:            420,
+		TotalCostUSD:           0.0123,
+		UsageSource:            cost.UsageSourceEstimated,
+		UsageUnavailableReason: "provider output did not include structured usage metadata",
+		Alerts:                 []cost.BudgetAlert{{Type: "warning", Metric: "tokens", Current: 420, Limit: 500}},
+		ByModel:                map[string]float64{"claude-sonnet-4": 0.0123},
+	}
+
+	err := r.VesselCompleted(context.Background(), 5, []PhaseResult{{Name: "implement", Duration: time.Second, Status: "completed"}}, nil, report)
+	require.NoError(t, err)
+	assert.Contains(t, mock.lastBody, "### Cost")
+	assert.Contains(t, mock.lastBody, "Total: $0.0123 (420 tokens) — estimated")
+	assert.Contains(t, mock.lastBody, "Usage note: provider output did not include structured usage metadata")
+	assert.Contains(t, mock.lastBody, "Warning: tokens at 420.0000 / 500.0000")
+	assert.Contains(t, mock.lastBody, "Models: claude-sonnet-4 ($0.0123)")
 }
 
 func TestVesselFailedGhArgs(t *testing.T) {

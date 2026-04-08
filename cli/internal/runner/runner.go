@@ -53,12 +53,13 @@ type DrainResult struct {
 
 // Runner launches Claude sessions for queued vessels with concurrency control.
 type Runner struct {
-	Config   *config.Config
-	Queue    *queue.Queue
-	Worktree WorktreeManager
-	Runner   CommandRunner
-	Sources  map[string]source.Source
-	Reporter *reporter.Reporter // may be nil for non-github vessels
+	Config         *config.Config
+	Queue          *queue.Queue
+	Worktree       WorktreeManager
+	Runner         CommandRunner
+	UsageExtractor UsageExtractor
+	Sources        map[string]source.Source
+	Reporter       *reporter.Reporter // may be nil for non-github vessels
 	// Shared harness scaffolding for phase policy enforcement, audit logging,
 	// protected-surface verification, and tracing.
 	Intermediary *intermediary.Intermediary // nil = no policy enforcement
@@ -69,6 +70,13 @@ type Runner struct {
 // New creates a Runner.
 func New(cfg *config.Config, q *queue.Queue, wt WorktreeManager, r CommandRunner) *Runner {
 	return &Runner{Config: cfg, Queue: q, Worktree: wt, Runner: r}
+}
+
+func (r *Runner) usageExtractor() UsageExtractor {
+	if r != nil && r.UsageExtractor != nil {
+		return r.UsageExtractor
+	}
+	return defaultUsageExtractor{}
 }
 
 // Drain dequeues pending vessels and launches sessions up to Config.Concurrency concurrently.
@@ -257,7 +265,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		if outcome != "failed" {
 			return
 		}
-		r.persistRunArtifacts(vessel, string(queue.StateFailed), vrs, claims, r.runtimeNow())
+		r.persistRunArtifacts(ctx, vessel, string(queue.StateFailed), vrs, claims, r.runtimeNow())
 	}()
 
 	// Worktree: reuse if set (resuming from waiting), otherwise create.
@@ -548,7 +556,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			if runErr != nil {
 				finishCurrentPhaseSpan(runErr)
 				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
+				vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usageDetails{}, phaseDuration, "failed", nil, runErr.Error()))
 				vessel.FailedPhase = p.Name
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -557,7 +565,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
 					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), "", r.previewCostReport(vrs, string(queue.StateFailed), r.runtimeNow())))
 				}
 				return "failed"
 			}
@@ -566,7 +574,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if err := r.verifyProtectedSurfaces(vessel, p, worktreePath, beforeSnapshot); err != nil {
 					finishCurrentPhaseSpan(err)
 					log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
+					vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usageDetails{}, phaseDuration, "failed", nil, err.Error()))
 					vessel.FailedPhase = p.Name
 					r.failVessel(vessel.ID, err.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
@@ -575,18 +583,26 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					issueNum := r.parseIssueNum(vessel)
 					if issueNum > 0 && r.Reporter != nil {
 						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+							r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), "", r.previewCostReport(vrs, string(queue.StateFailed), r.runtimeNow())))
 					}
 					return "failed"
 				}
 			}
 
 			recordedAt := r.runtimeNow()
-			inputTokensEst, outputTokensEst, costUSDEst := vrs.recordPhaseTokens(p, model, promptForCost, string(output), recordedAt)
+			providerUsage := executionUsage{
+				Source:            cost.UsageSourceUnavailable,
+				UnavailableReason: "command phase does not consume model tokens",
+			}
+			if p.Type != "command" {
+				providerUsage = r.usageExtractor().ExtractUsage(provider, model, output)
+			}
+			usage := vrs.recordPhaseUsage(p, model, promptForCost, string(output), recordedAt, providerUsage)
+			r.logBudgetAlerts(vessel.ID, vrs.consumeBudgetAlerts())
 			if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
 				errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
 					p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg))
+				vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usage, phaseDuration, "failed", nil, errMsg))
 				vessel.FailedPhase = p.Name
 				r.failVessel(vessel.ID, errMsg)
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -595,7 +611,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
 					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, errMsg, ""))
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, errMsg, "", r.previewCostReport(vrs, string(queue.StateFailed), recordedAt)))
 				}
 				finishCurrentPhaseSpan(fmt.Errorf("%s", errMsg))
 				return "failed"
@@ -631,7 +647,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			}
 
 			if phaseStatus == "no-op" {
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, ""))
+				vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usage, phaseDuration, phaseStatus, nil, ""))
 				log.Printf("%sphase %q triggered no-op; completing workflow early", vesselLabel(vessel), p.Name)
 				finishCurrentPhaseSpan(nil)
 				return r.completeVessel(ctx, vessel, worktreePath, phaseResults, vrs, claims)
@@ -639,7 +655,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			// Handle gate
 			if p.Gate == nil {
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, ""))
+				vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usage, phaseDuration, phaseStatus, nil, ""))
 				finishCurrentPhaseSpan(nil)
 				break // no gate, proceed to next phase
 			}
@@ -654,7 +670,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					RetryAttempt: retryAttempt,
 				}, gateErr)
 				if gateErr != nil {
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
+					vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usage, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
 					finishCurrentPhaseSpan(nil)
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
 					if err := src.OnFail(ctx, vessel); err != nil {
@@ -664,7 +680,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				}
 				if passed {
 					log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, gatePassedPointer(true), ""))
+					vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usage, phaseDuration, phaseStatus, gatePassedPointer(true), ""))
 					gateRecordedAt := r.runtimeNow()
 					claims = append(claims, buildGateClaim(p, true, phaseArtifactRelativePath(vessel.ID, p.Name), gateRecordedAt))
 					finishCurrentPhaseSpan(nil)
@@ -681,7 +697,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 				if vessel.GateRetries <= 0 {
 					log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted"))
+					vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usage, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted"))
 					finishCurrentPhaseSpan(nil)
 					vessel.FailedPhase = p.Name
 					vessel.GateOutput = gateOut
@@ -691,7 +707,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					if issueNum > 0 && r.Reporter != nil {
 						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut))
+							r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut, r.previewCostReport(vrs, string(queue.StateFailed), r.runtimeNow())))
 					}
 					return "failed"
 				}
@@ -706,7 +722,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				gateResult = fmt.Sprintf("The following gate check failed after the previous phase. Fix the issues and try again:\n\n%s", gateOut)
 
 				if err := r.runtimeSleep(ctx, retryDelay); err != nil {
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error()))
+					vrs.addPhase(vrs.phaseSummaryWithUsage(r.Config, srcCfg, sk, p, harnessContent, usage, phaseDuration, "failed", gatePassedPointer(false), err.Error()))
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
 					if failErr := src.OnFail(ctx, vessel); failErr != nil {
@@ -809,15 +825,34 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 			return "failed"
 		}
 	}
+	phasesDir := filepath.Join(r.Config.StateDir, "phases", vessel.ID)
+	if err := os.MkdirAll(phasesDir, 0o755); err != nil {
+		r.failVessel(vessel.ID, fmt.Sprintf("create phases dir: %v", err))
+		if failErr := src.OnFail(ctx, vessel); failErr != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+		}
+		return "failed"
+	}
+	outputPath := filepath.Join(phasesDir, "prompt-only.output")
+	if err := os.WriteFile(outputPath, output, 0o644); err != nil {
+		log.Printf("warn: write output file %s: %v", outputPath, err)
+	}
 	recordedAt := r.runtimeNow()
 	if vrs != nil {
-		vrs.recordPromptOnlyUsage(model, prompt, string(output), recordedAt)
+		providerUsage := r.usageExtractor().ExtractUsage(provider, model, output)
+		vrs.recordPromptOnlyUsageWithUsage(provider, model, prompt, string(output), recordedAt, providerUsage)
+		r.logBudgetAlerts(vessel.ID, vrs.consumeBudgetAlerts())
 		if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
 			errMsg := fmt.Sprintf("budget exceeded: estimated cost $%.4f, estimated tokens %d",
 				vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 			r.failVessel(vessel.ID, errMsg)
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, "prompt-only", errMsg, "", r.previewCostReport(vrs, string(queue.StateFailed), recordedAt)))
 			}
 			return "failed"
 		}
@@ -872,12 +907,29 @@ func (r *Runner) failVessel(id string, errMsg string) {
 	}
 }
 
+func (r *Runner) previewCostReport(vrs *vesselRunState, state string, now time.Time) *cost.CostReport {
+	if vrs == nil {
+		return nil
+	}
+	return vrs.buildCostReport(state, now, cost.ArtifactJoin{})
+}
+
+func (r *Runner) logBudgetAlerts(vesselID string, alerts []cost.BudgetAlert) {
+	for _, alert := range alerts {
+		metric := alert.Metric
+		if metric == "" {
+			metric = "budget"
+		}
+		log.Printf("%sbudget %s %s: current=%.4f limit=%.4f", vesselLabel(queue.Vessel{ID: vesselID}), metric, alert.Type, alert.Current, alert.Limit)
+	}
+}
+
 func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktreePath string, phaseResults []reporter.PhaseResult, vrs *vesselRunState, claims []evidence.Claim) string {
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
 	}
 
-	manifest := r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, claims, r.runtimeNow())
+	manifest, report := r.persistRunArtifacts(ctx, vessel, string(queue.StateCompleted), vrs, claims, r.runtimeNow())
 
 	// Clean up worktree (best-effort)
 	r.removeWorktree(worktreePath, vessel.ID)
@@ -886,17 +938,19 @@ func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktr
 	issueNum := r.parseIssueNum(vessel)
 	if issueNum > 0 && r.Reporter != nil {
 		r.logReporterError("post vessel-completed comment", vessel.ID,
-			r.Reporter.VesselCompleted(ctx, issueNum, phaseResults, manifest))
+			r.Reporter.VesselCompleted(ctx, issueNum, phaseResults, manifest, report))
 	}
 
 	return "completed"
 }
 
-func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *vesselRunState, claims []evidence.Claim, now time.Time) *evidence.Manifest {
+func (r *Runner) persistRunArtifacts(ctx context.Context, vessel queue.Vessel, state string, vrs *vesselRunState, claims []evidence.Claim, now time.Time) (*evidence.Manifest, *cost.CostReport) {
 	if vrs == nil {
 		vrs = newVesselRunState(r.Config, vessel, now)
 	}
 
+	summaryPath := filepath.ToSlash(filepath.Join("phases", vessel.ID, summaryFileName))
+	reportPath := filepath.ToSlash(filepath.Join("phases", vessel.ID, cost.ReportFileName))
 	summary := vrs.buildSummary(state, now)
 	var manifest *evidence.Manifest
 	if len(claims) > 0 {
@@ -913,11 +967,42 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 		}
 	}
 
+	spanCtx := oteltrace.SpanContextFromContext(ctx)
+	join := cost.ArtifactJoin{
+		SummaryPath:          summaryPath,
+		EvidenceManifestPath: summary.EvidenceManifestPath,
+	}
+	if spanCtx.IsValid() {
+		join.TraceID = spanCtx.TraceID().String()
+		join.SpanID = spanCtx.SpanID().String()
+	}
+	report := vrs.buildCostReport(state, now, cost.ArtifactJoin{
+		TraceID:              join.TraceID,
+		SpanID:               join.SpanID,
+		SummaryPath:          join.SummaryPath,
+		EvidenceManifestPath: join.EvidenceManifestPath,
+	})
 	if err := SaveVesselSummary(r.Config.StateDir, summary); err != nil {
 		log.Printf("warn: save vessel summary: %v", err)
 	}
+	if err := cost.SaveReport(filepath.Join(r.Config.StateDir, filepath.FromSlash(reportPath)), report); err != nil {
+		log.Printf("warn: save cost report: %v", err)
+	}
+	span := oteltrace.SpanFromContext(ctx)
+	if span != nil {
+		observability.AttachSpanAttributes(span, observability.CostReportAttributes(observability.CostReportData{
+			SummaryPath:          summaryPath,
+			CostReportPath:       reportPath,
+			EvidenceManifestPath: summary.EvidenceManifestPath,
+			UsageSource:          string(report.UsageSource),
+			TotalTokens:          report.TotalTokens,
+			TotalCostUSD:         report.TotalCostUSD,
+			BudgetExceeded:       report.BudgetExceeded,
+			AlertCount:           len(report.Alerts),
+		}))
+	}
 
-	return manifest
+	return manifest, report
 }
 
 // runVesselOrchestrated executes a workflow with explicit phase dependencies
@@ -1074,7 +1159,7 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 			issueNum := r.parseIssueNum(vessel)
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post vessel-failed comment", vessel.ID,
-					r.Reporter.VesselFailed(ctx, issueNum, "", errMsg, ""))
+					r.Reporter.VesselFailed(ctx, issueNum, "", errMsg, "", r.previewCostReport(vrs, string(queue.StateFailed), r.runtimeNow())))
 			}
 			return "failed"
 		}
@@ -1307,12 +1392,12 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			issueNum := r.parseIssueNum(vessel)
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post vessel-failed comment", vessel.ID,
-					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
+					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), "", r.previewCostReport(vrs, string(queue.StateFailed), r.runtimeNow())))
 			}
 			return singlePhaseResult{
 				status:       "failed",
 				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()),
+				phaseSummary: vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usageDetails{}, phaseDuration, "failed", nil, runErr.Error()),
 			}
 		}
 
@@ -1328,18 +1413,26 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
 					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), "", r.previewCostReport(vrs, string(queue.StateFailed), r.runtimeNow())))
 				}
 				return singlePhaseResult{
 					status:       "failed",
 					duration:     phaseDuration,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()),
+					phaseSummary: vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usageDetails{}, phaseDuration, "failed", nil, err.Error()),
 				}
 			}
 		}
 
 		recordedAt := r.runtimeNow()
-		inputTokensEst, outputTokensEst, costUSDEst := vrs.recordPhaseTokens(p, model, promptForCost, string(output), recordedAt)
+		providerUsage := executionUsage{
+			Source:            cost.UsageSourceUnavailable,
+			UnavailableReason: "command phase does not consume model tokens",
+		}
+		if p.Type != "command" {
+			providerUsage = r.usageExtractor().ExtractUsage(provider, model, output)
+		}
+		usage := vrs.recordPhaseUsage(p, model, promptForCost, string(output), recordedAt, providerUsage)
+		r.logBudgetAlerts(vessel.ID, vrs.consumeBudgetAlerts())
 		if enforceBudget && vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
 			errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
 				p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
@@ -1351,13 +1444,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			issueNum := r.parseIssueNum(vessel)
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post vessel-failed comment", vessel.ID,
-					r.Reporter.VesselFailed(ctx, issueNum, p.Name, errMsg, ""))
+					r.Reporter.VesselFailed(ctx, issueNum, p.Name, errMsg, "", r.previewCostReport(vrs, string(queue.StateFailed), recordedAt)))
 			}
 			finishCurrentPhaseSpan(fmt.Errorf("%s", errMsg))
 			return singlePhaseResult{
 				status:       "failed",
 				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg),
+				phaseSummary: vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "failed", nil, errMsg),
 			}
 		}
 
@@ -1373,7 +1466,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				output:        string(output),
 				status:        "no-op",
 				duration:      phaseDuration,
-				phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "no-op", nil, ""),
+				phaseSummary:  vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "no-op", nil, ""),
 				evidenceClaim: nil,
 			}
 		}
@@ -1390,7 +1483,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				output:        string(output),
 				status:        "completed",
 				duration:      phaseDuration,
-				phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, ""),
+				phaseSummary:  vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "completed", nil, ""),
 				evidenceClaim: nil,
 			}
 		}
@@ -1414,7 +1507,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					status:       "failed",
 					duration:     phaseDuration,
 					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()),
+					phaseSummary: vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()),
 				}
 			}
 			if passed {
@@ -1426,7 +1519,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					output:        string(output),
 					status:        "completed",
 					duration:      phaseDuration,
-					phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", gatePassedPointer(true), ""),
+					phaseSummary:  vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "completed", gatePassedPointer(true), ""),
 					evidenceClaim: &claim,
 				}
 			}
@@ -1448,14 +1541,14 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				if issueNum > 0 && r.Reporter != nil {
 					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut))
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut, r.previewCostReport(vrs, string(queue.StateFailed), r.runtimeNow())))
 				}
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
 					status:       "failed",
 					duration:     phaseDuration,
 					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted"),
+					phaseSummary: vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted"),
 				}
 			}
 			gateRetries--
@@ -1471,7 +1564,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					status:       "failed",
 					duration:     phaseDuration,
 					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error()),
+					phaseSummary: vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "failed", gatePassedPointer(false), err.Error()),
 				}
 			}
 			finishCurrentPhaseSpan(nil)
@@ -1506,7 +1599,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			output:        string(output),
 			status:        "completed",
 			duration:      phaseDuration,
-			phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, ""),
+			phaseSummary:  vrs.phaseSummaryWithUsage(r.Config, srcCfg, wf, p, harnessContent, usage, phaseDuration, "completed", nil, ""),
 			evidenceClaim: nil,
 		}
 	}

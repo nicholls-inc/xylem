@@ -5,11 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -20,7 +22,7 @@ func newStatusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jsonMode, _ := cmd.Flags().GetBool("json")
 			stateFilter, _ := cmd.Flags().GetString("state")
-			return cmdStatus(deps.q, jsonMode, stateFilter)
+			return cmdStatusWithStateDir(deps.q, deps.cfg.StateDir, jsonMode, stateFilter)
 		},
 	}
 	cmd.Flags().Bool("json", false, "Output as JSON")
@@ -29,6 +31,10 @@ func newStatusCmd() *cobra.Command {
 }
 
 func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
+	return cmdStatusWithStateDir(q, "", jsonMode, stateFilter)
+}
+
+func cmdStatusWithStateDir(q *queue.Queue, stateDir string, jsonMode bool, stateFilter string) error {
 	var vessels []queue.Vessel
 	var err error
 	if stateFilter != "" {
@@ -77,7 +83,7 @@ func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
 		if wf == "" {
 			wf = "(prompt)"
 		}
-		info := vesselInfo(j)
+		info := vesselInfo(stateDir, j)
 		fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-30s  %-12s  %s\n",
 			j.ID, j.Source, wf, string(j.State), info, started, duration)
 	}
@@ -91,7 +97,7 @@ func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
 }
 
 // vesselInfo returns additional context for the Info column based on vessel state.
-func vesselInfo(v queue.Vessel) string {
+func vesselInfo(stateDir string, v queue.Vessel) string {
 	if v.State == queue.StateWaiting && v.WaitingFor != "" {
 		elapsed := "unknown"
 		if v.WaitingSince != nil {
@@ -99,7 +105,42 @@ func vesselInfo(v queue.Vessel) string {
 		}
 		return fmt.Sprintf("waiting for %q (%s)", v.WaitingFor, elapsed)
 	}
-	return ""
+	if stateDir == "" {
+		return ""
+	}
+	report, err := cost.LoadReport(filepath.Join(stateDir, "phases", v.ID, cost.ReportFileName))
+	if err != nil {
+		return ""
+	}
+	return formatStatusCostInfo(report)
+}
+
+func formatStatusCostInfo(report *cost.CostReport) string {
+	if report == nil {
+		return ""
+	}
+	parts := []string{fmt.Sprintf("$%.4f", report.TotalCostUSD)}
+	if report.TotalTokens > 0 {
+		parts = append(parts, fmt.Sprintf("%dt", report.TotalTokens))
+	}
+	if report.UsageSource != "" {
+		parts = append(parts, string(report.UsageSource))
+	}
+	if report.BudgetExceeded {
+		parts = append(parts, "budget exceeded")
+	} else {
+		for _, alert := range report.Alerts {
+			if alert.Type == "warning" {
+				parts = append(parts, "warning")
+				break
+			}
+		}
+	}
+	info := strings.Join(parts, ", ")
+	if report.UsageUnavailableReason != "" {
+		info += ": " + report.UsageUnavailableReason
+	}
+	return info
 }
 
 func pauseMarkerPath(cfg *config.Config) string {

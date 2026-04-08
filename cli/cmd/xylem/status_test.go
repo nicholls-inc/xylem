@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -350,5 +351,45 @@ func TestStatusJSONIncludesWaitingFields(t *testing.T) {
 	}
 	if v.WaitingSince == nil {
 		t.Error("expected waiting_since to be set")
+	}
+}
+
+func TestStatusShowsCostReportInfo(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	q.Enqueue(testStatusVessel("issue-55", queue.StateCompleted)) //nolint:errcheck
+
+	reportDir := filepath.Join(stateDir, "phases", "issue-55")
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := cost.SaveReport(filepath.Join(reportDir, cost.ReportFileName), &cost.CostReport{
+		VesselID:               "issue-55",
+		TotalTokens:            420,
+		TotalCostUSD:           0.0123,
+		UsageSource:            cost.UsageSourceEstimated,
+		UsageUnavailableReason: "provider output did not include structured usage metadata",
+		Alerts:                 []cost.BudgetAlert{{Type: "warning", Metric: "tokens", Current: 420, Limit: 500}},
+	}); err != nil {
+		t.Fatalf("SaveReport() error = %v", err)
+	}
+
+	var err error
+	out := captureStdout(func() { err = cmdStatusWithStateDir(q, stateDir, false, "") })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "$0.0123") {
+		t.Fatalf("expected cost in output, got: %s", out)
+	}
+	if !strings.Contains(out, "420t") {
+		t.Fatalf("expected tokens in output, got: %s", out)
+	}
+	if !strings.Contains(out, "estimated") {
+		t.Fatalf("expected usage source in output, got: %s", out)
+	}
+	if !strings.Contains(out, "warning") {
+		t.Fatalf("expected warning in output, got: %s", out)
 	}
 }

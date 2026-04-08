@@ -53,21 +53,74 @@ type Budget struct {
 // BudgetAlert records a budget threshold event.
 type BudgetAlert struct {
 	Type      string    `json:"type"` // "warning" or "exceeded"
+	Metric    string    `json:"metric,omitempty"`
 	Current   float64   `json:"current"`
 	Limit     float64   `json:"limit"`
 	Timestamp time.Time `json:"timestamp"`
 }
 
-// CostReport summarises cost data for a mission.
+// UsageSource identifies how a usage value was obtained.
+type UsageSource string
+
+const (
+	UsageSourceReported    UsageSource = "reported"
+	UsageSourceEstimated   UsageSource = "estimated"
+	UsageSourceUnavailable UsageSource = "unavailable"
+	UsageSourceMixed       UsageSource = "mixed"
+)
+
+// PhaseCostBreakdown describes usage and cost for a single vessel phase.
+type PhaseCostBreakdown struct {
+	Name                   string      `json:"name"`
+	Type                   string      `json:"type,omitempty"`
+	Provider               string      `json:"provider,omitempty"`
+	Model                  string      `json:"model,omitempty"`
+	Status                 string      `json:"status,omitempty"`
+	DurationMS             int64       `json:"duration_ms,omitempty"`
+	ArtifactPath           string      `json:"artifact_path,omitempty"`
+	InputTokens            int         `json:"input_tokens,omitempty"`
+	OutputTokens           int         `json:"output_tokens,omitempty"`
+	TotalTokens            int         `json:"total_tokens,omitempty"`
+	CostUSD                float64     `json:"cost_usd,omitempty"`
+	UsageSource            UsageSource `json:"usage_source,omitempty"`
+	UsageUnavailableReason string      `json:"usage_unavailable_reason,omitempty"`
+}
+
+// ArtifactJoin records stable fields used to join cost artifacts to traces and evidence.
+type ArtifactJoin struct {
+	TraceID              string `json:"trace_id,omitempty"`
+	SpanID               string `json:"span_id,omitempty"`
+	SummaryPath          string `json:"summary_path,omitempty"`
+	EvidenceManifestPath string `json:"evidence_manifest_path,omitempty"`
+}
+
+const ReportFileName = "cost-report.json"
+
+// CostReport summarises cost data for a mission or vessel.
 type CostReport struct {
-	MissionID    string                `json:"mission_id"`
-	TotalTokens  int                   `json:"total_tokens"`
-	TotalCostUSD float64               `json:"total_cost_usd"`
-	ByRole       map[AgentRole]float64 `json:"by_role"`
-	ByPurpose    map[Purpose]float64   `json:"by_purpose"`
-	ByModel      map[string]float64    `json:"by_model"`
-	RecordCount  int                   `json:"record_count"`
-	GeneratedAt  time.Time             `json:"generated_at"`
+	MissionID              string                `json:"mission_id"`
+	VesselID               string                `json:"vessel_id,omitempty"`
+	Source                 string                `json:"source,omitempty"`
+	Workflow               string                `json:"workflow,omitempty"`
+	Ref                    string                `json:"ref,omitempty"`
+	State                  string                `json:"state,omitempty"`
+	TotalInputTokens       int                   `json:"total_input_tokens,omitempty"`
+	TotalOutputTokens      int                   `json:"total_output_tokens,omitempty"`
+	TotalTokens            int                   `json:"total_tokens"`
+	TotalCostUSD           float64               `json:"total_cost_usd"`
+	ByRole                 map[AgentRole]float64 `json:"by_role"`
+	ByPurpose              map[Purpose]float64   `json:"by_purpose"`
+	ByModel                map[string]float64    `json:"by_model"`
+	RecordCount            int                   `json:"record_count"`
+	GeneratedAt            time.Time             `json:"generated_at"`
+	UsageSource            UsageSource           `json:"usage_source,omitempty"`
+	UsageUnavailableReason string                `json:"usage_unavailable_reason,omitempty"`
+	Phases                 []PhaseCostBreakdown  `json:"phases,omitempty"`
+	Alerts                 []BudgetAlert         `json:"alerts,omitempty"`
+	BudgetExceeded         bool                  `json:"budget_exceeded,omitempty"`
+	BudgetMaxCostUSD       *float64              `json:"budget_max_cost_usd,omitempty"`
+	BudgetMaxTokens        *int                  `json:"budget_max_tokens,omitempty"`
+	Join                   ArtifactJoin          `json:"join,omitempty"`
 }
 
 // ModelLadder maps each agent role to a preferred model name.
@@ -160,6 +213,7 @@ func (t *Tracker) Record(record UsageRecord) error {
 			t.exceeded = true
 			t.alerts = append(t.alerts, BudgetAlert{
 				Type:      "exceeded",
+				Metric:    "cost_usd",
 				Current:   totalCost,
 				Limit:     t.budget.CostLimitUSD,
 				Timestamp: record.Timestamp,
@@ -167,6 +221,7 @@ func (t *Tracker) Record(record UsageRecord) error {
 		} else if utilization >= warningThreshold && !t.exceeded && !alertsHaveWarningForLimit(t.alerts, t.budget.CostLimitUSD) {
 			t.alerts = append(t.alerts, BudgetAlert{
 				Type:      "warning",
+				Metric:    "cost_usd",
 				Current:   totalCost,
 				Limit:     t.budget.CostLimitUSD,
 				Timestamp: record.Timestamp,
@@ -181,6 +236,7 @@ func (t *Tracker) Record(record UsageRecord) error {
 			t.exceeded = true
 			t.alerts = append(t.alerts, BudgetAlert{
 				Type:      "exceeded",
+				Metric:    "tokens",
 				Current:   float64(totalTokens),
 				Limit:     float64(t.budget.TokenLimit),
 				Timestamp: record.Timestamp,
@@ -188,6 +244,7 @@ func (t *Tracker) Record(record UsageRecord) error {
 		} else if utilization >= warningThreshold && !t.exceeded && !alertsHaveWarningForLimit(t.alerts, float64(t.budget.TokenLimit)) {
 			t.alerts = append(t.alerts, BudgetAlert{
 				Type:      "warning",
+				Metric:    "tokens",
 				Current:   float64(totalTokens),
 				Limit:     float64(t.budget.TokenLimit),
 				Timestamp: record.Timestamp,
@@ -292,6 +349,8 @@ func (t *Tracker) Report(missionID string) *CostReport {
 	}
 
 	for _, r := range t.records {
+		report.TotalInputTokens += r.InputTokens
+		report.TotalOutputTokens += r.OutputTokens
 		report.TotalTokens += r.InputTokens + r.OutputTokens
 		report.TotalCostUSD += r.CostUSD
 		report.ByRole[r.AgentRole] += r.CostUSD
@@ -301,6 +360,54 @@ func (t *Tracker) Report(missionID string) *CostReport {
 	}
 
 	return report
+}
+
+// DeriveUsageSource returns the aggregate usage source across phases.
+func DeriveUsageSource(phases []PhaseCostBreakdown) UsageSource {
+	var seenReported bool
+	var seenEstimated bool
+	var seenUnavailable bool
+
+	for _, phase := range phases {
+		switch phase.UsageSource {
+		case UsageSourceReported:
+			seenReported = true
+		case UsageSourceEstimated:
+			seenEstimated = true
+		case UsageSourceUnavailable:
+			seenUnavailable = true
+		}
+	}
+
+	count := 0
+	for _, seen := range []bool{seenReported, seenEstimated, seenUnavailable} {
+		if seen {
+			count++
+		}
+	}
+	if count > 1 {
+		return UsageSourceMixed
+	}
+	switch {
+	case seenReported:
+		return UsageSourceReported
+	case seenEstimated:
+		return UsageSourceEstimated
+	case seenUnavailable:
+		return UsageSourceUnavailable
+	default:
+		return ""
+	}
+}
+
+// FirstUsageUnavailableReason returns the first non-empty unavailable reason across phases.
+func FirstUsageUnavailableReason(phases []PhaseCostBreakdown) string {
+	for _, phase := range phases {
+		if phase.UsageUnavailableReason != "" {
+			return phase.UsageUnavailableReason
+		}
+	}
+	return ""
 }
 
 // DefaultModelLadder returns a sensible default model assignment per role.
@@ -393,6 +500,9 @@ func DetectAnomalies(current *CostReport, history []*CostReport) []Anomaly {
 
 // SaveReport writes a CostReport as JSON to the given file path.
 func SaveReport(path string, report *CostReport) error {
+	if report == nil {
+		return fmt.Errorf("marshal report: report must not be nil")
+	}
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal report: %w", err)
@@ -484,6 +594,7 @@ func (wt *WindowedTracker) Record(record UsageRecord) error {
 			wt.exceeded = true
 			wt.alerts = append(wt.alerts, BudgetAlert{
 				Type:      "exceeded",
+				Metric:    "cost_usd",
 				Current:   wt.windowCost,
 				Limit:     wt.budget.CostLimitUSD,
 				Timestamp: record.Timestamp,
@@ -491,6 +602,7 @@ func (wt *WindowedTracker) Record(record UsageRecord) error {
 		} else if utilization >= warningThreshold && !wt.exceeded && !alertsHaveWarningForLimit(wt.alerts, wt.budget.CostLimitUSD) {
 			wt.alerts = append(wt.alerts, BudgetAlert{
 				Type:      "warning",
+				Metric:    "cost_usd",
 				Current:   wt.windowCost,
 				Limit:     wt.budget.CostLimitUSD,
 				Timestamp: record.Timestamp,
@@ -505,6 +617,7 @@ func (wt *WindowedTracker) Record(record UsageRecord) error {
 			wt.exceeded = true
 			wt.alerts = append(wt.alerts, BudgetAlert{
 				Type:      "exceeded",
+				Metric:    "tokens",
 				Current:   float64(wt.windowTokens),
 				Limit:     float64(wt.budget.TokenLimit),
 				Timestamp: record.Timestamp,
@@ -512,6 +625,7 @@ func (wt *WindowedTracker) Record(record UsageRecord) error {
 		} else if utilization >= warningThreshold && !wt.exceeded && !alertsHaveWarningForLimit(wt.alerts, float64(wt.budget.TokenLimit)) {
 			wt.alerts = append(wt.alerts, BudgetAlert{
 				Type:      "warning",
+				Metric:    "tokens",
 				Current:   float64(wt.windowTokens),
 				Limit:     float64(wt.budget.TokenLimit),
 				Timestamp: record.Timestamp,
