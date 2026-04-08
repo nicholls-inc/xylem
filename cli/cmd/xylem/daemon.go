@@ -40,6 +40,13 @@ func newDaemonCmd() *cobra.Command {
 }
 
 func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
+	// Isolation check: refuse to run in the main git worktree because vessel
+	// subprocesses may switch branches or modify the working tree, which
+	// would corrupt the user's primary checkout.
+	if !logDaemonWorktreeCheck() {
+		return fmt.Errorf("daemon refused to start in main worktree; see log for instructions")
+	}
+
 	scanInterval, drainInterval := parseDaemonIntervals(cfg.Daemon)
 
 	// P0-3: Acquire singleton lock to prevent multiple daemons.
@@ -83,6 +90,11 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		r.Sources = buildSourceMap(cfg, q, cmdRunner)
 		r.CheckWaitingVessels(ctx)
 		r.CheckHungVessels(ctx)
+		// Auto-merge: request copilot review on unreviewed xylem PRs,
+		// and merge PRs that are approved + CI-green + mergeable.
+		if cfg.Daemon.AutoMerge {
+			autoMergeXylemPRs(ctx, cfg.Daemon.AutoMergeRepo)
+		}
 	}
 
 	return daemonLoop(ctx, q, scan, drain, check, scanInterval, drainInterval)

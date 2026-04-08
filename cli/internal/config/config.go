@@ -111,6 +111,14 @@ type DaemonConfig struct {
 	ScanInterval  string `yaml:"scan_interval,omitempty"`
 	DrainInterval string `yaml:"drain_interval,omitempty"`
 	AutoUpgrade   bool   `yaml:"auto_upgrade,omitempty"`
+	// AutoMerge enables automatic copilot review cycle + merge of
+	// xylem-authored PRs. Only merges when the PR is approved, CI-green,
+	// and mergeable. Branches matching feat/issue-*, fix/issue-*, or
+	// chore/issue-* are considered xylem-authored.
+	AutoMerge bool `yaml:"auto_merge,omitempty"`
+	// AutoMergeRepo is the GitHub repo slug (owner/name) for auto-merge.
+	// If empty, gh CLI uses the current directory's origin remote.
+	AutoMergeRepo string `yaml:"auto_merge_repo,omitempty"`
 }
 
 type HarnessConfig struct {
