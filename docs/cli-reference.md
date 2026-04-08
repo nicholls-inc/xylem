@@ -10,7 +10,7 @@ These flags are available on every command (except `init`, which skips config lo
 |------|------|---------|-------------|
 | `--config` | `string` | `.xylem.yml` | Path to the xylem configuration file. Also configurable via the `XYLEM_CONFIG` environment variable. |
 
-Before any command runs (except `init`), xylem performs the following checks:
+Before any command runs other than `init`, `dtu`, `shim-dispatch`, and `eval`, xylem performs the following checks:
 
 1. Verifies that `git` is on PATH.
 2. Loads and validates the config file at the `--config` path.
@@ -53,6 +53,7 @@ xylem init [flags]
 4. Creates `.xylem/HARNESS.md` -- a template for project-specific instructions appended to the session runner's system prompt.
 5. Creates workflow definitions: `.xylem/workflows/fix-bug.yaml` and `.xylem/workflows/implement-feature.yaml`.
 6. Creates prompt templates for each workflow phase (`analyze`, `plan`, `implement`, `pr`) under `.xylem/prompts/<workflow>/<phase>.md`.
+7. Seeds a Harbor-compatible eval corpus under `.xylem/eval/` including `harbor.yaml`, shared verifier helpers, rubric files, human-calibrated plan-quality fixtures, and starter scenarios covering workflow execution, protected-surface enforcement, waiting/resume, gate retry recovery, and PR/reporting paths.
 
 When `--force` is not set, each file is skipped if it already exists, with a message indicating the skip.
 
@@ -184,6 +185,82 @@ xylem dtu run --manifest /path/to/universe.yaml --workdir "$PWD" -- scan --dry-r
 ```
 
 Materializes DTU state and then re-runs the current `xylem` binary with the provided subcommand arguments under the DTU environment. The inner command runs from `--workdir` (default: `<state_dir>/dtu/<universe>/workdir`) and still performs normal xylem config/workflow loading, so use a workdir that already contains `.xylem.yml` and `.xylem/workflows/` when you want to run `scan`, `drain`, or `daemon`.
+
+---
+
+## xylem eval
+
+Run the Harbor-backed harness eval corpus and compare candidate harness behavior against a saved baseline.
+
+The eval command family does **not** require `.xylem.yml`, `git`, or `gh`. It operates on the seeded `.xylem/eval/` corpus and Harbor job directories.
+
+### Usage
+
+```bash
+xylem eval <subcommand> [flags]
+```
+
+### `xylem eval run`
+
+```bash
+xylem eval run --output jobs/baseline
+xylem eval run --output jobs/candidate --model claude-sonnet-4-5
+xylem eval run --output jobs/fix-only --task fix-simple-null-pointer
+```
+
+Runs:
+
+1. `harbor run -c .xylem/eval/harbor.yaml -o <output>`
+2. `harbor analyze <output> ...` once per rubric under `.xylem/eval/rubrics/`
+3. writes `<output>/xylem-eval-report.json`
+
+#### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--harbor-config` | `string` | `.xylem/eval/harbor.yaml` | Harbor job config to run. |
+| `--output` | `string` | `jobs/candidate` | Directory where Harbor writes the job and where xylem writes `xylem-eval-report.json`. |
+| `--task` | `string` | `""` | Optional Harbor task/scenario filter passed as `-t`. |
+| `--model` | `string` | `""` | Optional model override passed to `harbor run -m`. |
+| `--attempts` | `int` | `0` | Optional Harbor attempt override passed as `-k`. |
+| `--env-file` | `string` | `""` | Optional env file forwarded to Harbor. |
+| `--rubrics-dir` | `string` | `.xylem/eval/rubrics` | Rubric directory used for `harbor analyze`. |
+
+The generated xylem report aggregates reward, success rate, latency, estimated cost, retry count, tool failures, policy violations, and evidence strength from each Harbor trial's `verifier/reward.json`.
+
+The seeded corpus currently includes:
+
+- `fix-simple-null-pointer` — end-to-end workflow execution and gate verification
+- `modify-harness-md` — protected-surface / policy enforcement
+- `label-gate-resume` — waiting on a label gate, then resuming to completion
+- `gate-retry-then-pass` — failure recovery through command-gate retry
+- `pr-reporting-path` — final PR/reporting phase coverage
+
+For ambiguous outputs, `.xylem/eval/calibration/plan_quality/` contains human-reviewed pass/fail examples used to keep the `plan_quality` rubric grounded in real judgment rather than self-grading alone.
+
+### `xylem eval compare`
+
+```bash
+xylem eval compare --baseline jobs/baseline --candidate jobs/candidate
+xylem eval compare --baseline jobs/baseline --candidate jobs/candidate --output jobs/candidate/comparison.json --json
+xylem eval compare --baseline jobs/baseline --candidate jobs/candidate --fail-on-regression
+```
+
+Loads `xylem-eval-report.json` from each job directory when present, otherwise rebuilds the report directly from the Harbor job contents. The comparison report includes:
+
+- aggregate deltas for success, reward, latency, cost, retries, tool failures, policy violations, and evidence score
+- per-scenario baseline/candidate deltas aggregated across all attempts for the same scenario
+- rubric pass-rate deltas for any checked-in Harbor analyses
+
+#### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--baseline` | `string` | `jobs/baseline` | Baseline Harbor job directory. |
+| `--candidate` | `string` | `jobs/candidate` | Candidate Harbor job directory. |
+| `--output` | `string` | `""` | Optional path to write the JSON comparison report. |
+| `--json` | `bool` | `false` | Print the JSON comparison report to stdout instead of the human summary. |
+| `--fail-on-regression` | `bool` | `false` | Exit non-zero when the candidate regresses against the baseline. |
 
 ---
 

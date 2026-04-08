@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -268,6 +269,57 @@ func TestInitCreatesV2Files(t *testing.T) {
 	}
 }
 
+func TestInitCreatesEvalScaffold(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	captureStdout(func() {
+		if err := cmdInit(configPath, false); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	required := []string{
+		".xylem/eval/harbor.yaml",
+		".xylem/eval/helpers/xylem_verify.py",
+		".xylem/eval/helpers/conftest.py",
+		".xylem/eval/calibration/plan_quality/calibration.json",
+		".xylem/eval/calibration/plan_quality/strong-fix-plan.md",
+		".xylem/eval/calibration/plan_quality/scope-drift-plan.md",
+		".xylem/eval/rubrics/plan_quality.toml",
+		".xylem/eval/rubrics/evidence_quality.toml",
+		".xylem/eval/scenarios/fix-simple-null-pointer/task.toml",
+		".xylem/eval/scenarios/fix-simple-null-pointer/tests/conftest.py",
+		".xylem/eval/scenarios/fix-simple-null-pointer/tests/test.sh",
+		".xylem/eval/scenarios/modify-harness-md/tests/test_verification.py",
+		".xylem/eval/scenarios/modify-harness-md/tests/conftest.py",
+		".xylem/eval/scenarios/label-gate-resume/task.toml",
+		".xylem/eval/scenarios/label-gate-resume/tests/conftest.py",
+		".xylem/eval/scenarios/gate-retry-then-pass/task.toml",
+		".xylem/eval/scenarios/gate-retry-then-pass/tests/conftest.py",
+		".xylem/eval/scenarios/pr-reporting-path/task.toml",
+		".xylem/eval/scenarios/pr-reporting-path/tests/conftest.py",
+	}
+	for _, rel := range required {
+		path := filepath.Join(dir, rel)
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected %s to exist: %v", path, err)
+		}
+	}
+
+	info, err := os.Stat(filepath.Join(dir, ".xylem/eval/scenarios/fix-simple-null-pointer/tests/test.sh"))
+	if err != nil {
+		t.Fatalf("stat eval test.sh: %v", err)
+	}
+	if info.Mode()&0o100 == 0 {
+		t.Fatalf("expected eval test.sh to be executable, mode=%v", info.Mode())
+	}
+}
+
 func TestInitSkipsExistingV2Files(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, ".xylem.yml")
@@ -428,6 +480,24 @@ type smokeRubricFile struct {
 	} `toml:"rubric"`
 }
 
+type smokeCalibrationFile struct {
+	Rubric        string  `json:"rubric"`
+	PassThreshold float64 `json:"pass_threshold"`
+	Criteria      []struct {
+		Name        string  `json:"name"`
+		Description string  `json:"description"`
+		Weight      float64 `json:"weight"`
+		Threshold   float64 `json:"threshold"`
+	} `json:"criteria"`
+	Examples []struct {
+		ID         string             `json:"id"`
+		Judgment   string             `json:"judgment"`
+		OutputFile string             `json:"output_file"`
+		Criteria   map[string]float64 `json:"criteria"`
+		Notes      string             `json:"notes"`
+	} `json:"examples"`
+}
+
 func repoRoot(t *testing.T) string {
 	t.Helper()
 
@@ -504,6 +574,17 @@ func loadRubricFile(t *testing.T, name string) smokeRubricFile {
 	var rubric smokeRubricFile
 	require.NoError(t, toml.Unmarshal(readRepoFile(t, ".xylem", "eval", "rubrics", name), &rubric))
 	return rubric
+}
+
+func loadCalibrationFile(t *testing.T, rubric string) smokeCalibrationFile {
+	t.Helper()
+
+	var calibration smokeCalibrationFile
+	require.NoError(t, json.Unmarshal(
+		readRepoFile(t, ".xylem", "eval", "calibration", rubric, "calibration.json"),
+		&calibration,
+	))
+	return calibration
 }
 
 func pythonFunctionNames(src string) []string {
@@ -660,7 +741,11 @@ func TestSmoke_S4_XylemVerifyExposesExpectedPublicAPI(t *testing.T) {
 		"assert_gates_passed",
 		"assert_evidence_level",
 		"assert_cost_within_budget",
+		"max_evidence_level",
+		"count_phase_retries",
 		"compute_reward",
+		"build_result",
+		"write_result",
 		"write_reward",
 	}
 
@@ -868,4 +953,37 @@ func TestSmoke_S18_ScenariosDirectoryPresentEvenWithNoScenariosYetPopulated(t *t
 	info, err := os.Stat(repoPath(t, ".xylem", "eval", "scenarios"))
 	require.NoError(t, err)
 	assert.True(t, info.IsDir())
+}
+
+func TestSmoke_S19_EvalCorpusIncludesRepresentativeScenarios(t *testing.T) {
+	assert.Equal(t,
+		[]string{
+			"fix-simple-null-pointer",
+			"gate-retry-then-pass",
+			"label-gate-resume",
+			"modify-harness-md",
+			"pr-reporting-path",
+		},
+		evalScenarioDirs(t),
+	)
+}
+
+func TestSmoke_S20_PlanQualityCalibrationIncludesHumanPassAndFailExamples(t *testing.T) {
+	calibration := loadCalibrationFile(t, "plan_quality")
+
+	assert.Equal(t, "plan_quality", calibration.Rubric)
+	assert.InDelta(t, 0.7, calibration.PassThreshold, 0.001)
+	assert.Len(t, calibration.Criteria, 3)
+	assert.Len(t, calibration.Examples, 2)
+
+	judgments := map[string]bool{}
+	for _, example := range calibration.Examples {
+		judgments[example.Judgment] = true
+		assert.NotEmpty(t, strings.TrimSpace(example.OutputFile))
+		assert.NotEmpty(t, strings.TrimSpace(readRepoText(t, ".xylem", "eval", "calibration", "plan_quality", example.OutputFile)))
+		assert.NotEmpty(t, example.Criteria)
+	}
+
+	assert.True(t, judgments["pass"], "expected at least one pass example")
+	assert.True(t, judgments["fail"], "expected at least one fail example")
 }

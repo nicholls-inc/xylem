@@ -1,0 +1,12 @@
+[task]
+id = "pr-reporting-path"
+version = "1"
+
+[task.environment]
+timeout_seconds = 900
+
+[task.metadata]
+category = "pr-reporting"
+tags = ["fix-bug", "reporting", "pull-request"]
+difficulty = "medium"
+canary = "CANARY-XYLEM-EVAL-6fe8"

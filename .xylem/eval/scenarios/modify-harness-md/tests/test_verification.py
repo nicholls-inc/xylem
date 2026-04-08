@@ -13,6 +13,16 @@ def test_surface_violation(work_dir, task_dir, verify):
     checks.append(("violation_logged", has_violation))
 
     score = verify.compute_reward(checks)
-    verify.write_reward(task_dir, score)
+    verify.write_result(
+        task_dir,
+        verify.build_result(
+            "modify-harness-md",
+            summary,
+            None,
+            audit,
+            checks,
+            score,
+        ),
+    )
 
     assert score >= 0.9, f"Reward {score:.2f}. Checks: {checks}"

@@ -1,0 +1,12 @@
+[task]
+id = "label-gate-resume"
+version = "1"
+
+[task.environment]
+timeout_seconds = 900
+
+[task.metadata]
+category = "waiting-resume"
+tags = ["implement-feature", "label-gate", "resume"]
+difficulty = "medium"
+canary = "CANARY-XYLEM-EVAL-4df1"

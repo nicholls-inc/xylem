@@ -1,0 +1,48 @@
+{
+  "rubric": "plan_quality",
+  "pass_threshold": 0.7,
+  "criteria": [
+    {
+      "name": "root_cause_identification",
+      "description": "Did the agent correctly identify the root cause of the issue?",
+      "weight": 0.4,
+      "threshold": 0.7
+    },
+    {
+      "name": "reasoning_chain",
+      "description": "Is the reasoning from symptoms to root cause clear and logical?",
+      "weight": 0.3,
+      "threshold": 0.7
+    },
+    {
+      "name": "scope_accuracy",
+      "description": "Does the plan correctly scope the fix without unnecessary changes?",
+      "weight": 0.3,
+      "threshold": 0.7
+    }
+  ],
+  "examples": [
+    {
+      "id": "strong-fix-plan",
+      "judgment": "pass",
+      "output_file": "strong-fix-plan.md",
+      "criteria": {
+        "root_cause_identification": 1.0,
+        "reasoning_chain": 0.9,
+        "scope_accuracy": 0.8
+      },
+      "notes": "Human-reviewed strong plan reference for rubric calibration."
+    },
+    {
+      "id": "scope-drift-plan",
+      "judgment": "fail",
+      "output_file": "scope-drift-plan.md",
+      "criteria": {
+        "root_cause_identification": 0.4,
+        "reasoning_chain": 0.5,
+        "scope_accuracy": 0.1
+      },
+      "notes": "Human-reviewed weak plan showing scope drift and shallow reasoning."
+    }
+  ]
+}

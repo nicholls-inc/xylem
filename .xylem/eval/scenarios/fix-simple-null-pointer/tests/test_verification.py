@@ -46,6 +46,17 @@ def test_vessel_outcome(work_dir, task_dir, verify):
         "budget_ok": 1.0,
     }
     score = verify.compute_reward(checks, weights)
-    verify.write_reward(task_dir, score)
+    audit = verify.load_audit_log(work_dir)
+    verify.write_result(
+        task_dir,
+        verify.build_result(
+            "fix-simple-null-pointer",
+            summary,
+            manifest,
+            audit,
+            checks,
+            score,
+        ),
+    )
 
     assert score >= 0.8, f"Reward {score:.2f} below threshold. Checks: {checks}"

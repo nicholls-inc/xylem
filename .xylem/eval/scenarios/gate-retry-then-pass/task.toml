@@ -1,0 +1,12 @@
+[task]
+id = "gate-retry-then-pass"
+version = "1"
+
+[task.environment]
+timeout_seconds = 900
+
+[task.metadata]
+category = "failure-recovery"
+tags = ["fix-bug", "command-gate", "retry"]
+difficulty = "medium"
+canary = "CANARY-XYLEM-EVAL-c8a2"

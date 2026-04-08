@@ -146,6 +146,7 @@ See the [Workflows Guide](docs/workflows.md) for template variables, custom work
 | `xylem pause` / `resume` | Pause and resume scanning |
 | `xylem cancel` | Cancel a pending vessel |
 | `xylem cleanup` | Remove stale worktrees, old phase outputs, and compact stale queue records |
+| `xylem eval ...` | Run the Harbor-backed harness eval corpus and compare baseline vs candidate runs |
 | `xylem dtu ...` | Initialize a DTU manifest, materialize runtime state, and run xylem under DTU shims |
 
 ```bash
@@ -155,6 +156,8 @@ xylem daemon                        # Continuous operation
 xylem enqueue --workflow fix-bug \
   --ref "https://github.com/owner/repo/issues/99"  # Ad-hoc task
 xylem status --json | jq '.[] | select(.state == "failed")'  # Query failures
+xylem eval run --output jobs/baseline                                                    # Establish a harness baseline
+xylem eval compare --baseline jobs/baseline --candidate jobs/candidate --fail-on-regression  # Gate harness changes on regressions
 xylem dtu load --manifest cli/internal/dtu/testdata/issue-label-gate.yaml        # Seed DTU state from the repo's example fixture
 xylem dtu materialize --manifest cli/internal/dtu/testdata/issue-label-gate.yaml # Prepare DTU runtime and shims
 xylem dtu run --manifest /path/to/universe.yaml --workdir "$PWD" -- scan         # Run xylem inside DTU from the current repo
@@ -204,6 +207,7 @@ See the [Architecture](docs/architecture.md) document for details on the control
 - **Go 1.22+** -- to build the CLI
 - **git** -- must be on PATH
 - **[claude](https://docs.anthropic.com/en/docs/claude-code)** or **GitHub Copilot CLI** -- at least one supported LLM CLI
+- **[harbor](https://www.harborframework.com/)** -- required for `xylem eval` corpus runs and Harbor rubric analysis
 - **[gh](https://cli.github.com/)** -- GitHub CLI, authenticated (`gh auth login`). Required for GitHub-based sources and PR creation.
 
 ## Installation
