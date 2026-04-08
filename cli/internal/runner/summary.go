@@ -258,7 +258,7 @@ func SaveVesselSummary(stateDir string, summary *VesselSummary) error {
 		return fmt.Errorf("save vessel summary: invalid vessel ID: %w", err)
 	}
 
-	path := filepath.Join(stateDir, "phases", summary.VesselID, summaryFileName)
+	path := summaryPath(stateDir, summary.VesselID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("save vessel summary: create dir: %w", err)
 	}
@@ -276,6 +276,10 @@ func SaveVesselSummary(stateDir string, summary *VesselSummary) error {
 	}
 
 	return nil
+}
+
+func summaryPath(stateDir, vesselID string) string {
+	return filepath.Join(stateDir, "phases", vesselID, summaryFileName)
 }
 
 func validateSummaryPathComponent(component string) error {

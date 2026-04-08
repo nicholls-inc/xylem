@@ -135,6 +135,29 @@ func TestVesselSpanAttributesAllowsEmptyCoreFields(t *testing.T) {
 	}
 }
 
+func TestVesselHealthAttributesIncludeDerivedHealth(t *testing.T) {
+	attrs := VesselHealthAttributes(VesselHealthData{
+		State:        "failed",
+		Health:       "unhealthy",
+		AnomalyCount: 2,
+		Anomalies:    []string{"run_failed", "budget_exceeded"},
+	})
+	got := attrMap(attrs)
+
+	if got["xylem.vessel.state"] != "failed" {
+		t.Fatalf("xylem.vessel.state = %q, want failed", got["xylem.vessel.state"])
+	}
+	if got["xylem.vessel.health"] != "unhealthy" {
+		t.Fatalf("xylem.vessel.health = %q, want unhealthy", got["xylem.vessel.health"])
+	}
+	if got["xylem.vessel.anomaly_count"] != "2" {
+		t.Fatalf("xylem.vessel.anomaly_count = %q, want 2", got["xylem.vessel.anomaly_count"])
+	}
+	if got["xylem.vessel.anomalies"] != "run_failed,budget_exceeded" {
+		t.Fatalf("xylem.vessel.anomalies = %q, want joined anomalies", got["xylem.vessel.anomalies"])
+	}
+}
+
 func TestPhaseResultAttributesFormatsNegativeDuration(t *testing.T) {
 	attrs := PhaseResultAttributes(PhaseResultData{
 		InputTokensEst:  1,
@@ -179,5 +202,28 @@ func TestDrainSpanAttributes_ConcurrencyFormatted(t *testing.T) {
 
 	if got["xylem.drain.concurrency"] != "17" {
 		t.Fatalf("xylem.drain.concurrency = %q, want %q", got["xylem.drain.concurrency"], "17")
+	}
+}
+
+func TestDrainHealthAttributesIncludePatterns(t *testing.T) {
+	attrs := DrainHealthAttributes(DrainHealthData{
+		Healthy:   1,
+		Degraded:  2,
+		Unhealthy: 3,
+		Patterns:  "budget_exceeded=2, run_failed=1",
+	})
+	got := attrMap(attrs)
+
+	if got["xylem.drain.healthy_vessels"] != "1" {
+		t.Fatalf("xylem.drain.healthy_vessels = %q, want 1", got["xylem.drain.healthy_vessels"])
+	}
+	if got["xylem.drain.degraded_vessels"] != "2" {
+		t.Fatalf("xylem.drain.degraded_vessels = %q, want 2", got["xylem.drain.degraded_vessels"])
+	}
+	if got["xylem.drain.unhealthy_vessels"] != "3" {
+		t.Fatalf("xylem.drain.unhealthy_vessels = %q, want 3", got["xylem.drain.unhealthy_vessels"])
+	}
+	if got["xylem.drain.unhealthy_patterns"] != "budget_exceeded=2, run_failed=1" {
+		t.Fatalf("xylem.drain.unhealthy_patterns = %q, want joined patterns", got["xylem.drain.unhealthy_patterns"])
 	}
 }
