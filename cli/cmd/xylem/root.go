@@ -33,8 +33,14 @@ func newRootCmd() *cobra.Command {
 				return nil
 			}
 
-			if _, err := exec.LookPath("git"); err != nil {
-				return fmt.Errorf("error: git not found on PATH")
+			// visualize is a read-only command that only parses config and
+			// workflow YAML; it doesn't shell out to git or gh.
+			skipTooling := cmd.Name() == "visualize"
+
+			if !skipTooling {
+				if _, err := exec.LookPath("git"); err != nil {
+					return fmt.Errorf("error: git not found on PATH")
+				}
 			}
 
 			configPath := viper.GetString("config")
@@ -44,7 +50,7 @@ func newRootCmd() *cobra.Command {
 			}
 
 			// Only require gh if a GitHub source is configured
-			if hasGitHubSource(cfg) {
+			if !skipTooling && hasGitHubSource(cfg) {
 				if _, err := exec.LookPath("gh"); err != nil {
 					return fmt.Errorf("error: gh not found on PATH (required for github source)")
 				}
@@ -81,6 +87,7 @@ func newRootCmd() *cobra.Command {
 		newCleanupCmd(),
 		newDaemonCmd(),
 		newRetryCmd(),
+		newVisualizeCmd(),
 	)
 
 	return cmd
