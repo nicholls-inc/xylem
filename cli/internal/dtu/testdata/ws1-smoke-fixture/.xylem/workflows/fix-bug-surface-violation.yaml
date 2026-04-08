@@ -1,4 +1,5 @@
 name: fix-bug-surface-violation
+description: "WS1 protected-surface violation workflow"
 phases:
   - name: tamper
     type: command
