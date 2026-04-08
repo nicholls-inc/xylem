@@ -948,6 +948,7 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	}
 
 	summary := vrs.buildSummary(state, now)
+	reviewArtifacts := &ReviewArtifacts{}
 	var manifest *evidence.Manifest
 	if len(claims) > 0 {
 		manifest = &evidence.Manifest{
@@ -960,7 +961,39 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 			log.Printf("warn: save evidence manifest: %v", err)
 		} else {
 			summary.EvidenceManifestPath = evidenceManifestRelativePath(vessel.ID)
+			reviewArtifacts.EvidenceManifest = summary.EvidenceManifestPath
 		}
+	}
+
+	if vrs.costTracker != nil {
+		reportPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, costReportFileName)
+		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
+			log.Printf("warn: save cost report: %v", fmt.Errorf("create dir: %w", err))
+		} else if err := cost.SaveReport(reportPath, vrs.costTracker.Report(vessel.ID)); err != nil {
+			log.Printf("warn: save cost report: %v", err)
+		} else {
+			summary.CostReportPath = costReportRelativePath(vessel.ID)
+			reviewArtifacts.CostReport = summary.CostReportPath
+		}
+
+		alertsPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, budgetAlertsFileName)
+		if err := saveJSONArtifact(alertsPath, vrs.costTracker.Alerts()); err != nil {
+			log.Printf("warn: save budget alerts: %v", err)
+		} else {
+			summary.BudgetAlertsPath = budgetAlertsRelativePath(vessel.ID)
+			reviewArtifacts.BudgetAlerts = summary.BudgetAlertsPath
+		}
+	}
+
+	evalPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, evalReportFileName)
+	if info, err := os.Stat(evalPath); err == nil && !info.IsDir() {
+		summary.EvalReportPath = evalReportRelativePath(vessel.ID)
+		reviewArtifacts.EvalReport = summary.EvalReportPath
+	}
+
+	if reviewArtifacts.EvidenceManifest != "" || reviewArtifacts.CostReport != "" ||
+		reviewArtifacts.BudgetAlerts != "" || reviewArtifacts.EvalReport != "" {
+		summary.ReviewArtifacts = reviewArtifacts
 	}
 
 	if err := SaveVesselSummary(r.Config.StateDir, summary); err != nil {
@@ -968,6 +1001,20 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	}
 
 	return manifest
+}
+
+func saveJSONArtifact(path string, value any) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create dir: %w", err)
+	}
+	data, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return fmt.Errorf("write: %w", err)
+	}
+	return nil
 }
 
 // runVesselOrchestrated executes a workflow with explicit phase dependencies

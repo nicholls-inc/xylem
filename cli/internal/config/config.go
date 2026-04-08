@@ -117,6 +117,16 @@ type HarnessConfig struct {
 	ProtectedSurfaces ProtectedSurfacesConfig `yaml:"protected_surfaces,omitempty"`
 	Policy            PolicyConfig            `yaml:"policy,omitempty"`
 	AuditLog          string                  `yaml:"audit_log,omitempty"`
+	Review            HarnessReviewConfig     `yaml:"review,omitempty"`
+}
+
+type HarnessReviewConfig struct {
+	Enabled      bool   `yaml:"enabled,omitempty"`
+	Cadence      string `yaml:"cadence,omitempty"`
+	EveryNRuns   int    `yaml:"every_n_runs,omitempty"`
+	LookbackRuns int    `yaml:"lookback_runs,omitempty"`
+	MinSamples   int    `yaml:"min_samples,omitempty"`
+	OutputDir    string `yaml:"output_dir,omitempty"`
 }
 
 type ProtectedSurfacesConfig struct {
@@ -368,6 +378,48 @@ func (c *Config) EffectiveAuditLogPath() string {
 	return DefaultAuditLogPath
 }
 
+func (c *Config) HarnessReviewCadence() string {
+	if !c.Harness.Review.Enabled {
+		return "manual"
+	}
+	switch c.Harness.Review.Cadence {
+	case "", "manual":
+		return "manual"
+	case "every_drain", "every_n_runs":
+		return c.Harness.Review.Cadence
+	default:
+		return "manual"
+	}
+}
+
+func (c *Config) HarnessReviewEveryNRuns() int {
+	if c.Harness.Review.EveryNRuns > 0 {
+		return c.Harness.Review.EveryNRuns
+	}
+	return 10
+}
+
+func (c *Config) HarnessReviewLookbackRuns() int {
+	if c.Harness.Review.LookbackRuns > 0 {
+		return c.Harness.Review.LookbackRuns
+	}
+	return 50
+}
+
+func (c *Config) HarnessReviewMinSamples() int {
+	if c.Harness.Review.MinSamples > 0 {
+		return c.Harness.Review.MinSamples
+	}
+	return 3
+}
+
+func (c *Config) HarnessReviewOutputDir() string {
+	if strings.TrimSpace(c.Harness.Review.OutputDir) != "" {
+		return c.Harness.Review.OutputDir
+	}
+	return "reviews"
+}
+
 func (c *Config) ObservabilityEnabled() bool {
 	if c.Observability.Enabled == nil {
 		return true
@@ -454,6 +506,35 @@ func (c *Config) validateHarness() error {
 		case intermediary.Allow, intermediary.Deny, intermediary.RequireApproval:
 		default:
 			return fmt.Errorf("harness.policy.rules[%d]: invalid effect %q (must be allow, deny, or require_approval)", i, rule.Effect)
+		}
+	}
+
+	if cadence := c.Harness.Review.Cadence; cadence != "" {
+		switch cadence {
+		case "manual", "every_drain", "every_n_runs":
+		default:
+			return fmt.Errorf("harness.review.cadence: invalid value %q (must be manual, every_drain, or every_n_runs)", cadence)
+		}
+	}
+	if c.Harness.Review.EveryNRuns < 0 {
+		return fmt.Errorf("harness.review.every_n_runs must be non-negative")
+	}
+	if c.Harness.Review.MinSamples < 0 {
+		return fmt.Errorf("harness.review.min_samples must be non-negative")
+	}
+	if c.Harness.Review.LookbackRuns < 0 {
+		return fmt.Errorf("harness.review.lookback_runs must be non-negative")
+	}
+	if c.Harness.Review.Enabled && c.HarnessReviewCadence() == "every_n_runs" && c.HarnessReviewEveryNRuns() <= 0 {
+		return fmt.Errorf("harness.review.every_n_runs must be greater than 0 when cadence is every_n_runs")
+	}
+	if outputDir := strings.TrimSpace(c.Harness.Review.OutputDir); outputDir != "" {
+		if filepath.IsAbs(outputDir) {
+			return fmt.Errorf("harness.review.output_dir must be relative to state_dir")
+		}
+		cleaned := filepath.Clean(outputDir)
+		if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("harness.review.output_dir must stay within state_dir")
 		}
 	}
 

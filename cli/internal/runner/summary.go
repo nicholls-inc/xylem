@@ -16,8 +16,11 @@ import (
 )
 
 const (
-	summaryFileName   = "summary.json"
-	summaryDisclaimer = "Token counts and costs are estimates (len/4 heuristic + static pricing). Not provider-reported values."
+	summaryFileName      = "summary.json"
+	costReportFileName   = "cost-report.json"
+	budgetAlertsFileName = "budget-alerts.json"
+	evalReportFileName   = "quality-report.json"
+	summaryDisclaimer    = "Token counts and costs are estimates (len/4 heuristic + static pricing). Not provider-reported values."
 )
 
 var safeSummaryPathComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -44,9 +47,20 @@ type VesselSummary struct {
 	BudgetMaxTokens  *int     `json:"budget_max_tokens,omitempty"`
 	BudgetExceeded   bool     `json:"budget_exceeded"`
 
-	EvidenceManifestPath string `json:"evidence_manifest_path,omitempty"`
+	EvidenceManifestPath string           `json:"evidence_manifest_path,omitempty"`
+	CostReportPath       string           `json:"cost_report_path,omitempty"`
+	BudgetAlertsPath     string           `json:"budget_alerts_path,omitempty"`
+	EvalReportPath       string           `json:"eval_report_path,omitempty"`
+	ReviewArtifacts      *ReviewArtifacts `json:"review_artifacts,omitempty"`
 
 	Note string `json:"note"`
+}
+
+type ReviewArtifacts struct {
+	EvidenceManifest string `json:"evidence_manifest,omitempty"`
+	CostReport       string `json:"cost_report,omitempty"`
+	BudgetAlerts     string `json:"budget_alerts,omitempty"`
+	EvalReport       string `json:"eval_report,omitempty"`
 }
 
 // PhaseSummary records the outcome of a single phase.
@@ -243,6 +257,18 @@ func gatePassedPointer(passed bool) *bool {
 
 func evidenceManifestRelativePath(vesselID string) string {
 	return filepath.ToSlash(filepath.Join("phases", vesselID, "evidence-manifest.json"))
+}
+
+func costReportRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, costReportFileName))
+}
+
+func budgetAlertsRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, budgetAlertsFileName))
+}
+
+func evalReportRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, evalReportFileName))
 }
 
 func phaseArtifactRelativePath(vesselID, phaseName string) string {

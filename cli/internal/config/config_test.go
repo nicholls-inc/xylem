@@ -1273,6 +1273,11 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 
 	assert.Equal(t, DefaultProtectedSurfaces, cfg.EffectiveProtectedSurfaces())
 	assert.Equal(t, DefaultAuditLogPath, cfg.EffectiveAuditLogPath())
+	assert.Equal(t, "manual", cfg.HarnessReviewCadence())
+	assert.Equal(t, 10, cfg.HarnessReviewEveryNRuns())
+	assert.Equal(t, 50, cfg.HarnessReviewLookbackRuns())
+	assert.Equal(t, 3, cfg.HarnessReviewMinSamples())
+	assert.Equal(t, "reviews", cfg.HarnessReviewOutputDir())
 	assert.True(t, cfg.ObservabilityEnabled())
 	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
 	assert.Nil(t, cfg.VesselBudget())
@@ -1416,6 +1421,51 @@ func TestSmoke_S32_NegativeMaxCostRejected(t *testing.T) {
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cost.budget.max_cost_usd")
+}
+
+func TestSmoke_S33_HarnessReviewLoadsAndDefaults(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  review:
+    enabled: true
+    cadence: every_n_runs
+    every_n_runs: 7
+    lookback_runs: 12
+    min_samples: 4
+    output_dir: "insights"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.Equal(t, "every_n_runs", cfg.HarnessReviewCadence())
+	assert.Equal(t, 7, cfg.HarnessReviewEveryNRuns())
+	assert.Equal(t, 12, cfg.HarnessReviewLookbackRuns())
+	assert.Equal(t, 4, cfg.HarnessReviewMinSamples())
+	assert.Equal(t, "insights", cfg.HarnessReviewOutputDir())
+}
+
+func TestSmoke_S34_HarnessReviewInvalidCadenceRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  review:
+    enabled: true
+    cadence: hourly
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.review.cadence")
+}
+
+func TestSmoke_S35_HarnessReviewRejectsAbsoluteOutputDir(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  review:
+    output_dir: "/tmp/reviews"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.review.output_dir")
 }
 
 func TestSourceTimeoutValid(t *testing.T) {

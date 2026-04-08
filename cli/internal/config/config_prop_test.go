@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 
 	"pgregory.net/rapid"
@@ -108,6 +109,26 @@ func TestPropValidateHarnessAcceptsValidGlobs(t *testing.T) {
 
 		if err := cfg.validateHarness(); err != nil {
 			t.Fatalf("validateHarness() error for %q: %v", pattern, err)
+		}
+	})
+}
+
+func TestPropHarnessReviewOutputDirRejectsTraversal(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := Config{
+			Harness: HarnessConfig{
+				Review: HarnessReviewConfig{
+					OutputDir: "../" + rapid.StringMatching(`[A-Za-z0-9._-]{1,12}`).Draw(t, "segment"),
+				},
+			},
+		}
+
+		err := cfg.validateHarness()
+		if err == nil {
+			t.Fatal("validateHarness() error = nil, want traversal rejection")
+		}
+		if !strings.Contains(err.Error(), "harness.review.output_dir") {
+			t.Fatalf("validateHarness() error = %v, want harness.review.output_dir", err)
 		}
 	})
 }

@@ -53,6 +53,7 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	if err != nil {
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}
+	maybeAutoGenerateHarnessReview(cfg, result)
 	fmt.Printf("Completed %d, failed %d, skipped %d, waiting %d\n", result.Completed, result.Failed, result.Skipped, result.Waiting)
 	if result.Failed > 0 {
 		return &exitError{code: 1}

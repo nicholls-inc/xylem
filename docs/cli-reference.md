@@ -276,7 +276,8 @@ xylem drain [flags]
    - Executes workflow phases sequentially in the worktree. Prompt phases use the resolved provider (`claude` or `copilot`), and command phases run shell commands directly.
    - Runs quality gates between phases (command gates with retries, label gates with polling).
 4. Marks vessels as `completed`, `failed`, `waiting`, or `timed_out` based on outcome.
-5. Prints a summary line and exits.
+5. If `harness.review` is configured for automatic cadence, regenerates the latest harness review as a best-effort post-drain step.
+6. Prints a summary line and exits.
 
 **Graceful shutdown**: `drain` handles `SIGINT` and `SIGTERM`. When a signal is received, running sessions are allowed to finish, but no new pending vessels are started.
 
@@ -318,6 +319,41 @@ xylem scan && xylem drain
 
 ---
 
+## xylem review
+
+Aggregate persisted run artifacts into a recurring harness review report.
+
+### Usage
+
+```
+xylem review
+```
+
+### Flags
+
+None.
+
+### Behavior
+
+1. Scans historical vessel summaries under `<state_dir>/phases/`.
+2. Loads any linked evidence manifests, cost reports, budget alerts, and eval reports when present.
+3. Rolls those artifacts up by source, workflow, and phase into deterministic recommendations: `keep`, `investigate`, `prune-candidate`, or `insufficient-data`.
+4. Writes:
+   - `<state_dir>/<harness.review.output_dir>/harness-review.json`
+   - `<state_dir>/<harness.review.output_dir>/harness-review.md`
+5. Prints the latest markdown review to stdout.
+
+Missing historical artifacts from older runs are tolerated; the review degrades gracefully instead of failing.
+
+### Examples
+
+```bash
+# Generate the latest review report on demand
+xylem review
+```
+
+---
+
 ## xylem daemon
 
 Run a continuous scan-drain loop as a long-lived process.
@@ -346,6 +382,7 @@ The daemon uses the shorter of the two intervals as its tick interval and checks
 1. Parses scan and drain intervals from config (falling back to defaults).
 2. Enters a loop that alternates between scanning and draining based on elapsed time since each operation last ran.
 3. After each tick, logs a summary of the queue state (pending, running, completed, failed counts).
+4. Automatic harness review generation follows the same best-effort cadence as `xylem drain` because daemon draining uses the same post-drain hook.
 
 **Graceful shutdown**: Handles `SIGINT` and `SIGTERM`. On signal, the daemon logs a shutdown message and exits cleanly. Running sessions finish before the process terminates.
 

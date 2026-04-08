@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
@@ -434,6 +435,68 @@ func TestSmoke_S18_EvidenceManifestPathIsEmptyInSummaryWhenNoClaimsProvided(t *t
 	raw := loadSummaryJSON(t, cfg.StateDir, vessel.ID)
 	_, ok := raw["evidence_manifest_path"]
 	assert.False(t, ok)
+}
+
+func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	cfg.Cost.Budget = &config.BudgetConfig{MaxCostUSD: 1}
+
+	startedAt := time.Date(2026, time.April, 8, 20, 32, 30, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-cost-artifacts", "github", "fix-bug", startedAt)
+	vrs := newVesselRunState(cfg, vessel, startedAt)
+	require.NotNil(t, vrs.costTracker)
+
+	err := vrs.costTracker.Record(cost.UsageRecord{
+		MissionID:    vessel.ID,
+		AgentRole:    cost.RoleGenerator,
+		Purpose:      cost.PurposeReasoning,
+		Model:        "claude-sonnet-4-6",
+		InputTokens:  1000,
+		OutputTokens: 1000,
+		CostUSD:      1.2,
+		Timestamp:    startedAt.Add(time.Second),
+	})
+	require.NoError(t, err)
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, nil, startedAt.Add(2*time.Second))
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, costReportRelativePath(vessel.ID), summary.CostReportPath)
+	assert.Equal(t, budgetAlertsRelativePath(vessel.ID), summary.BudgetAlertsPath)
+	require.NotNil(t, summary.ReviewArtifacts)
+	assert.Equal(t, summary.CostReportPath, summary.ReviewArtifacts.CostReport)
+	assert.Equal(t, summary.BudgetAlertsPath, summary.ReviewArtifacts.BudgetAlerts)
+
+	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", vessel.ID, costReportFileName))
+	require.NoError(t, err)
+	assert.Equal(t, vessel.ID, report.MissionID)
+
+	alertsData, err := os.ReadFile(filepath.Join(cfg.StateDir, "phases", vessel.ID, budgetAlertsFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(alertsData), `"type": "exceeded"`)
+}
+
+func TestSmoke_S18b_PersistRunArtifactsLinksExistingEvalReport(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+
+	startedAt := time.Date(2026, time.April, 8, 20, 32, 45, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-eval-artifact", "github", "fix-bug", startedAt)
+	evalPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, evalReportFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(evalPath), 0o755))
+	require.NoError(t, os.WriteFile(evalPath, []byte(`{"iterations":1}`), 0o644))
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	r.persistRunArtifacts(vessel, string(queue.StateCompleted), newVesselRunState(cfg, vessel, startedAt), nil, startedAt.Add(time.Second))
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, evalReportRelativePath(vessel.ID), summary.EvalReportPath)
+	require.NotNil(t, summary.ReviewArtifacts)
+	assert.Equal(t, summary.EvalReportPath, summary.ReviewArtifacts.EvalReport)
 }
 
 func TestSmoke_S19_FailurePathBuildsSummaryWithStateFailedAndCallsSaveVesselSummary(t *testing.T) {

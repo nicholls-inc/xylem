@@ -286,6 +286,12 @@ When `harness.policy.rules` is empty, xylem installs a default policy that denie
 | `harness.protected_surfaces.paths` | list of strings | `[".xylem/HARNESS.md", ".xylem.yml", ".xylem/workflows/*.yaml", ".xylem/prompts/*/*.md"]` | No | Glob patterns for files agents cannot modify. Set to `["none"]` to disable all surface protections. |
 | `harness.policy.rules` | list of objects | `[]` | No | Policy rules for action authorization. Each rule has `action`, `resource`, and `effect`. |
 | `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the state directory. |
+| `harness.review.enabled` | bool | `false` | No | Enables recurring harness review generation after drain runs. Manual `xylem review` works regardless. |
+| `harness.review.cadence` | string | `"manual"` | No | Automatic review cadence. Valid values: `manual`, `every_drain`, `every_n_runs`. |
+| `harness.review.every_n_runs` | integer | `10` | No | When cadence is `every_n_runs`, regenerate after this many new reviewed runs. |
+| `harness.review.lookback_runs` | integer | `50` | No | Maximum number of historical run summaries to include in each review. |
+| `harness.review.min_samples` | integer | `3` | No | Minimum samples required before xylem will recommend keeping or pruning a surface. |
+| `harness.review.output_dir` | string | `"reviews"` | No | Output directory for review reports, relative to the state directory. |
 
 **Policy rule fields:**
 
@@ -315,7 +321,16 @@ harness:
         resource: "*"
         effect: require_approval
   audit_log: "audit.jsonl"
+  review:
+    enabled: true
+    cadence: every_n_runs
+    every_n_runs: 10
+    lookback_runs: 50
+    min_samples: 3
+    output_dir: "reviews"
 ```
+
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`.
 
 ### Observability settings
 
