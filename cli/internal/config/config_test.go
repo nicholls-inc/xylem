@@ -1397,3 +1397,70 @@ func TestSmoke_S32_NegativeMaxCostRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cost.budget.max_cost_usd")
 }
+
+func TestSourceTimeoutValid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"slow": {
+			Type:    "github",
+			Repo:    "owner/name",
+			Timeout: "1h",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected valid config with source timeout, got: %v", err)
+	}
+}
+
+func TestSourceTimeoutInvalidDuration(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"bad": {
+			Type:    "github",
+			Repo:    "owner/name",
+			Timeout: "bad",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "valid duration")
+}
+
+func TestSourceTimeoutTooShort(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"fast": {
+			Type:    "github",
+			Repo:    "owner/name",
+			Timeout: "5s",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "at least")
+}
+
+func TestSourceTimeoutEmptyInheritsGlobal(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"default": {
+			Type: "github",
+			Repo: "owner/name",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected valid config with no source timeout (inherits global), got: %v", err)
+	}
+}

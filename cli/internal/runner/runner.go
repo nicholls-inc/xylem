@@ -129,7 +129,13 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 				vesselBaseCtx = oteltrace.ContextWithSpanContext(context.Background(), oteltrace.SpanContextFromContext(vesselSpan.Context()))
 			}
 
-			vesselCtx, cancel := context.WithTimeout(vesselBaseCtx, timeout)
+			srcCfg := r.sourceConfigFromMeta(j)
+			vesselTimeout, resolveErr := resolveTimeout(r.Config, srcCfg)
+			if resolveErr != nil {
+				vesselTimeout = timeout // fallback to global
+			}
+
+			vesselCtx, cancel := context.WithTimeout(vesselBaseCtx, vesselTimeout)
 			defer cancel()
 
 			outcome := r.runVessel(vesselCtx, j)
@@ -1971,8 +1977,13 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 		if vessel.StartedAt == nil {
 			continue
 		}
+		srcCfg := r.sourceConfigFromMeta(vessel)
+		vesselTimeout, resolveErr := resolveTimeout(r.Config, srcCfg)
+		if resolveErr != nil {
+			vesselTimeout = timeout
+		}
 		elapsed := r.runtimeSince(*vessel.StartedAt)
-		if elapsed <= timeout {
+		if elapsed <= vesselTimeout {
 			continue
 		}
 
@@ -2196,6 +2207,16 @@ func providerAttempt(p *workflow.Phase, retriesRemaining int) int {
 
 func isDTUProviderRun() bool {
 	return strings.TrimSpace(os.Getenv(dtu.EnvStatePath)) != ""
+}
+
+// resolveTimeout returns the effective timeout for a vessel.
+// Resolution order: Source.Timeout > Config.Timeout.
+func resolveTimeout(cfg *config.Config, srcCfg *config.SourceConfig) (time.Duration, error) {
+	raw := cfg.Timeout
+	if srcCfg != nil && srcCfg.Timeout != "" {
+		raw = srcCfg.Timeout
+	}
+	return time.ParseDuration(raw)
 }
 
 // resolveProvider determines which LLM provider to use for a phase invocation.

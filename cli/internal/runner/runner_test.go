@@ -5176,3 +5176,132 @@ func TestDrainPromptOnlyRateLimitRetry(t *testing.T) {
 		t.Errorf("phase calls = %d, want 2 (1 rate limit + 1 success)", got)
 	}
 }
+
+// --- Per-source timeout ---
+
+func TestCheckHungVessels_PerSourceTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1s" // short global timeout
+
+	// Add a slow source with a long timeout
+	cfg.Sources["slow-source"] = config.SourceConfig{
+		Type:    "github",
+		Repo:    "owner/repo",
+		Timeout: "1h",
+		Tasks:   map[string]config.Task{"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"}},
+	}
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "slow-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+		Meta:      map[string]string{"config_source": "slow-source"},
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+	}
+
+	// Backdate StartedAt by 5 minutes — exceeds global 1s but not source 1h
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].State != queue.StateRunning {
+		t.Errorf("expected vessel still running (source timeout 1h), got %s", vessels[0].State)
+	}
+}
+
+func TestCheckHungVessels_PerSourceTimeoutExpired(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1h" // long global timeout
+
+	// Add a fast source with a short timeout
+	cfg.Sources["fast-source"] = config.SourceConfig{
+		Type:    "github",
+		Repo:    "owner/repo",
+		Timeout: "1s",
+		Tasks:   map[string]config.Task{"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"}},
+	}
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "fast-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+		Meta:      map[string]string{"config_source": "fast-source"},
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+	}
+
+	// Backdate StartedAt by 5 minutes — exceeds source 1s
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].State != queue.StateTimedOut {
+		t.Errorf("expected vessel timed_out (source timeout 1s), got %s", vessels[0].State)
+	}
+}
+
+func TestResolveTimeout(t *testing.T) {
+	cfg := &config.Config{Timeout: "30m"}
+
+	// nil srcCfg returns global
+	d, err := resolveTimeout(cfg, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d != 30*time.Minute {
+		t.Errorf("expected 30m, got %s", d)
+	}
+
+	// srcCfg with empty Timeout returns global
+	src := &config.SourceConfig{}
+	d, err = resolveTimeout(cfg, src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d != 30*time.Minute {
+		t.Errorf("expected 30m, got %s", d)
+	}
+
+	// srcCfg with set Timeout returns source timeout
+	src = &config.SourceConfig{Timeout: "2h"}
+	d, err = resolveTimeout(cfg, src)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if d != 2*time.Hour {
+		t.Errorf("expected 2h, got %s", d)
+	}
+}
