@@ -2077,7 +2077,7 @@ func (r *Runner) runPhaseWithRateLimitRetry(
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
-// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > Config.Model > ClaudeConfig.DefaultModel.
+// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > ClaudeConfig.DefaultModel.
 // When a model is resolved from the hierarchy, any --model flag in Claude.Flags is stripped to avoid duplication.
 func buildPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
 	args := []string{"-p"}
@@ -2116,7 +2116,7 @@ func buildPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflo
 }
 
 // buildCopilotPhaseArgs constructs the GitHub Copilot CLI arguments for a phase invocation.
-// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > Config.Model > CopilotConfig.DefaultModel.
+// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > CopilotConfig.DefaultModel.
 // The rendered prompt and harness content are combined into the -p flag value because
 // copilot has no --system-prompt equivalent.
 func buildCopilotPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, renderedPrompt string) []string {
@@ -2244,7 +2244,9 @@ func resolveProvider(cfg *config.Config, srcCfg *config.SourceConfig, wf *workfl
 }
 
 // resolveModel determines the model string for a phase invocation.
-// Resolution order: Phase.Model > Workflow.Model > Source.Model > Config.Model > provider's DefaultModel.
+// Resolution order: Phase.Model > Workflow.Model > Source.Model > provider's DefaultModel.
+// The provider's DefaultModel ensures the fallback is always compatible with the
+// resolved provider, avoiding cross-provider model leaks (e.g. gpt-* sent to claude).
 func resolveModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, provider string) string {
 	if p != nil && p.Model != nil && *p.Model != "" {
 		return *p.Model
@@ -2257,9 +2259,6 @@ func resolveModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.
 	}
 	if cfg == nil {
 		return ""
-	}
-	if cfg.Model != "" {
-		return cfg.Model
 	}
 	switch provider {
 	case "copilot":

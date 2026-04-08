@@ -136,6 +136,7 @@ llm: claude
 
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
   flags: "--bare --dangerously-skip-permissions"
   env:
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"

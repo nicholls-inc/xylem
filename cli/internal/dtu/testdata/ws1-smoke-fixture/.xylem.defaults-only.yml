@@ -18,3 +18,5 @@ max_turns: 5
 timeout: "1m"
 state_dir: ".xylem"
 default_branch: main
+claude:
+  default_model: "claude-sonnet-4-6"
