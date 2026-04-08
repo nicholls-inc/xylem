@@ -91,6 +91,19 @@ sources:
         status_labels:
           running: pr-vessel-active
 
+  # Conflict resolution for harness PRs
+  conflict-resolution:
+    type: github-pr
+    repo: nicholls-inc/xylem
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      resolve-conflicts:
+        labels: [needs-conflict-resolution, harness-impl]
+        workflow: resolve-conflicts
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+
   # Post-merge wave dependency unblocking
   # NOTE: github-merge has no label filtering. The unblock-wave prompt
   # guards with XYLEM_NOOP for non-harness merges.
