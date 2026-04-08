@@ -21,6 +21,31 @@ type Graph struct {
 	// file could not be found on disk. The graph is still rendered, but these
 	// workflows appear as empty placeholders so the user sees the gap.
 	MissingWorkflows []string `json:"missing_workflows,omitempty"`
+	// OrphanedWorkflows lists workflow YAML files present under the workflows
+	// directory that are not referenced by any task. They're collected by
+	// filename stem only (no parsing) so detection works even when a non-root
+	// cwd would cause prompt-file validation to fail.
+	OrphanedWorkflows []string `json:"orphaned_workflows,omitempty"`
+	// TriggersPerWorkflow is a reverse index: workflow name → the (source,
+	// task) entries that fire it. Keys include both loaded and missing
+	// workflows so the index still surfaces which triggers point at a gap.
+	// Values are sorted by (Source, Task) for deterministic output.
+	TriggersPerWorkflow map[string][]TriggerRef `json:"triggers_per_workflow,omitempty"`
+}
+
+// TriggerRef names a (source, task) pair that fires a specific workflow.
+// It's a flattened view used by the reverse index on Graph and by the
+// state-machine renderer.
+type TriggerRef struct {
+	Source       string            `json:"source"`
+	Task         string            `json:"task"`
+	SourceType   string            `json:"source_type,omitempty"`
+	Repo         string            `json:"repo,omitempty"`
+	Labels       []string          `json:"labels,omitempty"`
+	Events       []string          `json:"events,omitempty"` // flattened OnReview/OnChecks/OnComment
+	AuthorAllow  []string          `json:"author_allow,omitempty"`
+	AuthorDeny   []string          `json:"author_deny,omitempty"`
+	StatusLabels map[string]string `json:"status_labels,omitempty"`
 }
 
 // Source corresponds to one entry under .xylem.yml#sources.
@@ -45,6 +70,11 @@ type Trigger struct {
 	OnComment   bool     `json:"on_commented,omitempty"`
 	AuthorAllow []string `json:"author_allow,omitempty"`
 	AuthorDeny  []string `json:"author_deny,omitempty"`
+	// StatusLabels is the per-task status_labels map flattened into a
+	// plain map (e.g. {"running": "in-progress", "failed": "xylem-failed"}).
+	// It's lifted here so the state-machine renderer can walk triggers
+	// without also threading config.Config through every helper.
+	StatusLabels map[string]string `json:"status_labels,omitempty"`
 }
 
 // Workflow is a flattened view of workflow.Workflow.
