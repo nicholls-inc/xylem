@@ -400,6 +400,7 @@ phases:
 	}
 	if bugs == nil {
 		t.Fatal("bugs source not found in graph")
+		return
 	}
 	if bugs.Triggers[0].StatusLabels["running"] != "in-progress" {
 		t.Errorf("Trigger.StatusLabels not populated: %+v", bugs.Triggers[0].StatusLabels)
