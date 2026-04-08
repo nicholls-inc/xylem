@@ -42,6 +42,7 @@ func TestSmoke_S21_LookupPricingExactMatch(t *testing.T) {
 	pricing := LookupPricing("claude-sonnet-4")
 	if pricing == nil {
 		t.Fatal("LookupPricing() returned nil, want pricing")
+		return
 	}
 	if pricing.InputPer1M != 3.00 || pricing.OutputPer1M != 15.00 {
 		t.Fatalf("LookupPricing() = %+v, want input=3.00 output=15.00", *pricing)
@@ -52,6 +53,7 @@ func TestSmoke_S22_LookupPricingPrefixFallback(t *testing.T) {
 	pricing := LookupPricing("claude-sonnet-4-20250514")
 	if pricing == nil {
 		t.Fatal("LookupPricing() returned nil, want pricing")
+		return
 	}
 	if pricing.InputPer1M != 3.00 || pricing.OutputPer1M != 15.00 {
 		t.Fatalf("LookupPricing() = %+v, want input=3.00 output=15.00", *pricing)
@@ -72,6 +74,7 @@ func TestSmoke_S23_LookupPricingLongestPrefix(t *testing.T) {
 	pricing := LookupPricing("claude-haiku-4-20250514")
 	if pricing == nil {
 		t.Fatal("LookupPricing() returned nil, want pricing")
+		return
 	}
 	if pricing.InputPer1M != 0.80 || pricing.OutputPer1M != 4.00 {
 		t.Fatalf("LookupPricing() = %+v, want input=0.80 output=4.00", *pricing)

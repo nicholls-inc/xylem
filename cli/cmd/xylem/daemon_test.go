@@ -336,6 +336,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 		v, _ := q.Dequeue()
 		if v == nil {
 			t.Fatal("expected vessel from dequeue")
+			return
 		}
 		// Backdate StartedAt to make it stale.
 		v.StartedAt = &staleStart
@@ -364,6 +365,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 		v, _ := q.Dequeue()
 		if v == nil {
 			t.Fatal("expected vessel from dequeue")
+			return
 		}
 		// StartedAt is set to now by Dequeue — well within the timeout.
 
@@ -490,6 +492,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 		}
 		if vessel == nil {
 			t.Fatal("Dequeue() = nil, want vessel")
+			return
 		}
 
 		worktreePath, err := wt.Create(context.Background(), src.BranchName(*vessel))
@@ -545,6 +548,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 		repo := state.RepositoryBySlug("owner/repo")
 		if repo == nil {
 			t.Fatal("RepositoryBySlug(owner/repo) = nil")
+			return
 		}
 		if len(repo.Worktrees) != 1 {
 			t.Fatalf("len(repo.Worktrees) = %d, want 1", len(repo.Worktrees))

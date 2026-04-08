@@ -95,6 +95,7 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 	}
 	if vessel == nil {
 		t.Fatal("Dequeue() = nil, want vessel")
+		return
 	}
 	if vessel.State != queue.StateRunning {
 		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateRunning)
