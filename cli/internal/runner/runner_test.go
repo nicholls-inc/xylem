@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/containment"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
@@ -54,6 +55,8 @@ type mockCmdRunner struct {
 	// Track calls for assertion
 	phaseCalls []phaseCall
 	outputArgs [][]string
+	outputCtxs []context.Context
+	phaseCtxs  []context.Context
 	lastBody   string
 }
 
@@ -69,9 +72,10 @@ type phaseCall struct {
 	args   []string
 }
 
-func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string) ([]byte, error) {
+func (m *mockCmdRunner) RunOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	m.mu.Lock()
 	m.outputArgs = append(m.outputArgs, append([]string{name}, args...))
+	m.outputCtxs = append(m.outputCtxs, ctx)
 	for i, arg := range args {
 		if arg == "--body" && i+1 < len(args) {
 			m.lastBody = args[i+1]
@@ -108,7 +112,7 @@ func (m *mockCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...s
 	return m.processErr
 }
 
-func (m *mockCmdRunner) RunPhase(_ context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+func (m *mockCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 	prompt, _ := io.ReadAll(stdin)
 	m.mu.Lock()
 	m.phaseCalls = append(m.phaseCalls, phaseCall{
@@ -117,6 +121,7 @@ func (m *mockCmdRunner) RunPhase(_ context.Context, dir string, stdin io.Reader,
 		name:   name,
 		args:   args,
 	})
+	m.phaseCtxs = append(m.phaseCtxs, ctx)
 	m.mu.Unlock()
 	atomic.AddInt32(&m.started, 1)
 
@@ -317,6 +322,64 @@ func loadSingleVessel(t *testing.T, q *queue.Queue) queue.Vessel {
 	require.NoError(t, err)
 	require.Len(t, vessels, 1)
 	return vessels[0]
+}
+
+func TestBuildExecutionRequestScopesSecretsAndNetwork(t *testing.T) {
+	cfg := makeTestConfig(t.TempDir(), 1)
+	cfg.Claude.Env = map[string]string{"ANTHROPIC_API_KEY": "anthropic-secret"}
+	cfg.Harness.Runtime.Secrets = []config.RuntimeSecretConfig{{
+		Name:       "GH_TOKEN",
+		Value:      "gh-secret",
+		Operations: []string{"command"},
+		Phases:     []string{"publish"},
+	}}
+
+	r := &Runner{Config: cfg}
+	vessel := makeVessel(1, "fix-bug")
+
+	promptReq, err := r.buildExecutionRequest("/tmp/worktree", vessel, nil, &workflow.Phase{Name: "implement"}, "claude", executionPrompt)
+	require.NoError(t, err)
+	assert.Equal(t, containment.NetworkInherit, promptReq.Network)
+	assert.Equal(t, containment.IsolationWorkspace, promptReq.Isolation)
+	assert.Contains(t, promptReq.Env, "ANTHROPIC_API_KEY=anthropic-secret")
+	assert.NotContains(t, promptReq.Env, "GH_TOKEN=gh-secret")
+
+	commandReq, err := r.buildExecutionRequest("/tmp/worktree", vessel, nil, &workflow.Phase{
+		Name: "publish",
+		Runtime: &workflow.Runtime{
+			Secrets: []string{"GH_TOKEN"},
+		},
+	}, "", executionCommand)
+	require.NoError(t, err)
+	assert.Equal(t, containment.NetworkDeny, commandReq.Network)
+	assert.Equal(t, []string{"GH_TOKEN=gh-secret"}, commandReq.Env)
+}
+
+func TestBuildExecutionRequestRejectsUnknownPhaseSecret(t *testing.T) {
+	cfg := makeTestConfig(t.TempDir(), 1)
+	r := &Runner{Config: cfg}
+	vessel := makeVessel(1, "fix-bug")
+
+	_, err := r.buildExecutionRequest("/tmp/worktree", vessel, nil, &workflow.Phase{
+		Name: "publish",
+		Runtime: &workflow.Runtime{
+			Secrets: []string{"GH_TOKEN"},
+		},
+	}, "", executionCommand)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown runtime secret "GH_TOKEN"`)
+}
+
+func TestBuildExecutionRequestRejectsUnsafeVesselID(t *testing.T) {
+	cfg := makeTestConfig(t.TempDir(), 1)
+	r := &Runner{Config: cfg}
+	vessel := makeVessel(1, "fix-bug")
+	vessel.ID = "../escape"
+
+	_, err := r.buildExecutionRequest("/tmp/worktree", vessel, nil, &workflow.Phase{Name: "implement"}, "claude", executionPrompt)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `build runtime dir`)
+	assert.Contains(t, err.Error(), `vessel ID`)
 }
 
 func setBudget(cfg *config.Config, maxCostUSD float64, maxTokens int) {

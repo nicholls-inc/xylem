@@ -332,6 +332,61 @@ func TestValidateTimeoutTooLow(t *testing.T) {
 	requireErrorContains(t, err, "timeout must be at least")
 }
 
+func TestValidateRuntimeIsolationRejectedWhenUnknown(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.Runtime.Isolation = "container"
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "harness.runtime.isolation")
+}
+
+func TestValidateRuntimeSecretRejectedWhenOperationUnknown(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.Runtime.Secrets = []RuntimeSecretConfig{{
+		Name:       "GH_TOKEN",
+		Value:      "secret",
+		Operations: []string{"deploy"},
+	}}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "invalid operation")
+}
+
+func TestRuntimeSecretsIncludeLegacyProviderEnv(t *testing.T) {
+	cfg := validConfig()
+	cfg.Claude.Env = map[string]string{"ANTHROPIC_API_KEY": "${TEST_ANTHROPIC_KEY}"}
+	cfg.Copilot.Env = map[string]string{"GITHUB_TOKEN": "${TEST_COPILOT_KEY}"}
+	cfg.Harness.Runtime.Secrets = []RuntimeSecretConfig{{
+		Name:       "GH_TOKEN",
+		Value:      "${TEST_GH_TOKEN}",
+		Operations: []string{"command"},
+	}}
+	t.Setenv("TEST_ANTHROPIC_KEY", "anthropic-secret")
+	t.Setenv("TEST_COPILOT_KEY", "copilot-secret")
+	t.Setenv("TEST_GH_TOKEN", "gh-secret")
+
+	got := cfg.RuntimeSecrets()
+
+	require.Len(t, got, 3)
+	assert.Contains(t, got, ResolvedRuntimeSecret{
+		Name:       "ANTHROPIC_API_KEY",
+		Value:      "anthropic-secret",
+		Providers:  []string{"claude"},
+		Operations: []string{"prompt", "prompt_only"},
+	})
+	assert.Contains(t, got, ResolvedRuntimeSecret{
+		Name:       "GITHUB_TOKEN",
+		Value:      "copilot-secret",
+		Providers:  []string{"copilot"},
+		Operations: []string{"prompt", "prompt_only"},
+	})
+	assert.Contains(t, got, ResolvedRuntimeSecret{
+		Name:       "GH_TOKEN",
+		Value:      "gh-secret",
+		Operations: []string{"command"},
+	})
+}
+
 func TestValidateMalformedRepo(t *testing.T) {
 	tests := []struct {
 		name string

@@ -90,6 +90,8 @@ daemon:
 
 This example covers the most common fields. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
 
+Runtime containment now defaults to a workspace-scoped execution profile for autonomous phases: xylem rewrites `HOME`, `TMPDIR`, and XDG state into worktree-local directories, injects only phase-scoped secrets, and applies a deny-by-default network environment for command/gate phases unless you opt back into inherited network behavior.
+
 ## Workflows
 
 Workflows are multi-phase execution plans defined in YAML. Prompt phases run against the configured LLM provider, and phases can have quality gates that must pass before the next phase begins.

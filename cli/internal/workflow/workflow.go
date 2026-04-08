@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"gopkg.in/yaml.v3"
 )
@@ -38,7 +39,13 @@ type Phase struct {
 	NoOp         *NoOp    `yaml:"noop,omitempty"`
 	Gate         *Gate    `yaml:"gate,omitempty"`
 	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
+	Runtime      *Runtime `yaml:"runtime,omitempty"`
 	DependsOn    []string `yaml:"depends_on,omitempty"`
+}
+
+type Runtime struct {
+	Network string   `yaml:"network,omitempty"`
+	Secrets []string `yaml:"secrets,omitempty"`
 }
 
 // NoOp defines an early-success completion rule for a phase.
@@ -165,6 +172,12 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			return fmt.Errorf("phase %q: allowed_tools must not be empty when specified", p.Name)
 		}
 
+		if p.Runtime != nil {
+			if err := validateRuntime(p.Name, p.Runtime); err != nil {
+				return err
+			}
+		}
+
 		if err := validateLLM(p.LLM, fmt.Sprintf("phase %q", p.Name)); err != nil {
 			return err
 		}
@@ -262,6 +275,33 @@ func validateNoOp(phaseName string, n *NoOp) error {
 		return fmt.Errorf("phase %q: noop: match is required", phaseName)
 	}
 	return nil
+}
+
+func validateRuntime(phaseName string, rt *Runtime) error {
+	if err := validateRuntimeNetwork(rt.Network); err != nil {
+		return fmt.Errorf("phase %q: runtime.network: %w", phaseName, err)
+	}
+	seen := make(map[string]struct{}, len(rt.Secrets))
+	for _, secret := range rt.Secrets {
+		trimmed := strings.TrimSpace(secret)
+		if trimmed == "" {
+			return fmt.Errorf("phase %q: runtime.secrets must not contain empty entries", phaseName)
+		}
+		if _, ok := seen[trimmed]; ok {
+			return fmt.Errorf("phase %q: runtime.secrets contains duplicate entry %q", phaseName, trimmed)
+		}
+		seen[trimmed] = struct{}{}
+	}
+	return nil
+}
+
+func validateRuntimeNetwork(value string) error {
+	switch strings.TrimSpace(value) {
+	case "", config.RuntimeNetworkInherit, config.RuntimeNetworkDeny:
+		return nil
+	default:
+		return fmt.Errorf("must be %q or %q", config.RuntimeNetworkInherit, config.RuntimeNetworkDeny)
+	}
 }
 
 func validateGate(phaseName string, g *Gate) error {

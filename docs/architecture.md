@@ -75,7 +75,7 @@ Sources                     xylem scan            Queue
 
 4. **Worktree creation** -- The runner asks the source for a branch name (e.g. `fix/issue-42-login-crash`), then creates an isolated git worktree at `.claude/worktrees/<branch>` branched from `origin/<default-branch>`. Provider config files (`.claude/settings.json`, rules) are copied into the worktree.
 
-5. **Phase execution** -- The runner loads the workflow YAML, reads `.xylem/HARNESS.md`, then iterates through phases. Prompt phases render a Go template with issue data and previous phase outputs, then invoke the resolved provider (`claude` or `copilot`). Command phases render and run a shell command directly in the worktree. Phase outputs are persisted to `.xylem/phases/<vessel-id>/<phase>.output`.
+5. **Phase execution** -- The runner loads the workflow YAML, reads `.xylem/HARNESS.md`, then iterates through phases. Before autonomous execution it applies runtime containment: prompt and command subprocesses run with workspace-local `HOME`/`TMPDIR`/XDG state, provider and operator secrets are injected only when the phase selectors match, and network defaults are narrower for command/gate execution than for prompt-provider calls. Prompt phases render a Go template with issue data and previous phase outputs, then invoke the resolved provider (`claude` or `copilot`). Command phases render and run a shell command directly in the worktree. Phase outputs are persisted to `.xylem/phases/<vessel-id>/<phase>.output`.
 
 6. **Gate evaluation** -- After each phase, if a gate is defined:
    - **Command gate**: runs a shell command (e.g. `make test`). On failure, the same phase re-runs with gate output appended to the prompt, up to `retries` times.

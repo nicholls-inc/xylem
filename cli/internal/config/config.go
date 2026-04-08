@@ -16,6 +16,13 @@ const minTimeout = 30 * time.Second
 
 const DefaultAuditLogPath = "audit.jsonl"
 
+const (
+	RuntimeIsolationWorkspace = "workspace"
+	RuntimeIsolationOff       = "off"
+	RuntimeNetworkInherit     = "inherit"
+	RuntimeNetworkDeny        = "deny"
+)
+
 var DefaultProtectedSurfaces = []string{
 	".xylem/HARNESS.md",
 	".xylem.yml",
@@ -117,6 +124,7 @@ type HarnessConfig struct {
 	ProtectedSurfaces ProtectedSurfacesConfig `yaml:"protected_surfaces,omitempty"`
 	Policy            PolicyConfig            `yaml:"policy,omitempty"`
 	AuditLog          string                  `yaml:"audit_log,omitempty"`
+	Runtime           RuntimeConfig           `yaml:"runtime,omitempty"`
 }
 
 type ProtectedSurfacesConfig struct {
@@ -131,6 +139,37 @@ type PolicyRuleConfig struct {
 	Action   string `yaml:"action"`
 	Resource string `yaml:"resource"`
 	Effect   string `yaml:"effect"`
+}
+
+type RuntimeConfig struct {
+	Isolation string                `yaml:"isolation,omitempty"`
+	Network   RuntimeNetworkConfig  `yaml:"network,omitempty"`
+	Secrets   []RuntimeSecretConfig `yaml:"secrets,omitempty"`
+}
+
+type RuntimeNetworkConfig struct {
+	Default string `yaml:"default,omitempty"`
+	Prompt  string `yaml:"prompt,omitempty"`
+	Command string `yaml:"command,omitempty"`
+	Gate    string `yaml:"gate,omitempty"`
+}
+
+type RuntimeSecretConfig struct {
+	Name       string   `yaml:"name"`
+	Value      string   `yaml:"value"`
+	Providers  []string `yaml:"providers,omitempty"`
+	Workflows  []string `yaml:"workflows,omitempty"`
+	Phases     []string `yaml:"phases,omitempty"`
+	Operations []string `yaml:"operations,omitempty"`
+}
+
+type ResolvedRuntimeSecret struct {
+	Name       string
+	Value      string
+	Providers  []string
+	Workflows  []string
+	Phases     []string
+	Operations []string
 }
 
 type ObservabilityConfig struct {
@@ -368,6 +407,84 @@ func (c *Config) EffectiveAuditLogPath() string {
 	return DefaultAuditLogPath
 }
 
+func (c *Config) EffectiveRuntimeIsolation() string {
+	switch c.Harness.Runtime.Isolation {
+	case "", RuntimeIsolationWorkspace:
+		return RuntimeIsolationWorkspace
+	case RuntimeIsolationOff:
+		return RuntimeIsolationOff
+	default:
+		return RuntimeIsolationWorkspace
+	}
+}
+
+func (c *Config) EffectiveRuntimeNetworkMode(operation string) string {
+	var value string
+	switch operation {
+	case "prompt", "prompt_only":
+		value = c.Harness.Runtime.Network.Prompt
+	case "command":
+		value = c.Harness.Runtime.Network.Command
+	case "gate":
+		value = c.Harness.Runtime.Network.Gate
+	}
+	if strings.TrimSpace(value) == "" {
+		value = c.Harness.Runtime.Network.Default
+	}
+	if strings.TrimSpace(value) == "" {
+		switch operation {
+		case "prompt", "prompt_only":
+			return RuntimeNetworkInherit
+		default:
+			return RuntimeNetworkDeny
+		}
+	}
+	switch value {
+	case RuntimeNetworkInherit:
+		return RuntimeNetworkInherit
+	case RuntimeNetworkDeny:
+		return RuntimeNetworkDeny
+	default:
+		switch operation {
+		case "prompt", "prompt_only":
+			return RuntimeNetworkInherit
+		default:
+			return RuntimeNetworkDeny
+		}
+	}
+}
+
+func (c *Config) RuntimeSecrets() []ResolvedRuntimeSecret {
+	var resolved []ResolvedRuntimeSecret
+	for name, value := range c.Claude.Env {
+		resolved = append(resolved, ResolvedRuntimeSecret{
+			Name:       name,
+			Value:      os.ExpandEnv(value),
+			Providers:  []string{"claude"},
+			Operations: []string{"prompt", "prompt_only"},
+		})
+	}
+	for name, value := range c.Copilot.Env {
+		resolved = append(resolved, ResolvedRuntimeSecret{
+			Name:       name,
+			Value:      os.ExpandEnv(value),
+			Providers:  []string{"copilot"},
+			Operations: []string{"prompt", "prompt_only"},
+		})
+	}
+	for _, secret := range c.Harness.Runtime.Secrets {
+		resolved = append(resolved, ResolvedRuntimeSecret{
+			Name:       secret.Name,
+			Value:      os.ExpandEnv(secret.Value),
+			Providers:  append([]string(nil), secret.Providers...),
+			Workflows:  append([]string(nil), secret.Workflows...),
+			Phases:     append([]string(nil), secret.Phases...),
+			Operations: append([]string(nil), secret.Operations...),
+		})
+	}
+	return resolved
+}
+
 func (c *Config) ObservabilityEnabled() bool {
 	if c.Observability.Enabled == nil {
 		return true
@@ -457,7 +574,69 @@ func (c *Config) validateHarness() error {
 		}
 	}
 
+	if err := validateRuntimeIsolation(c.Harness.Runtime.Isolation); err != nil {
+		return fmt.Errorf("harness.runtime.isolation: %w", err)
+	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"default", c.Harness.Runtime.Network.Default},
+		{"prompt", c.Harness.Runtime.Network.Prompt},
+		{"command", c.Harness.Runtime.Network.Command},
+		{"gate", c.Harness.Runtime.Network.Gate},
+	} {
+		if err := validateRuntimeNetworkMode(field.value); err != nil {
+			return fmt.Errorf("harness.runtime.network.%s: %w", field.name, err)
+		}
+	}
+	seenNames := make(map[string]struct{}, len(c.Harness.Runtime.Secrets))
+	for i, secret := range c.Harness.Runtime.Secrets {
+		if strings.TrimSpace(secret.Name) == "" {
+			return fmt.Errorf("harness.runtime.secrets[%d]: name is required", i)
+		}
+		if strings.TrimSpace(secret.Value) == "" {
+			return fmt.Errorf("harness.runtime.secrets[%d]: value is required", i)
+		}
+		if _, ok := seenNames[secret.Name]; ok {
+			return fmt.Errorf("harness.runtime.secrets[%d]: duplicate name %q", i, secret.Name)
+		}
+		seenNames[secret.Name] = struct{}{}
+		for _, provider := range secret.Providers {
+			switch provider {
+			case "claude", "copilot":
+			default:
+				return fmt.Errorf("harness.runtime.secrets[%d]: invalid provider %q", i, provider)
+			}
+		}
+		for _, operation := range secret.Operations {
+			switch operation {
+			case "prompt", "prompt_only", "command", "gate":
+			default:
+				return fmt.Errorf("harness.runtime.secrets[%d]: invalid operation %q", i, operation)
+			}
+		}
+	}
+
 	return nil
+}
+
+func validateRuntimeIsolation(value string) error {
+	switch strings.TrimSpace(value) {
+	case "", RuntimeIsolationWorkspace, RuntimeIsolationOff:
+		return nil
+	default:
+		return fmt.Errorf("must be %q or %q", RuntimeIsolationWorkspace, RuntimeIsolationOff)
+	}
+}
+
+func validateRuntimeNetworkMode(value string) error {
+	switch strings.TrimSpace(value) {
+	case "", RuntimeNetworkInherit, RuntimeNetworkDeny:
+		return nil
+	default:
+		return fmt.Errorf("must be %q or %q", RuntimeNetworkInherit, RuntimeNetworkDeny)
+	}
 }
 
 func (c *Config) validateObservability() error {

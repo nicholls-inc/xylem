@@ -65,6 +65,8 @@ phases:
     prompt_file: .xylem/prompts/fix-bug/implement.md
     max_turns: 15
     allowed_tools: "Bash, Read, Edit, Write, Grep, Glob"  # Optional tool restriction
+    runtime:
+      network: inherit
     gate:                                          # Optional quality gate
       type: command                                # "command" or "label"
       run: "make test"                             # Shell command to execute
@@ -78,6 +80,9 @@ phases:
   - name: smoke_test
     type: command                                  # Optional shell-command phase
     run: "make smoke-test"
+    runtime:
+      secrets: [GH_TOKEN]
+      network: deny
 ```
 
 ### Field reference
@@ -105,6 +110,7 @@ phases:
 | `model` | No | Model override for this prompt phase. Provider-specific string. |
 | `noop` | No | Early-success completion rule checked against the phase output before any gate runs. |
 | `allowed_tools` | No | Tool restriction string for prompt phases. Passed through to the provider CLI. Use this instead of top-level `claude.allowed_tools`, which is rejected by config validation. |
+| `runtime` | No | Runtime containment override for this phase. Lets you override the per-operation network mode and explicitly opt this phase into configured secret bindings. |
 | `gate` | No | Quality gate that must pass after this phase completes. |
 | `depends_on` | No | List of phase names this phase depends on. Enables parallel execution -- phases without dependency relationships can execute concurrently. Validated for duplicate entries, self-references, references to unknown phase names, and dependency cycles. |
 
@@ -113,6 +119,13 @@ phases:
 | Field | Required | Description |
 |-------|----------|-------------|
 | `match` | Yes | Substring marker that, when present in successful phase output, completes the workflow early. |
+
+**Runtime fields:**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `runtime.network` | No | Overrides the effective network mode for this phase. Valid values: `inherit`, `deny`. Prompt phases default to `inherit`; command phases and command gates default to `deny`. |
+| `runtime.secrets` | No | List of configured `harness.runtime.secrets` names this phase is allowed to receive. If omitted, all matching secret bindings are eligible; if set, unmatched names fail the phase early. |
 
 **Gate fields (when `type: command`):**
 
@@ -174,10 +187,11 @@ Provider resolution for prompt phases is: `phase.llm` -> `workflow.llm` -> `.xyl
 
 1. The runner builds `TemplateData` for the current phase (issue details, previous phase outputs, gate results, vessel metadata).
 2. If the phase is `prompt`, the runner reads `prompt_file`, renders it, writes `.xylem/phases/<vessel-id>/<phase>.prompt`, then invokes the resolved provider CLI in the worktree.
-3. If the phase is `command`, the runner renders `run`, writes `.xylem/phases/<vessel-id>/<phase>.command`, then executes the rendered shell command in the worktree.
-4. The phase output is captured and persisted to `.xylem/phases/<vessel-id>/<phase>.output`.
-5. If the phase has a `noop` rule and the successful phase output contains `noop.match`, the vessel is marked `completed`, remaining phases are skipped, and no gate is evaluated for that phase.
-6. Otherwise, if the phase has a gate, the gate is evaluated. If it fails and retries remain, the phase re-executes with the gate failure output injected into the template via `{{.GateResult}}`.
+3. Before autonomous execution, xylem applies runtime containment: workspace-local `HOME`/`TMPDIR`/XDG directories, operation-specific network policy, and secret injection scoped to the matched provider/workflow/phase/operation selectors.
+4. If the phase is `command`, the runner renders `run`, writes `.xylem/phases/<vessel-id>/<phase>.command`, then executes the rendered shell command in the worktree.
+5. The phase output is captured and persisted to `.xylem/phases/<vessel-id>/<phase>.output`.
+6. If the phase has a `noop` rule and the successful phase output contains `noop.match`, the vessel is marked `completed`, remaining phases are skipped, and no gate is evaluated for that phase.
+7. Otherwise, if the phase has a gate, the gate is evaluated. If it fails and retries remain, the phase re-executes with the gate failure output injected into the template via `{{.GateResult}}`.
 
 ### Output persistence
 

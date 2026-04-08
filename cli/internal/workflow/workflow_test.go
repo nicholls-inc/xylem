@@ -523,6 +523,42 @@ phases:
 	}
 }
 
+func TestLoadRejectsInvalidRuntimeNetwork(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    runtime:
+      network: allowlist
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `runtime.network`)
+}
+
+func TestLoadRejectsDuplicateRuntimeSecrets(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    runtime:
+      secrets: [GH_TOKEN, GH_TOKEN]
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `runtime.secrets contains duplicate entry`)
+}
+
 func TestLoadFileNotFound(t *testing.T) {
 	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err == nil {

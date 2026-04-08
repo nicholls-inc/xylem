@@ -93,6 +93,22 @@ copilot:
   env: {}                                     # parsed config map for Copilot-related environment values
 
 # ---------------------------------------------------------------------------
+# Harness runtime containment
+# ---------------------------------------------------------------------------
+harness:
+  runtime:
+    isolation: workspace                      # workspace (default) or off
+    network:
+      prompt: inherit                         # prompt + prompt-only phases default to inherit
+      command: deny                           # command phases default to deny
+      gate: deny                              # command gates default to deny
+    secrets:
+      - name: GH_TOKEN
+        value: "${GH_TOKEN}"
+        operations: [command, gate]
+        phases: [publish]
+
+# ---------------------------------------------------------------------------
 # Daemon mode intervals
 # ---------------------------------------------------------------------------
 daemon:
@@ -284,6 +300,7 @@ The `harness` section configures agent safety guardrails: protected file surface
 | `harness.protected_surfaces.paths` | list of strings | `[".xylem/HARNESS.md", ".xylem.yml", ".xylem/workflows/*.yaml", ".xylem/prompts/*/*.md"]` | No | Glob patterns for files agents cannot modify. Set to `["none"]` to disable all surface protections. |
 | `harness.policy.rules` | list of objects | `[]` | No | Policy rules for action authorization. Each rule has `action`, `resource`, and `effect`. |
 | `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the state directory. |
+| `harness.runtime` | object | see below | No | Execution-time containment settings: workspace-local home/tmp, network policy, and scoped secret injection. |
 
 **Policy rule fields:**
 
@@ -310,7 +327,41 @@ harness:
         resource: "*"
         effect: allow
   audit_log: "audit.jsonl"
+  runtime:
+    isolation: workspace
+    network:
+      command: deny
+      gate: deny
+    secrets:
+      - name: GH_TOKEN
+        value: "${GH_TOKEN}"
+        operations: [command, gate]
+        phases: [publish]
 ```
+
+**Runtime fields:**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `harness.runtime.isolation` | string | `workspace` | `workspace` rewrites `HOME`, `TMPDIR`, XDG dirs, and git config paths into worktree-local runtime directories for autonomous execution. `off` disables that containment layer. |
+| `harness.runtime.network.default` | string | operation-specific | Fallback network mode. Valid values: `inherit`, `deny`. `deny` applies the filtered runtime environment plus loopback blackhole proxy settings; it is not an OS-level firewall. |
+| `harness.runtime.network.prompt` | string | `inherit` | Network mode for prompt and prompt-only runs. |
+| `harness.runtime.network.command` | string | `deny` | Network mode for command phases. `deny` keeps the constrained runtime environment and points common proxy variables at loopback blackholes. |
+| `harness.runtime.network.gate` | string | `deny` | Network mode for command gates. `deny` keeps the constrained runtime environment and points common proxy variables at loopback blackholes. |
+| `harness.runtime.secrets` | list | `[]` | Additional secret bindings that are injected only when their selectors match the provider, workflow, phase, and operation. |
+
+**Runtime secret fields:**
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `name` | string | Yes | Environment variable name exposed to the matched subprocess. |
+| `value` | string | Yes | Value to inject. Shell variable expansion via `${VAR}` is supported at config load time. |
+| `providers` | list | No | Optional provider selector (`claude`, `copilot`). |
+| `workflows` | list | No | Optional workflow-name selector. |
+| `phases` | list | No | Optional phase-name selector. |
+| `operations` | list | No | Optional execution-kind selector. Valid values: `prompt`, `prompt_only`, `command`, `gate`. |
+
+Provider env blocks (`claude.env`, `copilot.env`) are now treated as prompt-scoped secret bindings rather than being ambient across every subprocess. That preserves existing provider authentication behavior while narrowing secret exposure for command phases and gates.
 
 ### Observability settings
 

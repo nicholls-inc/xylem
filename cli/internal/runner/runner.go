@@ -8,12 +8,14 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/containment"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
@@ -467,7 +469,16 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-				cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
+				execCtx, execErr := r.executionContext(ctx, worktreePath, vessel, sk, &p, "", executionCommand)
+				if execErr != nil {
+					finishCurrentPhaseSpan(execErr)
+					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, execErr))
+					if err := src.OnFail(ctx, vessel); err != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+					}
+					return "failed"
+				}
+				cmdOut, cmdErr := gate.RunCommand(execCtx, r.Runner, worktreePath, rendered)
 				output = []byte(cmdOut)
 				runErr = cmdErr
 			} else {
@@ -534,7 +545,16 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if phaseStdin != nil {
 					stdinContent = rendered
 				}
-				output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+				execCtx, execErr := r.executionContext(ctx, worktreePath, vessel, sk, &p, provider, executionPrompt)
+				if execErr != nil {
+					finishCurrentPhaseSpan(execErr)
+					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, execErr))
+					if err := src.OnFail(ctx, vessel); err != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+					}
+					return "failed"
+				}
+				output, runErr = r.runPhaseWithRateLimitRetry(execCtx, worktreePath, stdinContent, cmd, args)
 			}
 
 			// Shared: Write phase output
@@ -647,7 +667,17 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			switch p.Gate.Type {
 			case "command":
 				gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-				gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
+				gateCtx, gateCtxErr := r.executionContext(ctx, worktreePath, vessel, sk, &p, "", executionGate)
+				if gateCtxErr != nil {
+					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateCtxErr.Error()))
+					finishCurrentPhaseSpan(gateCtxErr)
+					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateCtxErr))
+					if err := src.OnFail(ctx, vessel); err != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+					}
+					return "failed"
+				}
+				gateOut, passed, gateErr := gate.RunCommandGate(gateCtx, r.Runner, worktreePath, p.Gate.Run)
 				finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
 					Type:         p.Gate.Type,
 					Passed:       passed,
@@ -792,7 +822,15 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		return "failed"
 	}
 
-	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
+	execCtx, execErr := r.executionContext(ctx, worktreePath, vessel, nil, nil, provider, executionPromptOnly)
+	if execErr != nil {
+		r.failVessel(vessel.ID, execErr.Error())
+		if err := src.OnFail(ctx, vessel); err != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
+		return "failed"
+	}
+	output, runErr := r.runPhaseWithRateLimitRetry(execCtx, worktreePath, prompt, cmd, args)
 	if runErr != nil {
 		r.failVessel(vessel.ID, runErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
@@ -1219,7 +1257,16 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
+			execCtx, execErr := r.executionContext(ctx, worktreePath, vessel, wf, &p, "", executionCommand)
+			if execErr != nil {
+				finishCurrentPhaseSpan(execErr)
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, execErr))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
+			}
+			cmdOut, cmdErr := gate.RunCommand(execCtx, r.Runner, worktreePath, rendered)
 			output = []byte(cmdOut)
 			runErr = cmdErr
 		} else {
@@ -1285,7 +1332,16 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if phaseStdin != nil {
 				stdinContent = rendered
 			}
-			output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+			execCtx, execErr := r.executionContext(ctx, worktreePath, vessel, wf, &p, provider, executionPrompt)
+			if execErr != nil {
+				finishCurrentPhaseSpan(execErr)
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, execErr))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
+			}
+			output, runErr = r.runPhaseWithRateLimitRetry(execCtx, worktreePath, stdinContent, cmd, args)
 		}
 
 		// Write output file.
@@ -1398,7 +1454,16 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		switch p.Gate.Type {
 		case "command":
 			gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-			gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
+			gateCtx, gateCtxErr := r.executionContext(ctx, worktreePath, vessel, wf, &p, "", executionGate)
+			if gateCtxErr != nil {
+				finishCurrentPhaseSpan(gateCtxErr)
+				return singlePhaseResult{
+					status:       "failed",
+					duration:     phaseDuration,
+					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateCtxErr.Error()),
+				}
+			}
+			gateOut, passed, gateErr := gate.RunCommandGate(gateCtx, r.Runner, worktreePath, p.Gate.Run)
 			finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
 				Type:         p.Gate.Type,
 				Passed:       passed,
@@ -1626,6 +1691,130 @@ func phaseActionType(p *workflow.Phase) string {
 		return "external_command"
 	}
 	return "phase_execute"
+}
+
+type executionOperation string
+
+const (
+	executionPrompt     executionOperation = "prompt"
+	executionPromptOnly executionOperation = "prompt_only"
+	executionCommand    executionOperation = "command"
+	executionGate       executionOperation = "gate"
+)
+
+func (r *Runner) executionContext(
+	ctx context.Context,
+	worktreePath string,
+	vessel queue.Vessel,
+	wf *workflow.Workflow,
+	p *workflow.Phase,
+	provider string,
+	operation executionOperation,
+) (context.Context, error) {
+	req, err := r.buildExecutionRequest(worktreePath, vessel, wf, p, provider, operation)
+	if err != nil {
+		return nil, err
+	}
+	return containment.WithRequest(ctx, req), nil
+}
+
+func (r *Runner) buildExecutionRequest(
+	worktreePath string,
+	vessel queue.Vessel,
+	wf *workflow.Workflow,
+	p *workflow.Phase,
+	provider string,
+	operation executionOperation,
+) (containment.Request, error) {
+	networkMode := r.Config.EffectiveRuntimeNetworkMode(string(operation))
+	if p != nil && p.Runtime != nil && p.Runtime.Network != "" {
+		networkMode = p.Runtime.Network
+	}
+
+	env, err := r.executionEnv(vessel, p, provider, operation)
+	if err != nil {
+		return containment.Request{}, err
+	}
+
+	phaseName := string(operation)
+	if p != nil && p.Name != "" {
+		phaseName = p.Name
+	}
+
+	runtimeDir, err := containment.BuildRuntimeDir(worktreePath, vessel.ID, string(operation), phaseName)
+	if err != nil {
+		return containment.Request{}, fmt.Errorf("build runtime dir: %w", err)
+	}
+
+	return containment.Request{
+		Isolation:  containment.IsolationMode(r.Config.EffectiveRuntimeIsolation()),
+		Network:    containment.NetworkMode(networkMode),
+		RuntimeDir: runtimeDir,
+		Env:        env,
+		Metadata: map[string]string{
+			"provider":  provider,
+			"operation": string(operation),
+			"phase":     phaseName,
+			"workflow":  vessel.Workflow,
+			"vessel_id": vessel.ID,
+		},
+	}, nil
+}
+
+func (r *Runner) executionEnv(
+	vessel queue.Vessel,
+	p *workflow.Phase,
+	provider string,
+	operation executionOperation,
+) ([]string, error) {
+	var allowedNames []string
+	if p != nil && p.Runtime != nil && len(p.Runtime.Secrets) > 0 {
+		allowedNames = append(allowedNames, p.Runtime.Secrets...)
+	}
+
+	var env []string
+	seen := make(map[string]struct{})
+	for _, secret := range r.Config.RuntimeSecrets() {
+		if !secretMatches(secret, vessel.Workflow, phaseName(p), provider, string(operation)) {
+			continue
+		}
+		if len(allowedNames) > 0 && !slices.Contains(allowedNames, secret.Name) {
+			continue
+		}
+		seen[secret.Name] = struct{}{}
+		env = append(env, fmt.Sprintf("%s=%s", secret.Name, secret.Value))
+	}
+	if len(allowedNames) > 0 {
+		for _, name := range allowedNames {
+			if _, ok := seen[name]; !ok {
+				return nil, fmt.Errorf("phase %q references unknown runtime secret %q", phaseName(p), name)
+			}
+		}
+	}
+	return env, nil
+}
+
+func secretMatches(secret config.ResolvedRuntimeSecret, workflowName, phaseName, provider, operation string) bool {
+	if len(secret.Providers) > 0 && (provider == "" || !slices.Contains(secret.Providers, provider)) {
+		return false
+	}
+	if len(secret.Workflows) > 0 && (workflowName == "" || !slices.Contains(secret.Workflows, workflowName)) {
+		return false
+	}
+	if len(secret.Phases) > 0 && (phaseName == "" || !slices.Contains(secret.Phases, phaseName)) {
+		return false
+	}
+	if len(secret.Operations) > 0 && !slices.Contains(secret.Operations, operation) {
+		return false
+	}
+	return true
+}
+
+func phaseName(p *workflow.Phase) string {
+	if p == nil {
+		return ""
+	}
+	return p.Name
 }
 
 func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase) error {
