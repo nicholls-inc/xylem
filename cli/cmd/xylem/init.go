@@ -131,6 +131,11 @@ max_turns: 50
 timeout: "30m"
 state_dir: ".xylem"
 
+# Default harness policy denies writes to xylem control files and requires
+# approval for git_push and pr_create. Keep the scaffolded PR phase behind an
+# approval step in your workflow, or replace it with a deterministic command
+# phase after review.
+
 # llm selects the global default LLM provider: "claude" (default) or "copilot"
 llm: claude
 
@@ -232,6 +237,7 @@ phases:
   - name: pr
     prompt_file: .xylem/prompts/fix-bug/pr.md
     max_turns: 3
+    # High-risk phase: default harness policy requires approval for git_push and pr_create.
 `
 
 const implementFeatureWorkflowContent = `name: implement-feature
@@ -259,6 +265,7 @@ phases:
   - name: pr
     prompt_file: .xylem/prompts/implement-feature/pr.md
     max_turns: 3
+    # High-risk phase: default harness policy requires approval for git_push and pr_create.
 `
 
 const analyzePrompt = `Analyze the following GitHub issue and identify the relevant code.
@@ -316,6 +323,10 @@ Implement the changes now. Follow the plan precisely.
 
 const prPrompt = `Create a pull request for the changes.
 
+This phase is high-risk. Under the default harness policy, actions that push a
+branch or create a pull request require approval. Do not work around that
+policy boundary.
+
 Issue: {{.Issue.Title}}
 URL: {{.Issue.URL}}
 
@@ -325,7 +336,8 @@ URL: {{.Issue.URL}}
 ## Plan
 {{.PreviousOutputs.plan}}
 
-Commit all changes with a clear commit message, push the branch, and create a PR using:
+Commit all changes with a clear commit message. Push the branch and create a PR
+only when the repository policy or workflow has explicitly approved ` + "`git_push`" + ` and ` + "`pr_create`" + `. Use:
 gh pr create --title "<descriptive title>" --body "<summary of changes, linking to {{.Issue.URL}}>"
 `
 

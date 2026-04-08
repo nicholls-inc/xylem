@@ -554,6 +554,75 @@ func TestCopyClaudeConfigSettingsLocal(t *testing.T) {
 	}
 }
 
+func TestProtectXylemSurfacesHonorsConfiguredPatterns(t *testing.T) {
+	worktreePath := t.TempDir()
+	protectedFile := filepath.Join(worktreePath, "docs", "control.txt")
+	unprotectedFile := filepath.Join(worktreePath, ".xylem.yml")
+	if err := os.MkdirAll(filepath.Dir(protectedFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(protected): %v", err)
+	}
+	if err := os.WriteFile(protectedFile, []byte("protected"), 0o644); err != nil {
+		t.Fatalf("WriteFile(protected): %v", err)
+	}
+	if err := os.WriteFile(unprotectedFile, []byte("config"), 0o644); err != nil {
+		t.Fatalf("WriteFile(unprotected): %v", err)
+	}
+
+	if err := protectXylemSurfaces(worktreePath, []string{"docs/*.txt"}); err != nil {
+		t.Fatalf("protectXylemSurfaces() error = %v", err)
+	}
+
+	protectedInfo, err := os.Stat(protectedFile)
+	if err != nil {
+		t.Fatalf("Stat(protected): %v", err)
+	}
+	if got := protectedInfo.Mode().Perm(); got != 0o444 {
+		t.Fatalf("protected file mode = %#o, want %#o", got, 0o444)
+	}
+
+	unprotectedInfo, err := os.Stat(unprotectedFile)
+	if err != nil {
+		t.Fatalf("Stat(unprotected): %v", err)
+	}
+	if got := unprotectedInfo.Mode().Perm(); got != 0o644 {
+		t.Fatalf("unprotected file mode = %#o, want %#o", got, 0o644)
+	}
+
+	ruleFile := filepath.Join(worktreePath, ".claude", "rules", "protected-surfaces.md")
+	ruleContent, err := os.ReadFile(ruleFile)
+	if err != nil {
+		t.Fatalf("ReadFile(rule): %v", err)
+	}
+	if !strings.Contains(string(ruleContent), "docs/*.txt") {
+		t.Fatalf("rule file = %q, want to mention configured pattern", string(ruleContent))
+	}
+}
+
+func TestProtectXylemSurfacesDisabledSkipsFilesystemHardening(t *testing.T) {
+	worktreePath := t.TempDir()
+	protectedFile := filepath.Join(worktreePath, ".xylem.yml")
+	if err := os.WriteFile(protectedFile, []byte("config"), 0o644); err != nil {
+		t.Fatalf("WriteFile(protected): %v", err)
+	}
+
+	if err := protectXylemSurfaces(worktreePath, nil); err != nil {
+		t.Fatalf("protectXylemSurfaces() error = %v", err)
+	}
+
+	info, err := os.Stat(protectedFile)
+	if err != nil {
+		t.Fatalf("Stat(protected): %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("protected file mode = %#o, want %#o when protections disabled", got, 0o644)
+	}
+
+	ruleFile := filepath.Join(worktreePath, ".claude", "rules", "protected-surfaces.md")
+	if _, err := os.Stat(ruleFile); !os.IsNotExist(err) {
+		t.Fatalf("Stat(rule file) error = %v, want not exist", err)
+	}
+}
+
 func TestParsePorcelainBareWorktree(t *testing.T) {
 	// A bare worktree has "bare" instead of "branch"
 	porcelain := "worktree /home/user/repo.git\nHEAD abc123\nbare\n\n"

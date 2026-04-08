@@ -62,6 +62,9 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 
 func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeManager, cmdRunner *realCmdRunner) (*runner.Runner, func()) {
 	tracer := buildConfiguredTracer(cfg)
+	if configurable, ok := wt.(interface{ SetProtectedSurfaces([]string) }); ok {
+		configurable.SetProtectedSurfaces(cfg.EffectiveProtectedSurfaces())
+	}
 
 	r := runner.New(cfg, q, wt, cmdRunner)
 	r.Sources = buildSourceMap(cfg, q, cmdRunner)
