@@ -4665,6 +4665,7 @@ func TestCheckHungVessels_NotTimedOut(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	if vessel == nil {
 		t.Fatal("expected dequeued vessel")
+		return
 	}
 
 	wt := &mockWorktree{}
@@ -5205,6 +5206,7 @@ func TestCheckHungVessels_PerSourceTimeout(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	if vessel == nil {
 		t.Fatal("expected dequeued vessel")
+		return
 	}
 
 	// Backdate StartedAt by 5 minutes — exceeds global 1s but not source 1h
@@ -5252,6 +5254,7 @@ func TestCheckHungVessels_PerSourceTimeoutExpired(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	if vessel == nil {
 		t.Fatal("expected dequeued vessel")
+		return
 	}
 
 	// Backdate StartedAt by 5 minutes — exceeds source 1s
