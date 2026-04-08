@@ -23,6 +23,8 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -1009,7 +1011,7 @@ func TestDrainPromptOnlyWithRef(t *testing.T) {
 	}
 }
 
-func TestSmoke_WS3_S25_PerVesselTrackerCreatedFresh(t *testing.T) {
+func TestSmoke_S25_PerVesselTrackerIsCreatedFreshForEachVessel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1041,31 +1043,27 @@ func TestSmoke_WS3_S25_PerVesselTrackerCreatedFresh(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 2 {
-		t.Fatalf("Completed = %d, want 2", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Completed)
 
 	summary1 := loadSummary(t, cfg.StateDir, "issue-1")
 	summary2 := loadSummary(t, cfg.StateDir, "issue-2")
-	if summary1.BudgetExceeded {
-		t.Fatal("summary1.BudgetExceeded = true, want false")
-	}
-	if summary2.BudgetExceeded {
-		t.Fatal("summary2.BudgetExceeded = true, want false")
-	}
-	if len(summary2.Phases) != 1 {
-		t.Fatalf("len(summary2.Phases) = %d, want 1", len(summary2.Phases))
-	}
-	wantTokens := summary2.Phases[0].InputTokensEst + summary2.Phases[0].OutputTokensEst
-	if summary2.TotalTokensEst != wantTokens {
-		t.Fatalf("summary2.TotalTokensEst = %d, want %d", summary2.TotalTokensEst, wantTokens)
-	}
+	require.Len(t, summary1.Phases, 1)
+	require.Len(t, summary2.Phases, 1)
+
+	phase1Tokens := summary1.Phases[0].InputTokensEst + summary1.Phases[0].OutputTokensEst
+	phase2Tokens := summary2.Phases[0].InputTokensEst + summary2.Phases[0].OutputTokensEst
+
+	assert.False(t, summary1.BudgetExceeded)
+	assert.False(t, summary2.BudgetExceeded)
+	assert.Positive(t, phase1Tokens)
+	assert.Equal(t, phase1Tokens, summary1.TotalTokensEst)
+	assert.Equal(t, phase2Tokens, summary2.TotalTokensEst)
+	assert.Less(t, phase1Tokens, 150)
+	assert.Greater(t, phase1Tokens*2, 150)
 }
 
-func TestSmoke_WS3_S26_CostRecordedAfterEachPromptPhase(t *testing.T) {
+func TestSmoke_S26_CostRecordedAfterEachPromptTypePhase(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1096,28 +1094,21 @@ func TestSmoke_WS3_S26_CostRecordedAfterEachPromptPhase(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
-	if summary.TotalTokensEst <= 0 {
-		t.Fatalf("summary.TotalTokensEst = %d, want > 0", summary.TotalTokensEst)
-	}
+	require.Len(t, summary.Phases, 2)
+	assert.Positive(t, summary.TotalTokensEst)
 	for i, phaseSummary := range summary.Phases {
-		if phaseSummary.InputTokensEst <= 0 {
-			t.Fatalf("summary.Phases[%d].InputTokensEst = %d, want > 0", i, phaseSummary.InputTokensEst)
-		}
+		assert.Equal(t, "prompt", phaseSummary.Type, "phase %d type", i)
+		assert.Positive(t, phaseSummary.InputTokensEst, "phase %d input tokens", i)
+		assert.Positive(t, phaseSummary.OutputTokensEst, "phase %d output tokens", i)
+		assert.Positive(t, phaseSummary.CostUSDEst, "phase %d cost", i)
 	}
 }
 
-func TestSmoke_WS3_S27_CommandPhaseNoCostRecord(t *testing.T) {
+func TestSmoke_S27_CommandTypePhasesDoNotGenerateCostRecords(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1153,31 +1144,27 @@ func TestSmoke_WS3_S27_CommandPhaseNoCostRecord(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
+	require.Len(t, summary.Phases, 2)
+	promptPhase := summary.Phases[0]
 	commandPhase := summary.Phases[1]
-	if commandPhase.Type != "command" {
-		t.Fatalf("commandPhase.Type = %q, want command", commandPhase.Type)
-	}
-	if commandPhase.InputTokensEst != 0 || commandPhase.OutputTokensEst != 0 || commandPhase.CostUSDEst != 0 {
-		t.Fatalf("command phase usage = %+v, want zero usage", commandPhase)
-	}
-	wantTotal := summary.Phases[0].InputTokensEst + summary.Phases[0].OutputTokensEst
-	if summary.TotalTokensEst != wantTotal {
-		t.Fatalf("summary.TotalTokensEst = %d, want %d", summary.TotalTokensEst, wantTotal)
-	}
+
+	assert.Equal(t, "prompt", promptPhase.Type)
+	assert.Positive(t, promptPhase.InputTokensEst)
+	assert.Positive(t, promptPhase.OutputTokensEst)
+	assert.Positive(t, promptPhase.CostUSDEst)
+	assert.Equal(t, "command", commandPhase.Type)
+	assert.Zero(t, commandPhase.InputTokensEst)
+	assert.Zero(t, commandPhase.OutputTokensEst)
+	assert.Zero(t, commandPhase.CostUSDEst)
+	assert.Equal(t, promptPhase.InputTokensEst+promptPhase.OutputTokensEst, summary.TotalTokensEst)
+	assert.Equal(t, promptPhase.CostUSDEst, summary.TotalCostUSDEst)
 }
 
-func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
+func TestSmoke_S28_BudgetEnforcementFailsVesselWhenBudgetIsExceeded(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1188,7 +1175,9 @@ func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
 	_, _ = q.Enqueue(makeVessel(1, "budget-fail"))
 
 	writeWorkflowFile(t, dir, "budget-fail", []testPhase{
-		{name: "implement", promptContent: "Budget failure path", maxTurns: 5},
+		{name: "plan", promptContent: "Budget failure phase 1", maxTurns: 5},
+		{name: "implement", promptContent: "Budget failure phase 2", maxTurns: 5},
+		{name: "verify", promptContent: "Budget failure phase 3", maxTurns: 5},
 	})
 
 	oldWd, _ := os.Getwd()
@@ -1197,7 +1186,7 @@ func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
 
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
-			"Budget failure path": []byte(strings.Repeat("y", 4000)),
+			"Budget failure phase 1": []byte(strings.Repeat("y", 4000)),
 		},
 	}
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
@@ -1206,37 +1195,27 @@ func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("Failed = %d, want 1", result.Failed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
 
 	vessels, err := q.List()
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if !strings.Contains(vessels[0].Error, "budget exceeded") {
-		t.Fatalf("vessel.Error = %q, want budget exceeded", vessels[0].Error)
-	}
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateFailed, vessels[0].State)
+	assert.Contains(t, vessels[0].Error, "budget exceeded")
+	assert.Contains(t, vessels[0].Error, "estimated cost")
+	assert.Contains(t, vessels[0].Error, "estimated tokens")
+	require.Len(t, cmdRunner.phaseCalls, 1)
+	assert.Contains(t, cmdRunner.phaseCalls[0].prompt, "Budget failure phase 1")
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if summary.State != "failed" {
-		t.Fatalf("summary.State = %q, want failed", summary.State)
-	}
-	if len(summary.Phases) != 1 {
-		t.Fatalf("len(summary.Phases) = %d, want 1", len(summary.Phases))
-	}
-	if summary.Phases[0].Status != "failed" {
-		t.Fatalf("summary.Phases[0].Status = %q, want failed", summary.Phases[0].Status)
-	}
-	if !summary.BudgetExceeded {
-		t.Fatal("summary.BudgetExceeded = false, want true")
-	}
+	assert.Equal(t, "failed", summary.State)
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "failed", summary.Phases[0].Status)
+	assert.True(t, summary.BudgetExceeded)
 }
 
-func TestSmoke_WS3_S29_NilBudgetNoEnforcement(t *testing.T) {
+func TestSmoke_S29_NilBudgetMeansNoEnforcement(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1264,20 +1243,18 @@ func TestSmoke_WS3_S29_NilBudgetNoEnforcement(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateCompleted, vessels[0].State)
+	assert.NotContains(t, vessels[0].Error, "budget exceeded")
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if summary.State != "completed" {
-		t.Fatalf("summary.State = %q, want completed", summary.State)
-	}
-	if summary.BudgetExceeded {
-		t.Fatal("summary.BudgetExceeded = true, want false")
-	}
+	assert.Equal(t, "completed", summary.State)
+	assert.False(t, summary.BudgetExceeded)
 }
 
 func TestSmoke_WS6_S5_BudgetExceededShortCircuitsBeforeGate(t *testing.T) {

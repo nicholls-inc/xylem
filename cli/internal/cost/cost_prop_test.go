@@ -48,9 +48,9 @@ func genUsageRecord() *rapid.Generator[UsageRecord] {
 	})
 }
 
-// TestProp_TotalCostEqualsSumOfRecords verifies that TotalCost always equals
+// TestPropTotalCostEqualsSum verifies that TotalCost always equals
 // the sum of all recorded CostUSD values.
-func TestProp_TotalCostEqualsSumOfRecords(t *testing.T) {
+func TestPropTotalCostEqualsSum(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(genUsageRecord(), 1, 50).Draw(t, "records")
 		tr := NewTracker(nil)
@@ -69,8 +69,8 @@ func TestProp_TotalCostEqualsSumOfRecords(t *testing.T) {
 	})
 }
 
-// TestProp_TotalTokensEqualsSumOfRecords verifies token sum invariant.
-func TestProp_TotalTokensEqualsSumOfRecords(t *testing.T) {
+// TestPropTotalTokensEqualsSum verifies token sum invariant.
+func TestPropTotalTokensEqualsSum(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(genUsageRecord(), 1, 50).Draw(t, "records")
 		tr := NewTracker(nil)
@@ -89,8 +89,8 @@ func TestProp_TotalTokensEqualsSumOfRecords(t *testing.T) {
 	})
 }
 
-// TestProp_CostByRoleSumsToTotalCost verifies that per-role costs sum to total.
-func TestProp_CostByRoleSumsToTotalCost(t *testing.T) {
+// TestPropCostByRoleSumsToTotal verifies that per-role costs sum to total.
+func TestPropCostByRoleSumsToTotal(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(genUsageRecord(), 1, 50).Draw(t, "records")
 		tr := NewTracker(nil)
@@ -112,8 +112,8 @@ func TestProp_CostByRoleSumsToTotalCost(t *testing.T) {
 	})
 }
 
-// TestProp_CostByPurposeSumsToTotalCost verifies that per-purpose costs sum to total.
-func TestProp_CostByPurposeSumsToTotalCost(t *testing.T) {
+// TestPropCostByPurposeSumsToTotal verifies that per-purpose costs sum to total.
+func TestPropCostByPurposeSumsToTotal(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(genUsageRecord(), 1, 50).Draw(t, "records")
 		tr := NewTracker(nil)
@@ -135,8 +135,8 @@ func TestProp_CostByPurposeSumsToTotalCost(t *testing.T) {
 	})
 }
 
-// TestProp_CostByModelSumsToTotalCost verifies that per-model costs sum to total.
-func TestProp_CostByModelSumsToTotalCost(t *testing.T) {
+// TestPropCostByModelSumsToTotal verifies that per-model costs sum to total.
+func TestPropCostByModelSumsToTotal(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(genUsageRecord(), 1, 50).Draw(t, "records")
 		tr := NewTracker(nil)
@@ -158,9 +158,9 @@ func TestProp_CostByModelSumsToTotalCost(t *testing.T) {
 	})
 }
 
-// TestProp_BudgetExceededIsMonotonic verifies that once BudgetExceeded returns
+// TestPropBudgetExceededIsMonotonic verifies that once BudgetExceeded returns
 // true, it never reverts to false.
-func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
+func TestPropBudgetExceededIsMonotonic(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		limit := float64(rapid.IntRange(1, 100).Draw(t, "limit_cents")) / 100.0
 		budget := &Budget{CostLimitUSD: limit}
@@ -182,8 +182,8 @@ func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 	})
 }
 
-// TestProp_ReportRoundTrip verifies that saving and loading a report preserves data.
-func TestProp_ReportRoundTrip(t *testing.T) {
+// TestPropReportRoundTrip verifies that saving and loading a report preserves data.
+func TestPropReportRoundTrip(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(genUsageRecord(), 1, 20).Draw(t, "records")
 		tr := NewTracker(nil)
@@ -245,9 +245,9 @@ func TestProp_ReportRoundTrip(t *testing.T) {
 	})
 }
 
-// TestProp_AnomalyRatioAlwaysExceedsThreshold verifies that every anomaly
+// TestPropAnomalyRatioAboveThreshold verifies that every anomaly
 // reported has a ratio > 2.0.
-func TestProp_AnomalyRatioAlwaysExceedsThreshold(t *testing.T) {
+func TestPropAnomalyRatioAboveThreshold(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		// Generate a current report with potentially high values.
 		currentCost := float64(rapid.IntRange(1, 10000).Draw(t, "current_cost")) / 100.0
@@ -283,9 +283,9 @@ func TestProp_AnomalyRatioAlwaysExceedsThreshold(t *testing.T) {
 	})
 }
 
-// TestProp_ZeroCostRecordPreservesTotalCost verifies that recording a zero-cost
+// TestPropZeroCostRecordPreservesTotal verifies that recording a zero-cost
 // event never changes the running total.
-func TestProp_ZeroCostRecordPreservesTotalCost(t *testing.T) {
+func TestPropZeroCostRecordPreservesTotal(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(genUsageRecord(), 1, 20).Draw(t, "records")
 		tr := NewTracker(nil)
@@ -315,9 +315,9 @@ func TestProp_ZeroCostRecordPreservesTotalCost(t *testing.T) {
 	})
 }
 
-// TestPropWindowedTotalCostEqualsSumOfRecords verifies that TotalCost always
+// TestPropWindowedTotalCostEqualsSum verifies that TotalCost always
 // equals the sum of all CostUSD values regardless of window rotation.
-func TestPropWindowedTotalCostEqualsSumOfRecords(t *testing.T) {
+func TestPropWindowedTotalCostEqualsSum(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		window := time.Duration(rapid.IntRange(1, 60).Draw(t, "window_minutes")) * time.Minute
 		budget := Budget{CostLimitUSD: 1000.0, Window: window}
@@ -345,9 +345,9 @@ func TestPropWindowedTotalCostEqualsSumOfRecords(t *testing.T) {
 	})
 }
 
-// TestPropWindowedCostNeverNegative verifies that both window cost and total
+// TestPropWindowedCostsNeverNegative verifies that both window cost and total
 // cost are never negative.
-func TestPropWindowedCostNeverNegative(t *testing.T) {
+func TestPropWindowedCostsNeverNegative(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		window := time.Duration(rapid.IntRange(1, 60).Draw(t, "window_minutes")) * time.Minute
 		budget := Budget{CostLimitUSD: 1000.0, Window: window}
@@ -412,8 +412,8 @@ func TestPropWindowedExceededResetsOnRotation(t *testing.T) {
 	})
 }
 
-// TestProp_BudgetUtilizationMatchesCost verifies utilization = totalCost / limit.
-func TestProp_BudgetUtilizationMatchesCost(t *testing.T) {
+// TestPropBudgetUtilizationMatchesCost verifies utilization = totalCost / limit.
+func TestPropBudgetUtilizationMatchesCost(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		limit := float64(rapid.IntRange(1, 1000).Draw(t, "limit_cents")) / 100.0
 		budget := &Budget{CostLimitUSD: limit}
