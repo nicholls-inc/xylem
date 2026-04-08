@@ -18,7 +18,7 @@ func genPricedModel() *rapid.Generator[string] {
 	return rapid.SampledFrom(models)
 }
 
-func TestProp_EstimateTokensAlwaysNonNegative(t *testing.T) {
+func TestPropEstimateTokensNonNegative(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		content := rapid.String().Draw(t, "content")
 		if got := EstimateTokens(content); got < 0 {
@@ -27,7 +27,7 @@ func TestProp_EstimateTokensAlwaysNonNegative(t *testing.T) {
 	})
 }
 
-func TestProp_EstimateTokensMonotonicallyIncreasing(t *testing.T) {
+func TestPropEstimateTokensMonotonicallyIncreasing(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		base := rapid.String().Draw(t, "base")
 		suffix := rapid.String().Draw(t, "suffix")
@@ -40,7 +40,7 @@ func TestProp_EstimateTokensMonotonicallyIncreasing(t *testing.T) {
 	})
 }
 
-func TestProp_EstimateCostNonNegativeForValidInputs(t *testing.T) {
+func TestPropEstimateCostNonNegative(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		inputTokens := rapid.IntRange(0, 1_000_000).Draw(t, "input_tokens")
 		outputTokens := rapid.IntRange(0, 1_000_000).Draw(t, "output_tokens")
@@ -55,7 +55,7 @@ func TestProp_EstimateCostNonNegativeForValidInputs(t *testing.T) {
 	})
 }
 
-func TestProp_EstimateCostNilPricingAlwaysZero(t *testing.T) {
+func TestPropEstimateCostNilPricingAlwaysZero(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		inputTokens := rapid.IntRange(0, 1_000_000).Draw(t, "input_tokens")
 		outputTokens := rapid.IntRange(0, 1_000_000).Draw(t, "output_tokens")
@@ -66,7 +66,7 @@ func TestProp_EstimateCostNilPricingAlwaysZero(t *testing.T) {
 	})
 }
 
-func TestProp_EstimateCostLinearInTokens(t *testing.T) {
+func TestPropEstimateCostLinearInTokens(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		inputTokens := rapid.IntRange(0, 500_000).Draw(t, "input_tokens")
 		outputTokens := rapid.IntRange(0, 500_000).Draw(t, "output_tokens")
@@ -83,7 +83,7 @@ func TestProp_EstimateCostLinearInTokens(t *testing.T) {
 	})
 }
 
-func TestProp_LookupPricingExactMatchAlwaysReturnsEntry(t *testing.T) {
+func TestPropLookupPricingExactMatchAlwaysReturns(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		model := genPricedModel().Draw(t, "model")
 		got := LookupPricing(model)
@@ -99,7 +99,7 @@ func TestProp_LookupPricingExactMatchAlwaysReturnsEntry(t *testing.T) {
 	})
 }
 
-func TestProp_LookupPricingPrefixAppendNeverReturnsNil(t *testing.T) {
+func TestPropLookupPricingPrefixAppendNeverNil(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		model := genPricedModel().Draw(t, "model")
 		suffix := rapid.StringMatching(`[a-z0-9-]{1,20}`).Draw(t, "suffix")
