@@ -123,6 +123,9 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		endedAt = endedAt.UTC()
 	}
 
+	phases := make([]PhaseSummary, len(s.phases))
+	copy(phases, s.phases)
+
 	summary := &VesselSummary{
 		VesselID:         s.vesselID,
 		Source:           s.source,
@@ -132,7 +135,7 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		StartedAt:        s.startedAt,
 		EndedAt:          endedAt,
 		DurationMS:       endedAt.Sub(s.startedAt).Milliseconds(),
-		Phases:           append([]PhaseSummary(nil), s.phases...),
+		Phases:           phases,
 		BudgetMaxCostUSD: s.budgetMaxCostUSD,
 		BudgetMaxTokens:  s.budgetMaxTokens,
 		Note:             summaryDisclaimer,
@@ -261,6 +264,9 @@ func SaveVesselSummary(stateDir string, summary *VesselSummary) error {
 	}
 
 	summary.Note = summaryDisclaimer
+	if summary.Phases == nil {
+		summary.Phases = []PhaseSummary{}
+	}
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return fmt.Errorf("save vessel summary: marshal: %w", err)
