@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/memory"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -2578,6 +2580,174 @@ func TestDrainPreviousOutputsAvailable(t *testing.T) {
 	if !strings.Contains(secondPrompt, "found root cause in auth.go") {
 		t.Errorf("expected previous output in second phase prompt, got: %s", secondPrompt)
 	}
+}
+
+func TestDrainWritesStructuredContextArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "artifact-context"))
+
+	writeWorkflowFile(t, dir, "artifact-context", []testPhase{
+		{name: "analyze", promptContent: "Analyze issue", maxTurns: 5},
+		{name: "implement", promptContent: "Implement {{.PreviousOutputs.analyze}}", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze issue":      []byte("analysis ready"),
+			"Implement analysis": []byte("implemented"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+
+	manifestPath := filepath.Join(cfg.StateDir, "phases", "issue-1", "implement"+contextManifestSuffix)
+	data, err := os.ReadFile(manifestPath)
+	require.NoError(t, err)
+
+	var manifest PhaseContextManifest
+	require.NoError(t, json.Unmarshal(data, &manifest))
+	assert.Equal(t, "issue-1", manifest.VesselID)
+	assert.Equal(t, "implement", manifest.PhaseName)
+	assert.Equal(t, "v1", manifest.Version)
+	assert.Contains(t, manifest.SelectedPreviousOutputs["analyze"], "analysis ready")
+	assert.True(t, manifest.Inputs.HasProgress)
+	assert.True(t, manifest.Inputs.HasHandoff)
+
+	handoff, err := memory.LoadHandoff("issue-1", latestHandoffSessionID, filepath.Join(cfg.StateDir, "phases", "issue-1"))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"analyze", "implement"}, handoff.Plan)
+	assert.Contains(t, handoff.Checkpoints, "analyze")
+	assert.Equal(t, "implemented", handoff.PhaseOutputs["implement"])
+
+	progress, err := memory.LoadProgress("issue-1", filepath.Join(cfg.StateDir, "phases", "issue-1"))
+	require.NoError(t, err)
+	require.Len(t, progress.Items, 2)
+	assert.Equal(t, "completed", progress.Items[0].Status)
+	assert.Equal(t, "completed", progress.Items[1].Status)
+}
+
+func TestDrainResumeUsesStructuredHandoffBeforeRawOutputs(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(1, "resume-context")
+	vessel.CurrentPhase = 1
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "resume-context", []testPhase{
+		{name: "analyze", promptContent: "Analyze issue", maxTurns: 5},
+		{name: "implement", promptContent: "Implement using {{.PreviousOutputs.analyze}}", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	phasesDir := filepath.Join(cfg.StateDir, "phases", "issue-1")
+	require.NoError(t, os.MkdirAll(phasesDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(phasesDir, "analyze.output"), []byte("raw output should not be used"), 0o644))
+
+	handoff := memory.NewHandoff("issue-1", latestHandoffSessionID)
+	handoff.Plan = []string{"analyze", "implement"}
+	handoff.Checkpoints = []string{"analyze"}
+	handoff.PhaseOutputs = map[string]string{"analyze": "handoff output should win"}
+	require.NoError(t, handoff.Save(phasesDir))
+
+	progress, err := memory.CreateProgress("issue-1", []string{"analyze", "implement"}, phasesDir)
+	require.NoError(t, err)
+	_ = progress
+	require.NoError(t, memory.UpdateProgress("issue-1", "analyze", "in_progress", phasesDir))
+	require.NoError(t, memory.UpdateProgress("issue-1", "analyze", "completed", phasesDir))
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement using handoff output should win": []byte("implemented"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+	require.Len(t, cmdRunner.phaseCalls, 1)
+	assert.Contains(t, cmdRunner.phaseCalls[0].prompt, "handoff output should win")
+	assert.NotContains(t, cmdRunner.phaseCalls[0].prompt, "raw output should not be used")
+}
+
+func TestCompilePhaseContextCompactsLargePreviousOutputs(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, &mockCmdRunner{})
+	vessel := makeVessel(1, "compact")
+	p := workflow.Phase{Name: "implement", MaxTurns: 5}
+	largeOutput := strings.Repeat("dependency output ", 1500)
+
+	compiled, err := r.compilePhaseContext(vessel, p, 1, phase.IssueData{Title: "Issue title"}, map[string]string{"analyze": largeOutput}, "", structuredSnapshot{
+		Progress: &memory.ProgressFile{
+			MissionID: "issue-1",
+			Items: []memory.ProgressItem{
+				{Task: "analyze", Status: "completed"},
+				{Task: "implement", Status: "pending"},
+			},
+		},
+		Handoff: &memory.HandoffArtifact{
+			MissionID:   "issue-1",
+			SessionID:   latestHandoffSessionID,
+			Plan:        []string{"analyze", "implement"},
+			Checkpoints: []string{"analyze"},
+		},
+	}, false)
+	require.NoError(t, err)
+	assert.Empty(t, compiled.TemplateData.PreviousOutputs["analyze"])
+
+	manifestPath := filepath.Join(cfg.StateDir, "phases", "issue-1", "implement"+contextManifestSuffix)
+	data, err := os.ReadFile(manifestPath)
+	require.NoError(t, err)
+
+	var manifest PhaseContextManifest
+	require.NoError(t, json.Unmarshal(data, &manifest))
+	assert.True(t, manifest.Compaction.Applied)
+	assert.Empty(t, manifest.SelectedPreviousOutputs)
+	assert.NotEmpty(t, manifest.Window.Segments)
+}
+
+func TestCleanupExpiredStructuredArtifactsRemovesSnapshotsOnly(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	phasesDir := filepath.Join(stateDir, "phases", "issue-1")
+	require.NoError(t, os.MkdirAll(phasesDir, 0o755))
+
+	oldContext := filepath.Join(phasesDir, "implement"+contextManifestSuffix)
+	oldSnapshot := filepath.Join(phasesDir, "handoff_issue-1_completed.json")
+	latest := filepath.Join(phasesDir, "handoff_issue-1_latest.json")
+	progress := filepath.Join(phasesDir, "progress_issue-1.json")
+	for _, path := range []string{oldContext, oldSnapshot, latest, progress} {
+		require.NoError(t, os.WriteFile(path, []byte("{}"), 0o644))
+	}
+
+	oldTime := time.Now().Add(-48 * time.Hour)
+	require.NoError(t, os.Chtimes(oldContext, oldTime, oldTime))
+	require.NoError(t, os.Chtimes(oldSnapshot, oldTime, oldTime))
+
+	require.NoError(t, cleanupExpiredStructuredArtifacts(stateDir, time.Now(), time.Hour))
+
+	_, err := os.Stat(oldContext)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(oldSnapshot)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	_, err = os.Stat(latest)
+	assert.NoError(t, err)
+	_, err = os.Stat(progress)
+	assert.NoError(t, err)
 }
 
 func TestBranchPrefixSelection(t *testing.T) {

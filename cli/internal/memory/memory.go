@@ -306,13 +306,27 @@ func (s *Store) Delete(memType MemoryType, key string) error {
 // HandoffArtifact captures session outcome for structured handoff between
 // sessions.
 type HandoffArtifact struct {
-	MissionID  string    `json:"mission_id"`
-	SessionID  string    `json:"session_id"`
-	Completed  []string  `json:"completed,omitempty"`
-	Failed     []string  `json:"failed,omitempty"`
-	Unresolved []string  `json:"unresolved,omitempty"`
-	NextSteps  []string  `json:"next_steps,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	MissionID    string             `json:"mission_id"`
+	SessionID    string             `json:"session_id"`
+	CurrentPhase int                `json:"current_phase,omitempty"`
+	Plan         []string           `json:"plan,omitempty"`
+	Checkpoints  []string           `json:"checkpoints,omitempty"`
+	Completed    []string           `json:"completed,omitempty"`
+	Failed       []string           `json:"failed,omitempty"`
+	Unresolved   []string           `json:"unresolved,omitempty"`
+	NextSteps    []string           `json:"next_steps,omitempty"`
+	PhaseOutputs map[string]string  `json:"phase_outputs,omitempty"`
+	Verification map[string]string  `json:"verification,omitempty"`
+	Approvals    []OperatorApproval `json:"approvals,omitempty"`
+	CreatedAt    time.Time          `json:"created_at"`
+}
+
+// OperatorApproval records the last known approval state for a workflow phase.
+type OperatorApproval struct {
+	Phase      string    `json:"phase"`
+	Status     string    `json:"status"`
+	Reason     string    `json:"reason,omitempty"`
+	RecordedAt time.Time `json:"recorded_at"`
 }
 
 // NewHandoff creates a HandoffArtifact stamped with the current time.

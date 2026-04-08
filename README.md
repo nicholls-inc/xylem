@@ -132,6 +132,20 @@ Use `noop.match` on a phase to let that phase complete the workflow early when i
 
 See the [Workflows Guide](docs/workflows.md) for template variables, custom workflows, and prompt authoring tips.
 
+## Runner artifacts
+
+Each vessel writes durable artifacts under `.xylem/phases/<vessel-id>/` so long-running and resumed workflows can rebuild state deliberately instead of relying only on raw prompt/output files.
+
+| Artifact | Purpose |
+|----------|---------|
+| `<phase>.context.json` | Inspectable compiled context manifest showing selected inputs, compaction strategy, and the final context window used for that phase |
+| `progress_<vessel>.json` | Structured per-phase progress state used across retries, waiting states, and resume |
+| `handoff_<vessel>_latest.json` | Latest structured handoff with plan, checkpoints, unresolved items, verification state, approvals, and phase outputs |
+| `handoff_<vessel>_<snapshot>.json` | Historical handoff snapshots written at meaningful state transitions |
+| `summary.json` | Final vessel summary with per-phase telemetry, artifact links, and retention metadata |
+
+The latest handoff, progress file, rendered prompts, raw outputs, and summary stay durable. Historical handoff snapshots and compiled context manifests are expirable and follow `cleanup_after` from `.xylem.yml`.
+
 ## Commands
 
 | Command | Description |

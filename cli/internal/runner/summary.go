@@ -22,6 +22,30 @@ const (
 
 var safeSummaryPathComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
+// ArtifactRetention records the retention policy for structured runner artifacts.
+type ArtifactRetention struct {
+	CleanupAfter string   `json:"cleanup_after"`
+	Preserved    []string `json:"preserved"`
+	Expiring     []string `json:"expiring"`
+}
+
+func defaultArtifactRetention() ArtifactRetention {
+	return ArtifactRetention{
+		CleanupAfter: "168h",
+		Preserved: []string{
+			"progress_<vessel>.json",
+			"handoff_<vessel>_latest.json",
+			"summary.json",
+			"*.output",
+			"*.prompt",
+		},
+		Expiring: []string{
+			"*" + contextManifestSuffix,
+			"handoff_<vessel>_<snapshot>.json",
+		},
+	}
+}
+
 // VesselSummary is the JSON artifact written after vessel completion or failure.
 type VesselSummary struct {
 	VesselID   string    `json:"vessel_id"`
@@ -44,25 +68,29 @@ type VesselSummary struct {
 	BudgetMaxTokens  *int     `json:"budget_max_tokens,omitempty"`
 	BudgetExceeded   bool     `json:"budget_exceeded"`
 
-	EvidenceManifestPath string `json:"evidence_manifest_path,omitempty"`
+	EvidenceManifestPath string            `json:"evidence_manifest_path,omitempty"`
+	ProgressPath         string            `json:"progress_path,omitempty"`
+	HandoffPath          string            `json:"handoff_path,omitempty"`
+	Retention            ArtifactRetention `json:"retention"`
 
 	Note string `json:"note"`
 }
 
 // PhaseSummary records the outcome of a single phase.
 type PhaseSummary struct {
-	Name            string  `json:"name"`
-	Type            string  `json:"type"`
-	Provider        string  `json:"provider,omitempty"`
-	Model           string  `json:"model,omitempty"`
-	DurationMS      int64   `json:"duration_ms"`
-	Status          string  `json:"status"`
-	InputTokensEst  int     `json:"input_tokens_est"`
-	OutputTokensEst int     `json:"output_tokens_est"`
-	CostUSDEst      float64 `json:"cost_usd_est"`
-	GateType        string  `json:"gate_type,omitempty"`
-	GatePassed      *bool   `json:"gate_passed,omitempty"`
-	Error           string  `json:"error,omitempty"`
+	Name                string  `json:"name"`
+	Type                string  `json:"type"`
+	Provider            string  `json:"provider,omitempty"`
+	Model               string  `json:"model,omitempty"`
+	DurationMS          int64   `json:"duration_ms"`
+	Status              string  `json:"status"`
+	InputTokensEst      int     `json:"input_tokens_est"`
+	OutputTokensEst     int     `json:"output_tokens_est"`
+	CostUSDEst          float64 `json:"cost_usd_est"`
+	GateType            string  `json:"gate_type,omitempty"`
+	GatePassed          *bool   `json:"gate_passed,omitempty"`
+	ContextManifestPath string  `json:"context_manifest_path,omitempty"`
+	Error               string  `json:"error,omitempty"`
 }
 
 type vesselRunState struct {
@@ -81,6 +109,10 @@ type vesselRunState struct {
 	extraInputTokensEst  int
 	extraOutputTokensEst int
 	extraCostUSDEst      float64
+
+	progressPath string
+	handoffPath  string
+	retention    ArtifactRetention
 }
 
 func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.Time) *vesselRunState {
@@ -91,10 +123,15 @@ func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.T
 		source:    vessel.Source,
 		workflow:  vessel.Workflow,
 		ref:       vessel.Ref,
+		retention: defaultArtifactRetention(),
 	}
 
 	if cfg == nil {
 		return s
+	}
+
+	if cfg.CleanupAfter != "" {
+		s.retention.CleanupAfter = cfg.CleanupAfter
 	}
 
 	if budget := cfg.VesselBudget(); budget != nil {
@@ -138,6 +175,9 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		Phases:           phases,
 		BudgetMaxCostUSD: s.budgetMaxCostUSD,
 		BudgetMaxTokens:  s.budgetMaxTokens,
+		ProgressPath:     s.progressPath,
+		HandoffPath:      s.handoffPath,
+		Retention:        s.retention,
 		Note:             summaryDisclaimer,
 	}
 
@@ -201,12 +241,17 @@ func (s *vesselRunState) recordPhaseTokens(
 }
 
 func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, harnessContent string, inputTokensEst, outputTokensEst int, costUSDEst float64, duration time.Duration, status string, gatePassed *bool, errMsg string) PhaseSummary {
+	return s.phaseSummaryWithContext(cfg, srcCfg, wf, p, harnessContent, "", inputTokensEst, outputTokensEst, costUSDEst, duration, status, gatePassed, errMsg)
+}
+
+func (s *vesselRunState) phaseSummaryWithContext(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, harnessContent, contextManifestPath string, inputTokensEst, outputTokensEst int, costUSDEst float64, duration time.Duration, status string, gatePassed *bool, errMsg string) PhaseSummary {
 	summary := PhaseSummary{
-		Name:       p.Name,
-		Type:       phaseTypeLabel(p),
-		DurationMS: duration.Milliseconds(),
-		Status:     status,
-		Error:      errMsg,
+		Name:                p.Name,
+		Type:                phaseTypeLabel(p),
+		DurationMS:          duration.Milliseconds(),
+		Status:              status,
+		ContextManifestPath: contextManifestPath,
+		Error:               errMsg,
 	}
 
 	if p.Gate != nil {
@@ -266,6 +311,9 @@ func SaveVesselSummary(stateDir string, summary *VesselSummary) error {
 	summary.Note = summaryDisclaimer
 	if summary.Phases == nil {
 		summary.Phases = []PhaseSummary{}
+	}
+	if summary.Retention.CleanupAfter == "" {
+		summary.Retention = defaultArtifactRetention()
 	}
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
