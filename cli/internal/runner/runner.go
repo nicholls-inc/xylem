@@ -3,11 +3,13 @@ package runner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -96,6 +98,8 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var result DrainResult
+	healthCounts := FleetStatusReport{}
+	patternCounts := map[string]int{}
 
 	for {
 		select {
@@ -118,8 +122,9 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			defer func() { <-sem }()
 
 			vesselBaseCtx := context.Background()
+			var vesselSpan observability.SpanContext
 			if r.Tracer != nil {
-				vesselSpan := r.Tracer.StartSpan(ctx, "vessel:"+j.ID, observability.VesselSpanAttributes(observability.VesselSpanData{
+				vesselSpan = r.Tracer.StartSpan(ctx, "vessel:"+j.ID, observability.VesselSpanAttributes(observability.VesselSpanData{
 					ID:       j.ID,
 					Source:   j.Source,
 					Workflow: j.Workflow,
@@ -140,6 +145,21 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			defer cancel()
 
 			outcome := r.runVessel(vesselCtx, j)
+			finalVessel := j
+			if current, findErr := r.Queue.FindByID(j.ID); findErr != nil {
+				log.Printf("warn: inspect vessel %s after run: %v", j.ID, findErr)
+			} else if current != nil {
+				finalVessel = *current
+			}
+			status := r.inspectVesselStatus(finalVessel)
+			if r.Tracer != nil {
+				vesselSpan.AddAttributes(observability.VesselHealthAttributes(observability.VesselHealthData{
+					State:        string(finalVessel.State),
+					Health:       string(status.Health),
+					AnomalyCount: len(status.Anomalies),
+					Anomalies:    AnomalyCodes(status.Anomalies),
+				}))
+			}
 
 			mu.Lock()
 			switch outcome {
@@ -152,12 +172,41 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			default:
 				result.Skipped++
 			}
+			switch status.Health {
+			case VesselHealthHealthy:
+				healthCounts.Healthy++
+			case VesselHealthDegraded:
+				healthCounts.Degraded++
+			case VesselHealthUnhealthy:
+				healthCounts.Unhealthy++
+			}
+			for _, anomaly := range status.Anomalies {
+				patternCounts[anomaly.Code]++
+			}
 			mu.Unlock()
 		}(*vessel)
 	}
 
 wait:
 	wg.Wait()
+	if r.Tracer != nil {
+		patterns := make([]FleetPattern, 0, len(patternCounts))
+		for code, count := range patternCounts {
+			patterns = append(patterns, FleetPattern{Code: code, Count: count})
+		}
+		sort.Slice(patterns, func(i, j int) bool {
+			if patterns[i].Count == patterns[j].Count {
+				return patterns[i].Code < patterns[j].Code
+			}
+			return patterns[i].Count > patterns[j].Count
+		})
+		drainSpan.AddAttributes(observability.DrainHealthAttributes(observability.DrainHealthData{
+			Healthy:   healthCounts.Healthy,
+			Degraded:  healthCounts.Degraded,
+			Unhealthy: healthCounts.Unhealthy,
+			Patterns:  FormatFleetPatterns(patterns),
+		}))
+	}
 	return result, nil
 }
 
@@ -2034,6 +2083,17 @@ func (r *Runner) runtimeNow() time.Time {
 		return time.Now().UTC()
 	}
 	return now.UTC()
+}
+
+func (r *Runner) inspectVesselStatus(vessel queue.Vessel) VesselStatusReport {
+	summary, err := LoadVesselSummary(r.Config.StateDir, vessel.ID)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.Printf("warn: load vessel summary for %s: %v", vessel.ID, err)
+		}
+		return AnalyzeVesselStatus(vessel, nil)
+	}
+	return AnalyzeVesselStatus(vessel, summary)
 }
 
 func (r *Runner) runtimeSince(start time.Time) time.Duration {

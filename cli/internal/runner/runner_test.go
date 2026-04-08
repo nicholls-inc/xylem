@@ -586,6 +586,84 @@ func TestBuildCommandDirectPromptWithRef(t *testing.T) {
 	}
 }
 
+func TestDrainTracingSurfacesVesselHealthAndPatterns(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "trace-health"))
+
+	writeWorkflowFile(t, dir, "trace-health", []testPhase{
+		{name: "implement", promptContent: "Implement change", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement change": []byte("broken output"),
+		},
+		phaseErr: errors.New("boom"),
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Tracer = tracer
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
+	}
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	vesselAttrs := spanAttrMap(vesselSpan)
+	if vesselAttrs["xylem.vessel.health"] != "unhealthy" {
+		t.Fatalf("xylem.vessel.health = %q, want unhealthy", vesselAttrs["xylem.vessel.health"])
+	}
+	if vesselAttrs["xylem.vessel.anomalies"] != "run_failed,phase_failed" {
+		t.Fatalf("xylem.vessel.anomalies = %q, want failure anomalies", vesselAttrs["xylem.vessel.anomalies"])
+	}
+
+	drainSpan := endedSpanByName(t, rec, "drain_run")
+	drainAttrs := spanAttrMap(drainSpan)
+	if drainAttrs["xylem.drain.unhealthy_vessels"] != "1" {
+		t.Fatalf("xylem.drain.unhealthy_vessels = %q, want 1", drainAttrs["xylem.drain.unhealthy_vessels"])
+	}
+	if drainAttrs["xylem.drain.unhealthy_patterns"] != "phase_failed=1, run_failed=1" {
+		t.Fatalf("xylem.drain.unhealthy_patterns = %q, want joined pattern counts", drainAttrs["xylem.drain.unhealthy_patterns"])
+	}
+}
+
+func TestInspectVesselStatusMissingSummaryDoesNotWarn(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	r := New(cfg, nil, nil, nil)
+	buf := captureStandardLogger(t)
+
+	report := r.inspectVesselStatus(queue.Vessel{
+		ID:        "issue-1",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	if report.Health != VesselHealthHealthy {
+		t.Fatalf("Health = %q, want %q", report.Health, VesselHealthHealthy)
+	}
+	if len(report.Anomalies) != 0 {
+		t.Fatalf("Anomalies = %#v, want none", report.Anomalies)
+	}
+	if strings.Contains(buf.String(), "load vessel summary") {
+		t.Fatalf("expected no warning for missing summary, got %q", buf.String())
+	}
+}
+
 func TestBuildCommandWorkflowBased(t *testing.T) {
 	cfg := &config.Config{
 		MaxTurns: 50,

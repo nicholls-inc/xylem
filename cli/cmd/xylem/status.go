@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
 func newStatusCmd() *cobra.Command {
@@ -20,7 +22,7 @@ func newStatusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			jsonMode, _ := cmd.Flags().GetBool("json")
 			stateFilter, _ := cmd.Flags().GetString("state")
-			return cmdStatus(deps.q, jsonMode, stateFilter)
+			return cmdStatus(deps.cfg, deps.q, jsonMode, stateFilter)
 		},
 	}
 	cmd.Flags().Bool("json", false, "Output as JSON")
@@ -28,7 +30,13 @@ func newStatusCmd() *cobra.Command {
 	return cmd
 }
 
-func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
+type statusRow struct {
+	queue.Vessel
+	Health    string                 `json:"health"`
+	Anomalies []runner.VesselAnomaly `json:"anomalies,omitempty"`
+}
+
+func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter string) error {
 	var vessels []queue.Vessel
 	var err error
 	if stateFilter != "" {
@@ -40,13 +48,33 @@ func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
 		return fmt.Errorf("error reading queue: %w", err)
 	}
 
+	var summaries map[string]*runner.VesselSummary
+	if cfg != nil && cfg.StateDir != "" {
+		ids := make([]string, len(vessels))
+		for i, vessel := range vessels {
+			ids[i] = vessel.ID
+		}
+		summaries, err = runner.LoadVesselSummaries(cfg.StateDir, ids)
+		if err != nil {
+			return fmt.Errorf("load vessel summaries: %w", err)
+		}
+	}
+
+	rows := make([]statusRow, len(vessels))
+	for i, vessel := range vessels {
+		status := runner.AnalyzeVesselStatus(vessel, summaries[vessel.ID])
+		rows[i] = statusRow{
+			Vessel:    vessel,
+			Health:    string(status.Health),
+			Anomalies: status.Anomalies,
+		}
+	}
+	fleet := runner.AnalyzeFleetStatus(vessels, summaries)
+
 	if jsonMode {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
-		if vessels == nil {
-			vessels = []queue.Vessel{}
-		}
-		enc.Encode(vessels) //nolint:errcheck
+		enc.Encode(rows) //nolint:errcheck
 		return nil
 	}
 
@@ -55,13 +83,13 @@ func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
 		return nil
 	}
 
-	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-30s  %-12s  %s\n",
-		"ID", "Source", "Workflow", "State", "Info", "Started", "Duration")
-	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-30s  %-12s  %s\n",
-		"----", "------", "-----", "-----", "----", "-------", "--------")
+	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
+		"ID", "Source", "Workflow", "State", "Health", "Info", "Started", "Duration")
+	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
+		"----", "------", "-----", "-----", "------", "----", "-------", "--------")
 
 	counts := map[queue.VesselState]int{}
-	for _, j := range vessels {
+	for i, j := range vessels {
 		counts[j.State]++
 		started := "—"
 		duration := "—"
@@ -77,9 +105,9 @@ func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
 		if wf == "" {
 			wf = "(prompt)"
 		}
-		info := vesselInfo(j)
-		fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-30s  %-12s  %s\n",
-			j.ID, j.Source, wf, string(j.State), info, started, duration)
+		info := vesselInfo(j, rows[i].Anomalies)
+		fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
+			j.ID, j.Source, wf, string(j.State), rows[i].Health, info, started, duration)
 	}
 
 	fmt.Printf("\nSummary: %d pending, %d running, %d completed, %d failed, %d cancelled, %d waiting, %d timed_out\n",
@@ -87,19 +115,31 @@ func cmdStatus(q *queue.Queue, jsonMode bool, stateFilter string) error {
 		counts[queue.StateCompleted], counts[queue.StateFailed],
 		counts[queue.StateCancelled], counts[queue.StateWaiting],
 		counts[queue.StateTimedOut])
+	fmt.Printf("Health: %d healthy, %d degraded, %d unhealthy\n",
+		fleet.Healthy, fleet.Degraded, fleet.Unhealthy)
+	if len(fleet.Patterns) > 0 {
+		fmt.Printf("Patterns: %s\n", runner.FormatFleetPatterns(fleet.Patterns))
+	}
 	return nil
 }
 
 // vesselInfo returns additional context for the Info column based on vessel state.
-func vesselInfo(v queue.Vessel) string {
+func vesselInfo(v queue.Vessel, anomalies []runner.VesselAnomaly) string {
+	parts := make([]string, 0, len(anomalies)+1)
 	if v.State == queue.StateWaiting && v.WaitingFor != "" {
 		elapsed := "unknown"
 		if v.WaitingSince != nil {
 			elapsed = time.Since(*v.WaitingSince).Round(time.Second).String()
 		}
-		return fmt.Sprintf("waiting for %q (%s)", v.WaitingFor, elapsed)
+		parts = append(parts, fmt.Sprintf("waiting for %q (%s)", v.WaitingFor, elapsed))
 	}
-	return ""
+	for _, anomaly := range anomalies {
+		if anomaly.Code == "waiting_on_gate" {
+			continue
+		}
+		parts = append(parts, anomaly.Message)
+	}
+	return strings.Join(parts, "; ")
 }
 
 func pauseMarkerPath(cfg *config.Config) string {
