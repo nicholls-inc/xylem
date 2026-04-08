@@ -16,8 +16,13 @@ import (
 )
 
 const (
-	summaryFileName   = "summary.json"
-	summaryDisclaimer = "Token counts and costs are estimates (len/4 heuristic + static pricing). Not provider-reported values."
+	summaryFileName      = "summary.json"
+	runtimeFileName      = "runtime.json"
+	costReportFileName   = "cost-report.json"
+	budgetEventsFileName = "budget-events.json"
+	auditEventsFileName  = "audit-events.json"
+	traceFileName        = "trace.json"
+	summaryDisclaimer    = "Token counts and costs are estimates (len/4 heuristic + static pricing). Not provider-reported values."
 )
 
 var safeSummaryPathComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -43,8 +48,14 @@ type VesselSummary struct {
 	BudgetMaxCostUSD *float64 `json:"budget_max_cost_usd,omitempty"`
 	BudgetMaxTokens  *int     `json:"budget_max_tokens,omitempty"`
 	BudgetExceeded   bool     `json:"budget_exceeded"`
+	BudgetAction     string   `json:"budget_action,omitempty"`
 
 	EvidenceManifestPath string `json:"evidence_manifest_path,omitempty"`
+	RuntimePath          string `json:"runtime_path,omitempty"`
+	CostReportPath       string `json:"cost_report_path,omitempty"`
+	BudgetEventsPath     string `json:"budget_events_path,omitempty"`
+	AuditEventsPath      string `json:"audit_events_path,omitempty"`
+	TracePath            string `json:"trace_path,omitempty"`
 
 	Note string `json:"note"`
 }
@@ -69,11 +80,12 @@ type vesselRunState struct {
 	startedAt time.Time
 	phases    []PhaseSummary
 
-	costTracker *cost.Tracker
-	vesselID    string
-	source      string
-	workflow    string
-	ref         string
+	costTracker  *cost.Tracker
+	vesselID     string
+	source       string
+	workflow     string
+	ref          string
+	budgetPolicy config.BudgetPolicy
 
 	budgetMaxCostUSD *float64
 	budgetMaxTokens  *int
@@ -85,20 +97,24 @@ type vesselRunState struct {
 
 func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.Time) *vesselRunState {
 	s := &vesselRunState{
-		startedAt: startedAt.UTC(),
-		phases:    make([]PhaseSummary, 0),
-		vesselID:  vessel.ID,
-		source:    vessel.Source,
-		workflow:  vessel.Workflow,
-		ref:       vessel.Ref,
+		startedAt:    startedAt.UTC(),
+		phases:       make([]PhaseSummary, 0),
+		vesselID:     vessel.ID,
+		source:       vessel.Source,
+		workflow:     vessel.Workflow,
+		ref:          vessel.Ref,
+		budgetPolicy: config.BudgetPolicy{Action: config.BudgetExceededFail, ApprovalLabel: config.DefaultBudgetApprovalLabel},
 	}
 
 	if cfg == nil {
+		s.costTracker = cost.NewTracker(nil)
 		return s
 	}
 
-	if budget := cfg.VesselBudget(); budget != nil {
-		s.costTracker = cost.NewTracker(budget)
+	s.budgetPolicy = cfg.BudgetPolicy()
+	budget := cfg.VesselBudget()
+	s.costTracker = cost.NewTracker(budget)
+	if budget != nil {
 		if budget.CostLimitUSD > 0 {
 			v := budget.CostLimitUSD
 			s.budgetMaxCostUSD = &v
@@ -139,6 +155,9 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		BudgetMaxCostUSD: s.budgetMaxCostUSD,
 		BudgetMaxTokens:  s.budgetMaxTokens,
 		Note:             summaryDisclaimer,
+	}
+	if s.budgetMaxCostUSD != nil || s.budgetMaxTokens != nil {
+		summary.BudgetAction = string(s.budgetPolicy.Action)
 	}
 
 	for _, p := range s.phases {
@@ -243,6 +262,26 @@ func gatePassedPointer(passed bool) *bool {
 
 func evidenceManifestRelativePath(vesselID string) string {
 	return filepath.ToSlash(filepath.Join("phases", vesselID, "evidence-manifest.json"))
+}
+
+func runtimeArtifactRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, runtimeFileName))
+}
+
+func costReportRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, costReportFileName))
+}
+
+func budgetEventsRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, budgetEventsFileName))
+}
+
+func auditEventsRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, auditEventsFileName))
+}
+
+func traceArtifactRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, traceFileName))
 }
 
 func phaseArtifactRelativePath(vesselID, phaseName string) string {

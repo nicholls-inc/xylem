@@ -15,12 +15,14 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
 var standardLoggerMu sync.Mutex
@@ -434,6 +436,74 @@ func TestSmoke_S18_EvidenceManifestPathIsEmptyInSummaryWhenNoClaimsProvided(t *t
 	raw := loadSummaryJSON(t, cfg.StateDir, vessel.ID)
 	_, ok := raw["evidence_manifest_path"]
 	assert.False(t, ok)
+}
+
+func TestSmoke_S18b_RuntimeArtifactsAreWrittenAndLinkedFromSummary(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	setPricedModel(cfg)
+
+	startedAt := time.Date(2026, time.April, 8, 20, 32, 30, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-runtime-artifacts", "github", "fix-bug", startedAt)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.AuditLog = intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	require.NoError(t, r.AuditLog.Append(intermediary.AuditEntry{
+		Intent: intermediary.Intent{
+			Action:   "phase_execute",
+			Resource: "implement",
+			AgentID:  vessel.ID,
+		},
+		Decision:  intermediary.Allow,
+		Timestamp: startedAt.Add(time.Second),
+	}))
+
+	vrs := newVesselRunState(cfg, vessel, startedAt)
+	vrs.addPhase(PhaseSummary{Name: "implement", Type: "prompt", Status: "completed"})
+	claims := []evidence.Claim{{
+		Claim:     "Implementation verified",
+		Level:     evidence.BehaviorallyChecked,
+		Checker:   "go test ./...",
+		Phase:     "implement",
+		Passed:    true,
+		Timestamp: startedAt.Add(2 * time.Second),
+	}}
+
+	spanCtx := oteltrace.NewSpanContext(oteltrace.SpanContextConfig{
+		TraceID:    oteltrace.TraceID{1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+		SpanID:     oteltrace.SpanID{2, 2, 2, 2, 2, 2, 2, 2},
+		TraceFlags: oteltrace.FlagsSampled,
+		Remote:     false,
+	})
+	ctx := oteltrace.ContextWithSpanContext(context.Background(), spanCtx)
+
+	outcome := r.completeVessel(ctx, vessel, "", nil, vrs, claims)
+	assert.Equal(t, "completed", outcome)
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, runtimeArtifactRelativePath(vessel.ID), summary.RuntimePath)
+	assert.Equal(t, costReportRelativePath(vessel.ID), summary.CostReportPath)
+	assert.Equal(t, budgetEventsRelativePath(vessel.ID), summary.BudgetEventsPath)
+	assert.Equal(t, auditEventsRelativePath(vessel.ID), summary.AuditEventsPath)
+	assert.Equal(t, traceArtifactRelativePath(vessel.ID), summary.TracePath)
+
+	runtimeJSON := loadRuntimeJSON(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, runtimeArtifactSchemaVersion, runtimeJSON["schema_version"])
+	artifacts := runtimeJSON["artifacts"].(map[string]any)
+	assert.Equal(t, summary.CostReportPath, artifacts["cost_report"])
+	assert.Equal(t, summary.BudgetEventsPath, artifacts["budget_events"])
+	assert.Equal(t, summary.AuditEventsPath, artifacts["audit_events"])
+	assert.Equal(t, summary.TracePath, artifacts["trace"])
+	traceData := runtimeJSON["trace"].(map[string]any)
+	assert.Equal(t, spanCtx.TraceID().String(), traceData["trace_id"])
+	assert.Equal(t, spanCtx.SpanID().String(), traceData["span_id"])
+	auditData := runtimeJSON["audit"].(map[string]any)
+	assert.EqualValues(t, 1, auditData["entry_count"])
 }
 
 func TestSmoke_S19_FailurePathBuildsSummaryWithStateFailedAndCallsSaveVesselSummary(t *testing.T) {
@@ -861,7 +931,7 @@ func TestSmoke_WS6S6_EvidenceCollectionFailureIsNonFatal(t *testing.T) {
 	}}
 	vrs := newVesselRunState(cfg, vessel, now)
 
-	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, claims, now)
+	r.persistRunArtifacts(context.Background(), vessel, string(queue.StateCompleted), vrs, claims, now)
 
 	if !strings.Contains(buf.String(), "warn: save evidence manifest:") {
 		t.Fatalf("expected warning log for evidence manifest save failure, got %q", buf.String())
@@ -892,7 +962,7 @@ func TestSmoke_WS6S7_SummaryWriteFailureIsNonFatal(t *testing.T) {
 	now := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
 	vrs := newVesselRunState(cfg, vessel, now)
 
-	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, nil, now)
+	r.persistRunArtifacts(context.Background(), vessel, string(queue.StateCompleted), vrs, nil, now)
 
 	if !strings.Contains(buf.String(), "warn: save vessel summary:") {
 		t.Fatalf("expected warning log for summary write failure, got %q", buf.String())
@@ -1329,6 +1399,17 @@ func readSummaryBytes(t *testing.T, stateDir, vesselID string) []byte {
 	require.NoError(t, err)
 
 	return data
+}
+
+func loadRuntimeJSON(t *testing.T, stateDir, vesselID string) map[string]any {
+	t.Helper()
+
+	data, err := os.ReadFile(filepath.Join(stateDir, "phases", vesselID, runtimeFileName))
+	require.NoError(t, err)
+
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(data, &raw))
+	return raw
 }
 
 func queueVesselByID(t *testing.T, q *queue.Queue, vesselID string) queue.Vessel {

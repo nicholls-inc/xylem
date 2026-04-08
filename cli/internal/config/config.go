@@ -140,12 +140,35 @@ type ObservabilityConfig struct {
 }
 
 type CostConfig struct {
-	Budget *BudgetConfig `yaml:"budget,omitempty"`
+	Budget      *BudgetConfig      `yaml:"budget,omitempty"`
+	ModelLadder *ModelLadderConfig `yaml:"model_ladder,omitempty"`
 }
 
 type BudgetConfig struct {
-	MaxCostUSD float64 `yaml:"max_cost_usd,omitempty"`
-	MaxTokens  int     `yaml:"max_tokens,omitempty"`
+	MaxCostUSD    float64 `yaml:"max_cost_usd,omitempty"`
+	MaxTokens     int     `yaml:"max_tokens,omitempty"`
+	OnExceeded    string  `yaml:"on_exceeded,omitempty"`
+	ApprovalLabel string  `yaml:"approval_label,omitempty"`
+}
+
+type ModelLadderConfig struct {
+	Planner   string `yaml:"planner,omitempty"`
+	Generator string `yaml:"generator,omitempty"`
+	Evaluator string `yaml:"evaluator,omitempty"`
+}
+
+type BudgetExceededAction string
+
+const (
+	BudgetExceededFail            BudgetExceededAction = "fail"
+	BudgetExceededWarn            BudgetExceededAction = "warn"
+	BudgetExceededRequireApproval BudgetExceededAction = "require_approval"
+	DefaultBudgetApprovalLabel                         = "budget-approved"
+)
+
+type BudgetPolicy struct {
+	Action        BudgetExceededAction
+	ApprovalLabel string
 }
 
 func Load(path string) (*Config, error) {
@@ -396,6 +419,42 @@ func (c *Config) VesselBudget() *cost.Budget {
 	}
 }
 
+func (c *Config) BudgetPolicy() BudgetPolicy {
+	policy := BudgetPolicy{
+		Action:        BudgetExceededFail,
+		ApprovalLabel: DefaultBudgetApprovalLabel,
+	}
+	if c == nil || c.Cost.Budget == nil {
+		return policy
+	}
+	if action := strings.TrimSpace(c.Cost.Budget.OnExceeded); action != "" {
+		policy.Action = BudgetExceededAction(action)
+	}
+	if label := strings.TrimSpace(c.Cost.Budget.ApprovalLabel); label != "" {
+		policy.ApprovalLabel = label
+	}
+	return policy
+}
+
+func (c *Config) ModelLadder() cost.ModelLadder {
+	ladder := cost.ModelLadder{
+		Roles: make(map[cost.AgentRole]string),
+	}
+	if c == nil || c.Cost.ModelLadder == nil {
+		return ladder
+	}
+	if model := strings.TrimSpace(c.Cost.ModelLadder.Planner); model != "" {
+		ladder.Roles[cost.RolePlanner] = model
+	}
+	if model := strings.TrimSpace(c.Cost.ModelLadder.Generator); model != "" {
+		ladder.Roles[cost.RoleGenerator] = model
+	}
+	if model := strings.TrimSpace(c.Cost.ModelLadder.Evaluator); model != "" {
+		ladder.Roles[cost.RoleEvaluator] = model
+	}
+	return ladder
+}
+
 func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 	if len(c.Harness.Policy.Rules) == 0 {
 		return []intermediary.Policy{DefaultPolicy()}
@@ -468,13 +527,31 @@ func (c *Config) validateObservability() error {
 
 func (c *Config) validateCost() error {
 	if c.Cost.Budget == nil {
-		return nil
+		goto validateLadder
 	}
 	if c.Cost.Budget.MaxCostUSD < 0 {
 		return fmt.Errorf("cost.budget.max_cost_usd must be non-negative")
 	}
 	if c.Cost.Budget.MaxTokens < 0 {
 		return fmt.Errorf("cost.budget.max_tokens must be non-negative")
+	}
+	switch BudgetExceededAction(strings.TrimSpace(c.Cost.Budget.OnExceeded)) {
+	case "", BudgetExceededFail, BudgetExceededWarn, BudgetExceededRequireApproval:
+	default:
+		return fmt.Errorf("cost.budget.on_exceeded must be one of fail, warn, or require_approval")
+	}
+	if c.Cost.Budget.ApprovalLabel != "" && strings.TrimSpace(c.Cost.Budget.ApprovalLabel) == "" {
+		return fmt.Errorf("cost.budget.approval_label must not be blank")
+	}
+
+validateLadder:
+	if c.Cost.ModelLadder == nil {
+		return nil
+	}
+	if strings.TrimSpace(c.Cost.ModelLadder.Planner) == "" &&
+		strings.TrimSpace(c.Cost.ModelLadder.Generator) == "" &&
+		strings.TrimSpace(c.Cost.ModelLadder.Evaluator) == "" {
+		return fmt.Errorf("cost.model_ladder must configure at least one role")
 	}
 	return nil
 }

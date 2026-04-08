@@ -98,6 +98,20 @@ copilot:
 daemon:
   scan_interval: "60s"   # how often the daemon scans for new work
   drain_interval: "30s"  # how often the daemon drains pending vessels
+
+# ---------------------------------------------------------------------------
+# Runtime cost controls
+# ---------------------------------------------------------------------------
+cost:
+  budget:
+    max_cost_usd: 5.0              # optional estimated USD ceiling
+    max_tokens: 500000             # optional estimated token ceiling
+    on_exceeded: require_approval  # fail, warn, or require_approval
+    approval_label: budget-approved # label that resumes waiting GitHub vessels
+  model_ladder:
+    planner: claude-opus-4.6
+    generator: claude-sonnet-4.6
+    evaluator: claude-haiku-4.5
 ```
 
 ## Field reference
@@ -349,6 +363,32 @@ The `cost` section configures token budget enforcement for agent sessions.
 |-------|------|---------|----------|-------------|
 | `cost.budget.max_cost_usd` | float | `0` | No | Maximum cost in USD. Must be >= 0. Set to 0 to disable cost-based limits. |
 | `cost.budget.max_tokens` | integer | `0` | No | Maximum total tokens. Must be >= 0. Set to 0 to disable token-based limits. |
+| `cost.budget.on_exceeded` | string | `"fail"` | No | Action when an estimated budget is exceeded. Valid values: `fail`, `warn`, `require_approval`. |
+| `cost.budget.approval_label` | string | `"budget-approved"` | No | Label checked on GitHub-backed waiting vessels when `on_exceeded: require_approval`. |
+| `cost.model_ladder.planner` | string | `""` | No | Optional fallback model for planning-style phases such as `analyze`, `plan`, or `design` when no explicit model override is set. |
+| `cost.model_ladder.generator` | string | `""` | No | Optional fallback model for implementation-style phases when no explicit model override is set. |
+| `cost.model_ladder.evaluator` | string | `""` | No | Optional fallback model for evaluation-style phases such as `verify`, `test`, `review`, or `check` when no explicit model override is set. |
+
+Budget behavior:
+
+- `fail` keeps the current behavior: the vessel fails immediately once the estimate crosses the configured limit.
+- `warn` lets the vessel continue, but the run artifacts record both warning and exceeded events.
+- `require_approval` moves GitHub-backed issue/PR vessels to `waiting` and automatically resumes them when the configured `approval_label` appears. Non-GitHub vessels fail immediately with a clear error because there is no label-driven approval path to satisfy.
+
+### Runtime artifact contract
+
+Each vessel writes a canonical runtime index at `<state_dir>/phases/<vessel-id>/runtime.json`. Agents should read this file first rather than inferring paths from filenames.
+
+The per-vessel artifact directory contains:
+
+- `summary.json` — compact execution summary with links to detailed artifacts
+- `runtime.json` — canonical index for the run
+- `cost-report.json` — aggregated token/cost totals by model, purpose, and role
+- `budget-events.json` — warning/exceeded events and the configured budget action
+- `audit-events.json` — audit entries filtered to the current vessel
+- `trace.json` — trace IDs and collector metadata for linking into Jaeger/OTLP tooling
+- `evidence-manifest.json` — verification claims (only when evidence was collected)
+- `<phase>.prompt`, `<phase>.command`, `<phase>.output` — raw per-phase artifacts when that phase type emitted them
 
 ## Duration strings
 
@@ -593,3 +633,4 @@ The following rules are enforced when loading `.xylem.yml`. If any rule fails, `
 | `observability.sample_rate` must be in [0.0, 1.0] | `observability.sample_rate must be in [0.0, 1.0]` |
 | `cost.budget.max_cost_usd` must be >= 0 | `cost.budget.max_cost_usd must be non-negative` |
 | `cost.budget.max_tokens` must be >= 0 | `cost.budget.max_tokens must be non-negative` |
+| `cost.budget.on_exceeded` must be `fail`, `warn`, or `require_approval` | `cost.budget.on_exceeded must be one of fail, warn, or require_approval` |

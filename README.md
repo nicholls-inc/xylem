@@ -90,6 +90,8 @@ daemon:
 
 This example covers the most common fields. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
 
+Each completed, failed, or approval-paused vessel now writes a canonical runtime index at `.xylem/phases/<vessel-id>/runtime.json`. That file links the compact `summary.json` to detailed per-vessel artifacts such as `cost-report.json`, `budget-events.json`, `audit-events.json`, `trace.json`, and `evidence-manifest.json` when present.
+
 ## Workflows
 
 Workflows are multi-phase execution plans defined in YAML. Prompt phases run against the configured LLM provider, and phases can have quality gates that must pass before the next phase begins.

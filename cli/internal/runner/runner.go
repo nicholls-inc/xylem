@@ -257,7 +257,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		if outcome != "failed" {
 			return
 		}
-		r.persistRunArtifacts(vessel, string(queue.StateFailed), vrs, claims, r.runtimeNow())
+		r.persistRunArtifacts(ctx, vessel, string(queue.StateFailed), vrs, claims, r.runtimeNow())
 	}()
 
 	// Worktree: reuse if set (resuming from waiting), otherwise create
@@ -564,7 +564,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			recordedAt := r.runtimeNow()
 			inputTokensEst, outputTokensEst, costUSDEst := vrs.recordPhaseTokens(p, model, promptForCost, string(output), recordedAt)
-			if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
+			budgetExceeded := vrs.costTracker != nil && vrs.costTracker.BudgetExceeded()
+			if budgetExceeded && r.budgetPolicy().Action == config.BudgetExceededFail {
 				errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
 					p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg))
@@ -609,6 +610,24 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post phase-complete comment", vessel.ID,
 					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
+			}
+
+			if budgetExceeded && r.budgetPolicy().Action == config.BudgetExceededRequireApproval {
+				errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d; waiting for approval label %q",
+					p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens(), r.budgetPolicy().ApprovalLabel)
+				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, ""))
+				if err := r.moveVesselToBudgetApproval(&vessel, p.Name); err != nil {
+					finishCurrentPhaseSpan(err)
+					r.failVessel(vessel.ID, err.Error())
+					if failErr := src.OnFail(ctx, vessel); failErr != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+					}
+					return "failed"
+				}
+				log.Printf("%s%s", vesselLabel(vessel), errMsg)
+				r.persistRunArtifacts(ctx, vessel, string(queue.StateWaiting), vrs, claims, r.runtimeNow())
+				finishCurrentPhaseSpan(nil)
+				return "waiting"
 			}
 
 			if phaseStatus == "no-op" {
@@ -793,7 +812,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	recordedAt := r.runtimeNow()
 	if vrs != nil {
 		vrs.recordPromptOnlyUsage(model, prompt, string(output), recordedAt)
-		if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
+		if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() && r.budgetPolicy().Action == config.BudgetExceededFail {
 			errMsg := fmt.Sprintf("budget exceeded: estimated cost $%.4f, estimated tokens %d",
 				vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 			r.failVessel(vessel.ID, errMsg)
@@ -801,6 +820,17 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 			}
 			return "failed"
+		}
+		if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() && r.budgetPolicy().Action == config.BudgetExceededRequireApproval {
+			if err := r.moveVesselToBudgetApproval(&vessel, "prompt-only"); err != nil {
+				r.failVessel(vessel.ID, err.Error())
+				if failErr := src.OnFail(ctx, vessel); failErr != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+				}
+				return "failed"
+			}
+			r.persistRunArtifacts(ctx, vessel, string(queue.StateWaiting), vrs, nil, r.runtimeNow())
+			return "waiting"
 		}
 	}
 
@@ -853,12 +883,40 @@ func (r *Runner) failVessel(id string, errMsg string) {
 	}
 }
 
+func (r *Runner) budgetPolicy() config.BudgetPolicy {
+	if r.Config == nil {
+		return config.BudgetPolicy{
+			Action:        config.BudgetExceededFail,
+			ApprovalLabel: config.DefaultBudgetApprovalLabel,
+		}
+	}
+	return r.Config.BudgetPolicy()
+}
+
+func (r *Runner) moveVesselToBudgetApproval(vessel *queue.Vessel, phaseName string) error {
+	if vessel == nil {
+		return fmt.Errorf("persist budget approval wait: vessel must not be nil")
+	}
+	if r.parseIssueNum(*vessel) == 0 || r.resolveRepo(*vessel) == "" {
+		return fmt.Errorf("persist budget approval wait: budget approval requires a GitHub-backed issue or PR vessel")
+	}
+	now := r.runtimeNow()
+	vessel.State = queue.StateWaiting
+	vessel.WaitingSince = &now
+	vessel.WaitingFor = r.budgetPolicy().ApprovalLabel
+	vessel.FailedPhase = phaseName
+	if err := r.Queue.UpdateVessel(*vessel); err != nil {
+		return fmt.Errorf("persist budget approval wait: %w", err)
+	}
+	return nil
+}
+
 func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktreePath string, phaseResults []reporter.PhaseResult, vrs *vesselRunState, claims []evidence.Claim) string {
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
 	}
 
-	manifest := r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, claims, r.runtimeNow())
+	manifest := r.persistRunArtifacts(ctx, vessel, string(queue.StateCompleted), vrs, claims, r.runtimeNow())
 
 	// Clean up worktree (best-effort)
 	r.removeWorktree(worktreePath, vessel.ID)
@@ -873,7 +931,7 @@ func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktr
 	return "completed"
 }
 
-func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *vesselRunState, claims []evidence.Claim, now time.Time) *evidence.Manifest {
+func (r *Runner) persistRunArtifacts(ctx context.Context, vessel queue.Vessel, state string, vrs *vesselRunState, claims []evidence.Claim, now time.Time) *evidence.Manifest {
 	if vrs == nil {
 		vrs = newVesselRunState(r.Config, vessel, now)
 	}
@@ -893,6 +951,8 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 			summary.EvidenceManifestPath = evidenceManifestRelativePath(vessel.ID)
 		}
 	}
+
+	persistRuntimeArtifacts(ctx, r.Config, r.AuditLog, summary, manifest, vrs, now)
 
 	if err := SaveVesselSummary(r.Config.StateDir, summary); err != nil {
 		log.Printf("warn: save vessel summary: %v", err)
@@ -1031,6 +1091,11 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 			return "failed"
 		}
 		if waveWaiting {
+			var currentClaims []evidence.Claim
+			if claims != nil {
+				currentClaims = append(currentClaims, (*claims)...)
+			}
+			r.persistRunArtifacts(ctx, vessel, string(queue.StateWaiting), vrs, currentClaims, r.runtimeNow())
 			return "waiting"
 		}
 		if waveNoOp {
@@ -1045,7 +1110,7 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 			return r.completeVessel(ctx, vessel, worktreePath, allPhaseResults, vrs, completedClaims)
 		}
 
-		if waveIdx < len(graph.waves)-1 && vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
+		if waveIdx < len(graph.waves)-1 && vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() && r.budgetPolicy().Action == config.BudgetExceededFail {
 			errMsg := fmt.Sprintf("budget exceeded after concurrent wave: estimated cost $%.4f, estimated tokens %d",
 				vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 			r.failVessel(vessel.ID, errMsg)
@@ -1058,6 +1123,21 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 					r.Reporter.VesselFailed(ctx, issueNum, "", errMsg, ""))
 			}
 			return "failed"
+		}
+		if waveIdx < len(graph.waves)-1 && vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() && r.budgetPolicy().Action == config.BudgetExceededRequireApproval {
+			if err := r.moveVesselToBudgetApproval(&vessel, "concurrent-wave"); err != nil {
+				r.failVessel(vessel.ID, err.Error())
+				if failErr := src.OnFail(ctx, vessel); failErr != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+				}
+				return "failed"
+			}
+			var currentClaims []evidence.Claim
+			if claims != nil {
+				currentClaims = append(currentClaims, (*claims)...)
+			}
+			r.persistRunArtifacts(ctx, vessel, string(queue.StateWaiting), vrs, currentClaims, r.runtimeNow())
+			return "waiting"
 		}
 	}
 
@@ -1321,7 +1401,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		recordedAt := r.runtimeNow()
 		inputTokensEst, outputTokensEst, costUSDEst := vrs.recordPhaseTokens(p, model, promptForCost, string(output), recordedAt)
-		if enforceBudget && vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
+		budgetExceeded := enforceBudget && vrs.costTracker != nil && vrs.costTracker.BudgetExceeded()
+		if budgetExceeded && r.budgetPolicy().Action == config.BudgetExceededFail {
 			errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
 				p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 			vessel.FailedPhase = p.Name
@@ -1339,6 +1420,28 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				status:       "failed",
 				duration:     phaseDuration,
 				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg),
+			}
+		}
+		if budgetExceeded && r.budgetPolicy().Action == config.BudgetExceededRequireApproval {
+			if err := r.moveVesselToBudgetApproval(&vessel, p.Name); err != nil {
+				finishCurrentPhaseSpan(err)
+				r.failVessel(vessel.ID, err.Error())
+				if failErr := src.OnFail(ctx, vessel); failErr != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+				}
+				return singlePhaseResult{
+					status:       "failed",
+					duration:     phaseDuration,
+					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error()),
+				}
+			}
+			finishCurrentPhaseSpan(nil)
+			return singlePhaseResult{
+				output:        string(output),
+				status:        "waiting",
+				duration:      phaseDuration,
+				phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, ""),
+				evidenceClaim: nil,
 			}
 		}
 
@@ -2265,7 +2368,7 @@ func resolveProvider(cfg *config.Config, srcCfg *config.SourceConfig, wf *workfl
 }
 
 // resolveModel determines the model string for a phase invocation.
-// Resolution order: Phase.Model > Workflow.Model > Source.Model > provider's DefaultModel.
+// Resolution order: Phase.Model > Workflow.Model > Source.Model > configured model ladder > provider's DefaultModel.
 // The provider's DefaultModel ensures the fallback is always compatible with the
 // resolved provider, avoiding cross-provider model leaks (e.g. gpt-* sent to claude).
 func resolveModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, provider string) string {
@@ -2281,11 +2384,36 @@ func resolveModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.
 	if cfg == nil {
 		return ""
 	}
+	if ladderModel := cfg.ModelLadder().Roles[phaseCostRole(p)]; ladderModel != "" {
+		return ladderModel
+	}
 	switch provider {
 	case "copilot":
 		return cfg.Copilot.DefaultModel
 	default:
 		return cfg.Claude.DefaultModel
+	}
+}
+
+func phaseCostRole(p *workflow.Phase) cost.AgentRole {
+	if p == nil {
+		return cost.RoleGenerator
+	}
+	name := strings.ToLower(p.Name)
+	switch {
+	case strings.Contains(name, "plan"),
+		strings.Contains(name, "analy"),
+		strings.Contains(name, "triage"),
+		strings.Contains(name, "design"):
+		return cost.RolePlanner
+	case strings.Contains(name, "verify"),
+		strings.Contains(name, "test"),
+		strings.Contains(name, "review"),
+		strings.Contains(name, "check"),
+		strings.Contains(name, "qa"):
+		return cost.RoleEvaluator
+	default:
+		return cost.RoleGenerator
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1385,6 +1386,32 @@ func TestSmoke_S30_CostBudgetLoadsCorrectly(t *testing.T) {
 	assert.Equal(t, 500000, budget.TokenLimit)
 }
 
+func TestSmoke_S30b_CostBudgetPolicyAndModelLadderLoadCorrectly(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  budget:
+    max_cost_usd: 5.0
+    max_tokens: 500000
+    on_exceeded: require_approval
+    approval_label: budget-greenlight
+  model_ladder:
+    planner: claude-opus-4.6
+    generator: claude-sonnet-4.6
+    evaluator: claude-haiku-4.5
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	policy := cfg.BudgetPolicy()
+	assert.Equal(t, BudgetExceededRequireApproval, policy.Action)
+	assert.Equal(t, "budget-greenlight", policy.ApprovalLabel)
+
+	ladder := cfg.ModelLadder()
+	assert.Equal(t, "claude-opus-4.6", ladder.Roles[cost.RolePlanner])
+	assert.Equal(t, "claude-sonnet-4.6", ladder.Roles[cost.RoleGenerator])
+	assert.Equal(t, "claude-haiku-4.5", ladder.Roles[cost.RoleEvaluator])
+}
+
 func TestSmoke_S31_NegativeSampleRateRejected(t *testing.T) {
 	path := writeSmokeConfigFile(t, `observability:
   sample_rate: -0.5
@@ -1404,6 +1431,17 @@ func TestSmoke_S32_NegativeMaxCostRejected(t *testing.T) {
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cost.budget.max_cost_usd")
+}
+
+func TestSmoke_S32b_InvalidBudgetActionRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  budget:
+    on_exceeded: maybe
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cost.budget.on_exceeded")
 }
 
 func TestSourceTimeoutValid(t *testing.T) {

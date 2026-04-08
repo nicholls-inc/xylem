@@ -82,9 +82,20 @@ func NewAuditLog(path string) *AuditLog {
 	}
 }
 
+func (a *AuditLog) Path() string {
+	if a == nil {
+		return ""
+	}
+	return a.path
+}
+
 // Append writes a single audit entry to the log file under an exclusive lock.
 // INV: Every Append call adds exactly one JSONL line.
 func (a *AuditLog) Append(entry AuditEntry) error {
+	if err := os.MkdirAll(filepath.Dir(a.path), 0o755); err != nil {
+		return fmt.Errorf("create audit log dir: %w", err)
+	}
+
 	lock := flock.New(a.lockPath)
 	if err := lock.Lock(); err != nil {
 		return fmt.Errorf("acquire audit log lock: %w", err)

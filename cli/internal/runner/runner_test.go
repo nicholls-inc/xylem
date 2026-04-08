@@ -328,6 +328,14 @@ func setBudget(cfg *config.Config, maxCostUSD float64, maxTokens int) {
 	}
 }
 
+func setBudgetAction(cfg *config.Config, action, approvalLabel string) {
+	if cfg.Cost.Budget == nil {
+		cfg.Cost.Budget = &config.BudgetConfig{}
+	}
+	cfg.Cost.Budget.OnExceeded = action
+	cfg.Cost.Budget.ApprovalLabel = approvalLabel
+}
+
 func setPricedModel(cfg *config.Config) {
 	cfg.Claude.DefaultModel = "claude-sonnet-4"
 }
@@ -1699,6 +1707,133 @@ func TestSmoke_S29_NilBudgetMeansNoEnforcement(t *testing.T) {
 	assert.False(t, summary.BudgetExceeded)
 }
 
+func TestSmoke_S29b_BudgetWarnAllowsCompletionWhileRecordingExceededBudget(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
+	setBudget(cfg, 0.0001, 0)
+	setBudgetAction(cfg, string(config.BudgetExceededWarn), "")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "budget-warn"))
+
+	writeWorkflowFile(t, dir, "budget-warn", []testPhase{
+		{name: "implement", promptContent: "Budget warn path", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Budget warn path": []byte(strings.Repeat("w", 4000)),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateCompleted, vessels[0].State)
+
+	summary := loadSummary(t, cfg.StateDir, "issue-1")
+	assert.Equal(t, "completed", summary.State)
+	assert.True(t, summary.BudgetExceeded)
+	assert.Equal(t, string(config.BudgetExceededWarn), summary.BudgetAction)
+}
+
+func TestSmoke_S29c_BudgetRequireApprovalMovesVesselToWaiting(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
+	setBudget(cfg, 0.0001, 0)
+	setBudgetAction(cfg, string(config.BudgetExceededRequireApproval), "budget-greenlight")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "budget-approval"))
+
+	writeWorkflowFile(t, dir, "budget-approval", []testPhase{
+		{name: "implement", promptContent: "Budget approval path", maxTurns: 5},
+		{name: "verify", promptContent: "Should not run until approved", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Budget approval path": []byte(strings.Repeat("a", 4000)),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Waiting)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateWaiting, vessels[0].State)
+	assert.Equal(t, "budget-greenlight", vessels[0].WaitingFor)
+	assert.Equal(t, 1, vessels[0].CurrentPhase)
+
+	summary := loadSummary(t, cfg.StateDir, "issue-1")
+	assert.Equal(t, "waiting", summary.State)
+	assert.True(t, summary.BudgetExceeded)
+	assert.Equal(t, string(config.BudgetExceededRequireApproval), summary.BudgetAction)
+	assert.Equal(t, runtimeArtifactRelativePath("issue-1"), summary.RuntimePath)
+}
+
+func TestSmoke_S29d_BudgetRequireApprovalFailsForManualPromptOnlyVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
+	setBudget(cfg, 0.0001, 0)
+	setBudgetAction(cfg, string(config.BudgetExceededRequireApproval), "budget-greenlight")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makePromptVessel(1, "Manual budget approval path"))
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Manual budget approval path": []byte(strings.Repeat("m", 4000)),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Zero(t, result.Waiting)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateFailed, vessels[0].State)
+	assert.Contains(t, vessels[0].Error, "budget approval requires a GitHub-backed issue or PR vessel")
+
+	summary := loadSummary(t, cfg.StateDir, "prompt-1")
+	assert.Equal(t, "failed", summary.State)
+	assert.True(t, summary.BudgetExceeded)
+	assert.Equal(t, string(config.BudgetExceededRequireApproval), summary.BudgetAction)
+}
+
 func TestSmoke_WS6_S5_BudgetExceededShortCircuitsBeforeGate(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
@@ -3007,6 +3142,38 @@ func TestResolveModel(t *testing.T) {
 			got := resolveModel(cfg, nil, wf, p, tt.provider)
 			if got != tt.want {
 				t.Errorf("resolveModel() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveModelFallsBackToConfiguredModelLadder(t *testing.T) {
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{DefaultModel: "claude-default"},
+		Cost: config.CostConfig{
+			ModelLadder: &config.ModelLadderConfig{
+				Planner:   "planner-model",
+				Generator: "generator-model",
+				Evaluator: "evaluator-model",
+			},
+		},
+	}
+
+	tests := []struct {
+		name  string
+		phase *workflow.Phase
+		want  string
+	}{
+		{name: "planner phase", phase: &workflow.Phase{Name: "analyze"}, want: "planner-model"},
+		{name: "generator phase", phase: &workflow.Phase{Name: "implement"}, want: "generator-model"},
+		{name: "evaluator phase", phase: &workflow.Phase{Name: "verify"}, want: "evaluator-model"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := resolveModel(cfg, nil, &workflow.Workflow{}, tt.phase, "claude")
+			if got != tt.want {
+				t.Fatalf("resolveModel() = %q, want %q", got, tt.want)
 			}
 		})
 	}
