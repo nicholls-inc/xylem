@@ -139,6 +139,11 @@ observability:
   insecure: true
   sample_rate: 1.0
 
+daemon:
+  auto_upgrade: true
+  auto_merge: true
+  auto_merge_repo: nicholls-inc/xylem
+
 concurrency: 3
 max_turns: 80
 timeout: "45m"
