@@ -5276,32 +5276,33 @@ func TestCheckHungVessels_PerSourceTimeoutExpired(t *testing.T) {
 func TestResolveTimeout(t *testing.T) {
 	cfg := &config.Config{Timeout: "30m"}
 
-	// nil srcCfg returns global
-	d, err := resolveTimeout(cfg, nil)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if d != 30*time.Minute {
-		t.Errorf("expected 30m, got %s", d)
-	}
-
-	// srcCfg with empty Timeout returns global
-	src := &config.SourceConfig{}
-	d, err = resolveTimeout(cfg, src)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if d != 30*time.Minute {
-		t.Errorf("expected 30m, got %s", d)
+	tests := []struct {
+		name    string
+		srcCfg  *config.SourceConfig
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "nil source config uses global timeout", want: 30 * time.Minute},
+		{name: "empty source timeout uses global timeout", srcCfg: &config.SourceConfig{}, want: 30 * time.Minute},
+		{name: "source timeout overrides global timeout", srcCfg: &config.SourceConfig{Timeout: "2h"}, want: 2 * time.Hour},
+		{name: "invalid source timeout returns error", srcCfg: &config.SourceConfig{Timeout: "not-a-duration"}, wantErr: true},
 	}
 
-	// srcCfg with set Timeout returns source timeout
-	src = &config.SourceConfig{Timeout: "2h"}
-	d, err = resolveTimeout(cfg, src)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if d != 2*time.Hour {
-		t.Errorf("expected 2h, got %s", d)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveTimeout(cfg, tt.srcCfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTimeout() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveTimeout() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
