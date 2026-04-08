@@ -5648,9 +5648,18 @@ func TestIsRateLimitError(t *testing.T) {
 	}{
 		{"nil error", nil, false},
 		{"generic error", errors.New("exit status 1"), false},
-		{"rate limit error", errors.New(`API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`), true},
+		{"anthropic rate limit error", errors.New(`API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`), true},
 		{"rate_limit_error substring", errors.New("rate_limit_error"), true},
 		{"unrelated 429 in message", errors.New("processed 429 items"), false},
+		// New patterns covering Copilot/OpenAI and generic HTTP 429
+		{"anthropic credit balance", errors.New("Credit balance is too low"), true},
+		{"copilot insufficient quota", errors.New("error: insufficient_quota on model gpt-5.4"), true},
+		{"openai too many requests", errors.New("openai: Too Many Requests (429)"), true},
+		{"http status 429", errors.New("http error: status 429 returned"), true},
+		{"hyphenated rate-limit", errors.New("openai: rate-limit exceeded"), true},
+		{"api error 429 prefix", errors.New("API Error: 429 retry after 30s"), true},
+		{"unrelated insufficient word", errors.New("insufficient disk space"), false},
+		{"plain rate in unrelated context", errors.New("update rate set to 5"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

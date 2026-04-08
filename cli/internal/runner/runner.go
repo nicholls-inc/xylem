@@ -2328,12 +2328,42 @@ const (
 	rateLimitBaseBackoff = 30 * time.Second
 )
 
-// isRateLimitError reports whether the error indicates an API rate limit (HTTP 429).
+// isRateLimitError reports whether the error indicates a transient LLM
+// provider error that should be retried with backoff. This includes HTTP 429
+// rate limits (rate_limit_error), insufficient credit balance, and generic
+// "too many requests" errors from both Anthropic and Copilot providers.
+//
+// The function name is retained for backwards compatibility; "transient" is
+// the more accurate description of what it now detects.
 func isRateLimitError(err error) bool {
 	if err == nil {
 		return false
 	}
-	return strings.Contains(err.Error(), "rate_limit_error")
+	msg := strings.ToLower(err.Error())
+	// Anthropic: rate_limit_error, "Credit balance is too low"
+	// Copilot/OpenAI: "rate limit", "insufficient_quota"
+	// Generic: "too many requests", HTTP 429 status ("429 too many", "api error: 429")
+	//
+	// Deliberately NOT matching bare "429" — it appears in unrelated contexts
+	// like "processed 429 items". The patterns below require context.
+	transientPatterns := []string{
+		"rate_limit_error",
+		"rate limit",
+		"rate-limit",
+		"credit balance is too low",
+		"insufficient_quota",
+		"insufficient credit",
+		"too many requests",
+		"api error: 429",
+		"status 429",
+		"429 too many",
+	}
+	for _, p := range transientPatterns {
+		if strings.Contains(msg, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // runPhaseWithRateLimitRetry wraps RunPhase with retry logic for API rate limit
