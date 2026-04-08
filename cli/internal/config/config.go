@@ -49,6 +49,7 @@ type SourceConfig struct {
 	Repo    string          `yaml:"repo,omitempty"`
 	LLM     string          `yaml:"llm,omitempty"`
 	Model   string          `yaml:"model,omitempty"`
+	Timeout string          `yaml:"timeout,omitempty"`
 	Exclude []string        `yaml:"exclude,omitempty"`
 	Tasks   map[string]Task `yaml:"tasks,omitempty"`
 }
@@ -267,6 +268,16 @@ func (c *Config) Validate() error {
 			// valid
 		default:
 			return fmt.Errorf("source %q: llm must be \"claude\" or \"copilot\", got %q", name, src.LLM)
+		}
+
+		if src.Timeout != "" {
+			dur, err := time.ParseDuration(src.Timeout)
+			if err != nil {
+				return fmt.Errorf("source %q: timeout must be a valid duration: %w", name, err)
+			}
+			if dur < minTimeout {
+				return fmt.Errorf("source %q: timeout must be at least %s", name, minTimeout)
+			}
 		}
 
 		switch src.Type {

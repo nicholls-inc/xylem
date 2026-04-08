@@ -4665,6 +4665,7 @@ func TestCheckHungVessels_NotTimedOut(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	if vessel == nil {
 		t.Fatal("expected dequeued vessel")
+		return
 	}
 
 	wt := &mockWorktree{}
@@ -5174,5 +5175,137 @@ func TestDrainPromptOnlyRateLimitRetry(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&callCount); got != 2 {
 		t.Errorf("phase calls = %d, want 2 (1 rate limit + 1 success)", got)
+	}
+}
+
+// --- Per-source timeout ---
+
+func TestCheckHungVessels_PerSourceTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1s" // short global timeout
+
+	// Add a slow source with a long timeout
+	cfg.Sources["slow-source"] = config.SourceConfig{
+		Type:    "github",
+		Repo:    "owner/repo",
+		Timeout: "1h",
+		Tasks:   map[string]config.Task{"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"}},
+	}
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "slow-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+		Meta:      map[string]string{"config_source": "slow-source"},
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+		return
+	}
+
+	// Backdate StartedAt by 5 minutes — exceeds global 1s but not source 1h
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].State != queue.StateRunning {
+		t.Errorf("expected vessel still running (source timeout 1h), got %s", vessels[0].State)
+	}
+}
+
+func TestCheckHungVessels_PerSourceTimeoutExpired(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1h" // long global timeout
+
+	// Add a fast source with a short timeout
+	cfg.Sources["fast-source"] = config.SourceConfig{
+		Type:    "github",
+		Repo:    "owner/repo",
+		Timeout: "1s",
+		Tasks:   map[string]config.Task{"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"}},
+	}
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "fast-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+		Meta:      map[string]string{"config_source": "fast-source"},
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+		return
+	}
+
+	// Backdate StartedAt by 5 minutes — exceeds source 1s
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].State != queue.StateTimedOut {
+		t.Errorf("expected vessel timed_out (source timeout 1s), got %s", vessels[0].State)
+	}
+}
+
+func TestResolveTimeout(t *testing.T) {
+	cfg := &config.Config{Timeout: "30m"}
+
+	tests := []struct {
+		name    string
+		srcCfg  *config.SourceConfig
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "nil source config uses global timeout", want: 30 * time.Minute},
+		{name: "empty source timeout uses global timeout", srcCfg: &config.SourceConfig{}, want: 30 * time.Minute},
+		{name: "source timeout overrides global timeout", srcCfg: &config.SourceConfig{Timeout: "2h"}, want: 2 * time.Hour},
+		{name: "invalid source timeout returns error", srcCfg: &config.SourceConfig{Timeout: "not-a-duration"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveTimeout(cfg, tt.srcCfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTimeout() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveTimeout() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }
