@@ -126,6 +126,7 @@ func readDaemonDTULabels(t *testing.T, store *dtu.Store, repoSlug string, issueN
 	issue := repo.IssueByNumber(issueNum)
 	if issue == nil {
 		t.Fatalf("IssueByNumber(%d) = nil", issueNum)
+		return nil
 	}
 	return append([]string(nil), issue.Labels...)
 }
