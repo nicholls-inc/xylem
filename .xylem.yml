@@ -13,6 +13,7 @@ sources:
         workflow: fix-bug
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   features:
     type: github
@@ -25,20 +26,22 @@ sources:
         workflow: implement-feature
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   triage:
     type: github
     repo: nicholls-inc/xylem
     exclude:
       [wontfix, duplicate, in-progress, no-bot, needs-refinement, xylem-failed]
-    llm: claude
-    model: claude-haiku-4-5
+    llm: copilot
+    model: gpt-5-mini
     tasks:
       triage-issues:
         labels: [needs-triage]
         workflow: triage
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   refinement:
     type: github
@@ -50,11 +53,13 @@ sources:
         workflow: refine-issue
         status_labels:
           failed: xylem-failed
+          timed_out: xylem-failed
 
   # Harness implementation issues
   harness-impl:
     type: github
     repo: nicholls-inc/xylem
+    timeout: "90m"
     exclude: [wontfix, duplicate, in-progress, no-bot, blocked, xylem-failed]
     tasks:
       implement-harness-steps:
@@ -63,6 +68,7 @@ sources:
         status_labels:
           running: in-progress
           failed: xylem-failed
+          timed_out: xylem-failed
 
   # PR review + CI failure monitoring for harness PRs
   # NOTE: review_submitted and checks_failed fire for ALL open PRs.
@@ -139,12 +145,13 @@ timeout: "45m"
 state_dir: ".xylem"
 
 # llm selects the global default LLM provider: "claude" (default) or "copilot"
-llm: claude
-model: claude-sonnet-4-6
+llm: copilot
+model: gpt-5.4
 
 claude:
   command: "claude"
   flags: "--dangerously-skip-permissions"
+  default_model: "claude-sonnet-4-6"
   env:
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
   # allowed_tools:
@@ -154,7 +161,7 @@ claude:
 
 copilot:
   command: "copilot"
-  flags: "--yolo --autopilot"
+  flags: "--yolo --autopilot --effort medium"
   default_model: "gpt-5.4"
   env:
     COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"

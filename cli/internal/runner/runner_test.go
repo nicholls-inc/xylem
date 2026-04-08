@@ -22,7 +22,10 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
+	"github.com/nicholls-inc/xylem/cli/internal/surface"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
@@ -307,6 +310,15 @@ func countRunOutputCalls(m *mockCmdRunner, name string) int {
 	return count
 }
 
+func loadSingleVessel(t *testing.T, q *queue.Queue) queue.Vessel {
+	t.Helper()
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	return vessels[0]
+}
+
 func setBudget(cfg *config.Config, maxCostUSD float64, maxTokens int) {
 	cfg.Cost = config.CostConfig{
 		Budget: &config.BudgetConfig{
@@ -574,6 +586,84 @@ func TestBuildCommandDirectPromptWithRef(t *testing.T) {
 	}
 }
 
+func TestDrainTracingSurfacesVesselHealthAndPatterns(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "trace-health"))
+
+	writeWorkflowFile(t, dir, "trace-health", []testPhase{
+		{name: "implement", promptContent: "Implement change", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement change": []byte("broken output"),
+		},
+		phaseErr: errors.New("boom"),
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Tracer = tracer
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Failed != 1 {
+		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
+	}
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	vesselAttrs := spanAttrMap(vesselSpan)
+	if vesselAttrs["xylem.vessel.health"] != "unhealthy" {
+		t.Fatalf("xylem.vessel.health = %q, want unhealthy", vesselAttrs["xylem.vessel.health"])
+	}
+	if vesselAttrs["xylem.vessel.anomalies"] != "run_failed,phase_failed" {
+		t.Fatalf("xylem.vessel.anomalies = %q, want failure anomalies", vesselAttrs["xylem.vessel.anomalies"])
+	}
+
+	drainSpan := endedSpanByName(t, rec, "drain_run")
+	drainAttrs := spanAttrMap(drainSpan)
+	if drainAttrs["xylem.drain.unhealthy_vessels"] != "1" {
+		t.Fatalf("xylem.drain.unhealthy_vessels = %q, want 1", drainAttrs["xylem.drain.unhealthy_vessels"])
+	}
+	if drainAttrs["xylem.drain.unhealthy_patterns"] != "phase_failed=1, run_failed=1" {
+		t.Fatalf("xylem.drain.unhealthy_patterns = %q, want joined pattern counts", drainAttrs["xylem.drain.unhealthy_patterns"])
+	}
+}
+
+func TestInspectVesselStatusMissingSummaryDoesNotWarn(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	r := New(cfg, nil, nil, nil)
+	buf := captureStandardLogger(t)
+
+	report := r.inspectVesselStatus(queue.Vessel{
+		ID:        "issue-1",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+
+	if report.Health != VesselHealthHealthy {
+		t.Fatalf("Health = %q, want %q", report.Health, VesselHealthHealthy)
+	}
+	if len(report.Anomalies) != 0 {
+		t.Fatalf("Anomalies = %#v, want none", report.Anomalies)
+	}
+	if strings.Contains(buf.String(), "load vessel summary") {
+		t.Fatalf("expected no warning for missing summary, got %q", buf.String())
+	}
+}
+
 func TestBuildCommandWorkflowBased(t *testing.T) {
 	cfg := &config.Config{
 		MaxTurns: 50,
@@ -644,6 +734,506 @@ func TestPhaseActionType(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPhasePolicyIntents_ClassifiesHighRiskCommandActions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "publish", Type: "command"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, `git commit -m "ship" && git push origin feature-1 && gh pr create --repo owner/repo`, "")
+	require.Len(t, intents, 4)
+
+	assert.Equal(t, "external_command", intents[0].Action)
+	assert.Equal(t, "publish", intents[0].Resource)
+	assert.Equal(t, "git_commit", intents[1].Action)
+	assert.Equal(t, "*", intents[1].Resource)
+	assert.Equal(t, "git_push", intents[2].Action)
+	assert.Equal(t, "feature-1", intents[2].Resource)
+	assert.Equal(t, "pr_create", intents[3].Action)
+	assert.Equal(t, "owner/repo", intents[3].Resource)
+	assert.Equal(t, "command", intents[1].Metadata["classified_from"])
+}
+
+func TestPhasePolicyIntents_ClassifiesHighRiskPromptActions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "pr"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, "", "Commit all changes with a clear commit message, push the branch, and create a pull request using gh pr create.")
+	require.Len(t, intents, 4)
+
+	assert.Equal(t, "phase_execute", intents[0].Action)
+	assert.Equal(t, "git_commit", intents[1].Action)
+	assert.Equal(t, "git_push", intents[2].Action)
+	assert.Equal(t, "*", intents[2].Resource)
+	assert.Equal(t, "pr_create", intents[3].Action)
+	assert.Equal(t, "owner/repo", intents[3].Resource)
+	assert.Equal(t, "prompt", intents[1].Metadata["classified_from"])
+}
+
+func TestPhasePolicyIntents_IgnoresHighRiskPhrasesFromRenderedPromptContext(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "analyze"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, "", "Analyze the following issue:\n\nIssue body:\n{{.Issue.Body}}\n")
+	require.Len(t, intents, 1)
+	assert.Equal(t, "phase_execute", intents[0].Action)
+	assert.Equal(t, "analyze", intents[0].Resource)
+}
+
+func TestSmoke_S1_PolicyDenialShortCircuitsBeforeSurfaceSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "policy-deny"))
+
+	writeWorkflowFile(t, dir, "policy-deny", []testPhase{
+		{name: "solve", promptContent: "Solve the issue", maxTurns: 5},
+	})
+	require.NoError(t, os.Symlink("broken-target", filepath.Join(dir, ".xylem.yml")))
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "deny-all",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
+	}}, nil, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "denied by policy")
+	assert.Len(t, cmdRunner.phaseCalls, 0)
+
+	_, statErr := os.Stat(filepath.Join(cfg.StateDir, "phases", "issue-1", "solve.output"))
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestSmoke_S2_SurfacePreSnapshotFailureShortCircuitsBeforePhaseExecution(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "snapshot-fail"))
+
+	writeWorkflowFile(t, dir, "snapshot-fail", []testPhase{
+		{name: "plan", promptContent: "Plan the fix", maxTurns: 5},
+	})
+	require.NoError(t, os.Symlink("broken-target", filepath.Join(dir, ".xylem.yml")))
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "snapshot failed")
+	assert.Len(t, cmdRunner.phaseCalls, 0)
+
+	_, statErr := os.Stat(filepath.Join(cfg.StateDir, "phases", "issue-1", "plan.output"))
+	assert.ErrorIs(t, statErr, os.ErrNotExist)
+}
+
+func TestSmoke_S3_PhaseExecutionFailureShortCircuitsBeforeSurfacePostVerification(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "phase-fail"))
+
+	writeWorkflowFile(t, dir, "phase-fail", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 5},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644))
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(worktreePath, _, _ string, _ ...string) ([]byte, error, bool) {
+			if err := os.WriteFile(filepath.Join(worktreePath, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
+				return nil, err, true
+			}
+			return nil, errors.New("phase boom"), true
+		},
+	}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "allow-all",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
+	}}, auditLog, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "phase boom")
+	assert.NotContains(t, vessel.Error, "violated protected surfaces")
+	assert.Len(t, cmdRunner.phaseCalls, 1)
+
+	entries, entryErr := auditLog.Entries()
+	require.NoError(t, entryErr)
+	for _, entry := range entries {
+		assert.NotEqual(t, "file_write", entry.Intent.Action)
+	}
+}
+
+func TestSmoke_S4_SurfaceViolationShortCircuitsBeforeBudgetCheck(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
+	setBudget(cfg, 0.0001, 0)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "surface-before-budget"))
+
+	writeWorkflowFile(t, dir, "surface-before-budget", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 5},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644))
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(worktreePath, _, _ string, _ ...string) ([]byte, error, bool) {
+			if err := os.WriteFile(filepath.Join(worktreePath, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
+				return nil, err, true
+			}
+			return []byte(strings.Repeat("x", 4000)), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "violated protected surfaces")
+	assert.NotContains(t, vessel.Error, "budget exceeded")
+
+	summary := loadSummary(t, cfg.StateDir, "issue-1")
+	assert.False(t, summary.BudgetExceeded)
+	assert.Zero(t, summary.TotalTokensEst)
+}
+
+func TestSmoke_S17_RunnerWithNilIntermediarySkipsPolicyCheck(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "nil-intermediary"))
+
+	writeWorkflowFile(t, dir, "nil-intermediary", []testPhase{
+		{name: "solve", promptContent: "Solve the issue", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{"Solve the issue": []byte("done")},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+	assert.Empty(t, vessel.Error)
+	assert.Len(t, cmdRunner.phaseCalls, 1)
+}
+
+func TestSmoke_S18_RunnerPolicyDeniesPhase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "deny-phase"))
+
+	writeWorkflowFile(t, dir, "deny-phase", []testPhase{
+		{name: "solve", promptContent: "Solve the issue", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "deny-all",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
+	}}, nil, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "denied by policy")
+	assert.Contains(t, vessel.Error, "solve")
+	assert.Len(t, cmdRunner.phaseCalls, 0)
+}
+
+func TestSmoke_S19_RunnerPolicyRequireApproval(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "approval-phase"))
+
+	writeWorkflowFile(t, dir, "approval-phase", []testPhase{
+		{name: "deploy", promptContent: "Deploy the fix", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "require-approval",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.RequireApproval}},
+	}}, nil, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "requires approval")
+	assert.Contains(t, vessel.Error, "deploy")
+	assert.Contains(t, vessel.Error, "automatic approval not yet supported")
+	assert.Len(t, cmdRunner.phaseCalls, 0)
+}
+
+func TestSmoke_S20_SurfacePreSnapshotIsTakenBeforePhaseExecution(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "surface-order"))
+
+	writeWorkflowFile(t, dir, "surface-order", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 5},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644))
+	withTestWorkingDir(t, dir)
+
+	var sawOriginal atomic.Bool
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(worktreePath, _, _ string, _ ...string) ([]byte, error, bool) {
+			data, err := os.ReadFile(filepath.Join(worktreePath, ".xylem.yml"))
+			if err != nil {
+				return nil, err, true
+			}
+			sawOriginal.Store(string(data) == "repo: owner/repo\n")
+			if err := os.WriteFile(filepath.Join(worktreePath, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
+				return nil, err, true
+			}
+			return []byte("mutated"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.True(t, sawOriginal.Load())
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "violated protected surfaces")
+	assert.Contains(t, vessel.Error, ".xylem.yml")
+}
+
+func TestSmoke_S21_SurfacePostVerificationDetectsMutation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "surface-mutation"))
+
+	writeWorkflowFile(t, dir, "surface-mutation", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 5},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644))
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(worktreePath, _, _ string, _ ...string) ([]byte, error, bool) {
+			if err := os.WriteFile(filepath.Join(worktreePath, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
+				return nil, err, true
+			}
+			return []byte("mutated"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "violated protected surfaces")
+	assert.Contains(t, vessel.Error, ".xylem.yml")
+}
+
+func TestSmoke_S22_AuditLogRecordsPolicyDecisions(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "audit-policy"))
+
+	writeWorkflowFile(t, dir, "audit-policy", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{"Implement the fix": []byte("done")},
+	}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "allow-all",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
+	}}, auditLog, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	entries, entryErr := auditLog.Entries()
+	require.NoError(t, entryErr)
+	require.NotEmpty(t, entries)
+	assert.Equal(t, "phase_execute", entries[0].Intent.Action)
+	assert.Equal(t, "issue-1", entries[0].Intent.AgentID)
+	assert.Equal(t, intermediary.Allow, entries[0].Decision)
+}
+
+func TestSmoke_S23_AuditLogRecordsSurfaceViolations(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "audit-surface"))
+
+	writeWorkflowFile(t, dir, "audit-surface", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 5},
+	})
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644))
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(worktreePath, _, _ string, _ ...string) ([]byte, error, bool) {
+			if err := os.WriteFile(filepath.Join(worktreePath, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
+				return nil, err, true
+			}
+			return []byte("mutated"), nil, true
+		},
+	}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary([]intermediary.Policy{{
+		Name:  "allow-all",
+		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
+	}}, auditLog, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	entries, entryErr := auditLog.Entries()
+	require.NoError(t, entryErr)
+
+	found := false
+	for _, entry := range entries {
+		if entry.Intent.Action == "file_write" && entry.Intent.Resource == ".xylem.yml" {
+			found = true
+			assert.Equal(t, intermediary.Deny, entry.Decision)
+		}
+	}
+	assert.True(t, found)
+}
+
+func TestSmoke_S24_PhaseActionTypeReturnsExternalCommandForCommandPhases(t *testing.T) {
+	assert.Equal(t, "external_command", phaseActionType(&workflow.Phase{Type: "command"}))
+}
+
+func TestSmoke_S25_PhaseActionTypeReturnsPhaseExecuteForPromptPhases(t *testing.T) {
+	assert.Equal(t, "phase_execute", phaseActionType(&workflow.Phase{}))
+}
+
+func TestSmoke_S26_FormatViolationsProducesHumanReadableOutput(t *testing.T) {
+	got := formatViolations([]surface.Violation{
+		{Path: ".xylem.yml", Before: "abc", After: "xyz"},
+		{Path: ".xylem/HARNESS.md", Before: "111", After: "deleted"},
+	})
+
+	assert.Contains(t, got, ".xylem.yml")
+	assert.Contains(t, got, "before: abc")
+	assert.Contains(t, got, "after: xyz")
+	assert.Contains(t, got, ".xylem/HARNESS.md")
+	assert.Contains(t, got, "deleted")
 }
 
 func TestDrainSingleVessel(t *testing.T) {
@@ -1009,7 +1599,7 @@ func TestDrainPromptOnlyWithRef(t *testing.T) {
 	}
 }
 
-func TestSmoke_WS3_S25_PerVesselTrackerCreatedFresh(t *testing.T) {
+func TestSmoke_WS3_S25_PerVesselTrackerIsCreatedFreshForEachVessel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1041,31 +1631,27 @@ func TestSmoke_WS3_S25_PerVesselTrackerCreatedFresh(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 2 {
-		t.Fatalf("Completed = %d, want 2", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Completed)
 
 	summary1 := loadSummary(t, cfg.StateDir, "issue-1")
 	summary2 := loadSummary(t, cfg.StateDir, "issue-2")
-	if summary1.BudgetExceeded {
-		t.Fatal("summary1.BudgetExceeded = true, want false")
-	}
-	if summary2.BudgetExceeded {
-		t.Fatal("summary2.BudgetExceeded = true, want false")
-	}
-	if len(summary2.Phases) != 1 {
-		t.Fatalf("len(summary2.Phases) = %d, want 1", len(summary2.Phases))
-	}
-	wantTokens := summary2.Phases[0].InputTokensEst + summary2.Phases[0].OutputTokensEst
-	if summary2.TotalTokensEst != wantTokens {
-		t.Fatalf("summary2.TotalTokensEst = %d, want %d", summary2.TotalTokensEst, wantTokens)
-	}
+	require.Len(t, summary1.Phases, 1)
+	require.Len(t, summary2.Phases, 1)
+
+	phase1Tokens := summary1.Phases[0].InputTokensEst + summary1.Phases[0].OutputTokensEst
+	phase2Tokens := summary2.Phases[0].InputTokensEst + summary2.Phases[0].OutputTokensEst
+
+	assert.False(t, summary1.BudgetExceeded)
+	assert.False(t, summary2.BudgetExceeded)
+	assert.Positive(t, phase1Tokens)
+	assert.Equal(t, phase1Tokens, summary1.TotalTokensEst)
+	assert.Equal(t, phase2Tokens, summary2.TotalTokensEst)
+	assert.Less(t, phase1Tokens, 150)
+	assert.Greater(t, phase1Tokens*2, 150)
 }
 
-func TestSmoke_WS3_S26_CostRecordedAfterEachPromptPhase(t *testing.T) {
+func TestSmoke_WS3_S26_CostRecordedAfterEachPromptTypePhase(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1096,28 +1682,21 @@ func TestSmoke_WS3_S26_CostRecordedAfterEachPromptPhase(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
-	if summary.TotalTokensEst <= 0 {
-		t.Fatalf("summary.TotalTokensEst = %d, want > 0", summary.TotalTokensEst)
-	}
+	require.Len(t, summary.Phases, 2)
+	assert.Positive(t, summary.TotalTokensEst)
 	for i, phaseSummary := range summary.Phases {
-		if phaseSummary.InputTokensEst <= 0 {
-			t.Fatalf("summary.Phases[%d].InputTokensEst = %d, want > 0", i, phaseSummary.InputTokensEst)
-		}
+		assert.Equal(t, "prompt", phaseSummary.Type, "phase %d type", i)
+		assert.Positive(t, phaseSummary.InputTokensEst, "phase %d input tokens", i)
+		assert.Positive(t, phaseSummary.OutputTokensEst, "phase %d output tokens", i)
+		assert.Positive(t, phaseSummary.CostUSDEst, "phase %d cost", i)
 	}
 }
 
-func TestSmoke_WS3_S27_CommandPhaseNoCostRecord(t *testing.T) {
+func TestSmoke_S27_CommandTypePhasesDoNotGenerateCostRecords(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1153,31 +1732,27 @@ func TestSmoke_WS3_S27_CommandPhaseNoCostRecord(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
+	require.Len(t, summary.Phases, 2)
+	promptPhase := summary.Phases[0]
 	commandPhase := summary.Phases[1]
-	if commandPhase.Type != "command" {
-		t.Fatalf("commandPhase.Type = %q, want command", commandPhase.Type)
-	}
-	if commandPhase.InputTokensEst != 0 || commandPhase.OutputTokensEst != 0 || commandPhase.CostUSDEst != 0 {
-		t.Fatalf("command phase usage = %+v, want zero usage", commandPhase)
-	}
-	wantTotal := summary.Phases[0].InputTokensEst + summary.Phases[0].OutputTokensEst
-	if summary.TotalTokensEst != wantTotal {
-		t.Fatalf("summary.TotalTokensEst = %d, want %d", summary.TotalTokensEst, wantTotal)
-	}
+
+	assert.Equal(t, "prompt", promptPhase.Type)
+	assert.Positive(t, promptPhase.InputTokensEst)
+	assert.Positive(t, promptPhase.OutputTokensEst)
+	assert.Positive(t, promptPhase.CostUSDEst)
+	assert.Equal(t, "command", commandPhase.Type)
+	assert.Zero(t, commandPhase.InputTokensEst)
+	assert.Zero(t, commandPhase.OutputTokensEst)
+	assert.Zero(t, commandPhase.CostUSDEst)
+	assert.Equal(t, promptPhase.InputTokensEst+promptPhase.OutputTokensEst, summary.TotalTokensEst)
+	assert.Equal(t, promptPhase.CostUSDEst, summary.TotalCostUSDEst)
 }
 
-func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
+func TestSmoke_S28_BudgetEnforcementFailsVesselWhenBudgetIsExceeded(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1188,7 +1763,9 @@ func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
 	_, _ = q.Enqueue(makeVessel(1, "budget-fail"))
 
 	writeWorkflowFile(t, dir, "budget-fail", []testPhase{
-		{name: "implement", promptContent: "Budget failure path", maxTurns: 5},
+		{name: "plan", promptContent: "Budget failure phase 1", maxTurns: 5},
+		{name: "implement", promptContent: "Budget failure phase 2", maxTurns: 5},
+		{name: "verify", promptContent: "Budget failure phase 3", maxTurns: 5},
 	})
 
 	oldWd, _ := os.Getwd()
@@ -1197,7 +1774,7 @@ func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
 
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
-			"Budget failure path": []byte(strings.Repeat("y", 4000)),
+			"Budget failure phase 1": []byte(strings.Repeat("y", 4000)),
 		},
 	}
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
@@ -1206,37 +1783,27 @@ func TestSmoke_WS3_S28_BudgetEnforcementFailsVessel(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("Failed = %d, want 1", result.Failed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
 
 	vessels, err := q.List()
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if !strings.Contains(vessels[0].Error, "budget exceeded") {
-		t.Fatalf("vessel.Error = %q, want budget exceeded", vessels[0].Error)
-	}
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateFailed, vessels[0].State)
+	assert.Contains(t, vessels[0].Error, "budget exceeded")
+	assert.Contains(t, vessels[0].Error, "estimated cost")
+	assert.Contains(t, vessels[0].Error, "estimated tokens")
+	require.Len(t, cmdRunner.phaseCalls, 1)
+	assert.Contains(t, cmdRunner.phaseCalls[0].prompt, "Budget failure phase 1")
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if summary.State != "failed" {
-		t.Fatalf("summary.State = %q, want failed", summary.State)
-	}
-	if len(summary.Phases) != 1 {
-		t.Fatalf("len(summary.Phases) = %d, want 1", len(summary.Phases))
-	}
-	if summary.Phases[0].Status != "failed" {
-		t.Fatalf("summary.Phases[0].Status = %q, want failed", summary.Phases[0].Status)
-	}
-	if !summary.BudgetExceeded {
-		t.Fatal("summary.BudgetExceeded = false, want true")
-	}
+	assert.Equal(t, "failed", summary.State)
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "failed", summary.Phases[0].Status)
+	assert.True(t, summary.BudgetExceeded)
 }
 
-func TestSmoke_WS3_S29_NilBudgetNoEnforcement(t *testing.T) {
+func TestSmoke_S29_NilBudgetMeansNoEnforcement(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1264,20 +1831,18 @@ func TestSmoke_WS3_S29_NilBudgetNoEnforcement(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateCompleted, vessels[0].State)
+	assert.NotContains(t, vessels[0].Error, "budget exceeded")
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if summary.State != "completed" {
-		t.Fatalf("summary.State = %q, want completed", summary.State)
-	}
-	if summary.BudgetExceeded {
-		t.Fatal("summary.BudgetExceeded = true, want false")
-	}
+	assert.Equal(t, "completed", summary.State)
+	assert.False(t, summary.BudgetExceeded)
 }
 
 func TestSmoke_WS6_S5_BudgetExceededShortCircuitsBeforeGate(t *testing.T) {
@@ -2634,24 +3199,24 @@ func TestResolveProviderWithSource(t *testing.T) {
 func TestResolveModelWithSourceAndConfigModel(t *testing.T) {
 	tests := []struct {
 		name       string
-		cfgModel   string
 		srcModel   string
 		wfModel    *string
 		phaseModel *string
 		provider   string
 		want       string
 	}{
-		{"config model used when no phase/wf/src", "global-model", "", nil, nil, "claude", "global-model"},
-		{"config model beats provider default", "global-model", "", nil, nil, "claude", "global-model"},
-		{"source model beats config model", "global-model", "src-model", nil, nil, "claude", "src-model"},
-		{"workflow model beats source model", "global-model", "src-model", strPtrRunner("wf-model"), nil, "claude", "wf-model"},
-		{"phase model beats all", "global-model", "src-model", strPtrRunner("wf-model"), strPtrRunner("phase-model"), "claude", "phase-model"},
-		{"config model works for copilot", "global-model", "", nil, nil, "copilot", "global-model"},
-		{"empty source falls to config model", "", "", nil, nil, "claude", ""},
+		{"provider default used when no phase/wf/src for claude", "", nil, nil, "claude", "claude-default"},
+		{"provider default used when no phase/wf/src for copilot", "", nil, nil, "copilot", "copilot-default"},
+		{"source model beats provider default", "src-model", nil, nil, "claude", "src-model"},
+		{"workflow model beats source model", "src-model", strPtrRunner("wf-model"), nil, "claude", "wf-model"},
+		{"phase model beats all", "src-model", strPtrRunner("wf-model"), strPtrRunner("phase-model"), "claude", "phase-model"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{Model: tt.cfgModel}
+			cfg := &config.Config{
+				Claude:  config.ClaudeConfig{DefaultModel: "claude-default"},
+				Copilot: config.CopilotConfig{DefaultModel: "copilot-default"},
+			}
 			var srcCfg *config.SourceConfig
 			if tt.srcModel != "" {
 				srcCfg = &config.SourceConfig{Model: tt.srcModel}
@@ -3806,6 +4371,85 @@ func TestDrainPolicyBlocksPhaseBeforeExecution(t *testing.T) {
 	}
 }
 
+func TestDrainCommandPhaseHighRiskActionRequiresApproval(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "push-command"))
+
+	writeWorkflowFile(t, dir, "push-command", []testPhase{
+		{name: "publish", phaseType: "command", run: "git push origin feature-1"},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, 0, countRunOutputCalls(cmdRunner, "sh"))
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "requires approval")
+	assert.Contains(t, vessel.Error, "git_push")
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "external_command", entries[0].Intent.Action)
+	assert.Equal(t, intermediary.Allow, entries[0].Decision)
+	assert.Equal(t, "git_push", entries[1].Intent.Action)
+	assert.Equal(t, intermediary.RequireApproval, entries[1].Decision)
+	assert.Equal(t, "feature-1", entries[1].Intent.Resource)
+}
+
+func TestDrainPromptPhaseHighRiskActionRequiresApproval(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "pr-phase"))
+
+	writeWorkflowFile(t, dir, "pr-phase", []testPhase{
+		{name: "pr", promptContent: "Commit all changes with a clear commit message, push the branch, and create a pull request using gh pr create.", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Len(t, cmdRunner.phaseCalls, 0)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "requires approval")
+	assert.Contains(t, vessel.Error, "git_push")
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+	assert.Equal(t, "phase_execute", entries[0].Intent.Action)
+	assert.Equal(t, intermediary.Allow, entries[0].Decision)
+	assert.Equal(t, "git_commit", entries[1].Intent.Action)
+	assert.Equal(t, intermediary.Allow, entries[1].Decision)
+	assert.Equal(t, "git_push", entries[2].Intent.Action)
+	assert.Equal(t, intermediary.RequireApproval, entries[2].Decision)
+}
+
 func TestDrainOrchestratedPolicyBlocksSinglePhaseWave(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
@@ -3967,15 +4611,27 @@ func TestDrainOrchestratedProtectedSurfaceViolationFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("AuditLog.Entries() error = %v", err)
 	}
-	if len(entries) < 2 {
-		t.Fatalf("len(entries) = %d, want at least 2", len(entries))
+	found := false
+	for _, entry := range entries {
+		if entry.Intent.Action != "file_write" || entry.Intent.Resource != ".xylem.yml" {
+			continue
+		}
+		found = true
+		if entry.Decision != intermediary.Deny {
+			t.Fatalf("file_write entry decision = %q, want %q", entry.Decision, intermediary.Deny)
+		}
+		if !strings.Contains(entry.Error, "violated protected surfaces") {
+			t.Fatalf("file_write entry error = %q, want to contain %q", entry.Error, "violated protected surfaces")
+		}
+		if entry.Intent.Metadata["phase"] != "tamper" {
+			t.Fatalf("file_write entry phase metadata = %q, want tamper", entry.Intent.Metadata["phase"])
+		}
+		if entry.Intent.Metadata["before"] == "" || entry.Intent.Metadata["after"] == "" {
+			t.Fatalf("file_write entry missing before/after metadata: %+v", entry.Intent.Metadata)
+		}
 	}
-	last := entries[len(entries)-1]
-	if last.Decision != intermediary.Deny {
-		t.Fatalf("last entry decision = %q, want %q", last.Decision, intermediary.Deny)
-	}
-	if !strings.Contains(last.Error, "violated protected surfaces") {
-		t.Fatalf("last entry error = %q, want to contain %q", last.Error, "violated protected surfaces")
+	if !found {
+		t.Fatalf("no file_write audit entry recorded; entries = %+v", entries)
 	}
 }
 
@@ -4051,15 +4707,12 @@ func TestVerifyProtectedSurfacesSkipsWhenWorktreeMissing(t *testing.T) {
 		t.Fatalf("expected 'no longer exists' in log, got: %q", logBuf.String())
 	}
 
-	// No audit entry should have been recorded — there was no violation.
 	entries, err := auditLog.Entries()
 	if err != nil {
 		t.Fatalf("AuditLog.Entries() = %v", err)
 	}
-	for _, e := range entries {
-		if e.Intent.Action == "protected_surface_violation" {
-			t.Fatalf("unexpected protected_surface_violation audit entry: %+v", e)
-		}
+	if len(entries) != 0 {
+		t.Fatalf("AuditLog.Entries() len = %d, want 0; entries = %+v", len(entries), entries)
 	}
 }
 
@@ -4124,16 +4777,22 @@ func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *t
 	}
 	found := false
 	for _, e := range entries {
-		if e.Intent.Action == "protected_surface_violation" && e.Decision == intermediary.Deny {
+		if e.Intent.Action == "file_write" && e.Intent.Resource == ".xylem.yml" && e.Decision == intermediary.Deny {
 			found = true
 			if !strings.Contains(e.Error, ".xylem.yml") {
 				t.Fatalf("audit entry error = %q, want to mention .xylem.yml", e.Error)
+			}
+			if e.Intent.Metadata["phase"] != "implement" {
+				t.Fatalf("audit entry phase metadata = %q, want implement", e.Intent.Metadata["phase"])
+			}
+			if e.Intent.Metadata["after"] != "deleted" {
+				t.Fatalf("audit entry after metadata = %q, want deleted", e.Intent.Metadata["after"])
 			}
 			break
 		}
 	}
 	if !found {
-		t.Fatalf("no protected_surface_violation audit entry recorded; entries = %+v", entries)
+		t.Fatalf("no file_write audit entry recorded; entries = %+v", entries)
 	}
 }
 
@@ -4665,6 +5324,7 @@ func TestCheckHungVessels_NotTimedOut(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	if vessel == nil {
 		t.Fatal("expected dequeued vessel")
+		return
 	}
 
 	wt := &mockWorktree{}
@@ -5174,5 +5834,137 @@ func TestDrainPromptOnlyRateLimitRetry(t *testing.T) {
 	}
 	if got := atomic.LoadInt32(&callCount); got != 2 {
 		t.Errorf("phase calls = %d, want 2 (1 rate limit + 1 success)", got)
+	}
+}
+
+// --- Per-source timeout ---
+
+func TestCheckHungVessels_PerSourceTimeout(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1s" // short global timeout
+
+	// Add a slow source with a long timeout
+	cfg.Sources["slow-source"] = config.SourceConfig{
+		Type:    "github",
+		Repo:    "owner/repo",
+		Timeout: "1h",
+		Tasks:   map[string]config.Task{"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"}},
+	}
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "slow-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+		Meta:      map[string]string{"config_source": "slow-source"},
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+		return
+	}
+
+	// Backdate StartedAt by 5 minutes — exceeds global 1s but not source 1h
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].State != queue.StateRunning {
+		t.Errorf("expected vessel still running (source timeout 1h), got %s", vessels[0].State)
+	}
+}
+
+func TestCheckHungVessels_PerSourceTimeoutExpired(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.Timeout = "1h" // long global timeout
+
+	// Add a fast source with a short timeout
+	cfg.Sources["fast-source"] = config.SourceConfig{
+		Type:    "github",
+		Repo:    "owner/repo",
+		Timeout: "1s",
+		Tasks:   map[string]config.Task{"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"}},
+	}
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "fast-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+		Meta:      map[string]string{"config_source": "fast-source"},
+	})
+	vessel, _ := q.Dequeue()
+	if vessel == nil {
+		t.Fatal("expected dequeued vessel")
+		return
+	}
+
+	// Backdate StartedAt by 5 minutes — exceeds source 1s
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	if err := q.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("update vessel: %v", err)
+	}
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.CheckHungVessels(context.Background())
+
+	vessels, _ := q.List()
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].State != queue.StateTimedOut {
+		t.Errorf("expected vessel timed_out (source timeout 1s), got %s", vessels[0].State)
+	}
+}
+
+func TestResolveTimeout(t *testing.T) {
+	cfg := &config.Config{Timeout: "30m"}
+
+	tests := []struct {
+		name    string
+		srcCfg  *config.SourceConfig
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "nil source config uses global timeout", want: 30 * time.Minute},
+		{name: "empty source timeout uses global timeout", srcCfg: &config.SourceConfig{}, want: 30 * time.Minute},
+		{name: "source timeout overrides global timeout", srcCfg: &config.SourceConfig{Timeout: "2h"}, want: 2 * time.Hour},
+		{name: "invalid source timeout returns error", srcCfg: &config.SourceConfig{Timeout: "not-a-duration"}, wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := resolveTimeout(cfg, tt.srcCfg)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error, got nil")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("resolveTimeout() error = %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("resolveTimeout() = %s, want %s", got, tt.want)
+			}
+		})
 	}
 }

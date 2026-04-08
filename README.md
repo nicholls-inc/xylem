@@ -88,7 +88,7 @@ daemon:
   drain_interval: "30s"
 ```
 
-This example covers the most common fields. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
+This example covers the most common fields. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), recurring harness reviews (`harness.review`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
 
 ## Workflows
 
@@ -139,6 +139,7 @@ See the [Workflows Guide](docs/workflows.md) for template variables, custom work
 | `xylem init` | Bootstrap config, workflows, prompts, and HARNESS.md |
 | `xylem scan` | Query sources and enqueue matching issues |
 | `xylem drain` | Dequeue pending vessels and launch sessions |
+| `xylem review` | Roll up failures, evals, and pruning signals into a harness review |
 | `xylem daemon` | Continuous scan-drain loop |
 | `xylem enqueue` | Manually enqueue a task |
 | `xylem retry` | Retry a failed vessel with failure context, or restart from scratch |
@@ -159,6 +160,8 @@ xylem dtu load --manifest cli/internal/dtu/testdata/issue-label-gate.yaml       
 xylem dtu materialize --manifest cli/internal/dtu/testdata/issue-label-gate.yaml # Prepare DTU runtime and shims
 xylem dtu run --manifest /path/to/universe.yaml --workdir "$PWD" -- scan         # Run xylem inside DTU from the current repo
 ```
+
+`xylem review` writes `.xylem/reviews/harness-review.json` and `.xylem/reviews/harness-review.md` by default. Enable recurring generation after drains with `harness.review` in `.xylem.yml`.
 
 See the [CLI Reference](docs/cli-reference.md) for all flags, examples, and exit codes.
 

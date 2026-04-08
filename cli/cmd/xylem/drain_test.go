@@ -42,6 +42,18 @@ type recordingExporter struct {
 	shutdownCalled bool
 }
 
+type configurableWorktreeStub struct {
+	patterns []string
+}
+
+func (w *configurableWorktreeStub) Create(context.Context, string) (string, error) { return "", nil }
+
+func (w *configurableWorktreeStub) Remove(context.Context, string) error { return nil }
+
+func (w *configurableWorktreeStub) SetProtectedSurfaces(patterns []string) {
+	w.patterns = append([]string(nil), patterns...)
+}
+
 func (e *recordingExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
 	return nil
 }
@@ -198,6 +210,25 @@ func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, "audit.jsonl")); err != nil {
 		t.Fatalf("Stat(audit.jsonl) error = %v", err)
+	}
+}
+
+func TestBuildDrainRunnerPropagatesProtectedSurfaces(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	cfg.Harness.ProtectedSurfaces.Paths = []string{"docs/*.txt"}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	wt := &configurableWorktreeStub{}
+	cmdRunner := newCmdRunner(cfg)
+
+	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
+	defer cleanup()
+
+	if r == nil {
+		t.Fatal("buildDrainRunner() returned nil runner")
+	}
+	if got := wt.patterns; len(got) != 1 || got[0] != "docs/*.txt" {
+		t.Fatalf("protected surfaces = %#v, want %#v", got, []string{"docs/*.txt"})
 	}
 }
 

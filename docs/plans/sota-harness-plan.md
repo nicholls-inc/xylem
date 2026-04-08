@@ -331,6 +331,8 @@ These are **validated quality multipliers**. They should follow immediately afte
 4. Summarize verbose tool output and gate failures into structured artifacts so context and cost stay bounded.
 5. Establish a recurring pruning review: compare advanced features (`ctxmgr`, evaluator loops, extra routing, sandbox modes) against actual eval and cost data, then remove or simplify what no longer pays for itself.
 
+**Implementation note:** the first slice should ship as a read-only review loop built on persisted run artifacts. Use `summary.json` as the index plus `evidence-manifest.json`, `cost-report.json`, `budget-alerts.json`, and optional `quality-report.json`, then expose the aggregate through `xylem review` and best-effort post-drain regeneration into `.xylem/reviews/harness-review.{json,md}`.
+
 **Dependencies**
 
 - Depends on Workstreams 3, 5, and 6. Budget/routing decisions are only useful once telemetry and eval data exist.

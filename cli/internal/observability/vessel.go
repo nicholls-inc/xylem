@@ -1,6 +1,9 @@
 package observability
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // VesselSpanData holds vessel information for attribute extraction.
 type VesselSpanData struct {
@@ -24,6 +27,24 @@ func VesselSpanAttributes(data VesselSpanData) []SpanAttribute {
 	return attrs
 }
 
+// VesselHealthData holds derived vessel health and anomaly data.
+type VesselHealthData struct {
+	State        string   `json:"state"`
+	Health       string   `json:"health"`
+	AnomalyCount int      `json:"anomaly_count"`
+	Anomalies    []string `json:"anomalies,omitempty"`
+}
+
+// VesselHealthAttributes returns span attributes for derived vessel health.
+func VesselHealthAttributes(data VesselHealthData) []SpanAttribute {
+	return []SpanAttribute{
+		{Key: "xylem.vessel.state", Value: data.State},
+		{Key: "xylem.vessel.health", Value: data.Health},
+		{Key: "xylem.vessel.anomaly_count", Value: fmt.Sprintf("%d", data.AnomalyCount)},
+		{Key: "xylem.vessel.anomalies", Value: strings.Join(data.Anomalies, ",")},
+	}
+}
+
 // DrainSpanData holds drain-run information for attribute extraction.
 type DrainSpanData struct {
 	Concurrency int    `json:"concurrency"`
@@ -35,6 +56,24 @@ func DrainSpanAttributes(data DrainSpanData) []SpanAttribute {
 	return []SpanAttribute{
 		{Key: "xylem.drain.concurrency", Value: fmt.Sprintf("%d", data.Concurrency)},
 		{Key: "xylem.drain.timeout", Value: data.Timeout},
+	}
+}
+
+// DrainHealthData holds aggregate health information for a drain run.
+type DrainHealthData struct {
+	Healthy   int    `json:"healthy"`
+	Degraded  int    `json:"degraded"`
+	Unhealthy int    `json:"unhealthy"`
+	Patterns  string `json:"patterns,omitempty"`
+}
+
+// DrainHealthAttributes returns span attributes for aggregate vessel health.
+func DrainHealthAttributes(data DrainHealthData) []SpanAttribute {
+	return []SpanAttribute{
+		{Key: "xylem.drain.healthy_vessels", Value: fmt.Sprintf("%d", data.Healthy)},
+		{Key: "xylem.drain.degraded_vessels", Value: fmt.Sprintf("%d", data.Degraded)},
+		{Key: "xylem.drain.unhealthy_vessels", Value: fmt.Sprintf("%d", data.Unhealthy)},
+		{Key: "xylem.drain.unhealthy_patterns", Value: data.Patterns},
 	}
 }
 

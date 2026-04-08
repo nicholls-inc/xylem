@@ -49,6 +49,7 @@ state_dir: ".xylem"
 exclude: [wontfix, duplicate]
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
   flags: "--bare"
   env:
     ANTHROPIC_API_KEY: "test-key"
@@ -127,6 +128,8 @@ tasks:
   fix-bugs:
     labels: [bug]
     workflow: fix-bug
+claude:
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -202,7 +205,8 @@ func validConfig() *Config {
 		MaxTurns:    50,
 		Timeout:     "30m",
 		Claude: ClaudeConfig{
-			Command: "claude",
+			Command:      "claude",
+			DefaultModel: "claude-sonnet-4-6",
 		},
 	}
 }
@@ -212,7 +216,7 @@ func TestValidateMissingRepoInGitHubSource(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"github": {Type: "github", Repo: "", Tasks: map[string]Task{
 				"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug"},
@@ -228,7 +232,7 @@ func TestValidateNoSourcesNoRepoIsValid(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 	}
 	err := cfg.Validate()
 	if err != nil {
@@ -241,7 +245,7 @@ func TestValidateEmptyTasksInGitHubSource(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"github": {Type: "github", Repo: "owner/name", Tasks: nil},
 		},
@@ -479,6 +483,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
   flags: "--bare --dangerously-skip-permissions"
   env:
     ANTHROPIC_API_KEY: "sk-test-123"
@@ -575,7 +580,7 @@ claude:
 	}
 }
 
-func TestLoadDefaultModelEmpty(t *testing.T) {
+func TestValidateClaudeDefaultModelRequired(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:
     type: github
@@ -591,14 +596,8 @@ claude:
   command: "claude"
 `)
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load returned error: %v", err)
-	}
-
-	if cfg.Claude.DefaultModel != "" {
-		t.Fatalf("Claude.DefaultModel = %q, want empty", cfg.Claude.DefaultModel)
-	}
+	_, err := Load(path)
+	requireErrorContains(t, err, "claude.default_model must be set")
 }
 
 func TestLoadStatusLabels(t *testing.T) {
@@ -621,6 +620,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -672,6 +672,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -699,6 +700,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 daemon:
   scan_interval: "120s"
   drain_interval: "45s"
@@ -733,9 +735,9 @@ func TestValidateLLM(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := validConfig()
 			cfg.LLM = tt.llm
-			// Ensure copilot command is set for "copilot" to avoid command validation failure
+			// Ensure copilot config is set for "copilot" to avoid command/model validation failure
 			if tt.llm == "copilot" {
-				cfg.Copilot = CopilotConfig{Command: "copilot"}
+				cfg.Copilot = CopilotConfig{Command: "copilot", DefaultModel: "gpt-5.4"}
 			}
 			err := cfg.Validate()
 			if tt.wantErr != "" {
@@ -776,6 +778,7 @@ copilot:
     GITHUB_TOKEN: "ghp-test"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -814,6 +817,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -841,6 +845,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -858,7 +863,7 @@ func TestValidateGitHubPREventsValid(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -886,7 +891,7 @@ func TestValidateGitHubPREventsReviewSubmittedRequiresAuthorFilter(t *testing.T)
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -909,7 +914,7 @@ func TestValidateGitHubPREventsCommentedRequiresAuthorFilter(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -932,7 +937,7 @@ func TestValidateGitHubPREventsAuthorDenyAloneIsEnough(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -962,7 +967,7 @@ func TestValidateGitHubPREventsChecksFailedNoAuthorFilter(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -986,7 +991,7 @@ func TestValidateGitHubPREventsMissingOn(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -1006,7 +1011,7 @@ func TestValidateGitHubPREventsEmptyTriggers(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -1029,7 +1034,7 @@ func TestValidateGitHubPREventsMissingRepo(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"pr-events": {
 				Type: "github-pr-events",
@@ -1052,7 +1057,7 @@ func TestValidateGitHubMergeValid(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"merge": {
 				Type: "github-merge",
@@ -1073,7 +1078,7 @@ func TestValidateGitHubMergeMissingRepo(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"merge": {
 				Type:  "github-merge",
@@ -1091,7 +1096,7 @@ func TestValidateUnknownSourceType(t *testing.T) {
 		Concurrency: 2,
 		MaxTurns:    50,
 		Timeout:     "30m",
-		Claude:      ClaudeConfig{Command: "claude"},
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
 		Sources: map[string]SourceConfig{
 			"unknown": {
 				Type: "bitbucket",
@@ -1121,6 +1126,7 @@ timeout: "30m"
 model: claude-sonnet-4-6
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -1149,6 +1155,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `)
 
 	cfg, err := Load(path)
@@ -1201,6 +1208,7 @@ max_turns: 50
 timeout: "30m"
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"
 `+extra)
 }
 
@@ -1265,6 +1273,11 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 
 	assert.Equal(t, DefaultProtectedSurfaces, cfg.EffectiveProtectedSurfaces())
 	assert.Equal(t, DefaultAuditLogPath, cfg.EffectiveAuditLogPath())
+	assert.Equal(t, "manual", cfg.HarnessReviewCadence())
+	assert.Equal(t, 10, cfg.HarnessReviewEveryNRuns())
+	assert.Equal(t, 50, cfg.HarnessReviewLookbackRuns())
+	assert.Equal(t, 3, cfg.HarnessReviewMinSamples())
+	assert.Equal(t, "reviews", cfg.HarnessReviewOutputDir())
 	assert.True(t, cfg.ObservabilityEnabled())
 	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
 	assert.Nil(t, cfg.VesselBudget())
@@ -1340,6 +1353,18 @@ func TestSmoke_S7_DefaultPolicyRequiresApprovalForGitPush(t *testing.T) {
 	assert.Equal(t, "*", result.MatchedRule.Resource)
 }
 
+func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {
+	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+		Action:   "file_write",
+		Resource: ".xylem/prompts/fix-bug/analyze.md",
+		AgentID:  "vessel-004",
+	})
+
+	assert.Equal(t, intermediary.Deny, result.Effect)
+	require.NotNil(t, result.MatchedRule)
+	assert.Equal(t, ".xylem/prompts/*/*.md", result.MatchedRule.Resource)
+}
+
 func TestSmoke_S8_DefaultPolicyAllowsPhaseExecute(t *testing.T) {
 	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
 		Action:   "phase_execute",
@@ -1396,4 +1421,116 @@ func TestSmoke_S32_NegativeMaxCostRejected(t *testing.T) {
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "cost.budget.max_cost_usd")
+}
+
+func TestSmoke_S33_HarnessReviewLoadsAndDefaults(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  review:
+    enabled: true
+    cadence: every_n_runs
+    every_n_runs: 7
+    lookback_runs: 12
+    min_samples: 4
+    output_dir: "insights"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.Equal(t, "every_n_runs", cfg.HarnessReviewCadence())
+	assert.Equal(t, 7, cfg.HarnessReviewEveryNRuns())
+	assert.Equal(t, 12, cfg.HarnessReviewLookbackRuns())
+	assert.Equal(t, 4, cfg.HarnessReviewMinSamples())
+	assert.Equal(t, "insights", cfg.HarnessReviewOutputDir())
+}
+
+func TestSmoke_S34_HarnessReviewInvalidCadenceRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  review:
+    enabled: true
+    cadence: hourly
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.review.cadence")
+}
+
+func TestSmoke_S35_HarnessReviewRejectsAbsoluteOutputDir(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  review:
+    output_dir: "/tmp/reviews"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.review.output_dir")
+}
+
+func TestSourceTimeoutValid(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"slow": {
+			Type:    "github",
+			Repo:    "owner/name",
+			Timeout: "1h",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected valid config with source timeout, got: %v", err)
+	}
+}
+
+func TestSourceTimeoutInvalidDuration(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"bad": {
+			Type:    "github",
+			Repo:    "owner/name",
+			Timeout: "bad",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "valid duration")
+}
+
+func TestSourceTimeoutTooShort(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"fast": {
+			Type:    "github",
+			Repo:    "owner/name",
+			Timeout: "5s",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "at least")
+}
+
+func TestSourceTimeoutEmptyInheritsGlobal(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"default": {
+			Type: "github",
+			Repo: "owner/name",
+			Tasks: map[string]Task{
+				"impl": {Labels: []string{"implement"}, Workflow: "implement-feature"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	if err != nil {
+		t.Fatalf("expected valid config with no source timeout (inherits global), got: %v", err)
+	}
 }

@@ -1,6 +1,7 @@
 package runner
 
 import (
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/surface"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"pgregory.net/rapid"
 )
@@ -103,6 +105,36 @@ func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 			if exceeded && !tracker.BudgetExceeded() {
 				t.Fatal("BudgetExceeded reverted to false")
 			}
+		}
+	})
+}
+
+func TestProp_FormatViolationsIncludesEveryViolation(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		count := rapid.IntRange(0, 8).Draw(t, "count")
+		violations := make([]surface.Violation, 0, count)
+		wantParts := make([]string, 0, count)
+		for i := range count {
+			violation := surface.Violation{
+				Path:   rapid.StringMatching(`[a-z0-9./_-]{1,32}`).Draw(t, "path"+string(rune('a'+i))),
+				Before: rapid.StringMatching(`(absent|deleted|[0-9a-f]{1,16})`).Draw(t, "before"+string(rune('a'+i))),
+				After:  rapid.StringMatching(`(absent|deleted|[0-9a-f]{1,16})`).Draw(t, "after"+string(rune('a'+i))),
+			}
+			violations = append(violations, violation)
+			wantParts = append(wantParts, fmt.Sprintf("%s (before: %s, after: %s)", violation.Path, violation.Before, violation.After))
+		}
+
+		formatted := formatViolations(violations)
+		if count == 0 {
+			if formatted != "" {
+				t.Fatalf("formatViolations(nil) = %q, want empty string", formatted)
+			}
+			return
+		}
+
+		want := strings.Join(wantParts, "; ")
+		if formatted != want {
+			t.Fatalf("formatViolations() = %q, want %q", formatted, want)
 		}
 	})
 }

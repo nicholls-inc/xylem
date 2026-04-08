@@ -49,6 +49,7 @@ type SourceConfig struct {
 	Repo    string          `yaml:"repo,omitempty"`
 	LLM     string          `yaml:"llm,omitempty"`
 	Model   string          `yaml:"model,omitempty"`
+	Timeout string          `yaml:"timeout,omitempty"`
 	Exclude []string        `yaml:"exclude,omitempty"`
 	Tasks   map[string]Task `yaml:"tasks,omitempty"`
 }
@@ -109,12 +110,23 @@ type CopilotConfig struct {
 type DaemonConfig struct {
 	ScanInterval  string `yaml:"scan_interval,omitempty"`
 	DrainInterval string `yaml:"drain_interval,omitempty"`
+	AutoUpgrade   bool   `yaml:"auto_upgrade,omitempty"`
 }
 
 type HarnessConfig struct {
 	ProtectedSurfaces ProtectedSurfacesConfig `yaml:"protected_surfaces,omitempty"`
 	Policy            PolicyConfig            `yaml:"policy,omitempty"`
 	AuditLog          string                  `yaml:"audit_log,omitempty"`
+	Review            HarnessReviewConfig     `yaml:"review,omitempty"`
+}
+
+type HarnessReviewConfig struct {
+	Enabled      bool   `yaml:"enabled,omitempty"`
+	Cadence      string `yaml:"cadence,omitempty"`
+	EveryNRuns   int    `yaml:"every_n_runs,omitempty"`
+	LookbackRuns int    `yaml:"lookback_runs,omitempty"`
+	MinSamples   int    `yaml:"min_samples,omitempty"`
+	OutputDir    string `yaml:"output_dir,omitempty"`
 }
 
 type ProtectedSurfacesConfig struct {
@@ -269,6 +281,16 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("source %q: llm must be \"claude\" or \"copilot\", got %q", name, src.LLM)
 		}
 
+		if src.Timeout != "" {
+			dur, err := time.ParseDuration(src.Timeout)
+			if err != nil {
+				return fmt.Errorf("source %q: timeout must be a valid duration: %w", name, err)
+			}
+			if dur < minTimeout {
+				return fmt.Errorf("source %q: timeout must be at least %s", name, minTimeout)
+			}
+		}
+
 		switch src.Type {
 		case "github", "github-pr":
 			if err := validateGitHubSource(name, src); err != nil {
@@ -318,6 +340,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateProviderDefaultModels(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -350,6 +376,48 @@ func (c *Config) EffectiveAuditLogPath() string {
 		return c.Harness.AuditLog
 	}
 	return DefaultAuditLogPath
+}
+
+func (c *Config) HarnessReviewCadence() string {
+	if !c.Harness.Review.Enabled {
+		return "manual"
+	}
+	switch c.Harness.Review.Cadence {
+	case "", "manual":
+		return "manual"
+	case "every_drain", "every_n_runs":
+		return c.Harness.Review.Cadence
+	default:
+		return "manual"
+	}
+}
+
+func (c *Config) HarnessReviewEveryNRuns() int {
+	if c.Harness.Review.EveryNRuns > 0 {
+		return c.Harness.Review.EveryNRuns
+	}
+	return 10
+}
+
+func (c *Config) HarnessReviewLookbackRuns() int {
+	if c.Harness.Review.LookbackRuns > 0 {
+		return c.Harness.Review.LookbackRuns
+	}
+	return 50
+}
+
+func (c *Config) HarnessReviewMinSamples() int {
+	if c.Harness.Review.MinSamples > 0 {
+		return c.Harness.Review.MinSamples
+	}
+	return 3
+}
+
+func (c *Config) HarnessReviewOutputDir() string {
+	if strings.TrimSpace(c.Harness.Review.OutputDir) != "" {
+		return c.Harness.Review.OutputDir
+	}
+	return "reviews"
 }
 
 func (c *Config) ObservabilityEnabled() bool {
@@ -408,7 +476,7 @@ func DefaultPolicy() intermediary.Policy {
 			{Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem/prompts/*", Effect: intermediary.Deny},
+			{Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
 			{Action: "git_push", Resource: "*", Effect: intermediary.RequireApproval},
 			{Action: "pr_create", Resource: "*", Effect: intermediary.RequireApproval},
 			{Action: "*", Resource: "*", Effect: intermediary.Allow},
@@ -441,6 +509,35 @@ func (c *Config) validateHarness() error {
 		}
 	}
 
+	if cadence := c.Harness.Review.Cadence; cadence != "" {
+		switch cadence {
+		case "manual", "every_drain", "every_n_runs":
+		default:
+			return fmt.Errorf("harness.review.cadence: invalid value %q (must be manual, every_drain, or every_n_runs)", cadence)
+		}
+	}
+	if c.Harness.Review.EveryNRuns < 0 {
+		return fmt.Errorf("harness.review.every_n_runs must be non-negative")
+	}
+	if c.Harness.Review.MinSamples < 0 {
+		return fmt.Errorf("harness.review.min_samples must be non-negative")
+	}
+	if c.Harness.Review.LookbackRuns < 0 {
+		return fmt.Errorf("harness.review.lookback_runs must be non-negative")
+	}
+	if c.Harness.Review.Enabled && c.HarnessReviewCadence() == "every_n_runs" && c.HarnessReviewEveryNRuns() <= 0 {
+		return fmt.Errorf("harness.review.every_n_runs must be greater than 0 when cadence is every_n_runs")
+	}
+	if outputDir := strings.TrimSpace(c.Harness.Review.OutputDir); outputDir != "" {
+		if filepath.IsAbs(outputDir) {
+			return fmt.Errorf("harness.review.output_dir must be relative to state_dir")
+		}
+		cleaned := filepath.Clean(outputDir)
+		if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+			return fmt.Errorf("harness.review.output_dir must stay within state_dir")
+		}
+	}
+
 	return nil
 }
 
@@ -460,6 +557,34 @@ func (c *Config) validateCost() error {
 	}
 	if c.Cost.Budget.MaxTokens < 0 {
 		return fmt.Errorf("cost.budget.max_tokens must be non-negative")
+	}
+	return nil
+}
+
+// validateProviderDefaultModels ensures every active LLM provider has a
+// default_model configured. A provider is active if it is the global llm value
+// or referenced by any source's llm field.
+func (c *Config) validateProviderDefaultModels() error {
+	active := map[string]bool{}
+	switch c.LLM {
+	case "", "claude":
+		active["claude"] = true
+	case "copilot":
+		active["copilot"] = true
+	}
+	for _, src := range c.Sources {
+		switch src.LLM {
+		case "claude":
+			active["claude"] = true
+		case "copilot":
+			active["copilot"] = true
+		}
+	}
+	if active["claude"] && c.Claude.DefaultModel == "" {
+		return fmt.Errorf("claude.default_model must be set when claude is an active provider")
+	}
+	if active["copilot"] && c.Copilot.DefaultModel == "" {
+		return fmt.Errorf("copilot.default_model must be set when copilot is an active provider")
 	}
 	return nil
 }

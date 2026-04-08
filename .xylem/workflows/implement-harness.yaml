@@ -11,7 +11,7 @@ phases:
   - name: plan
     prompt_file: .xylem/prompts/implement-harness/plan.md
     max_turns: 30
-    llm: claude
+    llm: copilot
   - name: implement
     prompt_file: .xylem/prompts/implement-harness/implement.md
     max_turns: 80
@@ -24,7 +24,7 @@ phases:
   - name: verify
     prompt_file: .xylem/prompts/implement-harness/verify.md
     max_turns: 80
-    llm: claude
+    llm: copilot
     gate:
       type: command
       run: "cd cli && go test ./..."

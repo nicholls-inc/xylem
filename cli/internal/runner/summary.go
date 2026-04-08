@@ -16,8 +16,11 @@ import (
 )
 
 const (
-	summaryFileName   = "summary.json"
-	summaryDisclaimer = "Token counts and costs are estimates (len/4 heuristic + static pricing). Not provider-reported values."
+	summaryFileName      = "summary.json"
+	costReportFileName   = "cost-report.json"
+	budgetAlertsFileName = "budget-alerts.json"
+	evalReportFileName   = "quality-report.json"
+	summaryDisclaimer    = "Token counts and costs are estimates (len/4 heuristic + static pricing). Not provider-reported values."
 )
 
 var safeSummaryPathComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
@@ -44,9 +47,20 @@ type VesselSummary struct {
 	BudgetMaxTokens  *int     `json:"budget_max_tokens,omitempty"`
 	BudgetExceeded   bool     `json:"budget_exceeded"`
 
-	EvidenceManifestPath string `json:"evidence_manifest_path,omitempty"`
+	EvidenceManifestPath string           `json:"evidence_manifest_path,omitempty"`
+	CostReportPath       string           `json:"cost_report_path,omitempty"`
+	BudgetAlertsPath     string           `json:"budget_alerts_path,omitempty"`
+	EvalReportPath       string           `json:"eval_report_path,omitempty"`
+	ReviewArtifacts      *ReviewArtifacts `json:"review_artifacts,omitempty"`
 
 	Note string `json:"note"`
+}
+
+type ReviewArtifacts struct {
+	EvidenceManifest string `json:"evidence_manifest,omitempty"`
+	CostReport       string `json:"cost_report,omitempty"`
+	BudgetAlerts     string `json:"budget_alerts,omitempty"`
+	EvalReport       string `json:"eval_report,omitempty"`
 }
 
 // PhaseSummary records the outcome of a single phase.
@@ -123,6 +137,9 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		endedAt = endedAt.UTC()
 	}
 
+	phases := make([]PhaseSummary, len(s.phases))
+	copy(phases, s.phases)
+
 	summary := &VesselSummary{
 		VesselID:         s.vesselID,
 		Source:           s.source,
@@ -132,7 +149,7 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		StartedAt:        s.startedAt,
 		EndedAt:          endedAt,
 		DurationMS:       endedAt.Sub(s.startedAt).Milliseconds(),
-		Phases:           append([]PhaseSummary(nil), s.phases...),
+		Phases:           phases,
 		BudgetMaxCostUSD: s.budgetMaxCostUSD,
 		BudgetMaxTokens:  s.budgetMaxTokens,
 		Note:             summaryDisclaimer,
@@ -242,6 +259,18 @@ func evidenceManifestRelativePath(vesselID string) string {
 	return filepath.ToSlash(filepath.Join("phases", vesselID, "evidence-manifest.json"))
 }
 
+func costReportRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, costReportFileName))
+}
+
+func budgetAlertsRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, budgetAlertsFileName))
+}
+
+func evalReportRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, evalReportFileName))
+}
+
 func phaseArtifactRelativePath(vesselID, phaseName string) string {
 	return filepath.ToSlash(filepath.Join("phases", vesselID, phaseName+".output"))
 }
@@ -255,12 +284,15 @@ func SaveVesselSummary(stateDir string, summary *VesselSummary) error {
 		return fmt.Errorf("save vessel summary: invalid vessel ID: %w", err)
 	}
 
-	path := filepath.Join(stateDir, "phases", summary.VesselID, summaryFileName)
+	path := summaryPath(stateDir, summary.VesselID)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("save vessel summary: create dir: %w", err)
 	}
 
 	summary.Note = summaryDisclaimer
+	if summary.Phases == nil {
+		summary.Phases = []PhaseSummary{}
+	}
 	data, err := json.MarshalIndent(summary, "", "  ")
 	if err != nil {
 		return fmt.Errorf("save vessel summary: marshal: %w", err)
@@ -270,6 +302,10 @@ func SaveVesselSummary(stateDir string, summary *VesselSummary) error {
 	}
 
 	return nil
+}
+
+func summaryPath(stateDir, vesselID string) string {
+	return filepath.Join(stateDir, "phases", vesselID, summaryFileName)
 }
 
 func validateSummaryPathComponent(component string) error {

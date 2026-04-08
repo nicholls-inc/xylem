@@ -198,6 +198,10 @@ func TestInitScaffoldConfigLoads(t *testing.T) {
 	if len(cfg.Sources) == 0 {
 		t.Error("expected at least one source in scaffold config")
 	}
+
+	data, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "approval for git_push and pr_create")
 }
 
 func TestInitRespectsConfigFlag(t *testing.T) {
@@ -225,6 +229,13 @@ func TestInitRespectsConfigFlag(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, ".xylem.yml")); err == nil {
 		t.Error(".xylem.yml was created despite --config pointing elsewhere")
 	}
+}
+
+func TestPromptContentPRMentionsApprovalBoundary(t *testing.T) {
+	content := promptContent("fix-bug", "pr")
+	assert.Contains(t, content, "default harness policy")
+	assert.Contains(t, content, "`git_push`")
+	assert.Contains(t, content, "`pr_create`")
 }
 
 func TestInitCreatesV2Files(t *testing.T) {

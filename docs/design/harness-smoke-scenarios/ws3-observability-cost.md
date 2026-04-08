@@ -501,9 +501,10 @@ find .xylem-state/phases -maxdepth 2 -type f | sort
 - `package_probes.output` contains passing `go test` lines for
   `./internal/observability` and `./internal/cost`.
 - `plan.output` and `implement.output` exist under `.xylem-state/phases/<vessel>/`.
+- `summary.json` exists under `.xylem-state/phases/<vessel>/` for the seeded
+  vessel run.
 
 **Known-fail / manual-triage right now**
-- No `summary.json` is written under `.xylem-state/phases/<vessel>/`.
 - The seeded `observability:` / `cost:` blocks are currently inert in the CLI
   path, so there is no end-to-end span stream or vessel budget artifact to
   inspect yet.
