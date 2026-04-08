@@ -370,7 +370,7 @@ tree.
 
 | Scenario IDs | DTU status | Manifest | Seeded workdir | Notes |
 | --- | --- | --- | --- | --- |
-| S1-S20 | **Known-fail / manual-triage** | `cli/internal/dtu/testdata/ws3-summary-artifacts.yaml` | `cli/internal/dtu/testdata/manual-smoke/ws3-summary-artifacts/` | The seeded two-phase workflow reaches `.xylem-state/phases/<vessel>/`, but the current runner still never writes `summary.json` or `evidence-manifest.json`. Use this seed to demonstrate the missing artifact boundary, not a passing WS3 artifact run. |
+| S1-S20 | **Seeded / passing artifact smoke** | `cli/internal/dtu/testdata/ws3-summary-artifacts.yaml` | `cli/internal/dtu/testdata/manual-smoke/ws3-summary-artifacts/` | The seeded two-phase workflow should now write `summary.json`, `evidence-manifest.json`, and the per-phase output files under `.xylem-state/phases/<vessel>/`. Use this seed to verify the full WS3 artifact surface end-to-end. |
 
 ### Run the seed
 
@@ -399,11 +399,14 @@ eval "$("$XYLEM_BIN" dtu env \
 ```bash
 cd "$WORKDIR" || exit 1
 find .xylem-state/phases -maxdepth 2 -type f | sort
-test -f .xylem-state/phases/*/summary.json && cat .xylem-state/phases/*/summary.json || echo "summary.json missing"
+cat .xylem-state/phases/*/summary.json
+cat .xylem-state/phases/*/evidence-manifest.json
 ```
 
-**Current interpretation**
+**Expected pass right now**
 - `analyze.output` and `implement.output` prove the seeded repo, manifest, and
   workflow wiring are correct.
-- `summary.json` remaining absent is the WS3 summary-artifact gap this seed is
-  meant to surface today.
+- `summary.json` exists under `.xylem-state/phases/<vessel>/` and includes the
+  vessel state, workflow metadata, phase summaries, and token/cost estimates.
+- `evidence-manifest.json` exists under the same vessel directory and is linked
+  from `summary.json` via `evidence_manifest_path`.
