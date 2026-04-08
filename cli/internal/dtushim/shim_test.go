@@ -132,6 +132,7 @@ func TestExecuteGHIssueEditMutatesLabels(t *testing.T) {
 	issue := loaded.RepositoryBySlug("owner/repo").IssueByNumber(1)
 	if issue == nil {
 		t.Fatal("IssueByNumber() = nil")
+		return
 	}
 	if strings.Join(issue.Labels, ",") != "done" {
 		t.Fatalf("issue labels = %#v, want [done]", issue.Labels)
@@ -210,6 +211,7 @@ func TestExecuteGHPRMergeUpdatesStateAndGitVisibility(t *testing.T) {
 	pr := repo.PullRequestByNumber(10)
 	if pr == nil {
 		t.Fatal("PullRequestByNumber() = nil")
+		return
 	}
 	if pr.State != dtu.PullRequestStateMerged || !pr.Merged {
 		t.Fatalf("merged pr = %#v, want merged state", pr)
@@ -461,6 +463,7 @@ func TestExecuteClaudeRecordsDeterministicDuration(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatalf("missing claude shim result event: %#v", events)
+		return
 	}
 	if got, want := result.RecordedAt, "2026-01-02T03:04:05Z"; got != want {
 		t.Fatalf("RecordedAt = %q, want %q", got, want)
@@ -514,6 +517,7 @@ func TestExecuteClaudeRecordsRichShimMetadata(t *testing.T) {
 	}
 	if invocation == nil || result == nil {
 		t.Fatalf("missing claude shim events: %#v", events)
+		return
 	}
 	if got, want := invocation.Shim.BinaryPath, binaryPath; got != want {
 		t.Fatalf("BinaryPath = %q, want %q", got, want)
@@ -631,6 +635,7 @@ func TestExecuteClaudeDelayAdvancesDTURuntimeClock(t *testing.T) {
 	}
 	if result == nil {
 		t.Fatalf("missing claude shim result event: %#v", events)
+		return
 	}
 	if got, want := result.Shim.Duration, "2s"; got != want {
 		t.Fatalf("Duration = %q, want %q", got, want)
