@@ -1,21 +1,13 @@
-Draft a pull request for this harness spec implementation.
+Your sole deliverable is a file named `pr_draft.json` at the worktree root. If this file does not exist when you finish, the workflow fails. Everything else (commit, push) is preparation for creating that file.
 
-Issue: {{.Issue.Title}}
-URL: {{.Issue.URL}}
+## Steps
 
-## Analysis
-{{.PreviousOutputs.analyze}}
+1. Stage and commit all changes with the message: `feat: {{.Issue.Title}}`
+   Reference the issue in the commit body: `Implements {{.Issue.URL}}`
 
-## Plan
-{{.PreviousOutputs.plan}}
+2. Push the branch.
 
-Stage and commit all changes with the message: `feat: {{.Issue.Title}}`
-
-Reference the issue in the commit body: `Implements {{.Issue.URL}}`
-
-Push the branch.
-
-Then write a JSON file at the worktree root named `pr_draft.json` with this exact structure:
+3. Write `pr_draft.json` at the worktree root with this exact structure:
 
 ```json
 {
@@ -24,11 +16,26 @@ Then write a JSON file at the worktree root named `pr_draft.json` with this exac
 }
 ```
 
-The PR body must include:
+The PR body MUST include:
 - Summary linking to {{.Issue.URL}}
 - Smoke scenarios covered (list IDs and titles)
 - Changes summary (files added/modified, key types and functions)
 - Test plan
 
-Do NOT run `gh pr create` — a separate script handles PR creation.
-Do NOT include `Fixes #N` or `Closes #N` in the body — that is appended automatically.
+## Constraints
+
+- You MUST create `pr_draft.json`. The next phase reads it — if missing, the entire workflow fails.
+- Do NOT run `gh pr create` — a separate script handles PR creation.
+- Do NOT include `Fixes #N` or `Closes #N` in the body — that is appended automatically.
+- Do NOT narrate your process. Execute the steps and produce the file.
+
+## Context
+
+Issue: {{.Issue.Title}}
+URL: {{.Issue.URL}}
+
+### Analysis
+{{.PreviousOutputs.analyze}}
+
+### Plan
+{{.PreviousOutputs.plan}}

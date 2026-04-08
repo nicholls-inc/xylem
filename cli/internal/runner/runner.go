@@ -435,15 +435,16 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				}
 				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
 				if err != nil {
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, err))
+					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
+					finishCurrentPhaseSpan(snapErr)
+					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, snapErr))
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
 					issueNum := r.parseIssueNum(vessel)
 					if issueNum > 0 && r.Reporter != nil {
 						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+							r.Reporter.VesselFailed(ctx, issueNum, p.Name, snapErr.Error(), ""))
 					}
 					return "failed"
 				}
@@ -495,15 +496,16 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				}
 				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
 				if err != nil {
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, err))
+					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
+					finishCurrentPhaseSpan(snapErr)
+					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, snapErr))
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
 					issueNum := r.parseIssueNum(vessel)
 					if issueNum > 0 && r.Reporter != nil {
 						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+							r.Reporter.VesselFailed(ctx, issueNum, p.Name, snapErr.Error(), ""))
 					}
 					return "failed"
 				}
@@ -524,6 +526,23 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			fmt.Printf("Phase %s complete: %s\n", p.Name, outputPath)
 			phaseDuration = r.runtimeSince(phaseStart)
 
+			if runErr != nil {
+				finishCurrentPhaseSpan(runErr)
+				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
+				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
+				vessel.FailedPhase = p.Name
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				issueNum := r.parseIssueNum(vessel)
+				if issueNum > 0 && r.Reporter != nil {
+					r.logReporterError("post vessel-failed comment", vessel.ID,
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
+				}
+				return "failed"
+			}
+
 			if checkProtectedSurfaces {
 				if err := r.verifyProtectedSurfaces(vessel, p, worktreePath, beforeSnapshot); err != nil {
 					finishCurrentPhaseSpan(err)
@@ -541,23 +560,6 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-			}
-
-			if runErr != nil {
-				finishCurrentPhaseSpan(runErr)
-				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
-				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				issueNum := r.parseIssueNum(vessel)
-				if issueNum > 0 && r.Reporter != nil {
-					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
-				}
-				return "failed"
 			}
 
 			recordedAt := r.runtimeNow()
@@ -763,7 +765,8 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	model := resolveModel(r.Config, nil, nil, nil, provider)
 	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(worktreePath)
 	if err != nil {
-		r.failVessel(vessel.ID, err.Error())
+		snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
+		r.failVessel(vessel.ID, snapErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 		}
@@ -771,6 +774,13 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	}
 
 	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
+	if runErr != nil {
+		r.failVessel(vessel.ID, runErr.Error())
+		if err := src.OnFail(ctx, vessel); err != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
+		return "failed"
+	}
 	if checkProtectedSurfaces {
 		if err := r.verifyProtectedSurfaces(vessel, workflow.Phase{Name: "prompt-only"}, worktreePath, beforeSnapshot); err != nil {
 			r.failVessel(vessel.ID, err.Error())
@@ -792,14 +802,6 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 			}
 			return "failed"
 		}
-	}
-
-	if runErr != nil {
-		r.failVessel(vessel.ID, runErr.Error())
-		if err := src.OnFail(ctx, vessel); err != nil {
-			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-		}
-		return "failed"
 	}
 
 	if err := src.OnComplete(ctx, vessel); err != nil {
@@ -1185,15 +1187,16 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
 			if err != nil {
-				finishCurrentPhaseSpan(err)
-				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, err))
+				snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
+				finishCurrentPhaseSpan(snapErr)
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, snapErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
 					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, snapErr.Error(), ""))
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
@@ -1244,15 +1247,16 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
 			if err != nil {
-				finishCurrentPhaseSpan(err)
-				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, err))
+				snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
+				finishCurrentPhaseSpan(snapErr)
+				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, snapErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
 					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, snapErr.Error(), ""))
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
@@ -1273,6 +1277,26 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		fmt.Printf("Phase %s complete: %s\n", p.Name, outputPath)
 		phaseDuration = r.runtimeSince(phaseStart)
 
+		if runErr != nil {
+			finishCurrentPhaseSpan(runErr)
+			log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
+			vessel.FailedPhase = p.Name
+			r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+			if err := src.OnFail(ctx, vessel); err != nil {
+				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
+			}
+			return singlePhaseResult{
+				status:       "failed",
+				duration:     phaseDuration,
+				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()),
+			}
+		}
+
 		if checkProtectedSurfaces {
 			if err := r.verifyProtectedSurfaces(vessel, p, worktreePath, beforeSnapshot); err != nil {
 				finishCurrentPhaseSpan(err)
@@ -1292,26 +1316,6 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					duration:     phaseDuration,
 					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()),
 				}
-			}
-		}
-
-		if runErr != nil {
-			finishCurrentPhaseSpan(runErr)
-			log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
-			vessel.FailedPhase = p.Name
-			r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
-			if err := src.OnFail(ctx, vessel); err != nil {
-				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-			}
-			issueNum := r.parseIssueNum(vessel)
-			if issueNum > 0 && r.Reporter != nil {
-				r.logReporterError("post vessel-failed comment", vessel.ID,
-					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
-			}
-			return singlePhaseResult{
-				status:       "failed",
-				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()),
 			}
 		}
 
@@ -1610,11 +1614,16 @@ func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase) error
 		return nil
 	}
 
+	justification := fmt.Sprintf("execute workflow phase %q", p.Name)
+	if vessel.Workflow != "" {
+		justification = fmt.Sprintf("execute phase %q of workflow %q", p.Name, vessel.Workflow)
+	}
+
 	intent := intermediary.Intent{
 		Action:        phaseActionType(&p),
 		Resource:      p.Name,
 		AgentID:       vessel.ID,
-		Justification: fmt.Sprintf("execute workflow phase %q", p.Name),
+		Justification: justification,
 		Metadata: map[string]string{
 			"phase":      p.Name,
 			"source":     vessel.Source,
@@ -1643,11 +1652,20 @@ func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase) error
 	case intermediary.Allow:
 		return nil
 	case intermediary.RequireApproval:
-		return fmt.Errorf("phase %s requires approval: automatic approval not yet supported", p.Name)
+		if result.Reason != "" {
+			return fmt.Errorf("phase %q requires approval (automatic approval not yet supported): %s", p.Name, result.Reason)
+		}
+		return fmt.Errorf("phase %q requires approval (automatic approval not yet supported)", p.Name)
 	case intermediary.Deny:
-		return fmt.Errorf("phase %s denied by policy", p.Name)
+		if result.Reason != "" {
+			return fmt.Errorf("phase %q denied by policy: %s", p.Name, result.Reason)
+		}
+		return fmt.Errorf("phase %q denied by policy", p.Name)
 	default:
-		return fmt.Errorf("phase %s denied by policy", p.Name)
+		if result.Reason != "" {
+			return fmt.Errorf("phase %q denied by policy: %s", p.Name, result.Reason)
+		}
+		return fmt.Errorf("phase %q denied by policy", p.Name)
 	}
 }
 
@@ -1687,7 +1705,9 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 
 	after, err := surface.TakeSnapshot(worktreePath, patterns)
 	if err != nil {
-		return fmt.Errorf("verify protected surfaces: %w", err)
+		log.Printf("%sphase %q protected surface verification skipped: %v",
+			vesselLabel(vessel), p.Name, err)
+		return nil
 	}
 
 	violations := surface.Compare(before, after)
@@ -1695,36 +1715,37 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 		return nil
 	}
 
-	errMsg := fmt.Sprintf("phase %s violated protected surfaces: %s", p.Name, formatSurfaceViolations(violations))
-	if err := r.recordProtectedSurfaceViolation(vessel, p, errMsg, violations); err != nil {
+	errMsg := fmt.Sprintf("phase %q violated protected surfaces: %s", p.Name, formatViolations(violations))
+	if err := r.recordProtectedSurfaceViolations(vessel, p, errMsg, violations); err != nil {
 		return fmt.Errorf("%s (record audit evidence: %w)", errMsg, err)
 	}
 	return fmt.Errorf("%s", errMsg)
 }
 
-func (r *Runner) recordProtectedSurfaceViolation(vessel queue.Vessel, p workflow.Phase, errMsg string, violations []surface.Violation) error {
-	paths := make([]string, 0, len(violations))
+func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, errMsg string, violations []surface.Violation) error {
 	for _, violation := range violations {
-		paths = append(paths, violation.Path)
-	}
-
-	return r.appendAuditEntry(intermediary.AuditEntry{
-		Intent: intermediary.Intent{
-			Action:        "protected_surface_violation",
-			Resource:      p.Name,
-			AgentID:       vessel.ID,
-			Justification: fmt.Sprintf("verify protected surfaces after phase %q", p.Name),
-			Metadata: map[string]string{
-				"phase":    p.Name,
-				"paths":    strings.Join(paths, ","),
-				"source":   vessel.Source,
-				"workflow": vessel.Workflow,
+		if err := r.appendAuditEntry(intermediary.AuditEntry{
+			Intent: intermediary.Intent{
+				Action:        "file_write",
+				Resource:      violation.Path,
+				AgentID:       vessel.ID,
+				Justification: fmt.Sprintf("verify protected surfaces after phase %q", p.Name),
+				Metadata: map[string]string{
+					"phase":    p.Name,
+					"before":   violation.Before,
+					"after":    violation.After,
+					"source":   vessel.Source,
+					"workflow": vessel.Workflow,
+				},
 			},
-		},
-		Decision:  intermediary.Deny,
-		Timestamp: time.Now().UTC(),
-		Error:     errMsg,
-	})
+			Decision:  intermediary.Deny,
+			Timestamp: time.Now().UTC(),
+			Error:     errMsg,
+		}); err != nil {
+			return fmt.Errorf("append surface violation audit for %s: %w", violation.Path, err)
+		}
+	}
+	return nil
 }
 
 func (r *Runner) appendAuditEntry(entry intermediary.AuditEntry) error {
@@ -1737,12 +1758,12 @@ func (r *Runner) appendAuditEntry(entry intermediary.AuditEntry) error {
 	return nil
 }
 
-func formatSurfaceViolations(violations []surface.Violation) string {
+func formatViolations(violations []surface.Violation) string {
 	parts := make([]string, 0, len(violations))
 	for _, violation := range violations {
-		parts = append(parts, fmt.Sprintf("%s (%s -> %s)", violation.Path, violation.Before, violation.After))
+		parts = append(parts, fmt.Sprintf("%s (before: %s, after: %s)", violation.Path, violation.Before, violation.After))
 	}
-	return strings.Join(parts, ", ")
+	return strings.Join(parts, "; ")
 }
 
 func (r *Runner) logReporterError(action string, vesselID string, err error) {

@@ -34,8 +34,8 @@ func cmdRetry(q *queue.Queue, cfg *config.Config, id string, fromScratch bool) e
 		return fmt.Errorf("retry error: %w", err)
 	}
 
-	if vessel.State != queue.StateFailed {
-		return fmt.Errorf("error: vessel %s is not in failed state (current: %s)", id, vessel.State)
+	if vessel.State != queue.StateFailed && vessel.State != queue.StateTimedOut {
+		return fmt.Errorf("error: vessel %s is not in a retryable state (current: %s)", id, vessel.State)
 	}
 
 	newID := retryID(vessel.ID, q)

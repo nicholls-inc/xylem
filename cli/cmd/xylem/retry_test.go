@@ -90,7 +90,37 @@ func TestRetryCreatesNewVessel(t *testing.T) {
 	}
 }
 
-func TestRetryNonFailedVessel(t *testing.T) {
+func TestRetryTimedOutVessel(t *testing.T) {
+	q := newRetryTestQueue(t)
+	cfg := newRetryTestConfig(t)
+	now := time.Now().UTC()
+	v := queue.Vessel{
+		ID: "issue-50", Source: "github-issue", Workflow: "implement-harness",
+		Ref:   "https://github.com/owner/repo/issues/50",
+		State: queue.StatePending, CreatedAt: now,
+	}
+	q.Enqueue(v)                                                     //nolint:errcheck
+	q.Update("issue-50", queue.StateRunning, "")                     //nolint:errcheck
+	q.Update("issue-50", queue.StateTimedOut, "timed out after 45m") //nolint:errcheck
+
+	err := cmdRetry(q, cfg, "issue-50", true)
+	if err != nil {
+		t.Fatalf("unexpected error retrying timed_out vessel: %v", err)
+	}
+
+	retry, err := q.FindByID("issue-50-retry-1")
+	if err != nil {
+		t.Fatalf("retry vessel not found: %v", err)
+	}
+	if retry.State != queue.StatePending {
+		t.Errorf("retry should be pending, got %s", retry.State)
+	}
+	if retry.RetryOf != "issue-50" {
+		t.Errorf("retry_of should be issue-50, got %s", retry.RetryOf)
+	}
+}
+
+func TestRetryNonRetryableVessel(t *testing.T) {
 	tests := []struct {
 		name  string
 		setup func(t *testing.T, q *queue.Queue)
@@ -120,10 +150,10 @@ func TestRetryNonFailedVessel(t *testing.T) {
 
 			err := cmdRetry(q, cfg, "issue-1", false)
 			if err == nil {
-				t.Fatal("expected error retrying non-failed vessel")
+				t.Fatal("expected error retrying non-retryable vessel")
 			}
-			if !strings.Contains(err.Error(), "not in failed state") {
-				t.Errorf("expected 'not in failed state' error, got: %v", err)
+			if !strings.Contains(err.Error(), "not in a retryable state") {
+				t.Errorf("expected 'not in a retryable state' error, got: %v", err)
 			}
 		})
 	}
