@@ -20,3 +20,4 @@ state_dir: ".xylem-state"
 llm: claude
 claude:
   command: "claude"
+  default_model: "claude-sonnet-4-6"

@@ -2611,24 +2611,24 @@ func TestResolveProviderWithSource(t *testing.T) {
 func TestResolveModelWithSourceAndConfigModel(t *testing.T) {
 	tests := []struct {
 		name       string
-		cfgModel   string
 		srcModel   string
 		wfModel    *string
 		phaseModel *string
 		provider   string
 		want       string
 	}{
-		{"config model used when no phase/wf/src", "global-model", "", nil, nil, "claude", "global-model"},
-		{"config model beats provider default", "global-model", "", nil, nil, "claude", "global-model"},
-		{"source model beats config model", "global-model", "src-model", nil, nil, "claude", "src-model"},
-		{"workflow model beats source model", "global-model", "src-model", strPtrRunner("wf-model"), nil, "claude", "wf-model"},
-		{"phase model beats all", "global-model", "src-model", strPtrRunner("wf-model"), strPtrRunner("phase-model"), "claude", "phase-model"},
-		{"config model works for copilot", "global-model", "", nil, nil, "copilot", "global-model"},
-		{"empty source falls to config model", "", "", nil, nil, "claude", ""},
+		{"provider default used when no phase/wf/src for claude", "", nil, nil, "claude", "claude-default"},
+		{"provider default used when no phase/wf/src for copilot", "", nil, nil, "copilot", "copilot-default"},
+		{"source model beats provider default", "src-model", nil, nil, "claude", "src-model"},
+		{"workflow model beats source model", "src-model", strPtrRunner("wf-model"), nil, "claude", "wf-model"},
+		{"phase model beats all", "src-model", strPtrRunner("wf-model"), strPtrRunner("phase-model"), "claude", "phase-model"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{Model: tt.cfgModel}
+			cfg := &config.Config{
+				Claude:  config.ClaudeConfig{DefaultModel: "claude-default"},
+				Copilot: config.CopilotConfig{DefaultModel: "copilot-default"},
+			}
 			var srcCfg *config.SourceConfig
 			if tt.srcModel != "" {
 				srcCfg = &config.SourceConfig{Model: tt.srcModel}

@@ -329,6 +329,10 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	if err := c.validateProviderDefaultModels(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -471,6 +475,34 @@ func (c *Config) validateCost() error {
 	}
 	if c.Cost.Budget.MaxTokens < 0 {
 		return fmt.Errorf("cost.budget.max_tokens must be non-negative")
+	}
+	return nil
+}
+
+// validateProviderDefaultModels ensures every active LLM provider has a
+// default_model configured. A provider is active if it is the global llm value
+// or referenced by any source's llm field.
+func (c *Config) validateProviderDefaultModels() error {
+	active := map[string]bool{}
+	switch c.LLM {
+	case "", "claude":
+		active["claude"] = true
+	case "copilot":
+		active["copilot"] = true
+	}
+	for _, src := range c.Sources {
+		switch src.LLM {
+		case "claude":
+			active["claude"] = true
+		case "copilot":
+			active["copilot"] = true
+		}
+	}
+	if active["claude"] && c.Claude.DefaultModel == "" {
+		return fmt.Errorf("claude.default_model must be set when claude is an active provider")
+	}
+	if active["copilot"] && c.Copilot.DefaultModel == "" {
+		return fmt.Errorf("copilot.default_model must be set when copilot is an active provider")
 	}
 	return nil
 }
