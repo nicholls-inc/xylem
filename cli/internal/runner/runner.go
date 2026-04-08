@@ -418,7 +418,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
 					log.Printf("warn: write command file: %v", wErr)
 				}
-				if policyErr := r.enforcePhasePolicy(vessel, p); policyErr != nil {
+				if policyErr := r.enforcePhasePolicy(vessel, p, rendered, ""); policyErr != nil {
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
@@ -462,7 +462,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-				rendered, err := phase.RenderPrompt(string(promptContent), td)
+				promptTemplate := string(promptContent)
+				rendered, err := phase.RenderPrompt(promptTemplate, td)
 				if err != nil {
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
@@ -479,7 +480,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
 					log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
 				}
-				if policyErr := r.enforcePhasePolicy(vessel, p); policyErr != nil {
+				if policyErr := r.enforcePhasePolicy(vessel, p, "", promptTemplate); policyErr != nil {
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
@@ -1170,7 +1171,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write command file: %v", wErr)
 			}
-			if policyErr := r.enforcePhasePolicy(vessel, p); policyErr != nil {
+			if policyErr := r.enforcePhasePolicy(vessel, p, rendered, ""); policyErr != nil {
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
@@ -1213,7 +1214,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			rendered, err := phase.RenderPrompt(string(promptContent), td)
+			promptTemplate := string(promptContent)
+			rendered, err := phase.RenderPrompt(promptTemplate, td)
 			if err != nil {
 				finishCurrentPhaseSpan(err)
 				r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
@@ -1230,7 +1232,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
 			}
-			if policyErr := r.enforcePhasePolicy(vessel, p); policyErr != nil {
+			if policyErr := r.enforcePhasePolicy(vessel, p, "", promptTemplate); policyErr != nil {
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
@@ -1609,64 +1611,206 @@ func phaseActionType(p *workflow.Phase) string {
 	return "phase_execute"
 }
 
-func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase) error {
+func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase, renderedCommand, renderedPrompt string) error {
 	if r.Intermediary == nil {
 		return nil
 	}
 
-	justification := fmt.Sprintf("execute workflow phase %q", p.Name)
-	if vessel.Workflow != "" {
-		justification = fmt.Sprintf("execute phase %q of workflow %q", p.Name, vessel.Workflow)
+	for _, intent := range r.phasePolicyIntents(vessel, p, renderedCommand, renderedPrompt) {
+		result := r.Intermediary.Evaluate(intent)
+		entry := intermediary.AuditEntry{
+			Intent:    intent,
+			Decision:  result.Effect,
+			Timestamp: time.Now().UTC(),
+		}
+		if result.Effect != intermediary.Allow {
+			entry.Error = result.Reason
+		}
+		if err := r.appendAuditEntry(entry); err != nil {
+			return fmt.Errorf("record audit evidence: %w", err)
+		}
+		if result.Effect != intermediary.Allow {
+			return formatPolicyDecisionError(p.Name, intent, result)
+		}
 	}
+	return nil
+}
 
-	intent := intermediary.Intent{
-		Action:        phaseActionType(&p),
+func (r *Runner) phasePolicyIntents(vessel queue.Vessel, p workflow.Phase, renderedCommand, renderedPrompt string) []intermediary.Intent {
+	baseAction := phaseActionType(&p)
+	intents := []intermediary.Intent{{
+		Action:        baseAction,
 		Resource:      p.Name,
 		AgentID:       vessel.ID,
-		Justification: justification,
-		Metadata: map[string]string{
-			"phase":      p.Name,
-			"source":     vessel.Source,
-			"workflow":   vessel.Workflow,
-			"phase_type": p.Type,
-		},
+		Justification: phaseIntentJustification(vessel, p.Name),
+		Metadata:      phaseIntentMetadata(vessel, p, ""),
+	}}
+
+	classificationText := renderedPrompt
+	classifiedFrom := "prompt"
+	if p.Type == "command" {
+		classificationText = renderedCommand
+		classifiedFrom = "command"
 	}
-	if intent.Metadata["phase_type"] == "" {
-		intent.Metadata["phase_type"] = "prompt"
+	if classificationText == "" {
+		return intents
 	}
 
-	result := r.Intermediary.Evaluate(intent)
-	entry := intermediary.AuditEntry{
-		Intent:    intent,
-		Decision:  result.Effect,
-		Timestamp: time.Now().UTC(),
+	sourceRepo := strings.TrimSpace(r.resolveRepo(vessel))
+	if sourceCfg := r.sourceConfigFromMeta(vessel); sourceCfg != nil && strings.TrimSpace(sourceCfg.Repo) != "" {
+		sourceRepo = strings.TrimSpace(sourceCfg.Repo)
 	}
-	if result.Effect != intermediary.Allow {
-		entry.Error = result.Reason
+	seen := map[string]struct{}{
+		baseAction + "\x00" + p.Name: {},
 	}
-	if err := r.appendAuditEntry(entry); err != nil {
-		return fmt.Errorf("record audit evidence: %w", err)
+
+	appendIntent := func(action, resource string) {
+		key := action + "\x00" + resource
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		intents = append(intents, intermediary.Intent{
+			Action:        action,
+			Resource:      resource,
+			AgentID:       vessel.ID,
+			Justification: fmt.Sprintf("phase %q may perform %s", p.Name, action),
+			Metadata:      phaseIntentMetadata(vessel, p, classifiedFrom),
+		})
+	}
+
+	if indicatesGitCommit(classificationText) {
+		appendIntent("git_commit", "*")
+	}
+	if indicatesGitPush(classificationText) {
+		appendIntent("git_push", extractGitPushResource(classificationText))
+	}
+	if indicatesPRCreate(classificationText) {
+		appendIntent("pr_create", extractRepoFlag(classificationText, sourceRepo))
+	}
+
+	return intents
+}
+
+func phaseIntentJustification(vessel queue.Vessel, phaseName string) string {
+	if vessel.Workflow != "" {
+		return fmt.Sprintf("execute phase %q of workflow %q", phaseName, vessel.Workflow)
+	}
+	return fmt.Sprintf("execute workflow phase %q", phaseName)
+}
+
+func phaseIntentMetadata(vessel queue.Vessel, p workflow.Phase, classifiedFrom string) map[string]string {
+	metadata := map[string]string{
+		"phase":      p.Name,
+		"source":     vessel.Source,
+		"workflow":   vessel.Workflow,
+		"phase_type": p.Type,
+	}
+	if metadata["phase_type"] == "" {
+		metadata["phase_type"] = "prompt"
+	}
+	if classifiedFrom != "" {
+		metadata["classified_from"] = classifiedFrom
+	}
+	return metadata
+}
+
+func formatPolicyDecisionError(phaseName string, intent intermediary.Intent, result intermediary.PolicyResult) error {
+	qualifier := ""
+	if intent.Action != "" && intent.Action != "phase_execute" && intent.Action != "external_command" {
+		qualifier = " for " + intent.Action
+		if intent.Resource != "" && intent.Resource != "*" {
+			qualifier += " on " + intent.Resource
+		}
 	}
 
 	switch result.Effect {
-	case intermediary.Allow:
-		return nil
 	case intermediary.RequireApproval:
 		if result.Reason != "" {
-			return fmt.Errorf("phase %q requires approval (automatic approval not yet supported): %s", p.Name, result.Reason)
+			return fmt.Errorf("phase %q requires approval%s (automatic approval not yet supported): %s", phaseName, qualifier, result.Reason)
 		}
-		return fmt.Errorf("phase %q requires approval (automatic approval not yet supported)", p.Name)
+		return fmt.Errorf("phase %q requires approval%s (automatic approval not yet supported)", phaseName, qualifier)
 	case intermediary.Deny:
 		if result.Reason != "" {
-			return fmt.Errorf("phase %q denied by policy: %s", p.Name, result.Reason)
+			return fmt.Errorf("phase %q denied by policy%s: %s", phaseName, qualifier, result.Reason)
 		}
-		return fmt.Errorf("phase %q denied by policy", p.Name)
+		return fmt.Errorf("phase %q denied by policy%s", phaseName, qualifier)
 	default:
 		if result.Reason != "" {
-			return fmt.Errorf("phase %q denied by policy: %s", p.Name, result.Reason)
+			return fmt.Errorf("phase %q denied by policy%s: %s", phaseName, qualifier, result.Reason)
 		}
-		return fmt.Errorf("phase %q denied by policy", p.Name)
+		return fmt.Errorf("phase %q denied by policy%s", phaseName, qualifier)
 	}
+}
+
+func indicatesGitCommit(rendered string) bool {
+	lower := strings.ToLower(rendered)
+	return strings.Contains(lower, "git commit") ||
+		strings.Contains(lower, "commit all changes") ||
+		strings.Contains(lower, "commit the changes")
+}
+
+func indicatesGitPush(rendered string) bool {
+	lower := strings.ToLower(rendered)
+	return strings.Contains(lower, "git push") ||
+		strings.Contains(lower, "push the branch") ||
+		strings.Contains(lower, "push branch")
+}
+
+func indicatesPRCreate(rendered string) bool {
+	lower := strings.ToLower(rendered)
+	return strings.Contains(lower, "gh pr create") ||
+		strings.Contains(lower, "create a pull request") ||
+		strings.Contains(lower, "create the pull request") ||
+		strings.Contains(lower, "create a pr")
+}
+
+func extractGitPushResource(rendered string) string {
+	fields := strings.Fields(rendered)
+	for i := 0; i < len(fields)-1; i++ {
+		if !strings.EqualFold(fields[i], "git") || !strings.EqualFold(fields[i+1], "push") {
+			continue
+		}
+
+		positional := make([]string, 0, 2)
+		for _, raw := range fields[i+2:] {
+			token := strings.Trim(strings.TrimSpace(raw), "\"'")
+			switch token {
+			case "", "&&", "||", ";", "|":
+				return "*"
+			}
+			if strings.HasPrefix(token, "-") {
+				continue
+			}
+			positional = append(positional, token)
+			if len(positional) == 2 {
+				return positional[1]
+			}
+		}
+		return "*"
+	}
+	return "*"
+}
+
+func extractRepoFlag(rendered, fallback string) string {
+	fields := strings.Fields(rendered)
+	for i := 0; i < len(fields); i++ {
+		token := strings.Trim(strings.TrimSpace(fields[i]), "\"'")
+		if strings.HasPrefix(token, "--repo=") {
+			if repo := strings.TrimPrefix(token, "--repo="); repo != "" {
+				return repo
+			}
+		}
+		if token == "--repo" && i+1 < len(fields) {
+			if repo := strings.Trim(strings.TrimSpace(fields[i+1]), "\"'"); repo != "" {
+				return repo
+			}
+		}
+	}
+	if strings.TrimSpace(fallback) != "" {
+		return fallback
+	}
+	return "*"
 }
 
 func (r *Runner) takeProtectedSurfaceSnapshot(worktreePath string) (surface.Snapshot, bool, error) {

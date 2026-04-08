@@ -32,11 +32,35 @@ type Manager struct {
 	RepoRoot      string
 	Runner        CommandRunner
 	DefaultBranch string // if set, skip auto-detection
+
+	protectedSurfaces    []string
+	protectedSurfacesSet bool
 }
 
 // New creates a Manager for the given repository root.
 func New(repoRoot string, runner CommandRunner) *Manager {
 	return &Manager{RepoRoot: repoRoot, Runner: runner}
+}
+
+var defaultProtectedSurfaces = []string{
+	".xylem.yml",
+	".xylem/workflows/*.yaml",
+	".xylem/prompts/*/*.md",
+	".xylem/HARNESS.md",
+}
+
+// SetProtectedSurfaces overrides the default read-only worktree protections.
+// Passing a nil or empty slice disables the filesystem hardening layer.
+func (m *Manager) SetProtectedSurfaces(patterns []string) {
+	m.protectedSurfacesSet = true
+	m.protectedSurfaces = append([]string(nil), patterns...)
+}
+
+func (m *Manager) protectedSurfacePatterns() []string {
+	if m.protectedSurfacesSet {
+		return append([]string(nil), m.protectedSurfaces...)
+	}
+	return append([]string(nil), defaultProtectedSurfaces...)
 }
 
 // DetectDefaultBranch detects the repository's default branch.
@@ -144,9 +168,9 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 		fmt.Fprintf(os.Stderr, "warn: copy .claude/ config: %v\n", err)
 	}
 
-	// Mark .xylem/ protected surfaces as read-only to prevent agents from
+	// Mark protected control surfaces as read-only to prevent agents from
 	// accidentally deleting or modifying workflow/prompt definitions.
-	if err := protectXylemSurfaces(worktreePath); err != nil {
+	if err := protectXylemSurfaces(worktreePath, m.protectedSurfacePatterns()); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: protect .xylem/ surfaces: %v\n", err)
 	}
 
@@ -254,19 +278,16 @@ func (m *Manager) copyClaudeConfig(worktreePath string) error {
 	return nil
 }
 
-// protectXylemSurfaces marks tracked .xylem/ files as read-only in the worktree
-// so agents running in the worktree cannot accidentally delete or modify them.
-// It also writes a .claude/rules/ file instructing Claude agents to leave them alone.
-func protectXylemSurfaces(worktreePath string) error {
-	// Glob patterns matching the default protected surfaces.
-	patterns := []string{
-		filepath.Join(worktreePath, ".xylem.yml"),
-		filepath.Join(worktreePath, ".xylem", "workflows", "*.yaml"),
-		filepath.Join(worktreePath, ".xylem", "prompts", "*", "*.md"),
-		filepath.Join(worktreePath, ".xylem", "HARNESS.md"),
+// protectXylemSurfaces marks configured protected files as read-only in the
+// worktree so agents cannot accidentally delete or modify them. It also writes
+// a .claude/rules/ file instructing agents to leave them alone.
+func protectXylemSurfaces(worktreePath string, patterns []string) error {
+	if len(patterns) == 0 {
+		return nil
 	}
 	for _, pattern := range patterns {
-		matches, err := filepath.Glob(pattern)
+		worktreePattern := filepath.Join(worktreePath, filepath.FromSlash(pattern))
+		matches, err := filepath.Glob(worktreePattern)
 		if err != nil {
 			continue
 		}
@@ -280,8 +301,10 @@ func protectXylemSurfaces(worktreePath string) error {
 	if err := os.MkdirAll(rulesDir, 0o755); err != nil {
 		return err
 	}
-	rule := "Do not modify, delete, or move any files under .xylem/ or the .xylem.yml config file. " +
-		"These are protected workflow and prompt definitions managed by the xylem control plane.\n"
+	rule := "Do not modify, delete, or move the configured protected control surfaces managed by the xylem control plane:\n"
+	for _, pattern := range patterns {
+		rule += "- " + pattern + "\n"
+	}
 	return os.WriteFile(filepath.Join(rulesDir, "protected-surfaces.md"), []byte(rule), 0o644)
 }
 

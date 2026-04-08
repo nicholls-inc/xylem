@@ -1348,6 +1348,18 @@ func TestSmoke_S7_DefaultPolicyRequiresApprovalForGitPush(t *testing.T) {
 	assert.Equal(t, "*", result.MatchedRule.Resource)
 }
 
+func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {
+	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+		Action:   "file_write",
+		Resource: ".xylem/prompts/fix-bug/analyze.md",
+		AgentID:  "vessel-004",
+	})
+
+	assert.Equal(t, intermediary.Deny, result.Effect)
+	require.NotNil(t, result.MatchedRule)
+	assert.Equal(t, ".xylem/prompts/*/*.md", result.MatchedRule.Resource)
+}
+
 func TestSmoke_S8_DefaultPolicyAllowsPhaseExecute(t *testing.T) {
 	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
 		Action:   "phase_execute",

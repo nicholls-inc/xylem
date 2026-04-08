@@ -279,6 +279,8 @@ The `daemon` section controls polling intervals when running `xylem daemon`.
 
 The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, and audit logging.
 
+When `harness.policy.rules` is empty, xylem installs a default policy that denies writes to the protected control surfaces, requires approval for `git_push` and `pr_create`, and allows other actions. The runner classifies those high-risk actions from rendered command phases and from prompt phases that explicitly instruct an agent to push or open a pull request. The same `harness.protected_surfaces.paths` list also drives the worktree's read-only hardening and the runner's post-phase surface verification.
+
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
 | `harness.protected_surfaces.paths` | list of strings | `[".xylem/HARNESS.md", ".xylem.yml", ".xylem/workflows/*.yaml", ".xylem/prompts/*/*.md"]` | No | Glob patterns for files agents cannot modify. Set to `["none"]` to disable all surface protections. |
@@ -308,7 +310,10 @@ harness:
         effect: deny
       - action: "git_push"
         resource: "*"
-        effect: allow
+        effect: require_approval
+      - action: "pr_create"
+        resource: "*"
+        effect: require_approval
   audit_log: "audit.jsonl"
 ```
 

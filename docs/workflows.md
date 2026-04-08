@@ -478,11 +478,11 @@ phases:
 1. **analyze** -- Reads the issue and the codebase to identify relevant files, the root cause, and constraints. If the output contains `XYLEM_NOOP`, the workflow completes early.
 2. **plan** -- Takes the analysis output and produces a step-by-step implementation plan: which files to change, in what order, what tests to update, and what risks exist.
 3. **implement** -- Executes the plan. After implementation, a command gate runs `make test`. If tests fail, the phase retries up to 2 times with the test output fed back via `{{.GateResult}}`.
-4. **pr** -- Commits changes, pushes the branch, and creates a pull request linking to the issue.
+4. **pr** -- Commits changes, pushes the branch, and creates a pull request linking to the issue. Under the default harness policy, `git_push` and `pr_create` are mediated high-risk actions and will stop here until your workflow or policy explicitly approves them.
 
 **When to use:** Assign this workflow to tasks triggered by `bug`-labeled GitHub issues. It works best for well-described bugs with clear reproduction steps.
 
-**Customization:** After running `xylem init`, edit the `run` field in the implement phase's gate to match your project's test command. The scaffolded default is `make test`, but you might need `go test ./...`, `npm test`, `pytest`, or something else.
+**Customization:** After running `xylem init`, edit the `run` field in the implement phase's gate to match your project's test command. The scaffolded default is `make test`, but you might need `go test ./...`, `npm test`, `pytest`, or something else. If you keep the scaffolded `pr` prompt phase, add an approval step before it or a policy rule that explicitly allows `git_push` and `pr_create` after review.
 
 ### implement-feature
 
@@ -521,11 +521,11 @@ phases:
 1. **analyze** -- Reads the issue and the codebase to identify requirements, affected modules, and existing patterns to follow.
 2. **plan** -- Produces an implementation plan with file changes, ordering, test strategy, and risk assessment. A label gate then waits for `plan-approved` before implementation continues.
 3. **implement** -- Executes the approved plan. Gated on `make test` with 2 retries in the scaffolded workflow.
-4. **pr** -- Commits, pushes, and creates a pull request.
+4. **pr** -- Commits, pushes, and creates a pull request. Under the default harness policy, `git_push` and `pr_create` are mediated high-risk actions and will stop here until your workflow or policy explicitly approves them.
 
 **When to use:** Assign this workflow to tasks triggered by `enhancement`-labeled issues that have been refined and marked as ready for autonomous implementation.
 
-**Customization:** After running `xylem init`, update the label gate and test command to match your process. For example, you might use a different approval label than `plan-approved`, or replace `make test` with `go test ./...`, `npm test`, or `pytest`.
+**Customization:** After running `xylem init`, update the label gate and test command to match your process. For example, you might use a different approval label than `plan-approved`, or replace `make test` with `go test ./...`, `npm test`, or `pytest`. If you keep the scaffolded `pr` prompt phase, add an approval step before it or a policy rule that explicitly allows `git_push` and `pr_create` after review.
 
 ### implement-harness (repo-specific)
 

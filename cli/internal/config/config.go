@@ -423,7 +423,7 @@ func DefaultPolicy() intermediary.Policy {
 			{Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem/prompts/*", Effect: intermediary.Deny},
+			{Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
 			{Action: "git_push", Resource: "*", Effect: intermediary.RequireApproval},
 			{Action: "pr_create", Resource: "*", Effect: intermediary.RequireApproval},
 			{Action: "*", Resource: "*", Effect: intermediary.Allow},
