@@ -72,6 +72,38 @@ func TestBuildContainedEnvInheritPreservesProxy(t *testing.T) {
 	}
 }
 
+func TestBuildContainedEnvOffPreservesAmbientEnvWithScopedSecrets(t *testing.T) {
+	env, err := buildContainedEnv([]string{
+		"PATH=/usr/bin",
+		"HOME=/Users/example",
+		"SECRET=ambient",
+		"CUSTOM=ambient",
+	}, containment.Request{
+		Isolation: containment.IsolationOff,
+		Network:   containment.NetworkDeny,
+		Env:       []string{"TOKEN=scoped", "SECRET=scoped"},
+	})
+	if err != nil {
+		t.Fatalf("buildContainedEnv() error = %v", err)
+	}
+
+	if got := envValue(env, "CUSTOM"); got != "ambient" {
+		t.Fatalf("CUSTOM = %q, want ambient", got)
+	}
+	if got := envValue(env, "HOME"); got != "/Users/example" {
+		t.Fatalf("HOME = %q, want inherited home", got)
+	}
+	if got := envValue(env, "TOKEN"); got != "scoped" {
+		t.Fatalf("TOKEN = %q, want scoped", got)
+	}
+	if got := envValue(env, "SECRET"); got != "scoped" {
+		t.Fatalf("SECRET = %q, want scoped", got)
+	}
+	if got := envValue(env, "HTTP_PROXY"); got != "http://127.0.0.1:9" {
+		t.Fatalf("HTTP_PROXY = %q, want deny proxy", got)
+	}
+}
+
 func TestCommandWithRequestAppliesContainment(t *testing.T) {
 	runtimeDir := t.TempDir()
 	runner := &realCmdRunner{runtime: hostRuntime{}}

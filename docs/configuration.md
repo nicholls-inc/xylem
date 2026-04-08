@@ -344,10 +344,10 @@ harness:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `harness.runtime.isolation` | string | `workspace` | `workspace` rewrites `HOME`, `TMPDIR`, XDG dirs, and git config paths into worktree-local runtime directories for autonomous execution. `off` disables that containment layer. |
-| `harness.runtime.network.default` | string | operation-specific | Fallback network mode. Valid values: `inherit`, `deny`. `deny` applies the filtered runtime environment plus loopback blackhole proxy settings; it is not an OS-level firewall. |
+| `harness.runtime.network.default` | string | operation-specific | Fallback network mode. Valid values: `inherit`, `deny`. `deny` rewrites common proxy variables to loopback blackholes; when workspace isolation is enabled the base env also stays filtered, but `off` isolation preserves the ambient env. It is not an OS-level firewall. |
 | `harness.runtime.network.prompt` | string | `inherit` | Network mode for prompt and prompt-only runs. |
-| `harness.runtime.network.command` | string | `deny` | Network mode for command phases. `deny` keeps the constrained runtime environment and points common proxy variables at loopback blackholes. |
-| `harness.runtime.network.gate` | string | `deny` | Network mode for command gates. `deny` keeps the constrained runtime environment and points common proxy variables at loopback blackholes. |
+| `harness.runtime.network.command` | string | `deny` | Network mode for command phases. `deny` points common proxy variables at loopback blackholes, while any workspace isolation settings still control whether the base env is filtered or ambient. |
+| `harness.runtime.network.gate` | string | `deny` | Network mode for command gates. `deny` points common proxy variables at loopback blackholes, while any workspace isolation settings still control whether the base env is filtered or ambient. |
 | `harness.runtime.secrets` | list | `[]` | Additional secret bindings that are injected only when their selectors match the provider, workflow, phase, and operation. |
 
 **Runtime secret fields:**

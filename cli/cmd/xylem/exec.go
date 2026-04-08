@@ -183,8 +183,9 @@ func (hostRuntime) Apply(cmd *exec.Cmd, req containment.Request) error {
 }
 
 func buildContainedEnv(base []string, req containment.Request) ([]string, error) {
-	env := filterRuntimeBaseEnv(base)
+	env := append([]string(nil), base...)
 	if req.Isolation == containment.IsolationWorkspace {
+		env = filterRuntimeBaseEnv(base)
 		homeDir := filepath.Join(req.RuntimeDir, "home")
 		tmpDir := filepath.Join(req.RuntimeDir, "tmp")
 		cacheDir := filepath.Join(req.RuntimeDir, "xdg", "cache")
