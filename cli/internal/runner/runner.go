@@ -489,7 +489,11 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				}
 				attempt := providerAttempt(&p, vessel.GateRetries)
 				cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, sk, &p, harnessContent, provider, rendered, attempt)
-				output, runErr = r.Runner.RunPhase(ctx, worktreePath, phaseStdin, cmd, args...)
+				var stdinContent string
+				if phaseStdin != nil {
+					stdinContent = rendered
+				}
+				output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
 			}
 
 			// Shared: Write phase output
@@ -746,7 +750,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		return "failed"
 	}
 
-	output, runErr := r.Runner.RunPhase(ctx, worktreePath, strings.NewReader(prompt), cmd, args...)
+	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
 	if checkProtectedSurfaces {
 		if err := r.verifyProtectedSurfaces(vessel, workflow.Phase{Name: "prompt-only"}, worktreePath, beforeSnapshot); err != nil {
 			r.failVessel(vessel.ID, err.Error())
@@ -1234,7 +1238,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			attempt := providerAttempt(&p, gateRetries)
 			cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, wf, &p, harnessContent, provider, rendered, attempt)
-			output, runErr = r.Runner.RunPhase(ctx, worktreePath, phaseStdin, cmd, args...)
+			var stdinContent string
+			if phaseStdin != nil {
+				stdinContent = rendered
+			}
+			output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
 		}
 
 		// Write output file.
@@ -1977,6 +1985,50 @@ func (r *Runner) runtimeSleep(ctx context.Context, delay time.Duration) error {
 		return err
 	}
 	return nil
+}
+
+const (
+	rateLimitMaxRetries  = 3
+	rateLimitBaseBackoff = 30 * time.Second
+)
+
+// isRateLimitError reports whether the error indicates an API rate limit (HTTP 429).
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "rate_limit_error")
+}
+
+// runPhaseWithRateLimitRetry wraps RunPhase with retry logic for API rate limit
+// errors (HTTP 429). It retries up to rateLimitMaxRetries times with exponential
+// backoff (30s, 60s, 120s) before returning the final error.
+// stdinContent is re-wrapped in a fresh strings.Reader for each attempt;
+// pass "" for nil stdin.
+func (r *Runner) runPhaseWithRateLimitRetry(
+	ctx context.Context, dir, stdinContent, cmd string, args []string,
+) ([]byte, error) {
+	for attempt := 0; attempt <= rateLimitMaxRetries; attempt++ {
+		var stdin io.Reader
+		if stdinContent != "" {
+			stdin = strings.NewReader(stdinContent)
+		}
+		output, err := r.Runner.RunPhase(ctx, dir, stdin, cmd, args...)
+		if err == nil || !isRateLimitError(err) {
+			return output, err
+		}
+		if attempt == rateLimitMaxRetries {
+			return output, err
+		}
+		backoff := rateLimitBaseBackoff * time.Duration(1<<uint(attempt))
+		log.Printf("rate limit error (attempt %d/%d), retrying after %v: %v",
+			attempt+1, rateLimitMaxRetries+1, backoff, err)
+		if sleepErr := r.runtimeSleep(ctx, backoff); sleepErr != nil {
+			return nil, sleepErr
+		}
+	}
+	// unreachable, but satisfies the compiler
+	return nil, nil
 }
 
 // buildPhaseArgs constructs the claude CLI arguments for a phase invocation.

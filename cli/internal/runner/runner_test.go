@@ -4818,3 +4818,200 @@ func TestSmoke_WS6S11_ErrorRecordedBeforeEnd(t *testing.T) {
 		t.Fatal("phase span end time not set")
 	}
 }
+
+func TestIsRateLimitError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil error", nil, false},
+		{"generic error", errors.New("exit status 1"), false},
+		{"rate limit error", errors.New(`API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`), true},
+		{"rate_limit_error substring", errors.New("rate_limit_error"), true},
+		{"unrelated 429 in message", errors.New("processed 429 items"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRateLimitError(tt.err); got != tt.want {
+				t.Errorf("isRateLimitError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// setupDTUClock creates a valid DTU state file so runtimeSleep advances a
+// virtual clock instead of sleeping for real. Returns the state file path.
+func setupDTUClock(t *testing.T) string {
+	t.Helper()
+	base := t.TempDir()
+	stateDir := filepath.Join(base, "dtu", "test-universe")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("create DTU state dir: %v", err)
+	}
+	statePath := filepath.Join(stateDir, "state.json")
+	if err := os.WriteFile(statePath, []byte(`{"universe_id":"test-universe","version":"v1","metadata":{"name":"test"},"clock":{}}`), 0o644); err != nil {
+		t.Fatalf("write DTU state: %v", err)
+	}
+	return statePath
+}
+
+func TestDrainRateLimitRetrySucceeds(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", setupDTUClock(t))
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "implement", promptContent: "Fix the bug", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var callCount int32
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(dir, prompt, name string, args ...string) ([]byte, error, bool) {
+			n := atomic.AddInt32(&callCount, 1)
+			if n <= 2 {
+				return nil, errors.New(`API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`), true
+			}
+			return []byte("success output"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("Completed = %d, want 1", result.Completed)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 3 {
+		t.Errorf("phase calls = %d, want 3 (1 initial + 2 retries then success)", got)
+	}
+}
+
+func TestDrainRateLimitRetryExhausted(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", setupDTUClock(t))
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "implement", promptContent: "Fix the bug", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	rateLimitErr := errors.New(`API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`)
+	var callCount int32
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(dir, prompt, name string, args ...string) ([]byte, error, bool) {
+			atomic.AddInt32(&callCount, 1)
+			return nil, rateLimitErr, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", result.Failed)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 4 {
+		t.Errorf("phase calls = %d, want 4 (1 initial + 3 retries)", got)
+	}
+
+	vessels, _ := q.List()
+	if vessels[0].State != queue.StateFailed {
+		t.Errorf("vessel state = %s, want failed", vessels[0].State)
+	}
+	if !strings.Contains(vessels[0].Error, "rate_limit_error") {
+		t.Errorf("vessel error = %q, want to contain rate_limit_error", vessels[0].Error)
+	}
+}
+
+func TestDrainNonRateLimitErrorNotRetried(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "implement", promptContent: "Fix the bug", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	var callCount int32
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(dir, prompt, name string, args ...string) ([]byte, error, bool) {
+			atomic.AddInt32(&callCount, 1)
+			return nil, errors.New("exit status 1"), true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Failed != 1 {
+		t.Errorf("Failed = %d, want 1", result.Failed)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 1 {
+		t.Errorf("phase calls = %d, want 1 (no retry for non-rate-limit error)", got)
+	}
+}
+
+func TestDrainPromptOnlyRateLimitRetry(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", setupDTUClock(t))
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makePromptVessel(1, "Fix the null pointer"))
+
+	var callCount int32
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(dir, prompt, name string, args ...string) ([]byte, error, bool) {
+			n := atomic.AddInt32(&callCount, 1)
+			if n <= 1 {
+				return nil, errors.New(`API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`), true
+			}
+			return []byte("fixed"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Completed != 1 {
+		t.Errorf("Completed = %d, want 1", result.Completed)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 2 {
+		t.Errorf("phase calls = %d, want 2 (1 rate limit + 1 success)", got)
+	}
+}
