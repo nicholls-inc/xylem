@@ -54,7 +54,15 @@ Key types:
 - **Workflow** (`workflow` package) — YAML-defined multi-phase execution plan loaded from `.xylem/workflows/`
 - **Gate** (`gate` package) — inter-phase quality checks: `command` (run shell command) or `label` (poll GitHub for label, vessel enters `waiting` state)
 
-The `runner` drives phase execution: renders Go templates into prompts, pipes them to `claude -p` via stdin, persists outputs to `.xylem/phases/<id>/`, and handles gate retries and label-wait suspension.
+The `runner` drives phase execution: renders Go templates into prompts, compiles a structured context view for each phase via `ctxmgr`, pipes prompts to `claude -p` via stdin, persists outputs to `.xylem/phases/<id>/`, and handles gate retries and label-wait suspension.
+
+Structured runner artifacts include:
+- `<phase>.context.json` — compiled context manifest showing selected inputs, strategy, and compaction outcome
+- `progress_<vessel>.json` — durable per-vessel state (plan, checkpoints, unresolved items, verification, approvals, phase output paths)
+- `handoff_<vessel>_latest.json` plus timestamped handoff snapshots — structured resume state for waiting/resumed vessels
+- `summary.json` — terminal summary, including retention metadata and durable artifact paths
+
+Retention follows `cleanup_after`: `summary.json`, `progress_<vessel>.json`, `handoff_<vessel>_latest.json`, and raw prompt/output/command artifacts are durable; historical handoff snapshots and `*.context.json` files expire once they age past the configured window.
 
 ### Agent harness library (`cli/internal/`)
 

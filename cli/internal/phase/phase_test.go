@@ -132,6 +132,19 @@ func TestRenderPrompt(t *testing.T) {
 			want: "Vessel: issue-42 from github",
 		},
 		{
+			name:     "renders compiled context data",
+			template: "Context: {{.Context.Strategy}} {{.Context.ManifestPath}} {{.Context.Resumed}} {{.Context.Compiled}}",
+			data: TemplateData{
+				Context: ContextData{
+					ManifestPath: "phases/issue-42/plan.context.json",
+					Strategy:     "compress",
+					Compiled:     "context block",
+					Resumed:      true,
+				},
+			},
+			want: "Context: compress phases/issue-42/plan.context.json true context block",
+		},
+		{
 			name:     "template syntax error",
 			template: "{{.BadSyntax",
 			data:     TemplateData{},
@@ -242,6 +255,22 @@ func TestRenderPromptTruncation(t *testing.T) {
 		}
 	})
 
+	t.Run("Compiled context exceeding limit is truncated", func(t *testing.T) {
+		data := TemplateData{
+			Context: ContextData{
+				Compiled: longString(MaxCompiledContextLen + 200),
+			},
+		}
+		got, err := RenderPrompt("{{.Context.Compiled}}", data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		suffix := fmt.Sprintf(TruncationSuffix, MaxCompiledContextLen)
+		if !strings.HasSuffix(got, suffix) {
+			t.Fatalf("expected truncation suffix")
+		}
+	})
+
 	t.Run("only large PreviousOutputs value is truncated", func(t *testing.T) {
 		shortVal := "short output"
 		longVal := longString(MaxPreviousOutputLen + 100)
@@ -279,11 +308,13 @@ func TestPrepareDataDoesNotMutateOriginal(t *testing.T) {
 			"analyze": strings.Repeat("x", MaxPreviousOutputLen+100),
 		},
 		GateResult: strings.Repeat("y", MaxGateResultLen+100),
+		Context:    ContextData{Compiled: strings.Repeat("w", MaxCompiledContextLen+100)},
 		Issue:      IssueData{Body: strings.Repeat("z", MaxIssueBodyLen+100)},
 	}
 
 	originalAnalyzeLen := len(original.PreviousOutputs["analyze"])
 	originalGateLen := len(original.GateResult)
+	originalContextLen := len(original.Context.Compiled)
 	originalBodyLen := len(original.Issue.Body)
 
 	_ = prepareData(original)
@@ -293,6 +324,9 @@ func TestPrepareDataDoesNotMutateOriginal(t *testing.T) {
 	}
 	if len(original.GateResult) != originalGateLen {
 		t.Fatal("prepareData mutated original GateResult")
+	}
+	if len(original.Context.Compiled) != originalContextLen {
+		t.Fatal("prepareData mutated original Context.Compiled")
 	}
 	if len(original.Issue.Body) != originalBodyLen {
 		t.Fatal("prepareData mutated original Issue.Body")

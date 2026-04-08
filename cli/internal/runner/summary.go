@@ -44,9 +44,18 @@ type VesselSummary struct {
 	BudgetMaxTokens  *int     `json:"budget_max_tokens,omitempty"`
 	BudgetExceeded   bool     `json:"budget_exceeded"`
 
-	EvidenceManifestPath string `json:"evidence_manifest_path,omitempty"`
+	EvidenceManifestPath string             `json:"evidence_manifest_path,omitempty"`
+	ProgressPath         string             `json:"progress_path,omitempty"`
+	HandoffPath          string             `json:"handoff_path,omitempty"`
+	Retention            *ArtifactRetention `json:"retention,omitempty"`
 
 	Note string `json:"note"`
+}
+
+type ArtifactRetention struct {
+	CleanupAfter string   `json:"cleanup_after,omitempty"`
+	Durable      []string `json:"durable,omitempty"`
+	Expirable    []string `json:"expirable,omitempty"`
 }
 
 // PhaseSummary records the outcome of a single phase.
@@ -70,6 +79,7 @@ type vesselRunState struct {
 	phases    []PhaseSummary
 
 	costTracker *cost.Tracker
+	structured  *structuredState
 	vesselID    string
 	source      string
 	workflow    string

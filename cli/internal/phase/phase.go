@@ -8,11 +8,12 @@ import (
 
 // Truncation limits (constants, not configurable).
 const (
-	MaxPreviousOutputLen = 16000
-	MaxGateResultLen     = 8000
-	MaxIssueBodyLen      = 32000
-	MaxReporterOutputLen = 64000
-	TruncationSuffix     = "\n\n[... output truncated at %d characters]"
+	MaxPreviousOutputLen  = 16000
+	MaxGateResultLen      = 8000
+	MaxIssueBodyLen       = 32000
+	MaxReporterOutputLen  = 64000
+	MaxCompiledContextLen = 16000
+	TruncationSuffix      = "\n\n[... output truncated at %d characters]"
 )
 
 // TemplateData holds all data available to phase prompt templates.
@@ -21,7 +22,16 @@ type TemplateData struct {
 	Phase           PhaseData
 	PreviousOutputs map[string]string // phase name → output text
 	GateResult      string            // most recent gate command output
+	Context         ContextData
 	Vessel          VesselData
+}
+
+// ContextData describes the compiled context artifact prepared for a phase.
+type ContextData struct {
+	ManifestPath string `json:"manifest_path,omitempty"`
+	Strategy     string `json:"strategy,omitempty"`
+	Compiled     string `json:"compiled,omitempty"`
+	Resumed      bool   `json:"resumed,omitempty"`
 }
 
 // IssueData describes the issue being worked on.
@@ -68,6 +78,7 @@ func prepareData(data TemplateData) TemplateData {
 
 	out.GateResult = TruncateOutput(data.GateResult, MaxGateResultLen)
 	out.Issue.Body = TruncateOutput(data.Issue.Body, MaxIssueBodyLen)
+	out.Context.Compiled = TruncateOutput(data.Context.Compiled, MaxCompiledContextLen)
 
 	return out
 }

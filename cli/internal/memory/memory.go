@@ -303,16 +303,29 @@ func (s *Store) Delete(memType MemoryType, key string) error {
 	return nil
 }
 
+// OperatorApproval records an operator decision that should survive resumes.
+type OperatorApproval struct {
+	ApprovedBy string    `json:"approved_by"`
+	Reason     string    `json:"reason,omitempty"`
+	ApprovedAt time.Time `json:"approved_at"`
+}
+
 // HandoffArtifact captures session outcome for structured handoff between
 // sessions.
 type HandoffArtifact struct {
-	MissionID  string    `json:"mission_id"`
-	SessionID  string    `json:"session_id"`
-	Completed  []string  `json:"completed,omitempty"`
-	Failed     []string  `json:"failed,omitempty"`
-	Unresolved []string  `json:"unresolved,omitempty"`
-	NextSteps  []string  `json:"next_steps,omitempty"`
-	CreatedAt  time.Time `json:"created_at"`
+	MissionID    string             `json:"mission_id"`
+	SessionID    string             `json:"session_id"`
+	CurrentPhase string             `json:"current_phase,omitempty"`
+	Completed    []string           `json:"completed,omitempty"`
+	Failed       []string           `json:"failed,omitempty"`
+	Unresolved   []string           `json:"unresolved,omitempty"`
+	NextSteps    []string           `json:"next_steps,omitempty"`
+	Plan         string             `json:"plan,omitempty"`
+	Checkpoints  []string           `json:"checkpoints,omitempty"`
+	PhaseOutputs map[string]string  `json:"phase_outputs,omitempty"`
+	Verification []string           `json:"verification,omitempty"`
+	Approvals    []OperatorApproval `json:"approvals,omitempty"`
+	CreatedAt    time.Time          `json:"created_at"`
 }
 
 // NewHandoff creates a HandoffArtifact stamped with the current time.

@@ -425,10 +425,20 @@ func TestStorePathTraversal(t *testing.T) {
 func TestHandoffSaveLoad(t *testing.T) {
 	dir := t.TempDir()
 	h := NewHandoff("m1", "s1")
+	h.CurrentPhase = "implement"
 	h.Completed = []string{"task-a"}
 	h.Failed = []string{"task-b"}
 	h.Unresolved = []string{"task-c"}
 	h.NextSteps = []string{"retry task-b"}
+	h.Plan = "1. inspect\n2. patch\n3. verify"
+	h.Checkpoints = []string{"plan complete"}
+	h.PhaseOutputs = map[string]string{"plan": "plan.output"}
+	h.Verification = []string{"go test ./..."}
+	h.Approvals = []OperatorApproval{{
+		ApprovedBy: "operator",
+		Reason:     "manual gate release",
+		ApprovedAt: time.Now().UTC(),
+	}}
 
 	if err := h.Save(dir); err != nil {
 		t.Fatalf("save: %v", err)
@@ -442,6 +452,9 @@ func TestHandoffSaveLoad(t *testing.T) {
 	if loaded.MissionID != "m1" || loaded.SessionID != "s1" {
 		t.Fatalf("id mismatch: %+v", loaded)
 	}
+	if loaded.CurrentPhase != "implement" {
+		t.Fatalf("current phase mismatch: %q", loaded.CurrentPhase)
+	}
 	if len(loaded.Completed) != 1 || loaded.Completed[0] != "task-a" {
 		t.Fatalf("completed mismatch: %v", loaded.Completed)
 	}
@@ -453,6 +466,21 @@ func TestHandoffSaveLoad(t *testing.T) {
 	}
 	if len(loaded.Unresolved) != 1 || loaded.Unresolved[0] != "task-c" {
 		t.Fatalf("unresolved mismatch: %v", loaded.Unresolved)
+	}
+	if loaded.Plan != "1. inspect\n2. patch\n3. verify" {
+		t.Fatalf("plan mismatch: %q", loaded.Plan)
+	}
+	if len(loaded.Checkpoints) != 1 || loaded.Checkpoints[0] != "plan complete" {
+		t.Fatalf("checkpoints mismatch: %v", loaded.Checkpoints)
+	}
+	if loaded.PhaseOutputs["plan"] != "plan.output" {
+		t.Fatalf("phase_outputs mismatch: %v", loaded.PhaseOutputs)
+	}
+	if len(loaded.Verification) != 1 || loaded.Verification[0] != "go test ./..." {
+		t.Fatalf("verification mismatch: %v", loaded.Verification)
+	}
+	if len(loaded.Approvals) != 1 || loaded.Approvals[0].ApprovedBy != "operator" {
+		t.Fatalf("approvals mismatch: %v", loaded.Approvals)
 	}
 	if loaded.CreatedAt.IsZero() {
 		t.Fatal("expected non-zero CreatedAt")
