@@ -1,1 +1,1 @@
-Plan fix for issue {{.Issue.Number}}: {{.Issue.Title}}.
+Plan a fix for issue #{{.Issue.Number}}: {{.Issue.Title}}.

@@ -1,1 +1,1 @@
-Implement fix for issue {{.Issue.Number}}: {{.Issue.Title}}.
+This prompt should never run because the tamper phase mutates a protected surface.

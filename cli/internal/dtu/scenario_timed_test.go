@@ -106,6 +106,7 @@ func TestScenarioIssueLabelGateTimesOut(t *testing.T) {
 	issue := state.RepositoryBySlug("owner/repo").IssueByNumber(3)
 	if issue == nil {
 		t.Fatal("IssueByNumber(3) = nil")
+		return
 	}
 	if len(issue.Comments) != 2 {
 		t.Fatalf("len(issue.Comments) = %d, want 2", len(issue.Comments))

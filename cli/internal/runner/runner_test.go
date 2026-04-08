@@ -4620,6 +4620,7 @@ func TestCheckHungVessels_TimesOut(t *testing.T) {
 	vessel, _ := q.Dequeue() // transitions to running, sets StartedAt
 	if vessel == nil {
 		t.Fatal("expected dequeued vessel")
+		return
 	}
 
 	// Backdate StartedAt to simulate a hung vessel
@@ -4696,6 +4697,7 @@ func TestCheckHungVessels_CleansUpWorktree(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	if vessel == nil {
 		t.Fatal("expected dequeued vessel")
+		return
 	}
 	// Preserve worktree path after dequeue
 	vessel.WorktreePath = "/tmp/some-worktree"

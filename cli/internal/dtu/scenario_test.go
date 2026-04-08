@@ -380,6 +380,7 @@ func readIssueLabels(t *testing.T, store *dtu.Store, repoSlug string, number int
 	issue := repo.IssueByNumber(number)
 	if issue == nil {
 		t.Fatalf("IssueByNumber(%d) = nil", number)
+		return nil
 	}
 	return append([]string(nil), issue.Labels...)
 }
@@ -395,6 +396,7 @@ func readPRLabels(t *testing.T, store *dtu.Store, repoSlug string, number int) [
 	pr := repo.PullRequestByNumber(number)
 	if pr == nil {
 		t.Fatalf("PullRequestByNumber(%d) = nil", number)
+		return nil
 	}
 	return append([]string(nil), pr.Labels...)
 }
@@ -1602,6 +1604,7 @@ func TestScenarioIssueHappyPath(t *testing.T) {
 	issue := state.RepositoryBySlug("owner/repo").IssueByNumber(1)
 	if issue == nil {
 		t.Fatal("IssueByNumber(1) = nil")
+		return
 	}
 	// Expect 3 comments: phase plan complete, phase implement complete, vessel completed summary
 	if len(issue.Comments) != 3 {

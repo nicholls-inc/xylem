@@ -95,6 +95,7 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 	}
 	if vessel == nil {
 		t.Fatal("Dequeue() = nil, want vessel")
+		return
 	}
 	if vessel.State != queue.StateRunning {
 		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateRunning)
@@ -164,6 +165,7 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 	}
 	if newVessel == nil {
 		t.Fatal("second Dequeue() = nil, want vessel")
+		return
 	}
 	if newVessel.ID != "manual-recovery-1" {
 		t.Fatalf("newVessel.ID = %q, want %q", newVessel.ID, "manual-recovery-1")

@@ -18,3 +18,11 @@ max_turns: 5
 timeout: "1m"
 state_dir: ".xylem"
 default_branch: main
+harness:
+  audit_log: "audit.jsonl"
+  protected_surfaces:
+    paths:
+      - ".xylem/HARNESS.md"
+      - ".xylem.yml"
+      - ".xylem/workflows/*.yaml"
+      - ".xylem/prompts/*/*.md"

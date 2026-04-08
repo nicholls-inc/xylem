@@ -1,5 +1,5 @@
 name: fix-bug-allow
-description: "WS1 happy-path workflow"
+description: WS1 happy-path smoke workflow with prompt phases.
 phases:
   - name: plan
     prompt_file: .xylem/prompts/fix-bug-allow/plan.md

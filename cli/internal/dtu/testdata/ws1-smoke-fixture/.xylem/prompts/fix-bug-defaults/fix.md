@@ -1,1 +1,1 @@
-Fix issue {{.Issue.Number}}: {{.Issue.Title}}.
+Fix issue #{{.Issue.Number}} using the default harness settings.
