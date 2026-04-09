@@ -721,12 +721,12 @@ func TestPhaseActionType(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "prompt phase",
+			name:  "S25 prompt phase",
 			phase: &workflow.Phase{Name: "plan"},
 			want:  "phase_execute",
 		},
 		{
-			name:  "command phase",
+			name:  "S24 command phase",
 			phase: &workflow.Phase{Name: "lint", Type: "command"},
 			want:  "external_command",
 		},
@@ -1218,14 +1218,6 @@ func TestSmoke_S23_AuditLogRecordsSurfaceViolations(t *testing.T) {
 		}
 	}
 	assert.True(t, found)
-}
-
-func TestSmoke_S24_PhaseActionTypeReturnsExternalCommandForCommandPhases(t *testing.T) {
-	assert.Equal(t, "external_command", phaseActionType(&workflow.Phase{Type: "command"}))
-}
-
-func TestSmoke_S25_PhaseActionTypeReturnsPhaseExecuteForPromptPhases(t *testing.T) {
-	assert.Equal(t, "phase_execute", phaseActionType(&workflow.Phase{}))
 }
 
 func TestSmoke_S26_FormatViolationsProducesHumanReadableOutput(t *testing.T) {
@@ -1885,18 +1877,24 @@ func TestSmoke_WS6_S5_BudgetExceededShortCircuitsBeforeGate(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("Failed = %d, want 1", result.Failed)
-	}
-	if got := countRunOutputCalls(cmdRunner, "sh"); got != 0 {
-		t.Fatalf("countRunOutputCalls(sh) = %d, want 0", got)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, 0, countRunOutputCalls(cmdRunner, "sh"))
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "budget exceeded")
+
+	summary := loadSummary(t, cfg.StateDir, "issue-1")
+	assert.Equal(t, "failed", summary.State)
+	assert.True(t, summary.BudgetExceeded)
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "failed", summary.Phases[0].Status)
+	assert.Equal(t, "command", summary.Phases[0].GateType)
 }
 
 func TestSmoke_WS6_S12_PromptOnlyVesselGetsVesselSpan(t *testing.T) {
+	tracer, rec := newTestTracer(t)
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1905,13 +1903,19 @@ func TestSmoke_WS6_S12_PromptOnlyVesselGetsVesselSpan(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only span"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
+	r.Tracer = tracer
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	drainSpan := endedSpanByName(t, rec, "drain_run")
+	vesselSpan := endedSpanByName(t, rec, "vessel:prompt-1")
+	assert.Equal(t, drainSpan.SpanContext().TraceID(), vesselSpan.Parent().TraceID())
+	assert.Equal(t, drainSpan.SpanContext().SpanID(), vesselSpan.Parent().SpanID())
+	attrs := spanAttrMap(vesselSpan)
+	assert.Equal(t, "prompt-1", attrs["xylem.vessel.id"])
+	assert.Equal(t, "manual", attrs["xylem.vessel.source"])
+	assert.Equal(t, "", attrs["xylem.vessel.workflow"])
 }
 
 func TestSmoke_WS6_S13_PromptOnlyVesselGetsCostTracking(t *testing.T) {
@@ -1921,8 +1925,9 @@ func TestSmoke_WS6_S13_PromptOnlyVesselGetsCostTracking(t *testing.T) {
 	setPricedModel(cfg)
 	setBudget(cfg, 10.0, 10000)
 
+	vessel := makePromptVessel(1, "prompt-only cost tracking")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only cost tracking"))
+	_, _ = q.Enqueue(vessel)
 
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -1930,57 +1935,51 @@ func TestSmoke_WS6_S13_PromptOnlyVesselGetsCostTracking(t *testing.T) {
 		},
 	}
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	vrs := newVesselRunState(cfg, vessel, time.Now().UTC())
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	outcome := r.runPromptOnly(context.Background(), vessel, dir, &source.Manual{}, vrs)
+	assert.Equal(t, "completed", outcome)
+	require.NotNil(t, vrs.costTracker)
+	assert.Positive(t, vrs.costTracker.TotalTokens())
+	assert.Positive(t, vrs.costTracker.TotalCost())
 
 	summary := loadSummary(t, cfg.StateDir, "prompt-1")
-	if summary.TotalCostUSDEst <= 0 {
-		t.Fatalf("summary.TotalCostUSDEst = %f, want > 0", summary.TotalCostUSDEst)
-	}
+	assert.Positive(t, summary.TotalTokensEst)
+	assert.Positive(t, summary.TotalCostUSDEst)
 }
 
 func TestSmoke_WS6_S14_PromptOnlyVesselGetsSurfaceVerification(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	protectedPath := filepath.Join(dir, ".xylem.yml")
+	originalContents := "repo: owner/repo\n"
 
-	if err := os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(.xylem.yml) error = %v", err)
-	}
+	require.NoError(t, os.WriteFile(protectedPath, []byte(originalContents), 0o644))
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only surfaces"))
 
+	var sawOriginalContents bool
 	cmdRunner := &mockCmdRunner{
 		runPhaseHook: func(dirPath, prompt, name string, args ...string) ([]byte, error, bool) {
-			if err := os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
-				return nil, err, true
-			}
-			return []byte("tampered"), nil, true
+			data, err := os.ReadFile(protectedPath)
+			require.NoError(t, err)
+			sawOriginalContents = string(data) == originalContents
+			return []byte("no protected mutations"), nil, true
 		},
 	}
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("Failed = %d, want 1", result.Failed)
-	}
-	vessels, err := q.List()
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if !strings.Contains(vessels[0].Error, "violated protected surfaces") {
-		t.Fatalf("vessel.Error = %q, want protected surface violation", vessels[0].Error)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	assert.True(t, sawOriginalContents)
+	require.Len(t, cmdRunner.phaseCalls, 1)
+	assert.Equal(t, queue.StateCompleted, loadSingleVessel(t, q).State)
+	data, readErr := os.ReadFile(protectedPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, originalContents, string(data))
 }
 
 func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
@@ -2027,17 +2026,11 @@ func TestSmoke_WS6_S16_PromptOnlyVesselNoEvidence(t *testing.T) {
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	manifestPath := filepath.Join(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
-	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
-		t.Fatalf("expected no evidence manifest, got err=%v", err)
-	}
+	assert.NoFileExists(t, manifestPath)
 }
 
 func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
@@ -2050,20 +2043,13 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
+	assert.FileExists(t, filepath.Join(cfg.StateDir, "phases", "prompt-1", summaryFileName))
 	summary := loadSummary(t, cfg.StateDir, "prompt-1")
-	if summary.State != "completed" {
-		t.Fatalf("summary.State = %q, want completed", summary.State)
-	}
-	if summary.VesselID != "prompt-1" {
-		t.Fatalf("summary.VesselID = %q, want prompt-1", summary.VesselID)
-	}
+	assert.Equal(t, "completed", summary.State)
+	assert.Equal(t, "prompt-1", summary.VesselID)
 }
 
 func TestSmoke_WS6_S18_PromptOnlyVesselSummaryEmptyPhases(t *testing.T) {
@@ -4884,19 +4870,17 @@ func TestSmoke_WS6_S20_SinglePhaseResultHasPhaseSummary(t *testing.T) {
 		phaseOutputs: map[string][]byte{
 			"Single phase summary": []byte("done"),
 		},
+		runPhaseHook: func(dir, prompt, name string, args ...string) ([]byte, error, bool) {
+			time.Sleep(10 * time.Millisecond)
+			return nil, nil, false
+		},
 	}
 	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, cmdRunner)
 
 	result := r.runSinglePhase(context.Background(), vessel, wf, 0, map[string]string{}, phase.IssueData{}, "", dir, &source.Manual{}, vrs, true)
-	if result.phaseSummary.Name != "plan" {
-		t.Fatalf("phaseSummary.Name = %q, want plan", result.phaseSummary.Name)
-	}
-	if result.phaseSummary.Status != "completed" {
-		t.Fatalf("phaseSummary.Status = %q, want completed", result.phaseSummary.Status)
-	}
-	if result.phaseSummary.DurationMS < 0 {
-		t.Fatalf("phaseSummary.DurationMS = %d, want >= 0", result.phaseSummary.DurationMS)
-	}
+	assert.Equal(t, "plan", result.phaseSummary.Name)
+	assert.Equal(t, "completed", result.phaseSummary.Status)
+	assert.Greater(t, result.phaseSummary.DurationMS, int64(0))
 }
 
 func TestSmoke_WS6_S21_EvidenceClaimNilWhenNoGate(t *testing.T) {
@@ -4967,24 +4951,15 @@ func TestSmoke_WS6_S22_WaveResultsMergedAfterWgWait(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
-	if len(cmdRunner.phaseCalls) != 2 {
-		t.Fatalf("len(phaseCalls) = %d, want 2", len(cmdRunner.phaseCalls))
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	require.Len(t, cmdRunner.phaseCalls, 2)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
-	for i, phaseSummary := range summary.Phases {
-		if phaseSummary.Status != "completed" {
-			t.Fatalf("summary.Phases[%d].Status = %q, want completed", i, phaseSummary.Status)
-		}
+	require.Len(t, summary.Phases, 2)
+	assert.Equal(t, []string{"a", "b"}, []string{summary.Phases[0].Name, summary.Phases[1].Name})
+	for _, phaseSummary := range summary.Phases {
+		assert.Equal(t, "completed", phaseSummary.Status)
 	}
 }
 
@@ -5049,6 +5024,7 @@ func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
 }
 
 func TestSmoke_WS6_S24_VesselSpanContextPropagatedToGoroutines(t *testing.T) {
+	tracer, rec := newTestTracer(t)
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -5077,14 +5053,17 @@ func TestSmoke_WS6_S24_VesselSpanContextPropagatedToGoroutines(t *testing.T) {
 	r.Sources = map[string]source.Source{
 		"github-issue": makeGitHubSource(),
 	}
-	r.Tracer = nil
+	r.Tracer = tracer
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	for _, phaseName := range []string{"phase:root", "phase:left", "phase:right"} {
+		phaseSpan := endedSpanByName(t, rec, phaseName)
+		assert.Equal(t, vesselSpan.SpanContext().TraceID(), phaseSpan.Parent().TraceID(), phaseName)
+		assert.Equal(t, vesselSpan.SpanContext().SpanID(), phaseSpan.Parent().SpanID(), phaseName)
 	}
 }
 
@@ -5128,20 +5107,14 @@ func TestSmoke_WS6_S25_ConcurrentPhasesAllowOverspend(t *testing.T) {
 	}
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if summary.State != "completed" {
-		t.Fatalf("summary.State = %q, want completed", summary.State)
-	}
-	if !summary.BudgetExceeded {
-		t.Fatal("summary.BudgetExceeded = false, want true")
-	}
+	assert.Equal(t, "completed", summary.State)
+	assert.True(t, summary.BudgetExceeded)
+	assert.Greater(t, summary.TotalTokensEst, 150)
+	assert.Positive(t, summary.TotalCostUSDEst)
 }
 
 // --- P1-2: Command phase template validation ---

@@ -239,7 +239,6 @@ func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, exporter.shutdownCalled)
 }
-
 func TestDaemonLoopPeriodicUpgradeFiresAfterInterval(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
