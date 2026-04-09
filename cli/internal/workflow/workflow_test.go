@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func writeWorkflowFile(t *testing.T, dir, name, content string) string {
@@ -56,11 +59,7 @@ func chdirTemp(t *testing.T, dir string) {
 	t.Cleanup(func() { os.Chdir(orig) })
 }
 
-// TestWS6S27WorkflowGateWithoutEvidenceLoads verifies that a workflow gate
-// without evidence metadata still loads and leaves Gate.Evidence unset.
-//
-// Covers: WS6 S27.
-func TestWS6S27WorkflowGateWithoutEvidenceLoads(t *testing.T) {
+func TestSmoke_S11_GateWithoutEvidenceMetadataLoadsCleanlyWithNilEvidenceField(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
 	createPromptFile(t, dir, "prompts/analyze.md")
@@ -76,14 +75,147 @@ phases:
 `)
 
 	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	assert.Nil(t, got.Phases[0].Gate.Evidence)
+}
+
+func TestSmoke_S12_GateWithValidEvidenceMetadataParsesCorrectly(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "All tests pass"
+        level: behaviorally_checked
+        checker: "go test"
+        trust_boundary: "Package-level only"
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	require.NotNil(t, got.Phases[0].Gate.Evidence)
+
+	e := got.Phases[0].Gate.Evidence
+	assert.Equal(t, "All tests pass", e.Claim)
+	assert.Equal(t, "behaviorally_checked", e.Level)
+	assert.Equal(t, "go test", e.Checker)
+	assert.Equal(t, "Package-level only", e.TrustBoundary)
+}
+
+func TestSmoke_S13_GateWithInvalidEvidenceLevelIsRejectedByValidateGate(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "All tests pass"
+        level: high
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `high`)
+	assert.Contains(t, err.Error(), `gate evidence level "high" is not valid`)
+	assert.Contains(t, err.Error(), "must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ")
+}
+
+func TestLoadWorkflowGateRejectsUntypedEvidenceLevelKeyword(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "All tests pass"
+        level: untyped
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `gate evidence level "untyped" is not valid`)
+	requireErrorContains(t, err, "must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ")
+}
+
+func TestSmoke_S14_GateWithPartialEvidenceClaimAndLevelOnlyParsesWithoutError(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "Tests pass"
+        level: mechanically_checked
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	require.NotNil(t, got.Phases[0].Gate.Evidence)
+
+	e := got.Phases[0].Gate.Evidence
+	assert.Equal(t, "", e.Checker)
+	assert.Equal(t, "", e.TrustBoundary)
+}
+
+func TestLoadWorkflowGateWithEvidenceAndEmptyLevel(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "Analyzer ran"
+        checker: "go test"
+`)
+
+	got, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got.Phases[0].Gate == nil {
-		t.Fatal("Gate = nil, want non-nil gate")
+	if got.Phases[0].Gate == nil || got.Phases[0].Gate.Evidence == nil {
+		t.Fatal("Gate.Evidence = nil, want evidence metadata")
 	}
-	if got.Phases[0].Gate.Evidence != nil {
-		t.Fatalf("Gate.Evidence = %#v, want nil", got.Phases[0].Gate.Evidence)
+
+	if got.Phases[0].Gate.Evidence.Level != "" {
+		t.Fatalf("Evidence.Level = %q, want empty string", got.Phases[0].Gate.Evidence.Level)
 	}
 }
 
