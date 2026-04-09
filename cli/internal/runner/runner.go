@@ -2823,7 +2823,7 @@ func (r *Runner) logReporterError(action string, vesselID string, err error) {
 // the config source name stored in vessel Meta at scan time.
 func (r *Runner) sourceConfigFromMeta(v queue.Vessel) *config.SourceConfig {
 	name := r.sourceConfigNameFromMeta(v)
-	if name == "" {
+	if r.Config == nil || name == "" {
 		return nil
 	}
 	if sc, ok := r.Config.Sources[name]; ok {
@@ -2968,6 +2968,9 @@ func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 }
 
 func (r *Runner) resolveRepo(vessel queue.Vessel) string {
+	if sourceCfg := r.sourceConfigFromMeta(vessel); sourceCfg != nil && strings.TrimSpace(sourceCfg.Repo) != "" {
+		return strings.TrimSpace(sourceCfg.Repo)
+	}
 	src := r.resolveSourceForVessel(vessel)
 	switch s := src.(type) {
 	case *source.GitHub:
@@ -2977,6 +2980,8 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 	case *source.GitHubPREvents:
 		return s.Repo
 	case *source.GitHubMerge:
+		return s.Repo
+	case *source.Scheduled:
 		return s.Repo
 	default:
 		return ""

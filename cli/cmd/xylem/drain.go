@@ -3,12 +3,10 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"log/slog"
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 
@@ -132,12 +130,6 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {
 	sources := make(map[string]source.Source)
-	addSource := func(configName string, src source.Source) {
-		sources[configName] = src
-		if _, exists := sources[src.Name()]; !exists {
-			sources[src.Name()] = src
-		}
-	}
 	for name, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
 		case "github":
@@ -152,7 +144,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			addSource(name, gh)
+			registerSource(sources, name, gh.Name(), gh)
 		case "github-pr":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -165,7 +157,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			addSource(name, pr)
+			registerSource(sources, name, pr.Name(), pr)
 		case "github-pr-events":
 			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -187,7 +179,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			addSource(name, pre)
+			registerSource(sources, name, pre.Name(), pre)
 		case "github-merge":
 			mergeTasks := make(map[string]source.MergeTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -201,27 +193,24 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			addSource(name, gm)
+			registerSource(sources, name, gm.Name(), gm)
 		case "scheduled":
 			scheduledTasks := make(map[string]source.ScheduledTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
 				scheduledTasks[name] = source.ScheduledTask{
 					Workflow: t.Workflow,
+					Ref:      t.Ref,
 				}
-			}
-			scheduledDur, err := time.ParseDuration(srcCfg.Schedule)
-			if err != nil {
-				log.Printf("warn: skip scheduled source %q: parse schedule %q: %v", name, srcCfg.Schedule, err)
-				continue
 			}
 			scheduled := &source.Scheduled{
 				Repo:       srcCfg.Repo,
 				StateDir:   cfg.StateDir,
 				ConfigName: name,
-				Schedule:   scheduledDur,
+				Schedule:   srcCfg.Schedule,
 				Tasks:      scheduledTasks,
+				Queue:      q,
 			}
-			addSource(name, scheduled)
+			registerSource(sources, name, scheduled.Name(), scheduled)
 		case "schedule":
 			sched := &source.Schedule{
 				ConfigName: name,
@@ -230,10 +219,21 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				StateDir:   cfg.StateDir,
 				Queue:      q,
 			}
-			addSource(name, sched)
+			registerSource(sources, name, sched.Name(), sched)
 		}
 	}
 	return sources
+}
+
+func registerSource(sources map[string]source.Source, configName string, runtimeName string, src source.Source) {
+	if configName != "" {
+		sources[configName] = src
+	}
+	if runtimeName != "" {
+		if _, exists := sources[runtimeName]; !exists {
+			sources[runtimeName] = src
+		}
+	}
 }
 
 func buildReporter(cfg *config.Config, cmdRunner reporter.Runner) *reporter.Reporter {

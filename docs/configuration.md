@@ -135,7 +135,7 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 |-------|------|---------|----------|-------------|
 | `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`, `"scheduled"`. |
 | `repo` | string | -- | Yes (GitHub sources and `scheduled`) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
-| `schedule` | string | -- | Required for `scheduled` | Positive Go duration string (for example `1h`, `24h`) that controls how often xylem enqueues the source's task map. |
+| `schedule` | string | -- | Required for `scheduled` | Recurring cadence for per-task scheduled sources. Supports `@hourly`, `@daily`, `@weekly`, or any positive Go duration like `168h`. |
 | `cadence` | string | -- | Yes (`schedule`) | Recurrence for scheduled sources. Accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions. |
 | `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue each time a scheduled source fires. Scheduled sources define the workflow directly and do not use `tasks`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
@@ -151,6 +151,7 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 |-------|------|---------|----------|-------------|
 | `labels` | list of strings | -- | Required for `github` and `github-pr` | Labels that trigger this task. The item must have all listed labels to match. |
 | `workflow` | string | -- | Yes | Name of the workflow to invoke (e.g., `fix-bug`, `implement-feature`). Must not be empty or whitespace-only. Corresponds to a YAML file in `<state_dir>/workflows/`. |
+| `ref` | string | omitted | No | Optional stable task identifier stored in vessel metadata for recurring scheduled runs. Useful when downstream workflows want a task-level handle that remains stable across schedule windows. |
 | `status_labels` | object | omitted | No | Optional labels to apply as a vessel moves through queue states. Supported for `github` and `github-pr`. |
 | `label_gate_labels` | object | omitted | No | Optional labels to apply when a GitHub-backed vessel enters or exits a label-gate wait. Supported for `github` and `github-pr`. |
 | `on` | object | omitted | Required for `github-pr-events` | Event triggers for pull-request event scanning. Must include at least one trigger. |
@@ -162,6 +163,7 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 - `github` and `github-pr` also support `label_gate_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
+- `scheduled`: requires `workflow`; `ref` is optional metadata, and the source also requires `schedule`
 - `schedule`: does not use `tasks`; configure `cadence` and `workflow` directly on the source
 - `scheduled`: uses `tasks` plus `schedule`; optimized for recurring task-backed hygiene workflows such as `context-weight-audit`
 
@@ -196,21 +198,21 @@ Behavior:
 
 ### `scheduled`
 
-`scheduled` sources create recurring task-backed vessels on a fixed Go-duration cadence. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work.
+`scheduled` sources create recurring task-backed vessels on a fixed cadence. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work, and the computed vessel ref also dedupes against already-queued work.
 
 ```yaml
 sources:
-  context-weight-audit:
+  sota-gap:
     type: scheduled
     repo: owner/repo
-    schedule: 24h
+    schedule: "@weekly"
     tasks:
-      audit:
-        workflow: context-weight-audit
+      weekly-self-gap-analysis:
+        workflow: sota-gap-analysis
+        ref: sota-gap-analysis
 ```
 
-The built-in `context-weight-audit` workflow reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
-
+The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
 ### `status_labels`
 
 When `status_labels` is set, xylem records the configured labels in vessel metadata and applies them during source lifecycle hooks.
@@ -713,8 +715,11 @@ The following rules are enforced when loading `.xylem.yml`. If any rule fails, `
 | `github` and `github-pr` sources must have a `repo` in `owner/name` format | `source "<name>" (github): repo must be in owner/name format` |
 | `github-pr-events` sources must have a `repo` in `owner/name` format | `source "<name>" (github-pr-events): repo must be in owner/name format` |
 | `github-merge` sources must have a `repo` in `owner/name` format | `source "<name>" (github-merge): repo must be in owner/name format` |
-| `github`, `github-pr`, `github-pr-events`, and `github-merge` sources must have at least one task | `source "<name>" ...: at least one task is required` |
+| `scheduled` sources must have a `repo` in `owner/name` format | `source "<name>" (scheduled): repo must be in owner/name format` |
+| `scheduled` sources must declare a valid cadence | `source "<name>" (scheduled): schedule is invalid: ...` |
+| `github`, `github-pr`, `github-pr-events`, `github-merge`, and `scheduled` sources must have at least one task | `source "<name>" ...: at least one task is required` |
 | `github` and `github-pr` tasks must have at least one label | `source "<name>" task "<task>": must include at least one labels entry` |
+| `scheduled` tasks must include a `ref` | `source "<name>" task "<task>": ref is required for scheduled tasks` |
 | `github-pr-events` tasks must include an `on` block | `source "<name>" task "<task>": must include an 'on' block...` |
 | `github-pr-events` `on` blocks must include at least one trigger | `source "<name>" task "<task>": 'on' block must specify at least one trigger...` |
 | `github-pr-events` tasks with `review_submitted` or `commented` must specify an author filter | `source "<name>" task "<task>": tasks with review_submitted or commented must specify author_allow or author_deny to prevent self-trigger loops` |

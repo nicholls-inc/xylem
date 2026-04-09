@@ -4,15 +4,24 @@ cli/copilot
 cli/gh
 cli/xylem
 
-# Ignore everything under .xylem/ except control-plane definitions. The
-# control surfaces (workflows, prompts, HARNESS.md) must be tracked so
-# fresh worktrees — including .claude/worktrees/.daemon-root where the
-# daemon runs — can load them. Only operational state (phases/, audit
-# logs, queue files, daemon.pid, dtu/, eval/) stays ignored.
+# Ignore everything under .xylem/ except tracked control-plane definitions and
+# the checked-in SoTA snapshot state. Fresh worktrees — including
+# .claude/worktrees/.daemon-root where the daemon runs — must load these files,
+# while operational state (phases/, queue files, daemon.pid, dtu/) stays
+# ignored.
 .xylem/*
 !.xylem/HARNESS.md
-!.xylem/workflows/
+!.xylem/eval/
+!.xylem/eval/**
 !.xylem/prompts/
+!.xylem/prompts/**
+!.xylem/workflows/
+!.xylem/workflows/**
+!.xylem/state/
+.xylem/state/*
+!.xylem/state/.gitignore
+!.xylem/state/sota-gap-snapshot.json
+!.xylem/state/sota-gap-snapshot.schema.json
 
 # DTU checked-in fixtures intentionally seed .xylem scaffolding.
 !cli/internal/dtu/testdata/**/.xylem/

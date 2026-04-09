@@ -229,6 +229,41 @@ func TestScanExistingBranch(t *testing.T) {
 	}
 }
 
+func TestScanBuildsScheduledSource(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"sota-gap": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "@weekly",
+			Tasks: map[string]config.Task{
+				"sota": {Workflow: "sota-gap-analysis", Ref: "sota-gap-analysis"},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	s := New(cfg, q, newMock())
+
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan() error = %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("Added = %d, want 1", result.Added)
+	}
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(vessels) != 1 || vessels[0].Source != "scheduled" {
+		t.Fatalf("vessels = %#v, want one scheduled vessel", vessels)
+	}
+	if got := vessels[0].Meta["config_source"]; got != "sota-gap" {
+		t.Fatalf("config_source = %q, want sota-gap", got)
+	}
+}
+
 func TestScanExistingPR(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeConfig(dir)

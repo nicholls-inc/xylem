@@ -17,6 +17,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
+	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -345,6 +346,127 @@ func TestBuildDrainRunnerPropagatesProtectedSurfaces(t *testing.T) {
 	}
 	if got := wt.patterns; len(got) != 1 || got[0] != "docs/*.txt" {
 		t.Fatalf("protected surfaces = %#v, want %#v", got, []string{"docs/*.txt"})
+	}
+}
+
+func TestBuildSourceMapIncludesScheduledSource(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"sota-gap": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "@weekly",
+			Tasks: map[string]config.Task{
+				"weekly-self-gap-analysis": {
+					Workflow: "sota-gap-analysis",
+					Ref:      "sota-gap-analysis",
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	sources := buildSourceMap(cfg, q, newCmdRunner(cfg))
+	scheduled, ok := sources["sota-gap"]
+	if !ok {
+		t.Fatalf("scheduled source missing from source map: %#v", sources)
+	}
+	scheduledSource, ok := scheduled.(*source.Scheduled)
+	if !ok {
+		t.Fatalf("scheduled source type = %T, want *source.Scheduled", scheduled)
+	}
+	if scheduledSource.Repo != "owner/repo" {
+		t.Fatalf("scheduled source repo = %q, want owner/repo", scheduledSource.Repo)
+	}
+	if scheduledSource.Schedule != "@weekly" {
+		t.Fatalf("scheduled source schedule = %q, want @weekly", scheduledSource.Schedule)
+	}
+	task, ok := scheduledSource.Tasks["weekly-self-gap-analysis"]
+	if !ok {
+		t.Fatalf("scheduled task missing from source map: %#v", scheduledSource.Tasks)
+	}
+	if task.Workflow != "sota-gap-analysis" {
+		t.Fatalf("scheduled task workflow = %q, want sota-gap-analysis", task.Workflow)
+	}
+	if task.Ref != "sota-gap-analysis" {
+		t.Fatalf("scheduled task ref = %q, want sota-gap-analysis", task.Ref)
+	}
+	if _, ok := sources["scheduled"]; !ok {
+		t.Fatalf("scheduled runtime alias missing from source map: %#v", sources)
+	}
+}
+
+func TestBuildSourceMapPreservesDistinctScheduledConfigNames(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"sota-gap": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "@weekly",
+			Tasks: map[string]config.Task{
+				"weekly-self-gap-analysis": {
+					Workflow: "sota-gap-analysis",
+					Ref:      "sota-gap-analysis",
+				},
+			},
+		},
+		"release-gap": {
+			Type:     "scheduled",
+			Repo:     "owner/other-repo",
+			Schedule: "@daily",
+			Tasks: map[string]config.Task{
+				"daily-self-gap-analysis": {
+					Workflow: "sota-gap-analysis",
+					Ref:      "release-gap-analysis",
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	sources := buildSourceMap(cfg, q, newCmdRunner(cfg))
+	first, ok := sources["sota-gap"]
+	if !ok {
+		t.Fatalf("sota-gap source missing from source map: %#v", sources)
+	}
+	second, ok := sources["release-gap"]
+	if !ok {
+		t.Fatalf("release-gap source missing from source map: %#v", sources)
+	}
+	firstScheduled, ok := first.(*source.Scheduled)
+	if !ok {
+		t.Fatalf("sota-gap source type = %T, want *source.Scheduled", first)
+	}
+	secondScheduled, ok := second.(*source.Scheduled)
+	if !ok {
+		t.Fatalf("release-gap source type = %T, want *source.Scheduled", second)
+	}
+	if firstScheduled.Repo != "owner/repo" {
+		t.Fatalf("sota-gap repo = %q, want owner/repo", firstScheduled.Repo)
+	}
+	if secondScheduled.Repo != "owner/other-repo" {
+		t.Fatalf("release-gap repo = %q, want owner/other-repo", secondScheduled.Repo)
+	}
+}
+
+func TestBuildReporterUsesScheduledSourceRepo(t *testing.T) {
+	cfg := &config.Config{
+		Sources: map[string]config.SourceConfig{
+			"sota-gap": {
+				Type: "scheduled",
+				Repo: "owner/repo",
+			},
+		},
+	}
+
+	reporter := buildReporter(cfg, nil)
+	if reporter == nil {
+		t.Fatal("buildReporter() = nil, want reporter")
+	}
+	if reporter.Repo != "owner/repo" {
+		t.Fatalf("reporter repo = %q, want owner/repo", reporter.Repo)
 	}
 }
 

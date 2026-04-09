@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -140,18 +139,14 @@ func (s *Scanner) buildSources() []sourceEntry {
 			})
 		case "scheduled":
 			scheduledTasks := convertScheduledTasks(srcCfg.Tasks)
-			scheduledDur, err := time.ParseDuration(srcCfg.Schedule)
-			if err != nil {
-				log.Printf("warn: skip scheduled source %q: parse schedule %q: %v", name, srcCfg.Schedule, err)
-				continue
-			}
 			entries = append(entries, sourceEntry{
 				src: &source.Scheduled{
 					Repo:       srcCfg.Repo,
 					StateDir:   s.Config.StateDir,
 					ConfigName: name,
-					Schedule:   scheduledDur,
+					Schedule:   srcCfg.Schedule,
 					Tasks:      scheduledTasks,
+					Queue:      s.Queue,
 				},
 				configName: name,
 			})
@@ -213,6 +208,7 @@ func convertScheduledTasks(cfgTasks map[string]config.Task) map[string]source.Sc
 	for name, t := range cfgTasks {
 		tasks[name] = source.ScheduledTask{
 			Workflow: t.Workflow,
+			Ref:      t.Ref,
 		}
 	}
 	return tasks

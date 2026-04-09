@@ -17,14 +17,16 @@ import (
 
 type ScheduledTask struct {
 	Workflow string
+	Ref      string
 }
 
 type Scheduled struct {
 	Repo       string
 	StateDir   string
 	ConfigName string
-	Schedule   time.Duration
+	Schedule   string
 	Tasks      map[string]ScheduledTask
+	Queue      *queue.Queue
 }
 
 type scheduleState struct {
@@ -36,8 +38,12 @@ var safeScheduledPathComponent = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 func (s *Scheduled) Name() string { return "scheduled" }
 
 func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
-	if s.Schedule <= 0 {
-		return nil, fmt.Errorf("scheduled source %q: schedule must be greater than 0", s.ConfigName)
+	interval, err := parseSchedule(s.Schedule)
+	if err != nil {
+		if s.ConfigName != "" {
+			return nil, fmt.Errorf("scheduled source %q: parse schedule %q: %w", s.ConfigName, s.Schedule, err)
+		}
+		return nil, fmt.Errorf("parse schedule %q: %w", s.Schedule, err)
 	}
 
 	state, err := s.loadState()
@@ -46,33 +52,48 @@ func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
 	}
 
 	now := sourceNow()
-	bucket := now.UnixNano() / s.Schedule.Nanoseconds()
+	bucket := now.UnixNano() / interval.Nanoseconds()
+	slotStart, slotEnd := scheduleWindow(now, interval)
 	taskNames := make([]string, 0, len(s.Tasks))
 	for taskName := range s.Tasks {
 		taskNames = append(taskNames, taskName)
 	}
 	sort.Strings(taskNames)
 
+	scope := s.scope()
 	vessels := make([]queue.Vessel, 0, len(taskNames))
 	for _, taskName := range taskNames {
 		if state.LastEnqueuedBuckets[taskName] >= bucket {
 			continue
 		}
 		task := s.Tasks[taskName]
-		ref := fmt.Sprintf("scheduled://%s/%s@%d", s.ConfigName, taskName, bucket)
-		id := fmt.Sprintf("scheduled-%s-%s-%d", sanitizeScheduledComponent(s.ConfigName), sanitizeScheduledComponent(taskName), bucket)
+		ref := fmt.Sprintf("scheduled://%s/%s@%d", scope, taskName, bucket)
+		if s.Queue != nil && s.Queue.HasRefAny(ref) {
+			continue
+		}
+
+		meta := map[string]string{
+			"schedule_task":         taskName,
+			"schedule_spec":         s.Schedule,
+			"schedule_slot_start":   slotStart.Format(time.RFC3339),
+			"schedule_slot_end":     slotEnd.Format(time.RFC3339),
+			"repo":                  s.Repo,
+			"scheduled_config_name": s.ConfigName,
+			"scheduled_task_name":   taskName,
+			"scheduled_bucket":      fmt.Sprintf("%d", bucket),
+			"scheduled_repo":        s.Repo,
+			"scheduled_fingerprint": scheduledFingerprint(scope, taskName, task.Workflow, task.Ref),
+		}
+		if refName := strings.TrimSpace(task.Ref); refName != "" {
+			meta["schedule_ref"] = refName
+		}
+
 		vessels = append(vessels, queue.Vessel{
-			ID:       id,
-			Source:   s.Name(),
-			Ref:      ref,
-			Workflow: task.Workflow,
-			Meta: map[string]string{
-				"scheduled_config_name": s.ConfigName,
-				"scheduled_task_name":   taskName,
-				"scheduled_bucket":      fmt.Sprintf("%d", bucket),
-				"scheduled_repo":        s.Repo,
-				"scheduled_fingerprint": scheduledFingerprint(s.ConfigName, taskName, task.Workflow),
-			},
+			ID:        fmt.Sprintf("scheduled-%s-%s-%d", sanitizeScheduledComponent(scope), sanitizeScheduledComponent(taskName), bucket),
+			Source:    s.Name(),
+			Ref:       ref,
+			Workflow:  task.Workflow,
+			Meta:      meta,
 			State:     queue.StatePending,
 			CreatedAt: now,
 		})
@@ -87,9 +108,10 @@ func (s *Scheduled) OnEnqueue(_ context.Context, vessel queue.Vessel) error {
 	if taskName == "" || bucketRaw == "" {
 		return nil
 	}
-	parsedBucket, parseErr := parseInt64(bucketRaw)
-	if parseErr != nil {
-		return fmt.Errorf("scheduled source %q: parse bucket %q: %w", s.ConfigName, bucketRaw, parseErr)
+
+	parsedBucket, err := parseInt64(bucketRaw)
+	if err != nil {
+		return fmt.Errorf("scheduled source %q: parse bucket %q: %w", s.ConfigName, bucketRaw, err)
 	}
 
 	state, err := s.loadState()
@@ -122,6 +144,34 @@ func (s *Scheduled) BranchName(vessel queue.Vessel) string {
 	return fmt.Sprintf("scheduled/%s-%s", taskName, sanitizeScheduledComponent(vessel.ID))
 }
 
+func parseSchedule(value string) (time.Duration, error) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "@hourly":
+		return time.Hour, nil
+	case "@daily":
+		return 24 * time.Hour, nil
+	case "@weekly":
+		return 7 * 24 * time.Hour, nil
+	}
+
+	interval, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, err
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("must be greater than 0")
+	}
+	return interval, nil
+}
+
+func scheduleWindow(now time.Time, interval time.Duration) (time.Time, time.Time) {
+	now = now.UTC()
+	size := interval.Nanoseconds()
+	startUnix := now.UnixNano() / size * size
+	start := time.Unix(0, startUnix).UTC()
+	return start, start.Add(interval)
+}
+
 func (s *Scheduled) loadState() (*scheduleState, error) {
 	path := s.statePath()
 	data, err := os.ReadFile(path)
@@ -131,6 +181,7 @@ func (s *Scheduled) loadState() (*scheduleState, error) {
 		}
 		return nil, fmt.Errorf("scheduled source %q: read state: %w", s.ConfigName, err)
 	}
+
 	var state scheduleState
 	if err := json.Unmarshal(data, &state); err != nil {
 		return nil, fmt.Errorf("scheduled source %q: unmarshal state: %w", s.ConfigName, err)
@@ -146,10 +197,12 @@ func (s *Scheduled) saveState(state *scheduleState) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("scheduled source %q: create state dir: %w", s.ConfigName, err)
 	}
+
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return fmt.Errorf("scheduled source %q: marshal state: %w", s.ConfigName, err)
 	}
+
 	tmpPath := path + ".tmp"
 	if err := os.WriteFile(tmpPath, data, 0o644); err != nil {
 		return fmt.Errorf("scheduled source %q: write temp state: %w", s.ConfigName, err)
@@ -161,7 +214,18 @@ func (s *Scheduled) saveState(state *scheduleState) error {
 }
 
 func (s *Scheduled) statePath() string {
-	return filepath.Join(s.StateDir, "schedules", sanitizeScheduledComponent(s.ConfigName)+".json")
+	return filepath.Join(s.StateDir, "schedules", sanitizeScheduledComponent(s.scope())+".json")
+}
+
+func (s *Scheduled) scope() string {
+	if configName := strings.TrimSpace(s.ConfigName); configName != "" {
+		return sanitizeScheduledComponent(configName)
+	}
+	repoScope := strings.Trim(strings.ReplaceAll(strings.TrimSpace(s.Repo), "/", "-"), "-")
+	if repoScope == "" {
+		return "global"
+	}
+	return sanitizeScheduledComponent(repoScope)
 }
 
 func sanitizeScheduledComponent(s string) string {
@@ -177,8 +241,8 @@ func sanitizeScheduledComponent(s string) string {
 	return clean
 }
 
-func scheduledFingerprint(configName, taskName, workflow string) string {
-	sum := sha256.Sum256([]byte(strings.Join([]string{configName, taskName, workflow}, "\n")))
+func scheduledFingerprint(configName, taskName, workflow, ref string) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{configName, taskName, workflow, ref}, "\n")))
 	return fmt.Sprintf("%x", sum[:8])
 }
 

@@ -124,6 +124,7 @@ type PREventsConfig struct {
 type Task struct {
 	Labels          []string         `yaml:"labels,omitempty"`
 	Workflow        string           `yaml:"workflow"`
+	Ref             string           `yaml:"ref,omitempty"`
 	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
 	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
 	On              *PREventsConfig  `yaml:"on,omitempty"`
@@ -748,12 +749,8 @@ func validateScheduledSource(name string, src SourceConfig) error {
 	if strings.TrimSpace(src.Schedule) == "" {
 		return fmt.Errorf("source %q (scheduled): schedule is required", name)
 	}
-	dur, err := time.ParseDuration(src.Schedule)
-	if err != nil {
-		return fmt.Errorf("source %q (scheduled): schedule must be a valid duration: %w", name, err)
-	}
-	if dur <= 0 {
-		return fmt.Errorf("source %q (scheduled): schedule must be greater than 0", name)
+	if _, err := parseScheduleValue(src.Schedule); err != nil {
+		return fmt.Errorf("source %q (scheduled): schedule is invalid: %w", name, err)
 	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (scheduled): at least one task is required", name)
@@ -766,6 +763,24 @@ func validateScheduledSource(name string, src SourceConfig) error {
 	return nil
 }
 
+func parseScheduleValue(value string) (time.Duration, error) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "@hourly":
+		return time.Hour, nil
+	case "@daily":
+		return 24 * time.Hour, nil
+	case "@weekly":
+		return 7 * 24 * time.Hour, nil
+	}
+	interval, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, err
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("must be greater than 0")
+	}
+	return interval, nil
+}
 func validateScheduleSource(name string, src SourceConfig) error {
 	if strings.TrimSpace(src.Workflow) == "" {
 		return fmt.Errorf("source %q (schedule): workflow is required", name)

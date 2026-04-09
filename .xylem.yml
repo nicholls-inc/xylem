@@ -123,6 +123,16 @@ sources:
           running: pr-vessel-active
           failed: xylem-failed
 
+  sota-gap:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-self-gap-analysis:
+        workflow: sota-gap-analysis
+        ref: sota-gap-analysis
+
   # Post-merge wave dependency unblocking
   # NOTE: github-merge has no label filtering. The unblock-wave prompt
   # guards with XYLEM_NOOP for non-harness merges.

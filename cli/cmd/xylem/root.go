@@ -86,6 +86,7 @@ func newRootCmd() *cobra.Command {
 		newScanCmd(),
 		newDrainCmd(),
 		newReviewCmd(),
+		newGapReportCmd(),
 		newLessonsCmd(),
 		newEnqueueCmd(),
 		newStatusCmd(),

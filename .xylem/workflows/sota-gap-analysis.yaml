@@ -1,0 +1,59 @@
+name: sota-gap-analysis
+description: "Recurring SoTA self-gap-analysis against xylem's harness reference docs"
+phases:
+  - name: ingest
+    prompt_file: .xylem/prompts/sota-gap-analysis/ingest.md
+    max_turns: 30
+    llm: copilot
+    model: gpt-5.4
+  - name: survey
+    prompt_file: .xylem/prompts/sota-gap-analysis/survey.md
+    max_turns: 60
+    llm: copilot
+    model: gpt-5.4
+  - name: diff
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem gap-report diff \
+        --previous ../.xylem/state/sota-gap-snapshot.json \
+        --current ../.xylem/state/sota-gap-snapshot.next.json \
+        --output ../.xylem/state/sota-gap-delta.json \
+        --write-current ../.xylem/state/sota-gap-snapshot.json
+  - name: report
+    prompt_file: .xylem/prompts/sota-gap-analysis/report.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+  - name: file_issues
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem gap-report file-issues \
+        --repo nicholls-inc/xylem \
+        --delta ../.xylem/state/sota-gap-delta.json \
+        --output ../.xylem/state/sota-gap-filed-issues.json \
+        --prefix "[sota-gap]" \
+        --labels enhancement \
+        --labels ready-for-work
+  - name: summary
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem gap-report post-summary \
+        --repo nicholls-inc/xylem \
+        --delta ../.xylem/state/sota-gap-delta.json \
+        --filed ../.xylem/state/sota-gap-filed-issues.json \
+        --report ../.xylem/state/sota-gap-report.md \
+        --tracking-title "[sota-gap] Weekly tracking"
+  - name: guard
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem gap-report guard \
+        --delta ../.xylem/state/sota-gap-delta.json \
+        --filed ../.xylem/state/sota-gap-filed-issues.json

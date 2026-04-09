@@ -329,6 +329,45 @@ func TestExecuteGHAPIAndIssueCommentUseStateStore(t *testing.T) {
 	}
 }
 
+func TestExecuteGHIssueCreateAndSearch(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	store, stateDir := testStore(t, state)
+	env := envForStore(store, stateDir, state.UniverseID)
+
+	var createOut, createErr bytes.Buffer
+	code := Execute(context.Background(), "gh", []string{
+		"issue", "create",
+		"--repo", "owner/repo",
+		"--title", "[sota-gap] Missing entropy management",
+		"--body", "details",
+		"--label", "enhancement",
+		"--label", "ready-for-work",
+	}, nil, &createOut, &createErr, env)
+	if code != 0 {
+		t.Fatalf("issue create code = %d, stderr = %q", code, createErr.String())
+	}
+	if strings.TrimSpace(createOut.String()) != "https://github.com/owner/repo/issues/3" {
+		t.Fatalf("create output = %q, want created issue URL", createOut.String())
+	}
+
+	var searchOut, searchErr bytes.Buffer
+	code = Execute(context.Background(), "gh", []string{
+		"search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--search", "missing entropy management",
+		"--json", "number,title,url",
+	}, nil, &searchOut, &searchErr, env)
+	if code != 0 {
+		t.Fatalf("search issues code = %d, stderr = %q", code, searchErr.String())
+	}
+	if !strings.Contains(searchOut.String(), `"number":3`) {
+		t.Fatalf("search output = %s, want new issue in results", searchOut.String())
+	}
+}
+
 func TestExecuteClaudeUsesStdinAndPhaseMatching(t *testing.T) {
 	t.Parallel()
 
