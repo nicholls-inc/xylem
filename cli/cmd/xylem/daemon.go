@@ -91,25 +91,17 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	scan := func(ctx context.Context) (scanner.ScanResult, error) {
 		return runScan(ctx, cfg, q)
 	}
+	cmdRunner := newCmdRunner(cfg)
+	drainRunner, cleanupDrainRunner := buildDrainRunner(cfg, q, wt, cmdRunner)
+	defer cleanupDrainRunner()
+	drainRunner.Reporter = buildReporter(cfg, cmdRunner)
+	drainRunner.DrainBudget = drainInterval
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
-		// Pass drainInterval as the drain budget so Drain() returns
-		// roughly once per tick even under sustained saturation. This is
-		// what keeps the drain-end auto-upgrade check reachable — see
-		// the comment on Runner.DrainBudget in cli/internal/runner/runner.go.
-		return runDrain(ctx, cfg, q, wt, drainInterval)
+		return drainRunner.Drain(ctx)
 	}
 	check := func(ctx context.Context) {
-		// Use newCmdRunner(cfg) here (not a bare &realCmdRunner{}) so the
-		// periodic label-poll and hang-detection paths receive the same
-		// configured env (claude.env / copilot.env) as the scan/drain
-		// paths. A bare runner silently strips any configured env which
-		// caused gh/copilot auth failures on hosts that rely on the
-		// config-declared tokens during label polling.
-		cmdRunner := newCmdRunner(cfg)
-		r := runner.New(cfg, q, wt, cmdRunner)
-		r.Sources = buildSourceMap(cfg, q, cmdRunner)
-		r.CheckWaitingVessels(ctx)
-		r.CheckHungVessels(ctx)
+		drainRunner.CheckWaitingVessels(ctx)
+		drainRunner.CheckHungVessels(ctx)
 		// Auto-merge: request copilot review on unreviewed xylem PRs,
 		// and merge PRs that are approved + CI-green + mergeable.
 		if cfg.Daemon.AutoMerge {
@@ -117,7 +109,7 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		}
 	}
 
-	return daemonLoop(ctx, q, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+	return daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
 }
 
 // parseUpgradeInterval returns the effective periodic upgrade interval. If
@@ -155,6 +147,10 @@ func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
 // scanFunc and drainFunc abstract scan/drain for testability.
 type scanFunc func(ctx context.Context) (scanner.ScanResult, error)
 type drainFunc func(ctx context.Context) (runner.DrainResult, error)
+type inFlightTracker interface {
+	Wait() runner.DrainResult
+	InFlightCount() int
+}
 
 // checkFunc runs periodic vessel health checks (waiting vessel label checks,
 // hung vessel timeouts). May be nil if no checks are needed.
@@ -175,13 +171,10 @@ const defaultUpgradeInterval = 5 * time.Minute
 // externally-controlled context so tests can cancel it without signals,
 // and injectable scan/drain/check functions so tests can use stubs.
 //
-// If upgrade is non-nil, it is called at the END of each drain cycle — when
-// every vessel processed in that cycle has reached a terminal state and no
-// subprocesses are alive — provided at least upgradeInterval has elapsed
-// since the last attempt. This gives the daemon a guaranteed-idle window to
-// exec() into a newer binary without killing in-flight vessel work. Pass
-// nil/zero upgrade/upgradeInterval to disable.
-func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
+// If upgrade is non-nil, it is called only when the daemon is fully idle:
+// there is no active drain tick and the shared runner reports zero in-flight
+// vessels. Pass nil/zero upgrade/upgradeInterval to disable.
+func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
@@ -204,10 +197,16 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 		case <-ctx.Done():
 			log.Println("daemon: received shutdown signal, waiting for in-flight drain")
 			waitDone := make(chan struct{})
-			go func() { drainWg.Wait(); close(waitDone) }()
+			go func() {
+				drainWg.Wait()
+				if tracker != nil {
+					tracker.Wait()
+				}
+				close(waitDone)
+			}()
 			select {
 			case <-waitDone:
-				log.Println("daemon: in-flight drain finished")
+				log.Println("daemon: in-flight drain and vessels finished")
 			case <-time.After(drainShutdownTimeout):
 				log.Println("daemon: drain shutdown timeout exceeded, exiting")
 			}
@@ -232,6 +231,14 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 			check(ctx)
 		}
 
+		if upgrade != nil && upgradeInterval > 0 &&
+			atomic.LoadInt32(&draining) == 0 &&
+			trackerInFlightCount(tracker) == 0 &&
+			now.Sub(lastUpgrade) >= upgradeInterval {
+			lastUpgrade = now
+			upgrade()
+		}
+
 		if now.Sub(lastDrain) >= drainInterval {
 			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
@@ -243,24 +250,8 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 					if err != nil {
 						log.Printf("daemon: drain error: %v", err)
 					} else {
-						log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
-							drainResult.Completed, drainResult.Failed, drainResult.Skipped)
-					}
-
-					// Drain-end self-upgrade: every vessel processed in this
-					// cycle has reached a terminal state (completed, failed,
-					// or timed_out) — there are no subprocesses alive right
-					// now, so exec() is safe. Runs regardless of drain
-					// success/failure, since vessels are in persistent state
-					// either way. lastUpgrade is only written from within
-					// this goroutine (and the CAS guard ensures one drain
-					// runs at a time), so no synchronisation is required.
-					if upgrade != nil && upgradeInterval > 0 {
-						drainEnd := daemonNow()
-						if drainEnd.Sub(lastUpgrade) >= upgradeInterval {
-							lastUpgrade = drainEnd
-							upgrade()
-						}
+						log.Printf("daemon: drain tick complete — launched=%d in_flight=%d",
+							drainResult.Launched, trackerInFlightCount(tracker))
 					}
 				}()
 			}
@@ -272,10 +263,16 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 		case <-ctx.Done():
 			log.Println("daemon: received shutdown signal, waiting for in-flight drain")
 			waitDone := make(chan struct{})
-			go func() { drainWg.Wait(); close(waitDone) }()
+			go func() {
+				drainWg.Wait()
+				if tracker != nil {
+					tracker.Wait()
+				}
+				close(waitDone)
+			}()
 			select {
 			case <-waitDone:
-				log.Println("daemon: in-flight drain finished")
+				log.Println("daemon: in-flight drain and vessels finished")
 			case <-time.After(drainShutdownTimeout):
 				log.Println("daemon: drain shutdown timeout exceeded, exiting")
 			}
@@ -296,11 +293,18 @@ func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *workt
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.DrainBudget = budget
-	result, err := r.Drain(ctx)
+	result, err := r.DrainAndWait(ctx)
 	if err == nil {
 		maybeAutoGenerateHarnessReview(cfg, result)
 	}
 	return result, err
+}
+
+func trackerInFlightCount(tracker inFlightTracker) int {
+	if tracker == nil {
+		return 0
+	}
+	return tracker.InFlightCount()
 }
 
 func logTickSummary(q *queue.Queue) {

@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -47,6 +48,7 @@ type WorktreeManager interface {
 
 // DrainResult summarises a drain run.
 type DrainResult struct {
+	Launched  int
 	Completed int
 	Failed    int
 	Skipped   int
@@ -68,26 +70,46 @@ type Runner struct {
 	Tracer       *observability.Tracer      // nil = no tracing
 	// DrainBudget bounds the wall time that Drain() spends dequeueing new
 	// vessels. When the deadline elapses, Drain() stops dequeueing and
-	// waits for the already-started goroutines to finish via wg.Wait(),
-	// then returns a partial DrainResult. Any pending vessels are picked
-	// up by the next drain tick. Zero means unbounded (legacy behavior).
+	// returns immediately while already-started goroutines continue in the
+	// background. Call Wait or DrainAndWait if the caller needs terminal
+	// outcomes for the in-flight vessels. Any pending vessels are picked up
+	// by the next drain tick. Zero means unbounded (legacy behavior).
 	//
 	// Set this to drainInterval in the daemon so that Drain() returns
 	// roughly once per tick even under sustained pool saturation. Without
-	// this bound, the daemon's drain-end auto-upgrade check at
-	// cli/cmd/xylem/daemon.go:248-254 can never fire because Drain()
-	// never returns — the upgrade goroutine is wired post-drain and the
-	// CAS guard prevents a fresh tick from starting.
+	// this bound, a saturated tick holds the daemon's draining CAS guard
+	// for the full vessel runtime, which prevents later ticks from using
+	// newly available capacity and blocks idle-only work such as upgrades.
 	DrainBudget time.Duration
+
+	sem      chan struct{}
+	wg       sync.WaitGroup
+	traceWg  sync.WaitGroup
+	inFlight atomic.Int32
+
+	resultMu sync.Mutex
+	result   DrainResult
 }
 
 // New creates a Runner.
 func New(cfg *config.Config, q *queue.Queue, wt WorktreeManager, r CommandRunner) *Runner {
-	return &Runner{Config: cfg, Queue: q, Worktree: wt, Runner: r}
+	concurrency := 1
+	if cfg != nil && cfg.Concurrency > 0 {
+		concurrency = cfg.Concurrency
+	}
+	return &Runner{
+		Config:   cfg,
+		Queue:    q,
+		Worktree: wt,
+		Runner:   r,
+		sem:      make(chan struct{}, concurrency),
+	}
 }
 
 // Drain dequeues pending vessels and launches sessions up to Config.Concurrency concurrently.
 // On context cancellation, no new vessels are launched; running vessels complete normally.
+// Drain returns once the current dequeue tick ends. Use DrainAndWait or Wait for
+// synchronous callers that need terminal outcomes.
 func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 	var drainSpan observability.SpanContext
 	if r.Tracer != nil {
@@ -96,7 +118,6 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			Timeout:     r.Config.Timeout,
 		}))
 		ctx = drainSpan.Context()
-		defer drainSpan.End()
 	}
 
 	timeout, err := time.ParseDuration(r.Config.Timeout)
@@ -107,46 +128,61 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 		return DrainResult{}, fmt.Errorf("parse timeout: %w", err)
 	}
 
-	sem := make(chan struct{}, r.Config.Concurrency)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	var result DrainResult
 	healthCounts := FleetStatusReport{}
 	patternCounts := map[string]int{}
+	var drainStatsMu sync.Mutex
+	var drainLaunchWg sync.WaitGroup
 
 	// Drain budget: if set, Drain() stops dequeueing once the deadline
-	// elapses. Already-started goroutines continue until wg.Wait() below.
-	// This guarantees Drain() returns in bounded time so the daemon's
-	// periodic self-upgrade (wired post-drain) can fire under load.
+	// elapses. Already-started goroutines continue in the background.
 	var drainDeadline time.Time
 	if r.DrainBudget > 0 {
 		drainDeadline = time.Now().Add(r.DrainBudget)
 	}
 
+drainLoop:
 	for {
 		select {
 		case <-ctx.Done():
-			goto wait
+			break drainLoop
 		default:
 		}
 
 		if !drainDeadline.IsZero() && time.Now().After(drainDeadline) {
-			log.Printf("drain: budget %s elapsed, stopping dequeue (waiting for %d in-flight)", r.DrainBudget, len(sem))
-			goto wait
+			log.Printf("drain: budget %s elapsed, stopping dequeue (%d in-flight)", r.DrainBudget, r.InFlightCount())
+			break drainLoop
+		}
+
+		select {
+		case r.sem <- struct{}{}:
+		default:
+			if result.Launched == 0 && r.InFlightCount() > 0 {
+				log.Printf("drain: concurrency saturated, ending tick with %d in-flight", r.InFlightCount())
+			}
+			break drainLoop
 		}
 
 		vessel, err := r.Queue.Dequeue()
 		if err != nil || vessel == nil {
-			break
+			<-r.sem
+			break drainLoop
 		}
 
 		log.Printf("%sdequeued vessel workflow=%s", vesselLabel(*vessel), vessel.Workflow)
 
-		sem <- struct{}{}
-		wg.Add(1)
+		result.Launched++
+		r.recordLaunched()
+		r.inFlight.Add(1)
+		r.wg.Add(1)
+		drainLaunchWg.Add(1)
 		go func(j queue.Vessel) {
-			defer wg.Done()
-			defer func() { <-sem }()
+			defer r.wg.Done()
+			defer drainLaunchWg.Done()
+			defer func() {
+				<-r.sem
+				r.inFlight.Add(-1)
+			}()
 
 			vesselBaseCtx := context.Background()
 			var vesselSpan observability.SpanContext
@@ -188,17 +224,7 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 				}))
 			}
 
-			mu.Lock()
-			switch outcome {
-			case "completed":
-				result.Completed++
-			case "failed":
-				result.Failed++
-			case "waiting":
-				result.Waiting++
-			default:
-				result.Skipped++
-			}
+			drainStatsMu.Lock()
 			switch status.Health {
 			case VesselHealthHealthy:
 				healthCounts.Healthy++
@@ -210,31 +236,119 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			for _, anomaly := range status.Anomalies {
 				patternCounts[anomaly.Code]++
 			}
-			mu.Unlock()
+			drainStatsMu.Unlock()
+			r.recordOutcome(outcome)
 		}(*vessel)
 	}
 
-wait:
-	wg.Wait()
 	if r.Tracer != nil {
-		patterns := make([]FleetPattern, 0, len(patternCounts))
-		for code, count := range patternCounts {
-			patterns = append(patterns, FleetPattern{Code: code, Count: count})
+		if result.Launched == 0 {
+			drainSpan.End()
+		} else {
+			r.traceWg.Add(1)
+			go func() {
+				defer r.traceWg.Done()
+				drainLaunchWg.Wait()
+				drainStatsMu.Lock()
+				patterns := make([]FleetPattern, 0, len(patternCounts))
+				for code, count := range patternCounts {
+					patterns = append(patterns, FleetPattern{Code: code, Count: count})
+				}
+				drainStatsMu.Unlock()
+				sort.Slice(patterns, func(i, j int) bool {
+					if patterns[i].Count == patterns[j].Count {
+						return patterns[i].Code < patterns[j].Code
+					}
+					return patterns[i].Count > patterns[j].Count
+				})
+				drainSpan.AddAttributes(observability.DrainHealthAttributes(observability.DrainHealthData{
+					Healthy:   healthCounts.Healthy,
+					Degraded:  healthCounts.Degraded,
+					Unhealthy: healthCounts.Unhealthy,
+					Patterns:  FormatFleetPatterns(patterns),
+				}))
+				drainSpan.End()
+			}()
 		}
-		sort.Slice(patterns, func(i, j int) bool {
-			if patterns[i].Count == patterns[j].Count {
-				return patterns[i].Code < patterns[j].Code
-			}
-			return patterns[i].Count > patterns[j].Count
-		})
-		drainSpan.AddAttributes(observability.DrainHealthAttributes(observability.DrainHealthData{
-			Healthy:   healthCounts.Healthy,
-			Degraded:  healthCounts.Degraded,
-			Unhealthy: healthCounts.Unhealthy,
-			Patterns:  FormatFleetPatterns(patterns),
-		}))
+	}
+
+	return result, nil
+}
+
+// DrainAndWait preserves the historical synchronous Drain behaviour for callers
+// that need a terminal outcome summary rather than a per-tick launch count.
+func (r *Runner) DrainAndWait(ctx context.Context) (DrainResult, error) {
+	before := r.SnapshotResults()
+	var launched int
+	for {
+		tickResult, err := r.Drain(ctx)
+		if err != nil {
+			return DrainResult{}, err
+		}
+		launched += tickResult.Launched
+		r.Wait()
+		if r.DrainBudget > 0 || tickResult.Launched == 0 || ctx.Err() != nil {
+			break
+		}
+		pending, pendingErr := r.Queue.ListByState(queue.StatePending)
+		if pendingErr != nil {
+			return DrainResult{}, fmt.Errorf("list pending vessels: %w", pendingErr)
+		}
+		if len(pending) == 0 {
+			break
+		}
+	}
+	after := r.SnapshotResults()
+	result := DrainResult{
+		Launched:  launched,
+		Completed: after.Completed - before.Completed,
+		Failed:    after.Failed - before.Failed,
+		Skipped:   after.Skipped - before.Skipped,
+		Waiting:   after.Waiting - before.Waiting,
 	}
 	return result, nil
+}
+
+// Wait blocks until all in-flight vessels have finished and returns the
+// cumulative outcome counts recorded by this Runner.
+func (r *Runner) Wait() DrainResult {
+	r.wg.Wait()
+	r.traceWg.Wait()
+	return r.SnapshotResults()
+}
+
+// InFlightCount reports the number of launched vessels that have not yet
+// reached a terminal outcome.
+func (r *Runner) InFlightCount() int {
+	return int(r.inFlight.Load())
+}
+
+// SnapshotResults returns the cumulative outcome counts recorded by this Runner.
+func (r *Runner) SnapshotResults() DrainResult {
+	r.resultMu.Lock()
+	defer r.resultMu.Unlock()
+	return r.result
+}
+
+func (r *Runner) recordLaunched() {
+	r.resultMu.Lock()
+	defer r.resultMu.Unlock()
+	r.result.Launched++
+}
+
+func (r *Runner) recordOutcome(outcome string) {
+	r.resultMu.Lock()
+	defer r.resultMu.Unlock()
+	switch outcome {
+	case "completed":
+		r.result.Completed++
+	case "failed":
+		r.result.Failed++
+	case "waiting":
+		r.result.Waiting++
+	default:
+		r.result.Skipped++
+	}
 }
 
 // CheckWaitingVessels checks all waiting vessels for label gate resolution.

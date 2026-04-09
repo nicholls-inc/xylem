@@ -51,7 +51,7 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	// Check waiting vessels before draining pending ones
 	r.CheckWaitingVessels(ctx)
 
-	result, err := r.Drain(ctx)
+	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}

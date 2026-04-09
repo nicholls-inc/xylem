@@ -276,7 +276,7 @@ func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTraci
 
 	assert.Nil(t, runnerInstance.Tracer)
 
-	result, err := runnerInstance.Drain(context.Background())
+	result, err := runnerInstance.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 	assert.Zero(t, result.Failed)

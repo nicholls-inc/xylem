@@ -617,7 +617,7 @@ func TestDrainTracingSurfacesVesselHealthAndPatterns(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -831,7 +831,7 @@ func TestSmoke_S1_PolicyDenialShortCircuitsBeforeSurfaceSnapshot(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, nil, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -862,7 +862,7 @@ func TestSmoke_S2_SurfacePreSnapshotFailureShortCircuitsBeforePhaseExecution(t *
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -906,7 +906,7 @@ func TestSmoke_S3_PhaseExecutionFailureShortCircuitsBeforeSurfacePostVerificatio
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -950,7 +950,7 @@ func TestSmoke_S4_SurfaceViolationShortCircuitsBeforeBudgetCheck(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -983,7 +983,7 @@ func TestSmoke_S17_RunnerWithNilIntermediarySkipsPolicyCheck(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1014,7 +1014,7 @@ func TestSmoke_S18_RunnerPolicyDeniesPhase(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, nil, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1046,7 +1046,7 @@ func TestSmoke_S19_RunnerPolicyRequireApproval(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.RequireApproval}},
 	}}, nil, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1089,7 +1089,7 @@ func TestSmoke_S20_SurfacePreSnapshotIsTakenBeforePhaseExecution(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.True(t, sawOriginal.Load())
@@ -1125,7 +1125,7 @@ func TestSmoke_S21_SurfacePostVerificationDetectsMutation(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1160,7 +1160,7 @@ func TestSmoke_S22_AuditLogRecordsPolicyDecisions(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1203,7 +1203,7 @@ func TestSmoke_S23_AuditLogRecordsSurfaceViolations(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1257,7 +1257,7 @@ func TestDrainSingleVessel(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1323,7 +1323,7 @@ func TestWS6S29NilHarnessFieldsRunsNormally(t *testing.T) {
 		t.Fatalf("r.Tracer = %#v, want nil", r.Tracer)
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1383,7 +1383,7 @@ func TestDrainBudgetStopsDequeueingAfterDeadline(t *testing.T) {
 	r.DrainBudget = 150 * time.Millisecond
 
 	start := time.Now()
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
@@ -1452,7 +1452,7 @@ func TestDrainBudgetZeroDisablesBudget(t *testing.T) {
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 	// DrainBudget deliberately left at zero.
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1496,7 +1496,7 @@ func TestDrainBudgetRespectsContextCancellation(t *testing.T) {
 	}()
 
 	start := time.Now()
-	_, err := r.Drain(ctx)
+	_, err := r.DrainAndWait(ctx)
 	elapsed := time.Since(start)
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
@@ -1506,6 +1506,97 @@ func TestDrainBudgetRespectsContextCancellation(t *testing.T) {
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("Drain() took %s, expected fast cancel-driven return", elapsed)
 	}
+}
+
+func TestSmoke_S33_DrainReturnsBeforeInFlightWorkCompletes(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, "fix-bug"))
+	require.NoError(t, err)
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 120 * time.Millisecond}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	start := time.Now()
+	result, err := r.Drain(context.Background())
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Launched)
+	assert.LessOrEqual(t, elapsed, 80*time.Millisecond)
+	assert.Equal(t, 1, r.InFlightCount())
+	vessel, err := q.FindByID("issue-1")
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+	assert.Equal(t, queue.StateRunning, vessel.State)
+
+	waited := r.Wait()
+	assert.Equal(t, 1, waited.Completed)
+	assert.Equal(t, 0, r.InFlightCount())
+}
+
+func TestSmoke_S34_DrainUsesRemainingCapacityFromPreviousTicks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 3)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	for i := 1; i <= 3; i++ {
+		_, err := q.Enqueue(makeVessel(i, "fix-bug"))
+		require.NoError(t, err)
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 60 * time.Millisecond}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	r.sem <- struct{}{}
+	r.inFlight.Add(1)
+	r.wg.Add(1)
+	heldDone := make(chan struct{})
+	go func() {
+		<-heldDone
+		<-r.sem
+		r.inFlight.Add(-1)
+		r.wg.Done()
+	}()
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Launched)
+	assert.Equal(t, 3, r.InFlightCount())
+
+	close(heldDone)
+	waited := r.Wait()
+	assert.Equal(t, 2, waited.Completed)
+	vessels, err := q.List()
+	require.NoError(t, err)
+	var pending, completed int
+	for _, vessel := range vessels {
+		switch vessel.State {
+		case queue.StatePending:
+			pending++
+		case queue.StateCompleted:
+			completed++
+		}
+	}
+	assert.Equal(t, 1, pending)
+	assert.Equal(t, 2, completed)
 }
 
 func TestDrainMultiPhaseWorkflow(t *testing.T) {
@@ -1538,7 +1629,7 @@ func TestDrainMultiPhaseWorkflow(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1594,7 +1685,7 @@ func TestDrainPhaseNoOpCompletesWorkflowEarly(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1663,7 +1754,7 @@ func TestDrainPhaseFailsStopsSubsequent(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1693,7 +1784,7 @@ func TestDrainPromptOnlyVessel(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1744,7 +1835,7 @@ func TestDrainPromptOnlyWithRef(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1792,7 +1883,7 @@ func TestSmoke_WS3_S25_PerVesselTrackerIsCreatedFreshForEachVessel(t *testing.T)
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.Completed)
 
@@ -1843,7 +1934,7 @@ func TestSmoke_WS3_S26_CostRecordedAfterEachPromptTypePhase(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1893,7 +1984,7 @@ func TestSmoke_S27_CommandTypePhasesDoNotGenerateCostRecords(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1944,7 +2035,7 @@ func TestSmoke_S28_BudgetEnforcementFailsVesselWhenBudgetIsExceeded(t *testing.T
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1992,7 +2083,7 @@ func TestSmoke_S29_NilBudgetMeansNoEnforcement(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -2041,7 +2132,7 @@ func TestSmoke_WS6_S5_BudgetExceededShortCircuitsBeforeGate(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.Equal(t, 0, countRunOutputCalls(cmdRunner, "sh"))
@@ -2069,7 +2160,7 @@ func TestSmoke_WS6_S12_PromptOnlyVesselGetsVesselSpan(t *testing.T) {
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
 	r.Tracer = tracer
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -2136,7 +2227,7 @@ func TestSmoke_WS6_S14_PromptOnlyVesselGetsSurfaceVerification(t *testing.T) {
 	}
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 	assert.True(t, sawOriginalContents)
@@ -2164,7 +2255,7 @@ func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -2190,7 +2281,7 @@ func TestSmoke_WS6_S16_PromptOnlyVesselNoEvidence(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only no evidence"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -2207,7 +2298,7 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only summary"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -2226,7 +2317,7 @@ func TestSmoke_WS6_S18_PromptOnlyVesselSummaryEmptyPhases(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only empty phases"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -2269,7 +2360,7 @@ func TestDrainCommandGatePasses(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2312,7 +2403,7 @@ func TestDrainCommandGateFailsNoRetries(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2369,7 +2460,7 @@ func TestDrainGateRetriesNotBleedBetweenPhases(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2413,7 +2504,7 @@ func TestDrainCommandGateFailsWithRetries(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2466,7 +2557,7 @@ func TestDrainLabelGateTransitionsToWaiting(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2520,7 +2611,7 @@ func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	first, err := r.Drain(context.Background())
+	first, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("first Drain() error = %v", err)
 	}
@@ -2564,7 +2655,7 @@ func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
 		t.Fatalf("WorktreePath after resume = %q, want %q", resumed.WorktreePath, waiting.WorktreePath)
 	}
 
-	second, err := r.Drain(context.Background())
+	second, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("second Drain() error = %v", err)
 	}
@@ -2609,7 +2700,7 @@ func TestDrainVesselFails(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2633,7 +2724,7 @@ func TestDrainWorktreeCreateFails(t *testing.T) {
 	wt := &mockWorktree{createErr: errors.New("git fetch failed")}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2671,13 +2762,16 @@ func TestDrainConcurrencyLimit(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	_, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	max := atomic.LoadInt32(&counter.maxSeen)
-	if max > 2 {
-		t.Errorf("concurrency exceeded limit: max concurrent = %d, limit = 2", max)
+	if result.Completed != 4 {
+		t.Fatalf("DrainAndWait().Completed = %d, want 4", result.Completed)
+	}
+	if max != 2 {
+		t.Fatalf("max concurrent = %d, want exactly 2 to prove the limit is enforced without collapsing throughput", max)
 	}
 }
 
@@ -2713,7 +2807,7 @@ func TestDrainContextCancel(t *testing.T) {
 		cancel()
 	}()
 
-	result, err := r.Drain(ctx)
+	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2737,7 +2831,7 @@ func TestDrainTimeout(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2773,7 +2867,7 @@ func TestDrainEmptyQueue(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2815,7 +2909,7 @@ func TestDrainHarnessAppended(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	_, err := r.Drain(context.Background())
+	_, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2866,7 +2960,7 @@ func TestDrainPreviousOutputsAvailable(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	_, err := r.Drain(context.Background())
+	_, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2918,7 +3012,7 @@ func TestBranchPrefixSelection(t *testing.T) {
 				"github-issue": makeGitHubSource(),
 			}
 
-			_, err := r.Drain(context.Background())
+			_, err := r.DrainAndWait(context.Background())
 			if err != nil {
 				t.Fatalf("drain: %v", err)
 			}
@@ -3224,7 +3318,7 @@ func TestDrainTimeoutV2Phase(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3846,7 +3940,7 @@ func TestDrainCommandPhase(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3916,7 +4010,7 @@ func TestDrainCommandPhaseFailure(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3961,7 +4055,7 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4014,7 +4108,7 @@ func TestDrainCommandPhaseWithNoOp(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4076,7 +4170,7 @@ func TestDrainPREventsVessel(t *testing.T) {
 		"github-pr-events": &source.GitHubPREvents{Repo: "owner/repo"},
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4146,7 +4240,7 @@ func TestDrainOrchestratedDiamondWorkflow(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4200,7 +4294,7 @@ func TestDrainOrchestratedContextFirewall(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4248,7 +4342,7 @@ func TestDrainOrchestratedPhaseFailure(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4288,7 +4382,7 @@ func TestDrainOrchestratedNoOp(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4328,7 +4422,7 @@ func TestDrainOrchestratedWithGate(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4407,7 +4501,7 @@ func TestDrainOrchestratedParallelFailureNoRace(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4478,7 +4572,7 @@ func TestDrainPolicyBlocksPhaseBeforeExecution(t *testing.T) {
 				Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: tt.policy}},
 			}}, auditLog, nil)
 
-			result, err := r.Drain(context.Background())
+			result, err := r.DrainAndWait(context.Background())
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -4558,7 +4652,7 @@ func TestDrainCommandPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	r.AuditLog = auditLog
 	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.Equal(t, 0, countRunOutputCalls(cmdRunner, "sh"))
@@ -4608,7 +4702,7 @@ func TestDrainPromptPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	r.AuditLog = auditLog
 	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.Len(t, cmdRunner.phaseCalls, 0)
@@ -4659,7 +4753,7 @@ func TestDrainOrchestratedPolicyBlocksSinglePhaseWave(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4744,7 +4838,7 @@ func TestDrainOrchestratedProtectedSurfaceViolationFails(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -5135,7 +5229,7 @@ func TestSmoke_WS6_S19_OrchestratedVesselRunStateNoRace(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -5245,7 +5339,7 @@ func TestSmoke_WS6_S22_WaveResultsMergedAfterWgWait(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 	require.Len(t, cmdRunner.phaseCalls, 2)
@@ -5297,7 +5391,7 @@ func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -5350,7 +5444,7 @@ func TestSmoke_WS6_S24_VesselSpanContextPropagatedToGoroutines(t *testing.T) {
 	}
 	r.Tracer = tracer
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5401,7 +5495,7 @@ func TestSmoke_WS6_S25_ConcurrentPhasesAllowOverspend(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5537,7 +5631,7 @@ func TestDrainCommandPhaseTemplateValidation(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -5689,7 +5783,7 @@ func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5714,7 +5808,7 @@ func TestSmoke_S10_DrainRunSpanWrapsEntireDrainCall(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5742,7 +5836,7 @@ func TestSmoke_S11_VesselSpanIsChildOfDrainRunSpan(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5769,7 +5863,7 @@ func TestSmoke_S12_PhaseSpanIsChildOfVesselSpan(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5796,7 +5890,7 @@ func TestSmoke_S13_GateSpanIsChildOfPhaseSpan(t *testing.T) {
 		},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5822,7 +5916,7 @@ func TestSmoke_S14_PhaseSpanGetsResultAttributesAddedAfterExecution(t *testing.T
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -5847,7 +5941,7 @@ func TestSmoke_S15_PhaseSpanRecordsErrorOnPhaseFailure(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -5865,7 +5959,7 @@ func TestSmoke_S16_PhaseSpanAlwaysEndsEvenWhenPhaseFails(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -5886,7 +5980,7 @@ func TestSmoke_S10_PhaseSpanIsAlwaysEndedEvenOnFailureDuringOrchestratedExecutio
 		{name: "implement", promptContent: "Implement {{.PreviousOutputs.analyze}}", maxTurns: 5, dependsOn: []string{"analyze"}},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.Len(t, cmdRunner.phaseCalls, 1)
@@ -5907,7 +6001,7 @@ func TestSmoke_S11_ErrorIsRecordedOnSpanBeforeEndDuringOrchestratedExecution(t *
 		{name: "implement", promptContent: "Implement {{.PreviousOutputs.analyze}}", maxTurns: 5, dependsOn: []string{"analyze"}},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -5994,7 +6088,7 @@ func TestDrainRateLimitRetrySucceeds(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -6034,7 +6128,7 @@ func TestDrainRateLimitRetryExhausted(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -6079,7 +6173,7 @@ func TestDrainNonRateLimitErrorNotRetried(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -6112,7 +6206,7 @@ func TestDrainPromptOnlyRateLimitRetry(t *testing.T) {
 	}
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}

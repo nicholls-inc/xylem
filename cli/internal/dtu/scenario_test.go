@@ -503,7 +503,7 @@ func TestScenarioIssueLabelGateWaitsThenResumes(t *testing.T) {
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -559,7 +559,7 @@ func TestScenarioIssueLabelGateWaitsThenResumes(t *testing.T) {
 	// state (runVessel defer). It will be re-added when the vessel resumes.
 	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "plan-approved"})
 
-	drainResult, err = drainer.Drain(context.Background())
+	drainResult, err = drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("second Drain() error = %v", err)
 	}
@@ -668,7 +668,7 @@ func TestScenarioGitHubPROfflineCopilot(t *testing.T) {
 
 	src := &source.GitHubPR{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -745,7 +745,7 @@ func TestScenarioGitHubPREventsChecksFailed(t *testing.T) {
 
 	src := &source.GitHubPREvents{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -806,7 +806,7 @@ func TestScenarioGithubPREventsProviderFailure(t *testing.T) {
 
 	src := &source.GitHubPREvents{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -868,7 +868,7 @@ func TestScenarioGitHubMergeHappyPath(t *testing.T) {
 
 	src := &source.GitHubMerge{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -928,7 +928,7 @@ func TestScenarioIssueProviderFailureMarksFailed(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -994,7 +994,7 @@ func TestScenarioIssueGitFetchRetrySucceeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1064,7 +1064,7 @@ func TestScenarioIssueGitFetchRetryExitCode1Succeeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1149,7 +1149,7 @@ func TestScenarioIssueGitWorktreeAddRetryExitCode255Succeeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1237,7 +1237,7 @@ func TestScenarioIssueGitWorktreeAddRetryExitCode128Succeeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1314,7 +1314,7 @@ func TestScenarioIssueGitWorktreeAddExhaustRetriesExitCode128Fails(t *testing.T)
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1494,7 +1494,7 @@ func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1587,7 +1587,7 @@ func TestScenarioIssueHappyPath(t *testing.T) {
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 	drainer.Reporter = &reporter.Reporter{Runner: env.cmdRunner, Repo: "owner/repo"}
 
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1685,7 +1685,7 @@ func TestScenarioGithubMergeProviderFailure(t *testing.T) {
 
 	src := &source.GitHubMerge{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1754,7 +1754,7 @@ func TestScenarioGithubPRProviderFailure(t *testing.T) {
 
 	src := &source.GitHubPR{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
