@@ -3,7 +3,18 @@ cli/claude
 cli/copilot
 cli/gh
 cli/xylem
-.xylem/
+.xylem/*
+!.xylem/eval/
+!.xylem/eval/**
+!.xylem/prompts/
+!.xylem/prompts/**
+!.xylem/workflows/
+!.xylem/workflows/**
+!.xylem/state/
+.xylem/state/*
+!.xylem/state/.gitignore
+!.xylem/state/sota-gap-snapshot.json
+!.xylem/state/sota-gap-snapshot.schema.json
 
 # DTU checked-in fixtures intentionally seed .xylem scaffolding.
 !cli/internal/dtu/testdata/**/.xylem/

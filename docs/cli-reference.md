@@ -206,11 +206,12 @@ xylem scan [flags]
 ### Behavior
 
 - Iterates over every source defined in `.xylem.yml` and calls its `Scan()` method.
-- Supported source types are `github`, `github-pr`, `github-pr-events`, and `github-merge`.
+- Supported source types are `github`, `github-pr`, `github-pr-events`, `github-merge`, and `scheduled`.
 - `github` scans open issues matching task labels.
 - `github-pr` scans open pull requests matching task labels.
 - `github-pr-events` scans open pull requests for configured `on` triggers such as labels, submitted reviews, failed checks, and comments.
 - `github-merge` scans merged pull requests and dedupes by merge commit SHA.
+- `scheduled` enqueues one vessel per task per schedule window (`@weekly`, `24h`, etc.) and dedupes by the computed slot ref.
 - If scanning is paused (via `xylem pause`), prints a message and exits without scanning.
 - Deduplication is handled automatically. Depending on the source, xylem skips refs that are already present in the queue, already present in any vessel state, or already have xylem-owned branches/open PRs.
 
@@ -351,6 +352,27 @@ Missing historical artifacts from older runs are tolerated; the review degrades 
 # Generate the latest review report on demand
 xylem review
 ```
+
+---
+
+## xylem gap-report
+
+Deterministic helpers used by recurring SoTA gap-analysis workflows.
+
+### Usage
+
+```
+xylem gap-report <diff|file-issues|post-summary|guard> [flags]
+```
+
+### Behavior
+
+1. `diff` compares a previous and current snapshot, writes a delta JSON artifact, and can overwrite the committed canonical snapshot with the current snapshot.
+2. `file-issues` creates up to the top three `[sota-gap]` issues from the deterministic delta, deduping against already-open issues by title.
+3. `post-summary` ensures a tracking issue exists and posts a human-readable weekly summary comment.
+4. `guard` exits non-zero when the run produced zero new issues and zero snapshot improvements.
+
+These commands are intended for workflow command phases rather than day-to-day manual use.
 
 ---
 

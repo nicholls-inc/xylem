@@ -134,6 +134,17 @@ func (s *Scanner) buildSources() []sourceEntry {
 				},
 				configName: name,
 			})
+		case "scheduled":
+			scheduledTasks := convertScheduledTasks(srcCfg.Tasks)
+			entries = append(entries, sourceEntry{
+				src: &source.Scheduled{
+					Repo:     srcCfg.Repo,
+					Schedule: srcCfg.Schedule,
+					Tasks:    scheduledTasks,
+					Queue:    s.Queue,
+				},
+				configName: name,
+			})
 		}
 	}
 	return entries
@@ -171,6 +182,17 @@ func convertMergeTasks(cfgTasks map[string]config.Task) map[string]source.MergeT
 	for name, t := range cfgTasks {
 		tasks[name] = source.MergeTask{
 			Workflow: t.Workflow,
+		}
+	}
+	return tasks
+}
+
+func convertScheduledTasks(cfgTasks map[string]config.Task) map[string]source.ScheduledTask {
+	tasks := make(map[string]source.ScheduledTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		tasks[name] = source.ScheduledTask{
+			Workflow: t.Workflow,
+			Ref:      t.Ref,
 		}
 	}
 	return tasks

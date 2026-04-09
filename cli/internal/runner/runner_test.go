@@ -3953,6 +3953,47 @@ func TestResolveRepoNewSources(t *testing.T) {
 	}
 }
 
+func TestResolveRepoPrefersConfigSource(t *testing.T) {
+	r := &Runner{
+		Config: &config.Config{
+			Sources: map[string]config.SourceConfig{
+				"sota-gap": {Type: "scheduled", Repo: "owner/primary-repo"},
+			},
+		},
+		Sources: map[string]source.Source{
+			"scheduled": &source.Scheduled{Repo: "owner/fallback-repo"},
+			"sota-gap":  &source.Scheduled{Repo: "owner/primary-repo"},
+		},
+	}
+
+	got := r.resolveRepo(queue.Vessel{
+		Source: "scheduled",
+		Meta:   map[string]string{"config_source": "sota-gap"},
+	})
+	if got != "owner/primary-repo" {
+		t.Fatalf("resolveRepo() = %q, want owner/primary-repo", got)
+	}
+}
+
+func TestResolveSourcePrefersConfigSource(t *testing.T) {
+	primary := &source.Scheduled{Repo: "owner/primary-repo"}
+	fallback := &source.Scheduled{Repo: "owner/fallback-repo"}
+	r := &Runner{
+		Sources: map[string]source.Source{
+			"scheduled": fallback,
+			"sota-gap":  primary,
+		},
+	}
+
+	got := r.resolveSource(queue.Vessel{
+		Source: "scheduled",
+		Meta:   map[string]string{"config_source": "sota-gap"},
+	})
+	if got != primary {
+		t.Fatalf("resolveSource() returned %T %p, want %T %p", got, got, primary, primary)
+	}
+}
+
 // --- Orchestrated (parallel) execution tests ---
 
 func TestDrainOrchestratedDiamondWorkflow(t *testing.T) {

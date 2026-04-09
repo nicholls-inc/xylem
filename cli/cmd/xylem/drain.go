@@ -119,7 +119,7 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {
 	sources := make(map[string]source.Source)
-	for _, srcCfg := range cfg.Sources {
+	for name, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
 		case "github":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
@@ -133,7 +133,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gh.Name()] = gh
+			registerSource(sources, name, gh.Name(), gh)
 		case "github-pr":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -146,7 +146,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pr.Name()] = pr
+			registerSource(sources, name, pr.Name(), pr)
 		case "github-pr-events":
 			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -168,7 +168,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pre.Name()] = pre
+			registerSource(sources, name, pre.Name(), pre)
 		case "github-merge":
 			mergeTasks := make(map[string]source.MergeTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -182,17 +182,43 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gm.Name()] = gm
+			registerSource(sources, name, gm.Name(), gm)
+		case "scheduled":
+			scheduledTasks := make(map[string]source.ScheduledTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				scheduledTasks[name] = source.ScheduledTask{
+					Workflow: t.Workflow,
+					Ref:      t.Ref,
+				}
+			}
+			scheduled := &source.Scheduled{
+				Repo:     srcCfg.Repo,
+				Schedule: srcCfg.Schedule,
+				Tasks:    scheduledTasks,
+				Queue:    q,
+			}
+			registerSource(sources, name, scheduled.Name(), scheduled)
 		}
 	}
 	return sources
+}
+
+func registerSource(sources map[string]source.Source, configName string, runtimeName string, src source.Source) {
+	if configName != "" {
+		sources[configName] = src
+	}
+	if runtimeName != "" {
+		if _, exists := sources[runtimeName]; !exists {
+			sources[runtimeName] = src
+		}
+	}
 }
 
 func buildReporter(cfg *config.Config, cmdRunner reporter.Runner) *reporter.Reporter {
 	// Find the first GitHub-based source repo for reporting
 	for _, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
-		case "github", "github-pr", "github-pr-events", "github-merge":
+		case "github", "github-pr", "github-pr-events", "github-merge", "scheduled":
 			if srcCfg.Repo != "" {
 				return &reporter.Reporter{Runner: cmdRunner, Repo: srcCfg.Repo}
 			}

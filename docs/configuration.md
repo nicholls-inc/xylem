@@ -128,8 +128,9 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`. |
-| `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"scheduled"`. |
+| `repo` | string | -- | Yes (GitHub and `scheduled` sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `schedule` | string | -- | Required for `scheduled` | Recurring cadence. Supports `@hourly`, `@daily`, `@weekly`, or any positive Go duration like `168h`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
@@ -143,6 +144,7 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 |-------|------|---------|----------|-------------|
 | `labels` | list of strings | -- | Required for `github` and `github-pr` | Labels that trigger this task. The item must have all listed labels to match. |
 | `workflow` | string | -- | Yes | Name of the workflow to invoke (e.g., `fix-bug`, `implement-feature`). Must not be empty or whitespace-only. Corresponds to a YAML file in `<state_dir>/workflows/`. |
+| `ref` | string | omitted | Required for `scheduled` | Stable task identifier stored in vessel metadata for recurring scheduled runs. |
 | `status_labels` | object | omitted | No | Optional labels to apply as a vessel moves through queue states. Supported for `github` and `github-pr`. |
 | `on` | object | omitted | Required for `github-pr-events` | Event triggers for pull-request event scanning. Must include at least one trigger. |
 
@@ -152,6 +154,23 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 - `github-pr`: requires `labels`, supports `status_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
+- `scheduled`: requires `workflow` and `ref`; the source also requires `schedule`
+
+### `scheduled`
+
+`scheduled` sources enqueue one vessel per task per schedule window. Repeated `scan` runs in the same window dedupe automatically by the computed schedule ref.
+
+```yaml
+sources:
+  sota-gap:
+    type: scheduled
+    repo: owner/repo
+    schedule: "@weekly"
+    tasks:
+      weekly-self-gap-analysis:
+        workflow: sota-gap-analysis
+        ref: sota-gap-analysis
+```
 
 ### `status_labels`
 
@@ -599,8 +618,11 @@ The following rules are enforced when loading `.xylem.yml`. If any rule fails, `
 | `github` and `github-pr` sources must have a `repo` in `owner/name` format | `source "<name>" (github): repo must be in owner/name format` |
 | `github-pr-events` sources must have a `repo` in `owner/name` format | `source "<name>" (github-pr-events): repo must be in owner/name format` |
 | `github-merge` sources must have a `repo` in `owner/name` format | `source "<name>" (github-merge): repo must be in owner/name format` |
-| `github`, `github-pr`, `github-pr-events`, and `github-merge` sources must have at least one task | `source "<name>" ...: at least one task is required` |
+| `scheduled` sources must have a `repo` in `owner/name` format | `source "<name>" (scheduled): repo must be in owner/name format` |
+| `scheduled` sources must declare a valid cadence | `source "<name>" (scheduled): schedule is invalid: ...` |
+| `github`, `github-pr`, `github-pr-events`, `github-merge`, and `scheduled` sources must have at least one task | `source "<name>" ...: at least one task is required` |
 | `github` and `github-pr` tasks must have at least one label | `source "<name>" task "<task>": must include at least one labels entry` |
+| `scheduled` tasks must include a `ref` | `source "<name>" task "<task>": ref is required for scheduled tasks` |
 | `github-pr-events` tasks must include an `on` block | `source "<name>" task "<task>": must include an 'on' block...` |
 | `github-pr-events` `on` blocks must include at least one trigger | `source "<name>" task "<task>": 'on' block must specify at least one trigger...` |
 | `github-pr-events` tasks with `review_submitted` or `commented` must specify an author filter | `source "<name>" task "<task>": tasks with review_submitted or commented must specify author_allow or author_deny to prevent self-trigger loops` |

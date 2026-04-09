@@ -1471,6 +1471,65 @@ func TestSmoke_S35_HarnessReviewRejectsAbsoluteOutputDir(t *testing.T) {
 	assert.Contains(t, err.Error(), "harness.review.output_dir")
 }
 
+func TestSmoke_S36_ScheduledSourceLoads(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"sota-gap": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "@weekly",
+			Tasks: map[string]Task{
+				"weekly": {Workflow: "sota-gap-analysis", Ref: "sota-gap-analysis"},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	require.NoError(t, err)
+
+	sourceCfg := cfg.Sources["sota-gap"]
+	assert.Equal(t, "scheduled", sourceCfg.Type)
+	assert.Equal(t, "@weekly", sourceCfg.Schedule)
+	assert.Equal(t, "sota-gap-analysis", sourceCfg.Tasks["weekly"].Workflow)
+	assert.Equal(t, "sota-gap-analysis", sourceCfg.Tasks["weekly"].Ref)
+}
+
+func TestSmoke_S37_ScheduledSourceRequiresRef(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"sota-gap": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "@weekly",
+			Tasks: map[string]Task{
+				"weekly": {Workflow: "sota-gap-analysis"},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ref is required")
+}
+
+func TestSmoke_S38_ScheduledSourceRejectsInvalidSchedule(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"sota-gap": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "weeklyish",
+			Tasks: map[string]Task{
+				"weekly": {Workflow: "sota-gap-analysis", Ref: "sota-gap-analysis"},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "schedule is invalid")
+}
+
 func TestSourceTimeoutValid(t *testing.T) {
 	cfg := validConfig()
 	cfg.Sources = map[string]SourceConfig{

@@ -628,6 +628,8 @@ func runGH(ctx context.Context, store *dtu.Store, state *dtu.State, args []strin
 		}
 	case "issue":
 		switch args[1] {
+		case "create":
+			return runGHIssueCreate(ctx, store, args[2:], stdout, stderr)
 		case "edit":
 			return runGHIssueEdit(ctx, store, args[2:], stderr)
 		case "view":
@@ -1052,7 +1054,10 @@ func runGHSearchIssues(_ context.Context, store *dtu.Store, state *dtu.State, ar
 		if issue.State != dtu.IssueStateOpen {
 			continue
 		}
-		if opts.label != "" && !contains(issue.Labels, opts.label) {
+		if len(opts.labels) > 0 && !containsAll(issue.Labels, opts.labels) {
+			continue
+		}
+		if opts.search != "" && !matchesSearchQuery(issue.Title, issue.Body, opts.search) {
 			continue
 		}
 		items = append(items, encodeIssue(state, repo, issue, fields))
@@ -1061,6 +1066,48 @@ func runGHSearchIssues(_ context.Context, store *dtu.Store, state *dtu.State, ar
 		}
 	}
 	return writeJSON(stdout, stderr, items)
+}
+
+func runGHIssueCreate(_ context.Context, store *dtu.Store, args []string, stdout, stderr io.Writer) int {
+	opts, err := parseGHFlags(args)
+	if err != nil {
+		return writeError(stderr, 2, err)
+	}
+	if opts.repo == "" {
+		return writeError(stderr, 2, fmt.Errorf("gh issue create requires --repo"))
+	}
+	if strings.TrimSpace(opts.title) == "" {
+		return writeError(stderr, 2, fmt.Errorf("gh issue create requires --title"))
+	}
+	if strings.TrimSpace(opts.body) == "" {
+		return writeError(stderr, 2, fmt.Errorf("gh issue create requires --body"))
+	}
+
+	var createdURL string
+	err = store.Update(func(state *dtu.State) error {
+		repo := state.RepositoryBySlug(opts.repo)
+		if repo == nil {
+			return fmt.Errorf("repository %q not found", opts.repo)
+		}
+		number := nextIssueNumber(repo)
+		ensureRepoLabels(repo, opts.labels)
+		issue := dtu.Issue{
+			Number: number,
+			Title:  opts.title,
+			Body:   opts.body,
+			State:  dtu.IssueStateOpen,
+			Labels: append([]string(nil), opts.labels...),
+		}
+		createdURL = issueURL(state, repo, issue)
+		issue.URL = createdURL
+		repo.Issues = append(repo.Issues, issue)
+		return nil
+	})
+	if err != nil {
+		return writeError(stderr, 1, err)
+	}
+	_, _ = io.WriteString(stdout, createdURL+"\n")
+	return 0
 }
 
 func runGHIssueEdit(_ context.Context, store *dtu.Store, args []string, stderr io.Writer) int {
@@ -1174,7 +1221,7 @@ func runGHPRList(_ context.Context, store *dtu.Store, state *dtu.State, args []s
 		if !matchesPRState(pr, opts.state) {
 			continue
 		}
-		if opts.label != "" && !contains(pr.Labels, opts.label) {
+		if len(opts.labels) > 0 && !containsAll(pr.Labels, opts.labels) {
 			continue
 		}
 		if search := strings.TrimPrefix(opts.search, "head:"); opts.search != "" && !strings.HasPrefix(pr.HeadBranch, search) {
@@ -1377,7 +1424,8 @@ type ghOptions struct {
 	repo         string
 	state        string
 	jsonFields   string
-	label        string
+	title        string
+	labels       []string
 	search       string
 	jq           string
 	body         string
@@ -1417,7 +1465,14 @@ func parseGHFlags(args []string) (ghOptions, error) {
 			if err != nil {
 				return ghOptions{}, err
 			}
-			opts.label = value
+			opts.labels = append(opts.labels, value)
+			i = next
+		case "--title":
+			value, next, err := requireValue(args, i, args[i])
+			if err != nil {
+				return ghOptions{}, err
+			}
+			opts.title = value
 			i = next
 		case "--search":
 			value, next, err := requireValue(args, i, args[i])
@@ -1685,6 +1740,52 @@ func contains(values []string, want string) bool {
 		}
 	}
 	return false
+}
+
+func containsAll(values []string, wants []string) bool {
+	for _, want := range wants {
+		if !contains(values, want) {
+			return false
+		}
+	}
+	return true
+}
+
+func matchesSearchQuery(title, body, query string) bool {
+	query = strings.ToLower(strings.TrimSpace(query))
+	if query == "" {
+		return true
+	}
+	haystack := strings.ToLower(title + "\n" + body)
+	return strings.Contains(haystack, query)
+}
+
+func nextIssueNumber(repo *dtu.Repository) int {
+	next := 1
+	for _, issue := range repo.Issues {
+		if issue.Number >= next {
+			next = issue.Number + 1
+		}
+	}
+	return next
+}
+
+func ensureRepoLabels(repo *dtu.Repository, labels []string) {
+	for _, label := range labels {
+		if strings.TrimSpace(label) == "" {
+			continue
+		}
+		found := false
+		for _, existing := range repo.Labels {
+			if existing.Name == label {
+				found = true
+				break
+			}
+		}
+		if !found {
+			repo.Labels = append(repo.Labels, dtu.Label{Name: label})
+		}
+	}
 }
 
 func waitContext(ctx context.Context, store *dtu.Store, delay time.Duration) error {

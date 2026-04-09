@@ -239,7 +239,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 				}
-				src := r.resolveSource(vessel.Source)
+				src := r.resolveSource(vessel)
 				if err := src.OnTimedOut(ctx, vessel); err != nil {
 					log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -280,7 +280,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 
 func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome string) {
 	// Look up source for this vessel
-	src := r.resolveSource(vessel.Source)
+	src := r.resolveSource(vessel)
 
 	// Source-specific start hook (e.g., add in-progress label)
 	startErr := src.OnStart(ctx, vessel)
@@ -880,11 +880,17 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	return r.completeVessel(ctx, vessel, worktreePath, nil, vrs, nil)
 }
 
-func (r *Runner) resolveSource(name string) source.Source {
-	if r.Sources != nil {
+func (r *Runner) resolveSource(vessel queue.Vessel) source.Source {
+	if r.Sources == nil {
+		return &source.Manual{}
+	}
+	if name := r.sourceConfigNameFromMeta(vessel); name != "" {
 		if src, ok := r.Sources[name]; ok {
 			return src
 		}
+	}
+	if src, ok := r.Sources[vessel.Source]; ok {
+		return src
 	}
 	return &source.Manual{}
 }
@@ -2180,13 +2186,10 @@ func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 }
 
 func (r *Runner) resolveRepo(vessel queue.Vessel) string {
-	if r.Sources == nil {
-		return ""
+	if sourceCfg := r.sourceConfigFromMeta(vessel); sourceCfg != nil && strings.TrimSpace(sourceCfg.Repo) != "" {
+		return strings.TrimSpace(sourceCfg.Repo)
 	}
-	src, ok := r.Sources[vessel.Source]
-	if !ok {
-		return ""
-	}
+	src := r.resolveSource(vessel)
 	switch s := src.(type) {
 	case *source.GitHub:
 		return s.Repo
@@ -2195,6 +2198,8 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 	case *source.GitHubPREvents:
 		return s.Repo
 	case *source.GitHubMerge:
+		return s.Repo
+	case *source.Scheduled:
 		return s.Repo
 	default:
 		return ""

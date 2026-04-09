@@ -45,13 +45,14 @@ type Config struct {
 }
 
 type SourceConfig struct {
-	Type    string          `yaml:"type"`
-	Repo    string          `yaml:"repo,omitempty"`
-	LLM     string          `yaml:"llm,omitempty"`
-	Model   string          `yaml:"model,omitempty"`
-	Timeout string          `yaml:"timeout,omitempty"`
-	Exclude []string        `yaml:"exclude,omitempty"`
-	Tasks   map[string]Task `yaml:"tasks,omitempty"`
+	Type     string          `yaml:"type"`
+	Repo     string          `yaml:"repo,omitempty"`
+	Schedule string          `yaml:"schedule,omitempty"`
+	LLM      string          `yaml:"llm,omitempty"`
+	Model    string          `yaml:"model,omitempty"`
+	Timeout  string          `yaml:"timeout,omitempty"`
+	Exclude  []string        `yaml:"exclude,omitempty"`
+	Tasks    map[string]Task `yaml:"tasks,omitempty"`
 }
 
 type StatusLabels struct {
@@ -85,6 +86,7 @@ type PREventsConfig struct {
 type Task struct {
 	Labels       []string        `yaml:"labels,omitempty"`
 	Workflow     string          `yaml:"workflow"`
+	Ref          string          `yaml:"ref,omitempty"`
 	StatusLabels *StatusLabels   `yaml:"status_labels,omitempty"`
 	On           *PREventsConfig `yaml:"on,omitempty"`
 }
@@ -314,6 +316,10 @@ func (c *Config) Validate() error {
 			}
 		case "github-merge":
 			if err := validateGitHubMergeSource(name, src); err != nil {
+				return err
+			}
+		case "scheduled":
+			if err := validateScheduledSource(name, src); err != nil {
 				return err
 			}
 		case "":
@@ -683,4 +689,52 @@ func validateGitHubMergeSource(name string, src SourceConfig) error {
 		}
 	}
 	return nil
+}
+
+func validateScheduledSource(name string, src SourceConfig) error {
+	repo := strings.TrimSpace(src.Repo)
+	if repo == "" {
+		return fmt.Errorf("source %q (scheduled): repo is required", name)
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("source %q (scheduled): repo must be in owner/name format", name)
+	}
+	if strings.TrimSpace(src.Schedule) == "" {
+		return fmt.Errorf("source %q (scheduled): schedule is required", name)
+	}
+	if _, err := parseScheduleValue(src.Schedule); err != nil {
+		return fmt.Errorf("source %q (scheduled): schedule is invalid: %w", name, err)
+	}
+	if len(src.Tasks) == 0 {
+		return fmt.Errorf("source %q (scheduled): at least one task is required", name)
+	}
+	for tname, task := range src.Tasks {
+		if strings.TrimSpace(task.Workflow) == "" {
+			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
+		}
+		if strings.TrimSpace(task.Ref) == "" {
+			return fmt.Errorf("source %q task %q: ref is required for scheduled tasks", name, tname)
+		}
+	}
+	return nil
+}
+
+func parseScheduleValue(value string) (time.Duration, error) {
+	switch strings.TrimSpace(strings.ToLower(value)) {
+	case "@hourly":
+		return time.Hour, nil
+	case "@daily":
+		return 24 * time.Hour, nil
+	case "@weekly":
+		return 7 * 24 * time.Hour, nil
+	}
+	interval, err := time.ParseDuration(value)
+	if err != nil {
+		return 0, err
+	}
+	if interval <= 0 {
+		return 0, fmt.Errorf("must be greater than 0")
+	}
+	return interval, nil
 }

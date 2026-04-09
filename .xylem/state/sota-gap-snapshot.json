@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "repo": "nicholls-inc/xylem",
+  "generated_at": "2026-04-09T00:00:00Z",
+  "capabilities": [
+    {
+      "key": "context",
+      "name": "Context management",
+      "layer": "standalone-harness-library",
+      "status": "dormant",
+      "summary": "The repo ships a dedicated context manager and compaction logic, but the primary scan/drain execution path does not route prompt assembly through it today.",
+      "recommendation": "Thread ctxmgr compaction and window selection into prompt construction so long-lived runs degrade gracefully instead of relying on raw prompt truncation alone.",
+      "priority": 7,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §2.2",
+        "docs/best-practices/harness-engineering.md §6"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/ctxmgr/ctxmgr.go",
+          "line_start": 180,
+          "summary": "Compaction exists as a standalone helper instead of being called from the runner's prompt path."
+        }
+      ]
+    },
+    {
+      "key": "tools",
+      "name": "Tool catalog and permissions",
+      "layer": "standalone-harness-library",
+      "status": "dormant",
+      "summary": "A rich tool catalog and role-permission model exists, but workflow execution still relies on per-phase strings and provider flags rather than the catalog as the source of truth.",
+      "recommendation": "Route phase/tool authorization through the catalog so allowed tool sets and permission scopes become auditable, reusable runtime policy.",
+      "priority": 8,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §3.1",
+        "docs/best-practices/harness-engineering.md §5"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/catalog/catalog.go",
+          "line_start": 75,
+          "summary": "Catalog models tools and role permissions, but the main CLI path does not wire it into phase execution."
+        }
+      ]
+    },
+    {
+      "key": "memory",
+      "name": "Typed memory",
+      "layer": "standalone-harness-library",
+      "status": "dormant",
+      "summary": "Typed memory, scratchpads, and a session KV store are implemented, but vessel execution does not currently persist or hydrate these artifacts across phases.",
+      "recommendation": "Persist mission/vessel memory alongside phase outputs and feed selected memory back into later phases and recurring review workflows.",
+      "priority": 7,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §3.3",
+        "docs/best-practices/harness-engineering.md §8"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/memory/memory.go",
+          "line_start": 613,
+          "summary": "KVStore and typed memory types exist as reusable primitives without primary-path wiring from scan/drain."
+        }
+      ]
+    },
+    {
+      "key": "orchestration",
+      "name": "Workflow orchestration",
+      "layer": "control-plane",
+      "status": "wired",
+      "summary": "Phase dependency graphs are turned into orchestrator topologies and executed in waves, so orchestration is active in the primary runner path.",
+      "recommendation": "Keep orchestration simple-first and extend only where dependency-based parallelism proves insufficient.",
+      "priority": 4,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §4.1",
+        "docs/best-practices/harness-engineering.md §4"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/runner/schedule.go",
+          "line_start": 90,
+          "summary": "The runner builds orchestrator topology from workflow phases when dependency execution is needed."
+        },
+        {
+          "path": "cli/internal/orchestrator/orchestrator.go",
+          "line_start": 136,
+          "summary": "The orchestrator package defines the topology and execution patterns used by the runner."
+        }
+      ]
+    },
+    {
+      "key": "verification",
+      "name": "Verification and evidence",
+      "layer": "control-plane",
+      "status": "wired",
+      "summary": "The runner persists evidence manifests and the repo includes DTU-backed verification flows, so verification is materially wired into execution artifacts.",
+      "recommendation": "Expand deterministic check coverage before adding more prompt-driven verification logic.",
+      "priority": 5,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §4.6",
+        "docs/best-practices/harness-engineering.md §11"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/runner/runner.go",
+          "line_start": 945,
+          "summary": "persistRunArtifacts writes evidence manifests and summary artifacts for vessel runs."
+        }
+      ]
+    },
+    {
+      "key": "evaluation",
+      "name": "Generator-evaluator loops",
+      "layer": "standalone-harness-library",
+      "status": "dormant",
+      "summary": "An evaluator loop abstraction exists, but it is not yet invoked by the main CLI workflows or recurring quality-review flows.",
+      "recommendation": "Use evaluator loops for high-risk workflow phases and recurring self-audits instead of relying on one-shot prompts alone.",
+      "priority": 8,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §4.7",
+        "docs/best-practices/harness-engineering.md §10"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/evaluator/evaluator.go",
+          "line_start": 201,
+          "summary": "NewLoop provides evaluator wiring, but the main runner path does not call it."
+        }
+      ]
+    },
+    {
+      "key": "observability",
+      "name": "Observability",
+      "layer": "control-plane",
+      "status": "wired",
+      "summary": "Drain initializes tracing from config and the observability package provides a live tracer, so observability is active in the control plane.",
+      "recommendation": "Keep expanding span coverage around recurring background vessels so weekly self-analysis has first-class telemetry.",
+      "priority": 4,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §4.9",
+        "docs/best-practices/harness-engineering.md §12"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/cmd/xylem/drain.go",
+          "line_start": 91,
+          "summary": "Drain enables tracing from config and constructs an observability tracer for runs."
+        },
+        {
+          "path": "cli/internal/observability/tracer.go",
+          "line_start": 63,
+          "summary": "NewTracer initializes the OpenTelemetry tracer used by the CLI."
+        }
+      ]
+    },
+    {
+      "key": "security",
+      "name": "Policy and protected surfaces",
+      "layer": "control-plane",
+      "status": "wired",
+      "summary": "Protected-surface policy is enforced through the intermediary and attached to runner execution, so baseline security controls are active today.",
+      "recommendation": "Continue tightening policy around externally visible actions while keeping worktree-local execution ergonomic.",
+      "priority": 5,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §4.8",
+        "docs/best-practices/harness-engineering.md §9"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/config/config.go",
+          "line_start": 497,
+          "summary": "DefaultPolicy denies writes to protected xylem control surfaces while allowing other actions."
+        },
+        {
+          "path": "cli/cmd/xylem/drain.go",
+          "line_start": 85,
+          "summary": "Drain wires intermediary policy enforcement into runner execution."
+        }
+      ]
+    },
+    {
+      "key": "entropy",
+      "name": "Entropy management",
+      "layer": "standalone-harness-library",
+      "status": "dormant",
+      "summary": "Signal heuristics for repetition and stalls exist, but there is no recurring garbage-collection or simplification loop wired into weekly operations yet.",
+      "recommendation": "Use signal heuristics to trigger recurring cleanup and self-gap-analysis actions instead of leaving entropy detection as a library-only primitive.",
+      "priority": 9,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §4.10",
+        "docs/best-practices/harness-engineering.md §15"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/signal/signal.go",
+          "line_start": 86,
+          "summary": "Signal configuration tracks repetition and stall windows, but the daemon does not yet schedule cleanup based on those signals."
+        },
+        {
+          "path": "cli/internal/signal/signal.go",
+          "line_start": 263,
+          "summary": "Stall detection exists as a reusable heuristic rather than an active weekly control loop."
+        }
+      ]
+    },
+    {
+      "key": "cost",
+      "name": "Cost controls",
+      "layer": "control-plane",
+      "status": "wired",
+      "summary": "Cost tracking, budget alerts, and budget-exceeded short-circuiting are active in vessel execution and summaries.",
+      "recommendation": "Extend cost reporting to recurring self-analysis output so convergence work stays budget-aware over time.",
+      "priority": 4,
+      "spec_sections": [
+        "docs/design/sota-agent-harness-spec.md §4.11",
+        "docs/best-practices/harness-engineering.md §13"
+      ],
+      "code_evidence": [
+        {
+          "path": "cli/internal/cost/cost.go",
+          "line_start": 93,
+          "summary": "Tracker accumulates usage and enforces budget constraints."
+        },
+        {
+          "path": "cli/internal/runner/runner.go",
+          "line_start": 636,
+          "summary": "The runner fails vessels when the active cost tracker reports budget exhaustion."
+        }
+      ]
+    }
+  ]
+}

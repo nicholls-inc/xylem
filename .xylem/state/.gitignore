@@ -1,0 +1,4 @@
+*
+!.gitignore
+!sota-gap-snapshot.json
+!sota-gap-snapshot.schema.json
