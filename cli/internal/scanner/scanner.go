@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -134,6 +135,23 @@ func (s *Scanner) buildSources() []sourceEntry {
 				},
 				configName: name,
 			})
+		case "scheduled":
+			scheduledTasks := convertScheduledTasks(srcCfg.Tasks)
+			scheduledDur, err := time.ParseDuration(srcCfg.Schedule)
+			if err != nil {
+				log.Printf("warn: skip scheduled source %q: parse schedule %q: %v", name, srcCfg.Schedule, err)
+				continue
+			}
+			entries = append(entries, sourceEntry{
+				src: &source.Scheduled{
+					Repo:       srcCfg.Repo,
+					StateDir:   s.Config.StateDir,
+					ConfigName: name,
+					Schedule:   scheduledDur,
+					Tasks:      scheduledTasks,
+				},
+				configName: name,
+			})
 		case "schedule":
 			entries = append(entries, sourceEntry{
 				src: &source.Schedule{
@@ -181,6 +199,16 @@ func convertMergeTasks(cfgTasks map[string]config.Task) map[string]source.MergeT
 	tasks := make(map[string]source.MergeTask, len(cfgTasks))
 	for name, t := range cfgTasks {
 		tasks[name] = source.MergeTask{
+			Workflow: t.Workflow,
+		}
+	}
+	return tasks
+}
+
+func convertScheduledTasks(cfgTasks map[string]config.Task) map[string]source.ScheduledTask {
+	tasks := make(map[string]source.ScheduledTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		tasks[name] = source.ScheduledTask{
 			Workflow: t.Workflow,
 		}
 	}
