@@ -111,6 +111,10 @@ type DaemonConfig struct {
 	ScanInterval  string `yaml:"scan_interval,omitempty"`
 	DrainInterval string `yaml:"drain_interval,omitempty"`
 	AutoUpgrade   bool   `yaml:"auto_upgrade,omitempty"`
+	// UpgradeInterval controls how often the daemon re-runs the
+	// auto_upgrade check while the loop is running. Only meaningful when
+	// AutoUpgrade is true. Defaults to 5m. Accepts any Go duration string.
+	UpgradeInterval string `yaml:"upgrade_interval,omitempty"`
 	// AutoMerge enables automatic copilot review cycle + merge of
 	// xylem-authored PRs. Only merges when the PR is approved, CI-green,
 	// and mergeable. Branches matching feat/issue-*, fix/issue-*, or
