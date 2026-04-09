@@ -253,6 +253,20 @@ func makeTestConfig(dir string, concurrency int) *config.Config {
 		Claude: config.ClaudeConfig{
 			Command: "claude",
 		},
+		// Explicit protected surfaces because the package default is now
+		// empty (to support xylem's self-improving use case — see PR
+		// loop11/#194). Tests in this package exercise the verifier and
+		// rely on non-empty protection patterns to trigger violations.
+		Harness: config.HarnessConfig{
+			ProtectedSurfaces: config.ProtectedSurfacesConfig{
+				Paths: []string{
+					".xylem/HARNESS.md",
+					".xylem.yml",
+					".xylem/workflows/*.yaml",
+					".xylem/prompts/*/*.md",
+				},
+			},
+		},
 		Sources: map[string]config.SourceConfig{
 			"github": {
 				Type:    "github",

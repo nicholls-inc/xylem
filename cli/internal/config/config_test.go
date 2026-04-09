@@ -1346,7 +1346,12 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	assert.Equal(t, DefaultProtectedSurfaces, cfg.EffectiveProtectedSurfaces())
+	// DefaultProtectedSurfaces is now empty (see rationale in config.go).
+	// EffectiveProtectedSurfaces() returns nil when no paths are configured,
+	// which is equivalent to "nothing protected" — the self-improving
+	// default. Deployments that want strict enforcement opt in explicitly
+	// via harness.protected_surfaces.paths.
+	assert.Empty(t, cfg.EffectiveProtectedSurfaces())
 	assert.Equal(t, DefaultAuditLogPath, cfg.EffectiveAuditLogPath())
 	assert.Equal(t, "manual", cfg.HarnessReviewCadence())
 	assert.Equal(t, 10, cfg.HarnessReviewEveryNRuns())

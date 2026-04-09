@@ -32,6 +32,18 @@ import (
 // ws1Config returns a base config pointing at acme/widget with a single task.
 func ws1Config(stateDir, workflow string) *config.Config {
 	cfg := baseScenarioConfig(stateDir)
+	// Explicit protected surfaces because the package default is now empty
+	// (to support xylem's self-improving use case — see PR loop11 / #194).
+	// WS1 scenarios exercise the verifier and need non-empty protection
+	// patterns to trigger violations (e.g., TestWS1SurfaceViolationDetected).
+	cfg.Harness.ProtectedSurfaces = config.ProtectedSurfacesConfig{
+		Paths: []string{
+			".xylem/HARNESS.md",
+			".xylem.yml",
+			".xylem/workflows/*.yaml",
+			".xylem/prompts/*/*.md",
+		},
+	}
 	cfg.Sources = map[string]config.SourceConfig{
 		"issues": {
 			Type: "github",
