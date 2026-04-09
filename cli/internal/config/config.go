@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 const minTimeout = 30 * time.Second
 
 const DefaultAuditLogPath = "audit.jsonl"
+const DefaultLLMRoutingTier = "med"
 
 // DefaultProtectedSurfaces is the default list of paths that xylem's
 // runtime verifier treats as off-limits to vessel modifications.
@@ -55,24 +57,44 @@ const DefaultAuditLogPath = "audit.jsonl"
 var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
-	Repo          string                  `yaml:"repo,omitempty"`
-	Sources       map[string]SourceConfig `yaml:"sources,omitempty"`
-	Tasks         map[string]Task         `yaml:"tasks,omitempty"`
-	Concurrency   int                     `yaml:"concurrency"`
-	MaxTurns      int                     `yaml:"max_turns"`
-	Timeout       string                  `yaml:"timeout"`
-	StateDir      string                  `yaml:"state_dir"`
-	Exclude       []string                `yaml:"exclude,omitempty"`
-	DefaultBranch string                  `yaml:"default_branch,omitempty"`
-	CleanupAfter  string                  `yaml:"cleanup_after,omitempty"`
-	LLM           string                  `yaml:"llm,omitempty"`
-	Model         string                  `yaml:"model,omitempty"`
-	Claude        ClaudeConfig            `yaml:"claude"`
-	Copilot       CopilotConfig           `yaml:"copilot,omitempty"`
-	Daemon        DaemonConfig            `yaml:"daemon,omitempty"`
-	Harness       HarnessConfig           `yaml:"harness,omitempty"`
-	Observability ObservabilityConfig     `yaml:"observability,omitempty"`
-	Cost          CostConfig              `yaml:"cost,omitempty"`
+	Repo          string                    `yaml:"repo,omitempty"`
+	Sources       map[string]SourceConfig   `yaml:"sources,omitempty"`
+	Tasks         map[string]Task           `yaml:"tasks,omitempty"`
+	Concurrency   int                       `yaml:"concurrency"`
+	MaxTurns      int                       `yaml:"max_turns"`
+	Timeout       string                    `yaml:"timeout"`
+	StateDir      string                    `yaml:"state_dir"`
+	Exclude       []string                  `yaml:"exclude,omitempty"`
+	DefaultBranch string                    `yaml:"default_branch,omitempty"`
+	CleanupAfter  string                    `yaml:"cleanup_after,omitempty"`
+	LLM           string                    `yaml:"llm,omitempty"`
+	Model         string                    `yaml:"model,omitempty"`
+	Providers     map[string]ProviderConfig `yaml:"providers,omitempty"`
+	LLMRouting    LLMRoutingConfig          `yaml:"llm_routing,omitempty"`
+	Claude        ClaudeConfig              `yaml:"claude"`
+	Copilot       CopilotConfig             `yaml:"copilot,omitempty"`
+	Daemon        DaemonConfig              `yaml:"daemon,omitempty"`
+	Harness       HarnessConfig             `yaml:"harness,omitempty"`
+	Observability ObservabilityConfig       `yaml:"observability,omitempty"`
+	Cost          CostConfig                `yaml:"cost,omitempty"`
+}
+
+type ProviderConfig struct {
+	Kind         string            `yaml:"kind"`
+	Command      string            `yaml:"command"`
+	Flags        string            `yaml:"flags,omitempty"`
+	Tiers        map[string]string `yaml:"tiers,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
+	AllowedTools []string          `yaml:"allowed_tools,omitempty"`
+}
+
+type LLMRoutingConfig struct {
+	DefaultTier string                 `yaml:"default_tier,omitempty"`
+	Tiers       map[string]TierRouting `yaml:"tiers,omitempty"`
+}
+
+type TierRouting struct {
+	Providers []string `yaml:"providers"`
 }
 
 type SourceConfig struct {
@@ -124,6 +146,7 @@ type PREventsConfig struct {
 type Task struct {
 	Labels          []string         `yaml:"labels,omitempty"`
 	Workflow        string           `yaml:"workflow"`
+	Tier            string           `yaml:"tier,omitempty"`
 	Ref             string           `yaml:"ref,omitempty"`
 	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
 	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
@@ -263,6 +286,7 @@ func (c *Config) normalize() {
 			},
 		}
 	}
+	c.normalizeProviders()
 }
 
 func (c *Config) Validate() error {
@@ -313,6 +337,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("--bare requires ANTHROPIC_API_KEY in claude.env")
 		}
 	}
+
+	c.normalizeProviders()
 
 	if c.Daemon.ScanInterval != "" {
 		if _, err := time.ParseDuration(c.Daemon.ScanInterval); err != nil {
@@ -401,7 +427,7 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if err := c.validateProviderDefaultModels(); err != nil {
+	if err := c.validateProviders(); err != nil {
 		return err
 	}
 
@@ -637,7 +663,95 @@ func (c *Config) validateCost() error {
 // validateProviderDefaultModels ensures every active LLM provider has a
 // default_model configured. A provider is active if it is the global llm value
 // or referenced by any source's llm field.
-func (c *Config) validateProviderDefaultModels() error {
+func (c *Config) validateProviders() error {
+	if len(c.Providers) == 0 && len(c.LLMRouting.Tiers) == 0 {
+		return nil
+	}
+
+	for name, provider := range c.Providers {
+		switch provider.Kind {
+		case "claude", "copilot":
+		default:
+			return fmt.Errorf("providers.%s.kind must be one of claude or copilot, got %q", name, provider.Kind)
+		}
+
+		for tierName := range c.LLMRouting.Tiers {
+			model, ok := provider.Tiers[tierName]
+			if !ok || strings.TrimSpace(model) == "" {
+				return fmt.Errorf("providers.%s.tiers.%s must be set because llm_routing.tiers.%s is configured", name, tierName, tierName)
+			}
+		}
+
+		if provider.Kind == "claude" && strings.Contains(provider.Flags, "--bare") {
+			if provider.Env == nil || strings.TrimSpace(provider.Env["ANTHROPIC_API_KEY"]) == "" {
+				return fmt.Errorf("--bare requires ANTHROPIC_API_KEY in providers.%s.env", name)
+			}
+		}
+	}
+
+	if strings.TrimSpace(c.LLMRouting.DefaultTier) == "" {
+		return fmt.Errorf("llm_routing.default_tier must be set")
+	}
+	if _, ok := c.LLMRouting.Tiers[c.LLMRouting.DefaultTier]; !ok {
+		return fmt.Errorf("llm_routing.default_tier %q must exist in llm_routing.tiers", c.LLMRouting.DefaultTier)
+	}
+
+	for tierName, routing := range c.LLMRouting.Tiers {
+		for _, providerName := range routing.Providers {
+			if _, ok := c.Providers[providerName]; !ok {
+				return fmt.Errorf("llm_routing.tiers.%s.providers references unknown provider %q", tierName, providerName)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *Config) normalizeProviders() {
+	defaultTier := strings.TrimSpace(c.LLMRouting.DefaultTier)
+	if defaultTier == "" {
+		defaultTier = DefaultLLMRoutingTier
+		c.LLMRouting.DefaultTier = defaultTier
+	}
+
+	if len(c.Providers) == 0 {
+		providers := make(map[string]ProviderConfig)
+		active := c.activeLegacyProviders()
+		if c.shouldSynthesizeClaudeProvider(active["claude"]) {
+			providers["claude"] = ProviderConfig{
+				Kind:         "claude",
+				Command:      c.Claude.Command,
+				Flags:        c.Claude.Flags,
+				Tiers:        map[string]string{defaultTier: c.Claude.DefaultModel},
+				Env:          copyStringMap(c.Claude.Env),
+				AllowedTools: append([]string(nil), c.Claude.AllowedTools...),
+			}
+		}
+		if c.shouldSynthesizeCopilotProvider(active["copilot"]) {
+			providers["copilot"] = ProviderConfig{
+				Kind:    "copilot",
+				Command: c.Copilot.Command,
+				Flags:   c.Copilot.Flags,
+				Tiers:   map[string]string{defaultTier: c.Copilot.DefaultModel},
+				Env:     copyStringMap(c.Copilot.Env),
+			}
+		}
+		if len(providers) > 0 {
+			c.Providers = providers
+		}
+	}
+
+	if len(c.LLMRouting.Tiers) == 0 {
+		providerNames := orderedProviderNames(c.Providers, c.LLM)
+		if len(providerNames) > 0 {
+			c.LLMRouting.Tiers = map[string]TierRouting{
+				defaultTier: {Providers: providerNames},
+			}
+		}
+	}
+}
+
+func (c *Config) activeLegacyProviders() map[string]bool {
 	active := map[string]bool{}
 	switch c.LLM {
 	case "", "claude":
@@ -653,13 +767,61 @@ func (c *Config) validateProviderDefaultModels() error {
 			active["copilot"] = true
 		}
 	}
-	if active["claude"] && c.Claude.DefaultModel == "" {
-		return fmt.Errorf("claude.default_model must be set when claude is an active provider")
+	return active
+}
+
+func (c *Config) shouldSynthesizeClaudeProvider(active bool) bool {
+	if active {
+		return true
 	}
-	if active["copilot"] && c.Copilot.DefaultModel == "" {
-		return fmt.Errorf("copilot.default_model must be set when copilot is an active provider")
+	return strings.TrimSpace(c.Claude.DefaultModel) != "" ||
+		strings.TrimSpace(c.Claude.Flags) != "" ||
+		len(c.Claude.Env) > 0 ||
+		len(c.Claude.AllowedTools) > 0 ||
+		strings.TrimSpace(c.Claude.Template) != "" ||
+		(strings.TrimSpace(c.Claude.Command) != "" && strings.TrimSpace(c.Claude.Command) != "claude")
+}
+
+func (c *Config) shouldSynthesizeCopilotProvider(active bool) bool {
+	if active {
+		return true
 	}
-	return nil
+	return strings.TrimSpace(c.Copilot.DefaultModel) != "" ||
+		strings.TrimSpace(c.Copilot.Flags) != "" ||
+		len(c.Copilot.Env) > 0 ||
+		(strings.TrimSpace(c.Copilot.Command) != "" && strings.TrimSpace(c.Copilot.Command) != "copilot")
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func orderedProviderNames(providers map[string]ProviderConfig, preferred string) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if preferred == "" {
+		return names
+	}
+	for i, name := range names {
+		if name != preferred {
+			continue
+		}
+		return append([]string{name}, append(names[:i], names[i+1:]...)...)
+	}
+	return names
 }
 
 func validateGitHubSource(name string, src SourceConfig) error {
