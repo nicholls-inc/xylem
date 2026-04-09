@@ -3,6 +3,7 @@ package runner
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -160,6 +161,79 @@ func TestProp_FormatViolationsIncludesEveryViolation(t *testing.T) {
 		want := strings.Join(wantParts, "; ")
 		if formatted != want {
 			t.Fatalf("formatViolations() = %q, want %q", formatted, want)
+		}
+	})
+}
+
+func TestProp_RestoreMissingProtectedSurfacesFromRootRepairsMissingFiles(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		sourceRoot, err := os.MkdirTemp("", "runner-surface-source-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp(sourceRoot) error = %v", err)
+		}
+		defer os.RemoveAll(sourceRoot)
+
+		worktreePath, err := os.MkdirTemp("", "runner-surface-worktree-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp(worktreePath) error = %v", err)
+		}
+		defer os.RemoveAll(worktreePath)
+
+		files := map[string]string{
+			".xylem.yml":                        rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "config"),
+			".xylem/HARNESS.md":                 rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "harness"),
+			".xylem/workflows/fix-bug.yaml":     rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "workflow"),
+			".xylem/prompts/fix-bug/analyze.md": rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "prompt"),
+		}
+		patterns := []string{
+			".xylem.yml",
+			".xylem/HARNESS.md",
+			".xylem/workflows/*.yaml",
+			".xylem/prompts/*/*.md",
+		}
+
+		expectedRestored := 0
+		for path, content := range files {
+			srcPath := filepath.Join(sourceRoot, filepath.FromSlash(path))
+			if err := os.MkdirAll(filepath.Dir(srcPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s) error = %v", srcPath, err)
+			}
+			if err := os.WriteFile(srcPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s) error = %v", srcPath, err)
+			}
+
+			if rapid.Bool().Draw(t, "missing-"+path) {
+				expectedRestored++
+				continue
+			}
+
+			dstPath := filepath.Join(worktreePath, filepath.FromSlash(path))
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s) error = %v", dstPath, err)
+			}
+			if err := os.WriteFile(dstPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s) error = %v", dstPath, err)
+			}
+		}
+
+		restored, err := restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot, patterns)
+		if err != nil {
+			t.Fatalf("restoreMissingProtectedSurfacesFromRoot() error = %v", err)
+		}
+		if restored != expectedRestored {
+			t.Fatalf("restored = %d, want %d", restored, expectedRestored)
+		}
+
+		sourceSnapshot, err := surface.TakeSnapshot(sourceRoot, patterns)
+		if err != nil {
+			t.Fatalf("TakeSnapshot(sourceRoot) error = %v", err)
+		}
+		worktreeSnapshot, err := surface.TakeSnapshot(worktreePath, patterns)
+		if err != nil {
+			t.Fatalf("TakeSnapshot(worktreePath) error = %v", err)
+		}
+		if diff := surface.Compare(sourceSnapshot, worktreeSnapshot); len(diff) != 0 {
+			t.Fatalf("restored snapshot diff = %+v, want none", diff)
 		}
 	})
 }

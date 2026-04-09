@@ -528,7 +528,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 				if err != nil {
 					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 					finishCurrentPhaseSpan(snapErr)
@@ -590,7 +590,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 				if err != nil {
 					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 					finishCurrentPhaseSpan(snapErr)
@@ -859,7 +859,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	cmd, args := buildPromptOnlyCmdArgs(r.Config, prompt)
 	provider := resolveProvider(r.Config, nil, nil, nil)
 	model := resolveModel(r.Config, nil, nil, nil, provider)
-	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(worktreePath)
+	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 	if err != nil {
 		snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 		r.failVessel(vessel.ID, snapErr.Error())
@@ -1328,7 +1328,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 			if err != nil {
 				snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 				finishCurrentPhaseSpan(snapErr)
@@ -1389,7 +1389,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 			if err != nil {
 				snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 				finishCurrentPhaseSpan(snapErr)
@@ -1955,10 +1955,17 @@ func extractRepoFlag(rendered, fallback string) string {
 	return "*"
 }
 
-func (r *Runner) takeProtectedSurfaceSnapshot(worktreePath string) (surface.Snapshot, bool, error) {
+func (r *Runner) takeProtectedSurfaceSnapshot(ctx context.Context, worktreePath string) (surface.Snapshot, bool, error) {
 	patterns := r.Config.EffectiveProtectedSurfaces()
 	if len(patterns) == 0 {
 		return surface.Snapshot{}, false, nil
+	}
+
+	sourceRoot, err := r.protectedSurfaceSourceRoot(ctx, worktreePath)
+	if err == nil {
+		if _, restoreErr := restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot, patterns); restoreErr != nil {
+			return surface.Snapshot{}, false, fmt.Errorf("restore missing protected surfaces: %w", restoreErr)
+		}
 	}
 
 	snapshot, err := surface.TakeSnapshot(worktreePath, patterns)
@@ -2005,7 +2012,149 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	if err := r.recordProtectedSurfaceViolations(vessel, p, errMsg, violations); err != nil {
 		return fmt.Errorf("%s (record audit evidence: %w)", errMsg, err)
 	}
+	if err := r.restoreDeletedProtectedSurfaces(context.Background(), worktreePath, violations); err != nil {
+		log.Printf("%sphase %q protected surface self-heal failed: %v", vesselLabel(vessel), p.Name, err)
+	}
 	return fmt.Errorf("%s", errMsg)
+}
+
+func (r *Runner) protectedSurfaceSourceRoot(ctx context.Context, worktreePath string) (string, error) {
+	out, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return worktreePath, nil
+	}
+
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return worktreePath, nil
+	}
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Dir(commonDir), nil
+	}
+	return worktreePath, nil
+}
+
+func restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot string, patterns []string) (int, error) {
+	if len(patterns) == 0 {
+		return 0, nil
+	}
+
+	sourceSnapshot, err := surface.TakeSnapshot(sourceRoot, patterns)
+	if err != nil {
+		return 0, fmt.Errorf("take source protected surface snapshot: %w", err)
+	}
+	worktreeSnapshot, err := surface.TakeSnapshot(worktreePath, patterns)
+	if err != nil {
+		return 0, fmt.Errorf("take worktree protected surface snapshot: %w", err)
+	}
+
+	restored := 0
+	for _, violation := range surface.Compare(sourceSnapshot, worktreeSnapshot) {
+		if violation.After != "deleted" {
+			continue
+		}
+		if err := copyProtectedSurfaceFile(sourceRoot, worktreePath, violation.Path); err != nil {
+			return restored, fmt.Errorf("restore %s from source root: %w", violation.Path, err)
+		}
+		restored++
+	}
+
+	return restored, nil
+}
+
+func copyProtectedSurfaceFile(sourceRoot, worktreePath, relPath string) error {
+	srcPath := filepath.Join(sourceRoot, filepath.FromSlash(relPath))
+	dstPath := filepath.Join(worktreePath, filepath.FromSlash(relPath))
+
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("stat source file: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir parent dir: %w", err)
+	}
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return fmt.Errorf("read source file: %w", err)
+	}
+	if err := os.WriteFile(dstPath, data, info.Mode()); err != nil {
+		return fmt.Errorf("write restored file: %w", err)
+	}
+	if err := os.Chmod(dstPath, 0o444); err != nil {
+		return fmt.Errorf("mark restored file read-only: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) restoreDeletedProtectedSurfaces(ctx context.Context, worktreePath string, violations []surface.Violation) error {
+	var errs []error
+	defaultBranch := ""
+
+	for _, violation := range violations {
+		if violation.After != "deleted" {
+			continue
+		}
+		if err := r.restoreProtectedSurfacePath(ctx, worktreePath, violation.Path, &defaultBranch); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", violation.Path, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (r *Runner) restoreProtectedSurfacePath(ctx context.Context, worktreePath, relPath string, defaultBranch *string) error {
+	if _, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "checkout", "--", relPath); err == nil {
+		return markProtectedSurfaceReadOnly(worktreePath, relPath)
+	}
+
+	if defaultBranch != nil && *defaultBranch == "" {
+		branch, err := r.detectDefaultBranchAtPath(ctx, worktreePath)
+		if err != nil {
+			return fmt.Errorf("detect default branch: %w", err)
+		}
+		*defaultBranch = branch
+	}
+
+	if defaultBranch == nil || *defaultBranch == "" {
+		return fmt.Errorf("default branch unavailable for restore")
+	}
+
+	if _, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "checkout", "origin/"+*defaultBranch, "--", relPath); err != nil {
+		return fmt.Errorf("checkout origin/%s -- %s: %w", *defaultBranch, relPath, err)
+	}
+	return markProtectedSurfaceReadOnly(worktreePath, relPath)
+}
+
+func markProtectedSurfaceReadOnly(worktreePath, relPath string) error {
+	if err := os.Chmod(filepath.Join(worktreePath, filepath.FromSlash(relPath)), 0o444); err != nil {
+		return fmt.Errorf("chmod restored file: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) detectDefaultBranchAtPath(ctx context.Context, worktreePath string) (string, error) {
+	out, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "symbolic-ref", "refs/remotes/origin/HEAD")
+	if err == nil {
+		ref := strings.TrimSpace(string(out))
+		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != ref && branch != "" {
+			return branch, nil
+		}
+	}
+
+	out, err = r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "remote", "show", "origin")
+	if err != nil {
+		return "", fmt.Errorf("git remote show origin: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "HEAD branch:") {
+			branch := strings.TrimSpace(strings.TrimPrefix(line, "HEAD branch:"))
+			if branch != "" {
+				return branch, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("could not detect default branch from origin")
 }
 
 func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, errMsg string, violations []surface.Violation) error {
