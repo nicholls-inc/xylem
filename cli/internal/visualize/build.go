@@ -256,6 +256,7 @@ func findOrphanWorkflows(workflowsDir string, referenced map[string]struct{}) ([
 func convertWorkflow(w *workflow.Workflow) Workflow {
 	out := Workflow{
 		Name:        w.Name,
+		Class:       string(w.Class),
 		Description: w.Description,
 		LLM:         derefString(w.LLM),
 		Model:       derefString(w.Model),

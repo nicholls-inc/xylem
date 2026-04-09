@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -8,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -20,15 +22,21 @@ func newInitCmd() *cobra.Command {
 		Short: "Bootstrap .xylem.yml config and .xylem/ state directory",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			force, _ := cmd.Flags().GetBool("force")
+			seed, _ := cmd.Flags().GetBool("seed")
 			configPath := viper.GetString("config")
-			return cmdInit(configPath, force)
+			return cmdInitWithOptions(configPath, force, seed, &realCmdRunner{})
 		},
 	}
 	cmd.Flags().Bool("force", false, "Overwrite existing .xylem.yml")
+	cmd.Flags().Bool("seed", false, "Synchronously seed the adapt-repo issue after scaffolding")
 	return cmd
 }
 
 func cmdInit(configPath string, force bool) error {
+	return cmdInitWithOptions(configPath, force, false, &realCmdRunner{})
+}
+
+func cmdInitWithOptions(configPath string, force, seed bool, runner adaptRepoSeedRunner) error {
 	// Write scaffold config
 	wrote, err := writeScaffoldConfig(configPath, force)
 	if err != nil {
@@ -58,11 +66,29 @@ func cmdInit(configPath string, force bool) error {
 	// Create workflow definitions
 	writeFileIfNeeded(filepath.Join(defaultStateDir, "workflows", "fix-bug.yaml"), fixBugWorkflowContent, force)
 	writeFileIfNeeded(filepath.Join(defaultStateDir, "workflows", "implement-feature.yaml"), implementFeatureWorkflowContent, force)
+	writeFileIfNeeded(filepath.Join(defaultStateDir, "workflows", "adapt-repo.yaml"), adaptRepoWorkflowContent, force)
 
 	// Create prompt templates
 	for _, workflow := range []string{"fix-bug", "implement-feature"} {
 		for _, phase := range []string{"analyze", "plan", "implement", "pr"} {
 			writeFileIfNeeded(filepath.Join(defaultStateDir, "prompts", workflow, phase+".md"), promptContent(workflow, phase), force)
+		}
+	}
+	for _, phase := range []string{"plan", "apply", "pr"} {
+		writeFileIfNeeded(filepath.Join(defaultStateDir, "prompts", "adapt-repo", phase+".md"), promptContent("adapt-repo", phase), force)
+	}
+
+	if seed {
+		cfg, err := config.Load(configPath)
+		if err != nil {
+			return fmt.Errorf("load scaffold config for seeding: %w", err)
+		}
+		marker, err := ensureAdaptRepoSeeded(context.Background(), cfg, runner, adaptRepoSeededByInit)
+		if err != nil {
+			return err
+		}
+		if marker != nil && marker.IssueURL != "" {
+			fmt.Printf("Seeded adapt-repo issue: %s\n", marker.IssueURL)
 		}
 	}
 
@@ -117,6 +143,14 @@ sources:
       fix-bugs:
         labels: [bug, ready-for-work]
         workflow: fix-bug
+  adapt-repo:
+    type: github
+    repo: %s
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      adapt-repo:
+        labels: [xylem-adapt-repo, ready-for-work]
+        workflow: adapt-repo
   # features:
   #   type: github
   #   repo: %s
@@ -155,7 +189,7 @@ claude:
 #   flags: ""
 #   default_model: ""
 #   env: {}
-`, repo, repo)
+`, repo, repo, repo)
 
 	if err := os.WriteFile(configPath, []byte(content), 0o644); err != nil {
 		return false, fmt.Errorf("write config: %w", err)
@@ -290,6 +324,41 @@ phases:
     # if you want a human checkpoint here.
 `
 
+const adaptRepoWorkflowContent = `name: adapt-repo
+class: harness-maintenance
+description: "Analyze the target repo and propose a reviewable harness update PR."
+phases:
+  - name: analyze
+    type: command
+    run: xylem bootstrap analyze-repo --output .xylem/state/bootstrap/repo-analysis.json
+    noop:
+      match: XYLEM_NOOP
+  - name: legibility
+    type: command
+    run: xylem bootstrap audit-legibility --output .xylem/state/bootstrap/legibility-report.json
+  - name: plan
+    prompt_file: .xylem/prompts/adapt-repo/plan.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: validate
+    type: command
+    run: |
+      set -euo pipefail
+      xylem config validate --proposed .xylem/state/bootstrap/adapt-plan.json
+      xylem workflow validate --proposed .xylem/state/bootstrap/adapt-plan.json
+  - name: apply
+    prompt_file: .xylem/prompts/adapt-repo/apply.md
+    max_turns: 30
+    allowed_tools: Edit
+  - name: verify
+    type: command
+    run: xylem validation run --from-config
+  - name: pr
+    prompt_file: .xylem/prompts/adapt-repo/pr.md
+    max_turns: 20
+`
+
 const analyzePrompt = `Analyze the following GitHub issue and identify the relevant code.
 
 Issue: {{.Issue.Title}}
@@ -365,8 +434,105 @@ only when the repository policy and workflow allow ` + "`git_push`" + ` and ` + 
 gh pr create --title "<descriptive title>" --body "<summary of changes, linking to {{.Issue.URL}}>"
 `
 
+const adaptRepoPlanPrompt = `Produce the deterministic adaptation plan for this repository.
+
+Issue: {{.Issue.Title}}
+URL: {{.Issue.URL}}
+
+Read the following inputs before writing anything:
+- .xylem/state/bootstrap/repo-analysis.json
+- .xylem/state/bootstrap/legibility-report.json
+- .xylem.yml
+- AGENTS.md, README.md, and nearby docs when present
+
+Your only allowed write in this phase is .xylem/state/bootstrap/adapt-plan.json.
+Do not edit any other file. If no harness changes are needed, print XYLEM_NOOP and explain why.
+
+Write .xylem/state/bootstrap/adapt-plan.json with exactly this schema and no unknown fields:
+
+` + "```json" + `
+{
+  "schema_version": 1,
+  "detected": {
+    "languages": ["go", "typescript"],
+    "build_tools": ["go", "pnpm"],
+    "test_runners": ["go test", "vitest"],
+    "linters": ["goimports", "eslint"],
+    "has_frontend": true,
+    "has_database": false,
+    "entry_points": ["cli/cmd/myapp", "web/src/main.ts"]
+  },
+  "planned_changes": [
+    {
+      "path": ".xylem.yml",
+      "op": "patch",
+      "rationale": "add Go + TS validation gates",
+      "diff_summary": "validation.format: goimports; validation.build: go build + pnpm build"
+    }
+  ],
+  "skipped": [
+    {
+      "path": ".xylem/workflows/db-migrate.yaml",
+      "reason": "no database detected"
+    }
+  ]
+}
+` + "```" + `
+
+Rules:
+- planned_changes[].op must be one of patch, replace, create, delete.
+- planned_changes[].path must stay within .xylem/, .xylem.yml, AGENTS.md, or docs/.
+- Use skipped for intentionally omitted changes.
+- Fail closed: if you cannot produce a valid schema-conformant plan, explain the blocker instead of guessing.
+`
+
+const adaptRepoApplyPrompt = `Apply the validated adapt-plan.json to the worktree.
+
+Issue: {{.Issue.Title}}
+URL: {{.Issue.URL}}
+
+Inputs:
+- .xylem/state/bootstrap/adapt-plan.json
+- .xylem/state/bootstrap/repo-analysis.json
+- .xylem/state/bootstrap/legibility-report.json
+
+Hard constraints:
+- Only edit files under .xylem/, .xylem.yml, AGENTS.md, or minimal docs/ stubs.
+- Do not write anywhere else.
+- Do not use git, Bash, network tools, or package-install commands.
+- Use the Edit tool only.
+- Preserve a reviewable PR-sized diff focused on harness changes.
+
+If the validated plan results in no material file changes, print XYLEM_NOOP and explain why.
+`
+
+const adaptRepoPRPrompt = `Create the adaptation PR.
+
+Issue: {{.Issue.Title}}
+URL: {{.Issue.URL}}
+
+Use the title ` + "`[xylem] adapt harness to this repository`" + `.
+
+The PR body must:
+- Link the seeding issue and the bootstrap artifacts under .xylem/state/bootstrap/.
+- Inline every planned_changes entry from adapt-plan.json.
+- Inline every skipped entry from adapt-plan.json.
+- Explain that the changes are restricted to harness/control-plane files and remain PR-gated.
+
+Do not broaden scope beyond the validated adaptation plan.
+`
+
 func promptContent(workflow, phase string) string {
-	_ = workflow // All workflows share the same prompt templates per phase.
+	if workflow == "adapt-repo" {
+		switch phase {
+		case "plan":
+			return adaptRepoPlanPrompt
+		case "apply":
+			return adaptRepoApplyPrompt
+		case "pr":
+			return adaptRepoPRPrompt
+		}
+	}
 	switch phase {
 	case "analyze":
 		return analyzePrompt

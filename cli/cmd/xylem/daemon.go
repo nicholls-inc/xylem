@@ -84,6 +84,10 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	// vessels are definitionally orphaned.
 	reconcileStaleVessels(q, wt)
 
+	if _, err := ensureAdaptRepoSeeded(context.Background(), cfg, newCmdRunner(cfg), adaptRepoSeededByDaemon); err != nil {
+		return fmt.Errorf("seed adapt-repo issue: %w", err)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 

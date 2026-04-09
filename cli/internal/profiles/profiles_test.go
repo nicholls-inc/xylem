@@ -2,10 +2,13 @@ package profiles
 
 import (
 	"io/fs"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	workflowpkg "github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,21 +23,6 @@ func TestLoadCore(t *testing.T) {
 	data, err := fs.ReadFile(profile.FS, "HARNESS.md.tmpl")
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "# Project Overview")
-}
-
-func TestSmoke_S1_LoadCoreProfileReturnsEmbeddedAssets(t *testing.T) {
-	t.Parallel()
-
-	profile, err := Load("core")
-	require.NoError(t, err)
-
-	require.NotNil(t, profile)
-	assert.Equal(t, "core", profile.Name)
-	assert.Equal(t, 1, profile.Version)
-
-	harnessTemplate, err := fs.ReadFile(profile.FS, "HARNESS.md.tmpl")
-	require.NoError(t, err)
-	assert.Contains(t, string(harnessTemplate), "# Project Overview")
 
 	configTemplate, err := fs.ReadFile(profile.FS, "xylem.yml.tmpl")
 	require.NoError(t, err)
@@ -58,42 +46,16 @@ func TestComposeCoreIncludesSeededAssets(t *testing.T) {
 	composed, err := Compose("core")
 	require.NoError(t, err)
 
-	require.Len(t, composed.Profiles, 1)
-	assert.Equal(t, "core", composed.Profiles[0].Name)
-	assert.Equal(t, 1, composed.Profiles[0].Version)
-
-	assert.Equal(t, []string{"fix-bug", "implement-feature"}, sortedKeys(composed.Workflows))
-	assert.Equal(t, []string{
-		"fix-bug/analyze",
-		"fix-bug/implement",
-		"fix-bug/plan",
-		"fix-bug/pr",
-		"implement-feature/analyze",
-		"implement-feature/implement",
-		"implement-feature/plan",
-		"implement-feature/pr",
-	}, sortedKeys(composed.Prompts))
-	assert.Equal(t, []string{"bugs"}, sortedKeys(composed.Sources))
-	require.Len(t, composed.ConfigOverlays, 1)
-	assert.Contains(t, string(composed.Workflows["fix-bug"]), `name: fix-bug`)
-	assert.Contains(t, string(composed.Workflows["implement-feature"]), `name: implement-feature`)
-	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "publication boundary")
-	assert.Contains(t, string(composed.ConfigOverlays[0]), `repo: "{{ .Repo }}"`)
-}
-
-func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
-	t.Parallel()
-
-	composed, err := Compose("core")
-	require.NoError(t, err)
-
 	require.NotNil(t, composed)
 	require.Len(t, composed.Profiles, 1)
 	assert.Equal(t, "core", composed.Profiles[0].Name)
 	assert.Equal(t, 1, composed.Profiles[0].Version)
 
-	assert.Equal(t, []string{"fix-bug", "implement-feature"}, sortedKeys(composed.Workflows))
+	assert.Equal(t, []string{"adapt-repo", "fix-bug", "implement-feature"}, sortedKeys(composed.Workflows))
 	assert.Equal(t, []string{
+		"adapt-repo/apply",
+		"adapt-repo/plan",
+		"adapt-repo/pr",
 		"fix-bug/analyze",
 		"fix-bug/implement",
 		"fix-bug/plan",
@@ -103,29 +65,23 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 		"implement-feature/plan",
 		"implement-feature/pr",
 	}, sortedKeys(composed.Prompts))
-	assert.Equal(t, []string{"bugs"}, sortedKeys(composed.Sources))
+	assert.Equal(t, []string{"adapt-repo", "bugs"}, sortedKeys(composed.Sources))
 	require.Len(t, composed.ConfigOverlays, 1)
-
-	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
-	assert.Contains(t, string(composed.Workflows["implement-feature"]), "name: implement-feature")
+	assert.Contains(t, string(composed.Workflows["adapt-repo"]), `name: adapt-repo`)
+	assert.Contains(t, string(composed.Workflows["adapt-repo"]), `class: harness-maintenance`)
+	assert.Contains(t, string(composed.Workflows["fix-bug"]), `name: fix-bug`)
+	assert.Contains(t, string(composed.Workflows["implement-feature"]), `name: implement-feature`)
+	assert.Contains(t, string(composed.Prompts["adapt-repo/apply"]), "Use the `Edit` tool only")
+	assert.Contains(t, string(composed.Prompts["adapt-repo/plan"]), "schema_version")
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "publication boundary")
+	assert.Contains(t, string(composed.Sources["adapt-repo"]), "xylem-adapt-repo")
+	assert.Contains(t, string(composed.Sources["adapt-repo"]), `workflow: adapt-repo`)
 	assert.Contains(t, string(composed.ConfigOverlays[0]), `repo: "{{ .Repo }}"`)
 }
 
 func TestComposeUnknownProfile(t *testing.T) {
 	composed, err := Compose("nonexistent")
 	require.Error(t, err)
-	assert.Nil(t, composed)
-	assert.Contains(t, err.Error(), "nonexistent")
-	assert.Contains(t, err.Error(), "unknown profile")
-}
-
-func TestSmoke_S3_ComposeUnknownProfileReturnsClearError(t *testing.T) {
-	t.Parallel()
-
-	composed, err := Compose("nonexistent")
-	require.Error(t, err)
-
 	assert.Nil(t, composed)
 	assert.Contains(t, err.Error(), "nonexistent")
 	assert.Contains(t, err.Error(), "unknown profile")
@@ -142,7 +98,8 @@ func TestComposeRejectsConflictingSourceKeys(t *testing.T) {
 	composed, err := Compose("core", "core")
 	require.Error(t, err)
 	assert.Nil(t, composed)
-	assert.Contains(t, err.Error(), `source "bugs" conflicts`)
+	assert.Contains(t, err.Error(), `source "`)
+	assert.Contains(t, err.Error(), `conflicts`)
 	assert.True(t, strings.Count(err.Error(), `"core"`) >= 2, "expected both conflicting profiles in error: %q", err.Error())
 }
 
@@ -174,16 +131,67 @@ func TestComposeRejectsWorkflowConflictsAcrossProfiles(t *testing.T) {
 	}
 }
 
-func TestSmoke_S4_ComposeCoreAndSelfHostingXylemRejectsWorkflowConflicts(t *testing.T) {
+func TestSmoke_S1_AdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {
 	t.Parallel()
 
-	composed, err := Compose("core", "self-hosting-xylem")
-	require.Error(t, err)
+	profile, err := Load("core")
+	require.NoError(t, err)
 
-	assert.Nil(t, composed)
-	assert.Contains(t, err.Error(), `workflow "fix-bug" conflicts`)
-	assert.Contains(t, err.Error(), "core")
-	assert.Contains(t, err.Error(), "self-hosting-xylem")
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(oldWd))
+	})
+
+	for _, name := range []string{"plan.md", "apply.md", "pr.md"} {
+		data, readErr := fs.ReadFile(profile.FS, filepath.Join("prompts", "adapt-repo", name))
+		require.NoError(t, readErr)
+		target := filepath.Join(dir, ".xylem", "prompts", "adapt-repo", name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+		require.NoError(t, os.WriteFile(target, data, 0o644))
+	}
+
+	workflowData, err := fs.ReadFile(profile.FS, filepath.Join("workflows", "adapt-repo.yaml"))
+	require.NoError(t, err)
+	workflowPath := filepath.Join(dir, "adapt-repo.yaml")
+	require.NoError(t, os.WriteFile(workflowPath, workflowData, 0o644))
+
+	wf, err := workflowpkg.Load(workflowPath)
+	require.NoError(t, err)
+	assert.Equal(t, "adapt-repo", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 7)
+}
+
+func TestSmoke_S2_AdaptRepoPromptAssetsEnforceGuardrails(t *testing.T) {
+	t.Parallel()
+
+	profile, err := Load("core")
+	require.NoError(t, err)
+
+	planPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "adapt-repo", "plan.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(planPrompt), "Your only allowed write in this phase is `.xylem/state/bootstrap/adapt-plan.json`.")
+	assert.Contains(t, string(planPrompt), `"schema_version": 1`)
+	assert.Contains(t, string(planPrompt), "`planned_changes[].op` must be one of `patch`, `replace`, `create`, or `delete`.")
+	assert.Contains(t, string(planPrompt), "`planned_changes[].path` must stay within `.xylem/`, `.xylem.yml`, `AGENTS.md`, or `docs/`.")
+
+	applyPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "adapt-repo", "apply.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(applyPrompt), "Only edit files under `.xylem/`, `.xylem.yml`, `AGENTS.md`, or minimal `docs/` stubs.")
+	assert.Contains(t, string(applyPrompt), "Do not use `git`, Bash, network tools, or package-install commands.")
+	assert.Contains(t, string(applyPrompt), "Use the `Edit` tool only.")
+	assert.Contains(t, string(applyPrompt), "If the validated plan results in no material file changes, print `XYLEM_NOOP`")
+
+	prPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "adapt-repo", "pr.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(prPrompt), "Use the title `[xylem] adapt harness to this repository`.")
+	assert.Contains(t, string(prPrompt), "Link the seeding issue and the bootstrap artifacts under `.xylem/state/bootstrap/`.")
+	assert.Contains(t, string(prPrompt), "Inline every `planned_changes` entry from `adapt-plan.json`.")
+	assert.Contains(t, string(prPrompt), "Inline every `skipped` entry from `adapt-plan.json`.")
+	assert.Contains(t, string(prPrompt), "remain PR-gated")
 }
 
 func sortedKeys[V any](m map[string]V) []string {

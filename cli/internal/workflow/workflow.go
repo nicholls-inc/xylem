@@ -45,6 +45,15 @@ type workflowYAML struct {
 	Phases                        []Phase `yaml:"phases"`
 }
 
+// Class identifies the policy class a workflow belongs to.
+type Class = policy.Class
+
+const (
+	ClassDelivery           = policy.Delivery
+	ClassHarnessMaintenance = policy.HarnessMaintenance
+	ClassOps                = policy.Ops
+)
+
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
 	Name         string   `yaml:"name"`
@@ -433,6 +442,15 @@ func validateNoOp(phaseName string, n *NoOp) error {
 		return fmt.Errorf("phase %q: noop: match is required", phaseName)
 	}
 	return nil
+}
+
+func validateClass(class policy.Class) error {
+	switch class {
+	case "", ClassDelivery, ClassHarnessMaintenance, ClassOps:
+		return nil
+	default:
+		return fmt.Errorf("workflow class %q is invalid; must be delivery, harness-maintenance, or ops", class)
+	}
 }
 
 func validateGate(phaseName string, g *Gate) error {
