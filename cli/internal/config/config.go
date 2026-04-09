@@ -477,16 +477,25 @@ func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 	}}
 }
 
+// DefaultPolicy returns the default intermediary policy. Protected control
+// surfaces are denied, and all other actions — including git_push and
+// pr_create — are allowed by default so the daemon can operate autonomously.
+//
+// Operators who want approval gates on destructive actions can override this
+// by configuring `harness.policy.rules` in `.xylem.yml`; those rules take
+// precedence over the default policy.
 func DefaultPolicy() intermediary.Policy {
 	return intermediary.Policy{
 		Name: "default",
 		Rules: []intermediary.Rule{
+			// Protected control surfaces are denied.
 			{Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
-			{Action: "git_push", Resource: "*", Effect: intermediary.RequireApproval},
-			{Action: "pr_create", Resource: "*", Effect: intermediary.RequireApproval},
+			// All other actions — including git_push and pr_create — are
+			// allowed. Autonomous operation requires these to succeed without
+			// manual approval. Override via harness.policy for stricter rules.
 			{Action: "*", Resource: "*", Effect: intermediary.Allow},
 		},
 	}

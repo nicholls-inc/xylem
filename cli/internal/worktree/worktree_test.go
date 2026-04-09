@@ -868,6 +868,33 @@ func TestBranchForWorktreeAbsoluteRoot(t *testing.T) {
 	}
 }
 
+// TestPathForBranchFound verifies pathForBranch returns the worktree path
+// when a branch is registered at any path.
+func TestPathForBranchFound(t *testing.T) {
+	r := newMock()
+	porcelain := "worktree /repo/.claude/worktrees/merge/pr-42-slug\nHEAD abc123\nbranch refs/heads/merge/pr-42-slug\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	m := New("/repo", r)
+	path := m.pathForBranch(context.Background(), "merge/pr-42-slug")
+	if path != "/repo/.claude/worktrees/merge/pr-42-slug" {
+		t.Errorf("expected path for branch, got %q", path)
+	}
+}
+
+// TestPathForBranchNotFound verifies pathForBranch returns empty string when
+// a branch is not registered.
+func TestPathForBranchNotFound(t *testing.T) {
+	r := newMock()
+	r.setOutput("git worktree list --porcelain", []byte(""))
+
+	m := New("/repo", r)
+	path := m.pathForBranch(context.Background(), "does/not/exist")
+	if path != "" {
+		t.Errorf("expected empty path for missing branch, got %q", path)
+	}
+}
+
 // TestCreateRemovesStaleWorktreeRelativeRoot verifies that Create() detects and
 // removes stale worktrees when RepoRoot is relative (e.g., ".").
 func TestCreateRemovesStaleWorktreeRelativeRoot(t *testing.T) {

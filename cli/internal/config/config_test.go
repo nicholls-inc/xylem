@@ -1340,16 +1340,19 @@ func TestSmoke_S6_DefaultPolicyDeniesHarnessWrite(t *testing.T) {
 	assert.Equal(t, ".xylem/HARNESS.md", result.MatchedRule.Resource)
 }
 
-func TestSmoke_S7_DefaultPolicyRequiresApprovalForGitPush(t *testing.T) {
+func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
+	// Autonomous self-healing requires git_push to succeed without manual
+	// approval. Operators who want approval gates can override via
+	// harness.policy in .xylem.yml.
 	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
 		Action:   "git_push",
 		Resource: "main",
 		AgentID:  "vessel-002",
 	})
 
-	assert.Equal(t, intermediary.RequireApproval, result.Effect)
+	assert.Equal(t, intermediary.Allow, result.Effect)
 	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, "git_push", result.MatchedRule.Action)
+	assert.Equal(t, "*", result.MatchedRule.Action)
 	assert.Equal(t, "*", result.MatchedRule.Resource)
 }
 
