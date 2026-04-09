@@ -215,7 +215,7 @@ func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
 	cfg := makeDrainConfig(dir)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
-	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
+	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
 	require.NoError(t, err)
 	assert.Equal(t, runner.DrainResult{}, result)
 	assert.Equal(t, 1, calls)
@@ -235,7 +235,7 @@ func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
 	cfg := makeDrainConfig(dir)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
-	_, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
+	_, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
 	require.NoError(t, err)
 	assert.True(t, exporter.shutdownCalled)
 }

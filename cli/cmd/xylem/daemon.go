@@ -92,7 +92,11 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		return runScan(ctx, cfg, q)
 	}
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
-		return runDrain(ctx, cfg, q, wt)
+		// Pass drainInterval as the drain budget so Drain() returns
+		// roughly once per tick even under sustained saturation. This is
+		// what keeps the drain-end auto-upgrade check reachable — see
+		// the comment on Runner.DrainBudget in cli/internal/runner/runner.go.
+		return runDrain(ctx, cfg, q, wt, drainInterval)
 	}
 	check := func(ctx context.Context) {
 		cmdRunner := &realCmdRunner{}
@@ -281,10 +285,11 @@ func runScan(ctx context.Context, cfg *config.Config, q *queue.Queue) (scanner.S
 	return s.Scan(ctx)
 }
 
-func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager) (runner.DrainResult, error) {
+func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, budget time.Duration) (runner.DrainResult, error) {
 	cmdRunner := newCmdRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
+	r.DrainBudget = budget
 	result, err := r.Drain(ctx)
 	if err == nil {
 		maybeAutoGenerateHarnessReview(cfg, result)

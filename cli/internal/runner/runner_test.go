@@ -1343,6 +1343,171 @@ func TestWS6S29NilHarnessFieldsRunsNormally(t *testing.T) {
 	}
 }
 
+// TestDrainBudgetStopsDequeueingAfterDeadline verifies that a non-zero
+// Runner.DrainBudget bounds how long Drain() continues dequeueing new
+// vessels. Under sustained load the budget elapses, Drain() stops
+// dequeueing, waits for already-started goroutines, and returns. The
+// remaining pending vessels are left for the next drain tick.
+//
+// This is the primary regression guard for the auto-upgrade deadlock:
+// without a bounded Drain(), the daemon's drain-end periodic upgrade
+// check at cli/cmd/xylem/daemon.go:248-254 cannot fire during sustained
+// saturation.
+func TestDrainBudgetStopsDequeueingAfterDeadline(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1) // concurrency=1 for deterministic timing
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	// Enqueue 10 vessels; each runs one "fix" phase that sleeps for
+	// 60ms via the countingCmdRunner delay. With concurrency=1, each
+	// vessel takes ~60ms to process. Budget=150ms allows ~2 vessels to
+	// complete before the dequeue loop stops.
+	for i := 1; i <= 10; i++ {
+		if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 60 * time.Millisecond}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.DrainBudget = 150 * time.Millisecond
+
+	start := time.Now()
+	result, err := r.Drain(context.Background())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+
+	// Drain() must return in roughly (budget + one vessel cycle), well
+	// under the time it would take to process all 10 vessels (>600ms).
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("Drain() took %s, expected under 400ms (budget=150ms + in-flight)", elapsed)
+	}
+	if result.Completed >= 10 {
+		t.Errorf("Drain() completed %d vessels, expected partial drain (fewer than 10)", result.Completed)
+	}
+	if result.Completed < 1 {
+		t.Errorf("Drain() completed %d vessels, expected at least 1", result.Completed)
+	}
+
+	// Remaining vessels must still be pending for the next tick.
+	vessels, _ := q.List()
+	var pending, completed int
+	for _, v := range vessels {
+		switch v.State {
+		case queue.StatePending:
+			pending++
+		case queue.StateCompleted:
+			completed++
+		}
+	}
+	if completed != result.Completed {
+		t.Errorf("queue completed count %d != DrainResult.Completed %d", completed, result.Completed)
+	}
+	if pending == 0 {
+		t.Errorf("expected some pending vessels after budget cutoff, got 0")
+	}
+	total := pending + completed
+	if total != 10 {
+		t.Errorf("pending+completed = %d, want 10 (no vessel lost)", total)
+	}
+}
+
+// TestDrainBudgetZeroDisablesBudget verifies that DrainBudget == 0
+// preserves the legacy unbounded behavior: Drain() processes every
+// pending vessel in one call.
+func TestDrainBudgetZeroDisablesBudget(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	for i := 1; i <= 5; i++ {
+		if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	// DrainBudget deliberately left at zero.
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Completed != 5 {
+		t.Errorf("Drain() completed = %d, want 5 (unbounded drain)", result.Completed)
+	}
+}
+
+// TestDrainBudgetRespectsContextCancellation verifies that context
+// cancellation short-circuits the budget check: Drain() stops
+// dequeueing immediately on cancel regardless of the budget state.
+func TestDrainBudgetRespectsContextCancellation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	for i := 1; i <= 5; i++ {
+		if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 50 * time.Millisecond}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	// Large budget so context cancel is the deciding factor.
+	r.DrainBudget = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after 30ms — before the first vessel completes.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := r.Drain(ctx)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	// With a 10s budget, if cancel didn't short-circuit we'd wait
+	// for all 5 × 50ms vessels + budget expiry.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Drain() took %s, expected fast cancel-driven return", elapsed)
+	}
+}
+
 func TestDrainMultiPhaseWorkflow(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
