@@ -288,12 +288,18 @@ func (g *GitHubPR) hasBranch(ctx context.Context, prNum int) bool {
 	return false
 }
 
-func (g *GitHubPR) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
-	latest, err := g.Queue.FindLatestByRef(ref)
-	if err != nil || latest == nil {
+func priorVesselBlocksReenqueue(v *queue.Vessel, fingerprint string) bool {
+	if v == nil {
 		return false
 	}
-	return latest.State == queue.StateFailed && latest.Meta["source_input_fingerprint"] == fingerprint
+	switch v.State {
+	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
+		return true
+	case queue.StateFailed:
+		return v.Meta["source_input_fingerprint"] == fingerprint
+	default:
+		return false
+	}
 }
 
 // isBlockedByPriorVessel reports whether a prior vessel already occupies
@@ -305,26 +311,35 @@ func (g *GitHubPR) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
 // when it belongs to the SAME workflow as the current task.
 //
 // Blocking conditions:
-//   - A pending/running/waiting vessel at the qualified ref (via HasRef).
+//   - A pending/running/waiting vessel at the qualified ref.
 //   - A failed vessel at the qualified ref whose fingerprint equals the
-//     current PR input fingerprint (hasMatchingFailedFingerprint).
-//   - A legacy bare-URL vessel whose Workflow matches and is either
-//     active (pending/running/waiting) or terminally failed with a
-//     matching fingerprint.
+//     current PR input fingerprint.
+//   - If no qualified vessel exists yet, a legacy bare-URL vessel whose
+//     Workflow matches and is either active (pending/running/waiting)
+//     or terminally failed with a matching fingerprint.
 //
-// This preserves the dedup guarantees of the pre-qualification scheme
-// for in-flight workflows while allowing distinct workflows over the
-// same PR (e.g., merge-pr and resolve-conflicts) to coexist.
+// Completed/cancelled/timed_out vessels do not block. This is important
+// for resolve-conflicts retries: if a prior vessel completed without
+// actually changing the PR branch and GitHub still reports CONFLICTING,
+// the scanner must be able to enqueue a fresh vessel.
+//
+// Once a qualified-ref vessel exists, it is always newer than any
+// legacy bare-URL vessel for the same PR/workflow and therefore solely
+// determines whether the dedup slot is occupied. Falling back to an
+// older legacy vessel in that case would let stale pre-upgrade state
+// incorrectly block a newer completed/cancelled run.
+//
+// This preserves the dedup guarantees of the pre-qualification scheme for
+// in-flight workflows while allowing distinct workflows over the same PR
+// (e.g., merge-pr and resolve-conflicts) to coexist.
 func (g *GitHubPR) isBlockedByPriorVessel(prURL, fingerprint, workflow string) bool {
 	qualifiedRef := prWorkflowRef(prURL, workflow)
-	if g.Queue.HasRef(qualifiedRef) {
-		return true
-	}
-	if g.hasMatchingFailedFingerprint(qualifiedRef, fingerprint) {
-		return true
+	latest, err := g.Queue.FindLatestByRef(qualifiedRef)
+	if err == nil {
+		return priorVesselBlocksReenqueue(latest, fingerprint)
 	}
 	// Backward-compat: legacy queue entries were written with ref = prURL.
-	latest, err := g.Queue.FindLatestByRef(prURL)
+	latest, err = g.Queue.FindLatestByRef(prURL)
 	if err != nil || latest == nil {
 		return false
 	}
@@ -334,11 +349,5 @@ func (g *GitHubPR) isBlockedByPriorVessel(prURL, fingerprint, workflow string) b
 	if latest.Workflow != workflow {
 		return false
 	}
-	switch latest.State {
-	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
-		return true
-	case queue.StateFailed:
-		return latest.Meta["source_input_fingerprint"] == fingerprint
-	}
-	return false
+	return priorVesselBlocksReenqueue(latest, fingerprint)
 }
