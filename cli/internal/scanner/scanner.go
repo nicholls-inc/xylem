@@ -5,8 +5,10 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
@@ -19,10 +21,15 @@ type CommandRunner interface {
 
 // Scanner scans configured sources for actionable tasks and enqueues vessels.
 type Scanner struct {
-	Config    *config.Config
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
-	RunHooks  bool
+	Config     *config.Config
+	Queue      *queue.Queue
+	CmdRunner  CommandRunner
+	RunHooks   bool
+	BudgetGate budgetGate
+}
+
+type budgetGate interface {
+	Check(class string) cost.Decision
 }
 
 // ScanResult summarises a scan run.
@@ -34,7 +41,13 @@ type ScanResult struct {
 
 // New creates a Scanner.
 func New(cfg *config.Config, q *queue.Queue, runner CommandRunner) *Scanner {
-	return &Scanner{Config: cfg, Queue: q, CmdRunner: runner, RunHooks: true}
+	return &Scanner{
+		Config:     cfg,
+		Queue:      q,
+		CmdRunner:  runner,
+		RunHooks:   true,
+		BudgetGate: cost.NewBudgetGate(cfg.VesselBudget()),
+	}
 }
 
 // Scan queries configured sources, filters candidates, and enqueues new vessels.
@@ -62,6 +75,14 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				vessel.Meta["config_source"] = entry.configName
 			}
 
+			class := vessel.Workflow
+			decision := s.budgetGate().Check(class)
+			if !decision.Allowed {
+				log.Printf("audit: budget.skipped class=%s vessel_source=%s reason=%s remaining_usd=%.4f", class, vessel.Source, decision.Reason, decision.RemainingUSD)
+				result.Skipped++
+				continue
+			}
+
 			enqueued, err := s.Queue.Enqueue(vessel)
 			if err != nil {
 				return result, err
@@ -84,6 +105,13 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func (s *Scanner) budgetGate() budgetGate {
+	if s.BudgetGate != nil {
+		return s.BudgetGate
+	}
+	return cost.NewBudgetGate(s.Config.VesselBudget())
 }
 
 type sourceEntry struct {
@@ -129,6 +157,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 					Repo:      srcCfg.Repo,
 					Tasks:     prEventsTasks,
 					Exclude:   srcCfg.Exclude,
+					StateDir:  s.Config.StateDir,
 					Queue:     s.Queue,
 					CmdRunner: s.CmdRunner,
 				},
@@ -193,8 +222,14 @@ func convertPREventsTasks(cfgTasks map[string]config.Task) map[string]source.PRE
 			task.ReviewSubmitted = t.On.ReviewSubmitted
 			task.ChecksFailed = t.On.ChecksFailed
 			task.Commented = t.On.Commented
+			task.PROpened = t.On.PROpened
+			task.PRHeadUpdated = t.On.PRHeadUpdated
 			task.AuthorAllow = t.On.AuthorAllow
 			task.AuthorDeny = t.On.AuthorDeny
+			task.Debounce = source.UnsetPREventsDebounce
+			if t.On.Debounce != "" {
+				task.Debounce, _ = time.ParseDuration(t.On.Debounce)
+			}
 		}
 		tasks[name] = task
 	}

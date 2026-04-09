@@ -1212,6 +1212,9 @@ func TestValidateGitHubPREventsValid(t *testing.T) {
 						On: &PREventsConfig{
 							Labels:          []string{"needs-review"},
 							ReviewSubmitted: true,
+							PROpened:        true,
+							PRHeadUpdated:   true,
+							Debounce:        "10m",
 							AuthorAllow:     []string{"copilot-pull-request-reviewer[bot]"},
 						},
 					},
@@ -1222,6 +1225,58 @@ func TestValidateGitHubPREventsValid(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected valid config, got: %v", err)
 	}
+}
+
+func TestValidateGitHubPREventsInvalidDebounce(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "handle-review",
+						On: &PREventsConfig{
+							PROpened: true,
+							Debounce: "nope",
+						},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "parse debounce")
+}
+
+func TestValidateGitHubPREventsRejectsNegativeDebounce(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "handle-review",
+						On: &PREventsConfig{
+							PROpened: true,
+							Debounce: "-1s",
+						},
+					},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "debounce must be non-negative")
 }
 
 func TestValidateGitHubPREventsReviewSubmittedRequiresAuthorFilter(t *testing.T) {
@@ -1314,6 +1369,30 @@ func TestValidateGitHubPREventsChecksFailedNoAuthorFilter(t *testing.T) {
 					"checks": {
 						Workflow: "fix-ci",
 						On:       &PREventsConfig{ChecksFailed: true},
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid, got: %v", err)
+	}
+}
+
+func TestValidateGitHubPREventsPROpenedNoAuthorFilter(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"pr-events": {
+				Type: "github-pr-events",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"review": {
+						Workflow: "review-pr",
+						On:       &PREventsConfig{PROpened: true},
 					},
 				},
 			},
@@ -2300,6 +2379,40 @@ providers:
 	assert.Equal(t, []string{"copilot", "claude"}, cfg.LLMRouting.Tiers[DefaultLLMRoutingTier].Providers)
 	assert.Equal(t, "claude-sonnet-4-6", cfg.Providers["claude"].Tiers[DefaultLLMRoutingTier])
 	assert.Equal(t, "gpt-5.4", cfg.Providers["copilot"].Tiers[DefaultLLMRoutingTier])
+}
+
+func TestSmoke_S43_GitHubPREventsLoadsPROpenedPRHeadUpdatedAndDebounce(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  pr-lifecycle:
+    type: github-pr-events
+    repo: owner/name
+    tasks:
+      review:
+        workflow: review-pr
+        on:
+          pr_opened: true
+          pr_head_updated: true
+          debounce: 10m
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	src, ok := cfg.Sources["pr-lifecycle"]
+	require.True(t, ok)
+
+	task, ok := src.Tasks["review"]
+	require.True(t, ok)
+	require.NotNil(t, task.On)
+	assert.True(t, task.On.PROpened)
+	assert.True(t, task.On.PRHeadUpdated)
+	assert.Equal(t, "10m", task.On.Debounce)
+	assert.Equal(t, "review-pr", task.Workflow)
 }
 
 func TestSourceTimeoutValid(t *testing.T) {
