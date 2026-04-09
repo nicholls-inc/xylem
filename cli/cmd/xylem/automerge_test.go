@@ -1,8 +1,12 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsBenignGhWarning(t *testing.T) {
@@ -80,13 +84,13 @@ func TestPRSummary_HasLabel(t *testing.T) {
 	pr := prSummary{
 		Labels: []struct {
 			Name string `json:"name"`
-		}{{Name: "needs-conflict-resolution"}, {Name: "harness-impl"}},
+		}{{Name: "needs-conflict-resolution"}, {Name: harnessImplLabel}},
 	}
 	if !pr.hasLabel("needs-conflict-resolution") {
 		t.Error("hasLabel('needs-conflict-resolution') = false, want true")
 	}
-	if !pr.hasLabel("harness-impl") {
-		t.Error("hasLabel('harness-impl') = false, want true")
+	if !pr.hasLabel(harnessImplLabel) {
+		t.Errorf("hasLabel(%q) = false, want true", harnessImplLabel)
 	}
 	if pr.hasLabel("nonexistent") {
 		t.Error("hasLabel('nonexistent') = true, want false")
@@ -158,6 +162,9 @@ func TestDecideAutoMergeAction(t *testing.T) {
 		Conclusion string `json:"conclusion"`
 		Status     string `json:"status"`
 	}{{Conclusion: "SUCCESS", Status: "COMPLETED"}}
+	mergeReadyLabels := []struct {
+		Name string `json:"name"`
+	}{{Name: readyToMergeLabel}, {Name: harnessImplLabel}}
 	copilotReviewed := []struct {
 		Author struct {
 			Login string `json:"login"`
@@ -181,8 +188,25 @@ func TestDecideAutoMergeAction(t *testing.T) {
 			want: actionSkip,
 		},
 		{
-			name: "xylem PR with conflicts and no labels is routed to resolve-conflicts",
-			pr:   prSummary{HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "CONFLICTING"},
+			name: "xylem PR without merge-ready labels is skipped",
+			pr: prSummary{
+				HeadRefName: "feat/issue-1-1",
+				State:       "OPEN",
+				Mergeable:   "MERGEABLE",
+				Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: harnessImplLabel}},
+			},
+			want: actionSkip,
+		},
+		{
+			name: "xylem PR with conflicts and no conflict labels is routed to resolve-conflicts",
+			pr: prSummary{
+				HeadRefName: "feat/issue-1-1",
+				State:       "OPEN",
+				Mergeable:   "CONFLICTING",
+				Labels:      mergeReadyLabels,
+			},
 			want: actionRouteConflict,
 		},
 		{
@@ -191,19 +215,20 @@ func TestDecideAutoMergeAction(t *testing.T) {
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "CONFLICTING",
 				Labels: []struct {
 					Name string `json:"name"`
-				}{{Name: "needs-conflict-resolution"}, {Name: "harness-impl"}},
+				}{{Name: "needs-conflict-resolution"}, {Name: readyToMergeLabel}, {Name: harnessImplLabel}},
 			},
 			want: actionWaitForMergeable,
 		},
 		{
 			name: "xylem PR with unknown mergeable waits",
-			pr:   prSummary{HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "UNKNOWN"},
+			pr:   prSummary{HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "UNKNOWN", Labels: mergeReadyLabels},
 			want: actionWaitForMergeable,
 		},
 		{
 			name: "xylem PR with CI failing waits",
 			pr: prSummary{
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
+				Labels: mergeReadyLabels,
 				StatusCheckRollup: []struct {
 					Conclusion string `json:"conclusion"`
 					Status     string `json:"status"`
@@ -215,37 +240,50 @@ func TestDecideAutoMergeAction(t *testing.T) {
 			name: "xylem PR with changes requested waits",
 			pr: prSummary{
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
-				StatusCheckRollup: greenChecks, ReviewDecision: "CHANGES_REQUESTED",
+				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "CHANGES_REQUESTED",
 			},
 			want: actionAddressReview,
 		},
 		{
-			name: "xylem PR without review requests copilot review",
+			name: "xylem PR without review requests asks for copilot review first",
 			pr: prSummary{
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
-				StatusCheckRollup: greenChecks, ReviewDecision: "REVIEW_REQUIRED",
+				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "REVIEW_REQUIRED",
 			},
 			want: actionRequestReview,
 		},
 		{
-			name: "xylem PR with copilot requested but not submitted waits",
+			name: "xylem PR with copilot requested enables auto-merge",
 			pr: prSummary{
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
-				StatusCheckRollup: greenChecks, ReviewDecision: "REVIEW_REQUIRED",
+				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "REVIEW_REQUIRED",
 				ReviewRequests: []struct {
 					Login string `json:"login"`
 				}{{Login: copilotReviewerLogin}},
 			},
-			want: actionWaitForReview,
+			want: actionEnableAutoMerge,
 		},
 		{
-			name: "xylem PR approved + green + mergeable is merged",
+			name: "xylem PR approved + green + mergeable enables auto-merge",
 			pr: prSummary{
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
-				StatusCheckRollup: greenChecks, ReviewDecision: "APPROVED",
+				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "APPROVED",
 				LatestReviews: copilotReviewed,
 			},
-			want: actionMerge,
+			want: actionEnableAutoMerge,
+		},
+		{
+			name: "xylem PR with auto-merge already enabled waits",
+			pr: prSummary{
+				HeadRefName:       "feat/issue-1-1",
+				State:             "OPEN",
+				Mergeable:         "MERGEABLE",
+				ReviewDecision:    "REVIEW_REQUIRED",
+				AutoMergeRequest:  &struct{}{},
+				Labels:            mergeReadyLabels,
+				StatusCheckRollup: greenChecks,
+			},
+			want: actionWaitForAutoMerge,
 		},
 	}
 	for _, tt := range tests {
@@ -255,4 +293,80 @@ func TestDecideAutoMergeAction(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSmoke_S1_AutoMergeContinuesWhenCopilotReviewerIsNotCollaborator(t *testing.T) {
+	origListOpenPRsFn := listOpenPRsFn
+	origRequestCopilotReviewFn := requestCopilotReviewFn
+	origAddPRLabelsFn := addPRLabelsFn
+	origEnableAutoMergePRFn := enableAutoMergePRFn
+	t.Cleanup(func() {
+		listOpenPRsFn = origListOpenPRsFn
+		requestCopilotReviewFn = origRequestCopilotReviewFn
+		addPRLabelsFn = origAddPRLabelsFn
+		enableAutoMergePRFn = origEnableAutoMergePRFn
+	})
+
+	mergeReadyPR := prSummary{
+		Number:         42,
+		HeadRefName:    "feat/issue-42-42",
+		Mergeable:      "MERGEABLE",
+		State:          "OPEN",
+		ReviewDecision: "REVIEW_REQUIRED",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: readyToMergeLabel}, {Name: harnessImplLabel}},
+		StatusCheckRollup: []struct {
+			Conclusion string `json:"conclusion"`
+			Status     string `json:"status"`
+		}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
+	}
+	require.Equal(t, actionRequestReview, decideAutoMergeAction(mergeReadyPR))
+
+	listCalls := 0
+	listOpenPRsFn = func(context.Context, string) ([]prSummary, error) {
+		listCalls++
+		return []prSummary{{
+			Number:            mergeReadyPR.Number,
+			HeadRefName:       mergeReadyPR.HeadRefName,
+			Mergeable:         mergeReadyPR.Mergeable,
+			State:             mergeReadyPR.State,
+			ReviewDecision:    mergeReadyPR.ReviewDecision,
+			Labels:            mergeReadyPR.Labels,
+			StatusCheckRollup: mergeReadyPR.StatusCheckRollup,
+		}}, nil
+	}
+
+	reviewCalls := 0
+	requestCopilotReviewFn = func(_ context.Context, repo string, number int) error {
+		reviewCalls++
+		assert.Equal(t, "nicholls-inc/xylem", repo)
+		assert.Equal(t, 42, number)
+		return errors.New(`exit status 1: {"message":"Reviews may only be requested from collaborators"}`)
+	}
+
+	labelCalls := 0
+	addPRLabelsFn = func(context.Context, string, int, []string) error {
+		labelCalls++
+		return nil
+	}
+
+	enableCalls := 0
+	enableAutoMergePRFn = func(_ context.Context, repo string, number int) error {
+		enableCalls++
+		if repo != "nicholls-inc/xylem" {
+			t.Fatalf("repo = %q, want nicholls-inc/xylem", repo)
+		}
+		if number != 42 {
+			t.Fatalf("number = %d, want 42", number)
+		}
+		return nil
+	}
+
+	autoMergeXylemPRs(context.Background(), "nicholls-inc/xylem")
+
+	assert.Equal(t, 1, listCalls)
+	assert.Equal(t, 1, reviewCalls)
+	assert.Equal(t, 0, labelCalls)
+	assert.Equal(t, 1, enableCalls)
 }

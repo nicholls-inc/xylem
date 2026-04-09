@@ -118,10 +118,10 @@ type DaemonConfig struct {
 	// auto_upgrade check while the loop is running. Only meaningful when
 	// AutoUpgrade is true. Defaults to 5m. Accepts any Go duration string.
 	UpgradeInterval string `yaml:"upgrade_interval,omitempty"`
-	// AutoMerge enables automatic copilot review cycle + merge of
-	// xylem-authored PRs. Only merges when the PR is approved, CI-green,
-	// and mergeable. Branches matching feat/issue-*, fix/issue-*, or
-	// chore/issue-* are considered xylem-authored.
+	// AutoMerge enables the automatic copilot review cycle + GitHub
+	// auto-merge for merge-ready xylem-authored PRs. The daemon only acts
+	// on PRs labeled ready-to-merge + harness-impl whose branches match
+	// feat/issue-*, fix/issue-*, or chore/issue-*.
 	AutoMerge bool `yaml:"auto_merge,omitempty"`
 	// AutoMergeRepo is the GitHub repo slug (owner/name) for auto-merge.
 	// If empty, gh CLI uses the current directory's origin remote.
