@@ -26,6 +26,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
@@ -659,7 +660,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
 					log.Printf("warn: write command file: %v", wErr)
 				}
-				if policyErr := r.enforcePhasePolicy(vessel, p, rendered, ""); policyErr != nil {
+				if policyErr := r.enforcePhasePolicy(ctx, vessel, sk, p, worktreePath, rendered, ""); policyErr != nil {
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
@@ -721,7 +722,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
 					log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
 				}
-				if policyErr := r.enforcePhasePolicy(vessel, p, "", promptTemplate); policyErr != nil {
+				if policyErr := r.enforcePhasePolicy(ctx, vessel, sk, p, worktreePath, "", promptTemplate); policyErr != nil {
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
@@ -1947,7 +1948,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write command file: %v", wErr)
 			}
-			if policyErr := r.enforcePhasePolicy(vessel, p, rendered, ""); policyErr != nil {
+			if policyErr := r.enforcePhasePolicy(ctx, vessel, wf, p, worktreePath, rendered, ""); policyErr != nil {
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
@@ -2008,7 +2009,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
 			}
-			if policyErr := r.enforcePhasePolicy(vessel, p, "", promptTemplate); policyErr != nil {
+			if policyErr := r.enforcePhasePolicy(ctx, vessel, wf, p, worktreePath, "", promptTemplate); policyErr != nil {
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
@@ -2585,18 +2586,22 @@ func phaseActionType(p *workflow.Phase) string {
 	return "phase_execute"
 }
 
-func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase, renderedCommand, renderedPrompt string) error {
+func (r *Runner) enforcePhasePolicy(ctx context.Context, vessel queue.Vessel, sk *workflow.Workflow, p workflow.Phase, worktreePath, renderedCommand, renderedPrompt string) error {
+	workflowClass := policy.Delivery
+	if sk != nil {
+		workflowClass = policy.NormalizeClass(sk.Class)
+	}
+	if err := r.guardDefaultBranchPush(ctx, vessel, p, workflowClass, worktreePath, renderedCommand, renderedPrompt); err != nil {
+		return err
+	}
 	if r.Intermediary == nil {
 		return nil
 	}
 
+	inter := r.Intermediary.WithWorkflowClass(workflowClass)
 	for _, intent := range r.phasePolicyIntents(vessel, p, renderedCommand, renderedPrompt) {
-		result := r.Intermediary.Evaluate(intent)
-		entry := intermediary.AuditEntry{
-			Intent:    intent,
-			Decision:  result.Effect,
-			Timestamp: time.Now().UTC(),
-		}
+		result := inter.Evaluate(intent)
+		entry := r.policyAuditEntry(vessel, workflowClass, intent, result, "")
 		if result.Effect != intermediary.Allow {
 			entry.Error = result.Reason
 		}
@@ -2604,6 +2609,10 @@ func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase, rende
 			return fmt.Errorf("record audit evidence: %w", err)
 		}
 		if result.Effect != intermediary.Allow {
+			if r.Config != nil && r.Config.HarnessPolicyMode() == policy.ModeWarn {
+				log.Printf("%sphase %q policy warning: %v", vesselLabel(vessel), p.Name, formatPolicyDecisionError(p.Name, intent, result))
+				continue
+			}
 			return formatPolicyDecisionError(p.Name, intent, result)
 		}
 	}
@@ -2689,6 +2698,77 @@ func phaseIntentMetadata(vessel queue.Vessel, p workflow.Phase, classifiedFrom s
 	return metadata
 }
 
+func (r *Runner) policyAuditEntry(vessel queue.Vessel, workflowClass policy.Class, intent intermediary.Intent, result intermediary.PolicyResult, filePath string) intermediary.AuditEntry {
+	entry := intermediary.AuditEntry{
+		Intent:        intent,
+		Decision:      result.Effect,
+		Timestamp:     time.Now().UTC(),
+		Audit:         result.Audit,
+		WorkflowClass: string(workflowClass),
+		Operation:     result.Operation,
+		RuleMatched:   result.RuleMatched,
+		VesselID:      vessel.ID,
+	}
+	if filePath != "" {
+		entry.FilePath = filePath
+	} else if intent.Action == "file_write" {
+		entry.FilePath = intent.Resource
+	}
+	return entry
+}
+
+func (r *Runner) guardDefaultBranchPush(ctx context.Context, vessel queue.Vessel, p workflow.Phase, workflowClass policy.Class, worktreePath, renderedCommand, renderedPrompt string) error {
+	if workflowClass != policy.HarnessMaintenance {
+		return nil
+	}
+	branch := extractGitPushResource(renderedCommand)
+	if branch == "*" {
+		branch = extractGitPushResource(renderedPrompt)
+	}
+	if branch == "*" || strings.TrimSpace(branch) == "" {
+		return nil
+	}
+
+	defaultBranch := ""
+	if r.Config != nil {
+		defaultBranch = strings.TrimSpace(r.Config.DefaultBranch)
+	}
+	if defaultBranch == "" && strings.TrimSpace(worktreePath) != "" {
+		detected, err := r.detectDefaultBranchAtPath(ctx, worktreePath)
+		if err == nil {
+			defaultBranch = detected
+		}
+	}
+	if defaultBranch == "" || branch != defaultBranch {
+		return nil
+	}
+
+	result := intermediary.PolicyResult{
+		Effect:      intermediary.Deny,
+		Reason:      `matched workflow class rule "policy.class.no-main-commits"`,
+		Operation:   string(policy.OpCommitDefaultBranch),
+		RuleMatched: "policy.class.no-main-commits",
+	}
+	intent := intermediary.Intent{
+		Action:        "git_push",
+		Resource:      branch,
+		AgentID:       vessel.ID,
+		Justification: fmt.Sprintf("phase %q may push to %s", p.Name, branch),
+		Metadata:      phaseIntentMetadata(vessel, p, "command"),
+	}
+	entry := r.policyAuditEntry(vessel, workflowClass, intent, result, "")
+	entry.Error = result.Reason
+	if err := r.appendAuditEntry(entry); err != nil {
+		return fmt.Errorf("record audit evidence: %w", err)
+	}
+	err := formatPolicyDecisionError(p.Name, intent, result)
+	if r.Config != nil && r.Config.HarnessPolicyMode() == policy.ModeWarn {
+		log.Printf("%sphase %q policy warning: %v", vesselLabel(vessel), p.Name, err)
+		return nil
+	}
+	return err
+}
+
 func formatPolicyDecisionError(phaseName string, intent intermediary.Intent, result intermediary.PolicyResult) error {
 	qualifier := ""
 	if intent.Action != "" && intent.Action != "phase_execute" && intent.Action != "external_command" {
@@ -2756,7 +2836,7 @@ func extractGitPushResource(rendered string) string {
 			if strings.HasPrefix(token, "-") {
 				continue
 			}
-			positional = append(positional, token)
+			positional = append(positional, normalizeGitPushTarget(token))
 			if len(positional) == 2 {
 				return positional[1]
 			}
@@ -2764,6 +2844,22 @@ func extractGitPushResource(rendered string) string {
 		return "*"
 	}
 	return "*"
+}
+
+func normalizeGitPushTarget(token string) string {
+	token = strings.Trim(strings.TrimSpace(token), "\"'")
+	if token == "" {
+		return "*"
+	}
+	token = strings.TrimPrefix(token, "+")
+	if idx := strings.LastIndex(token, ":"); idx >= 0 {
+		token = token[idx+1:]
+	}
+	token = strings.TrimPrefix(token, "refs/heads/")
+	if token == "" {
+		return "*"
+	}
+	return token
 }
 
 func extractRepoFlag(rendered, fallback string) string {
@@ -2863,12 +2959,18 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	}
 
 	violations := surface.Compare(before, after)
-	policy, err := r.workflowProtectedWritePolicy(vessel, violations)
+	workflowClass := policy.Delivery
+	if strings.TrimSpace(vessel.Workflow) != "" {
+		if sk, loadErr := r.loadWorkflow(vessel.Workflow); loadErr == nil {
+			workflowClass = policy.NormalizeClass(sk.Class)
+		}
+	}
+	policyCfg, err := r.workflowProtectedWritePolicy(vessel, violations)
 	if err != nil {
 		return fmt.Errorf("resolve protected surface policy: %w", err)
 	}
-	violations = filterAdditiveProtectedSurfaceViolations(violations, policy.allowAdditive)
-	violations = filterCanonicalProtectedSurfaceViolations(vessel, p, violations, policy.allowCanonical)
+	violations = filterAdditiveProtectedSurfaceViolations(violations, policyCfg.allowAdditive)
+	violations = filterCanonicalProtectedSurfaceViolations(vessel, p, violations, policyCfg.allowCanonical)
 
 	// Source-root alignment filter: drop modification violations where the
 	// after-hash matches the canonical source root's current hash for that
@@ -2906,13 +3008,86 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 		}
 	}
 
+	allowedControlPlane := make(map[string]intermediary.PolicyResult)
+	deniedControlPlane := make(map[string]intermediary.PolicyResult)
+	if len(violations) > 0 {
+		inter := r.Intermediary
+		if inter != nil {
+			inter = inter.WithWorkflowClass(workflowClass)
+		}
+		filtered := make([]surface.Violation, 0, len(violations))
+		for _, violation := range violations {
+			if !policy.IsControlPlanePath(violation.Path) {
+				filtered = append(filtered, violation)
+				continue
+			}
+			intent := intermediary.Intent{
+				Action:        "file_write",
+				Resource:      violation.Path,
+				AgentID:       vessel.ID,
+				Justification: fmt.Sprintf("verify protected surfaces after phase %q", p.Name),
+				Metadata: map[string]string{
+					"phase":    p.Name,
+					"before":   violation.Before,
+					"after":    violation.After,
+					"source":   vessel.Source,
+					"workflow": vessel.Workflow,
+				},
+			}
+			result := intermediary.PolicyResult{
+				Effect:      intermediary.Deny,
+				Reason:      `matched workflow class rule "delivery.write_control_plane.deny"`,
+				Operation:   string(policy.OpWriteControlPlane),
+				RuleMatched: string(workflowClass) + ".write_control_plane.deny",
+			}
+			if inter != nil {
+				result = inter.Evaluate(intent)
+			} else {
+				decision := policy.Evaluate(workflowClass, policy.OpWriteControlPlane)
+				result.Reason = fmt.Sprintf("matched workflow class rule %q", decision.Rule)
+				result.RuleMatched = decision.Rule
+				result.Audit = decision.Audit
+				if decision.Allowed {
+					result.Effect = intermediary.Allow
+				}
+			}
+			if result.Effect == intermediary.Allow {
+				allowedControlPlane[violation.Path] = result
+				continue
+			}
+			deniedControlPlane[violation.Path] = result
+			filtered = append(filtered, violation)
+		}
+		violations = filtered
+	}
+	for path, result := range allowedControlPlane {
+		entry := r.policyAuditEntry(vessel, workflowClass, intermediary.Intent{
+			Action:        "file_write",
+			Resource:      path,
+			AgentID:       vessel.ID,
+			Justification: fmt.Sprintf("verify protected surfaces after phase %q", p.Name),
+			Metadata: map[string]string{
+				"phase":    p.Name,
+				"source":   vessel.Source,
+				"workflow": vessel.Workflow,
+			},
+		}, result, path)
+		if err := r.appendAuditEntry(entry); err != nil {
+			return fmt.Errorf("record audit evidence: %w", err)
+		}
+	}
+
 	if len(violations) == 0 {
 		return nil
 	}
 
 	errMsg := fmt.Sprintf("phase %q violated protected surfaces: %s", p.Name, formatViolations(violations))
-	if err := r.recordProtectedSurfaceViolations(vessel, p, errMsg, violations); err != nil {
+	if err := r.recordProtectedSurfaceViolations(vessel, workflowClass, p, errMsg, violations, deniedControlPlane); err != nil {
 		return fmt.Errorf("%s (record audit evidence: %w)", errMsg, err)
+	}
+	if r.Config != nil && r.Config.HarnessPolicyMode() == policy.ModeWarn {
+		log.Printf("%sphase %q policy warning: %s", vesselLabel(vessel), p.Name, errMsg)
+		return nil
 	}
 	if err := r.restoreDeletedProtectedSurfaces(context.Background(), worktreePath, violations); err != nil {
 		log.Printf("%sphase %q protected surface self-heal failed: %v", vesselLabel(vessel), p.Name, err)
@@ -3301,26 +3476,30 @@ func (r *Runner) detectDefaultBranchAtPath(ctx context.Context, worktreePath str
 	return "", fmt.Errorf("could not detect default branch from origin")
 }
 
-func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, errMsg string, violations []surface.Violation) error {
+func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, workflowClass policy.Class, p workflow.Phase, errMsg string, violations []surface.Violation, decisions map[string]intermediary.PolicyResult) error {
 	for _, violation := range violations {
-		if err := r.appendAuditEntry(intermediary.AuditEntry{
-			Intent: intermediary.Intent{
-				Action:        "file_write",
-				Resource:      violation.Path,
-				AgentID:       vessel.ID,
-				Justification: fmt.Sprintf("verify protected surfaces after phase %q", p.Name),
-				Metadata: map[string]string{
-					"phase":    p.Name,
-					"before":   violation.Before,
-					"after":    violation.After,
-					"source":   vessel.Source,
-					"workflow": vessel.Workflow,
-				},
+		intent := intermediary.Intent{
+			Action:        "file_write",
+			Resource:      violation.Path,
+			AgentID:       vessel.ID,
+			Justification: fmt.Sprintf("verify protected surfaces after phase %q", p.Name),
+			Metadata: map[string]string{
+				"phase":    p.Name,
+				"before":   violation.Before,
+				"after":    violation.After,
+				"source":   vessel.Source,
+				"workflow": vessel.Workflow,
 			},
-			Decision:  intermediary.Deny,
-			Timestamp: time.Now().UTC(),
-			Error:     errMsg,
-		}); err != nil {
+		}
+		result, ok := decisions[violation.Path]
+		if !ok {
+			result = intermediary.PolicyResult{
+				Effect: intermediary.Deny,
+			}
+		}
+		entry := r.policyAuditEntry(vessel, workflowClass, intent, result, violation.Path)
+		entry.Error = errMsg
+		if err := r.appendAuditEntry(entry); err != nil {
 			return fmt.Errorf("append surface violation audit for %s: %w", violation.Path, err)
 		}
 	}

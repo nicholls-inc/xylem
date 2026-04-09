@@ -9,6 +9,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // mockExecutor records whether Execute was called and optionally returns an error.
@@ -191,6 +195,196 @@ func TestEvaluate(t *testing.T) {
 				t.Fatalf("reason: got %q, want %q", result.Reason, tt.wantReason)
 			}
 		})
+	}
+}
+
+func TestEvaluate_ClassMatrixDeniesControlPlaneForDelivery(t *testing.T) {
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, newTestAuditLog(t), &mockExecutor{})
+
+	result := inter.Evaluate(Intent{Action: "file_write", Resource: ".xylem/HARNESS.md", AgentID: "a"})
+	if result.Effect != Deny {
+		t.Fatalf("effect: got %q, want %q", result.Effect, Deny)
+	}
+	if result.Operation != string(policy.OpWriteControlPlane) {
+		t.Fatalf("operation: got %q, want %q", result.Operation, policy.OpWriteControlPlane)
+	}
+	if result.RuleMatched != "delivery.write_control_plane.deny" {
+		t.Fatalf("ruleMatched: got %q", result.RuleMatched)
+	}
+}
+
+func TestEvaluate_ClassMatrixAllowsHarnessMaintenanceControlPlaneWithAudit(t *testing.T) {
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, newTestAuditLog(t), &mockExecutor{}).WithWorkflowClass(policy.HarnessMaintenance)
+
+	result := inter.Evaluate(Intent{Action: "file_write", Resource: ".xylem/HARNESS.md", AgentID: "a"})
+	if result.Effect != Allow {
+		t.Fatalf("effect: got %q, want %q", result.Effect, Allow)
+	}
+	if !result.Audit {
+		t.Fatal("Audit = false, want true")
+	}
+	if result.RuleMatched != "harness-maintenance.write_control_plane.allow" {
+		t.Fatalf("ruleMatched: got %q", result.RuleMatched)
+	}
+}
+
+func TestSmoke_S1_DeliveryControlPlaneWriteDeniedWithAuditEntry(t *testing.T) {
+	exec := &mockExecutor{}
+	al := newTestAuditLog(t)
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, al, exec).WithWorkflowClass(policy.Delivery)
+
+	effect, err := inter.Submit(context.Background(), Intent{
+		Action:        "file_write",
+		Resource:      ".xylem/HARNESS.md",
+		AgentID:       "vessel-delivery",
+		Justification: "attempt control-plane edit",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, Deny, effect)
+	assert.Equal(t, 0, exec.calls())
+
+	entries, readErr := al.Entries()
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+
+	entry := entries[0]
+	assert.Equal(t, Deny, entry.Decision)
+	assert.Equal(t, string(policy.Delivery), entry.WorkflowClass)
+	assert.Equal(t, string(policy.OpWriteControlPlane), entry.Operation)
+	assert.Equal(t, "delivery.write_control_plane.deny", entry.RuleMatched)
+	assert.Equal(t, ".xylem/HARNESS.md", entry.FilePath)
+	assert.Equal(t, "vessel-delivery", entry.VesselID)
+	assert.False(t, entry.Audit)
+}
+
+func TestSmoke_S2_HarnessMaintenanceControlPlaneWriteAllowedWithAuditEntry(t *testing.T) {
+	exec := &mockExecutor{}
+	al := newTestAuditLog(t)
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, al, exec).WithWorkflowClass(policy.HarnessMaintenance)
+
+	effect, err := inter.Submit(context.Background(), Intent{
+		Action:        "file_write",
+		Resource:      ".xylem/HARNESS.md",
+		AgentID:       "vessel-maintenance",
+		Justification: "update harness instructions",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, Allow, effect)
+	assert.Equal(t, 1, exec.calls())
+
+	entries, readErr := al.Entries()
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+
+	entry := entries[0]
+	assert.Equal(t, Allow, entry.Decision)
+	assert.Equal(t, string(policy.HarnessMaintenance), entry.WorkflowClass)
+	assert.Equal(t, string(policy.OpWriteControlPlane), entry.Operation)
+	assert.Equal(t, "harness-maintenance.write_control_plane.allow", entry.RuleMatched)
+	assert.Equal(t, ".xylem/HARNESS.md", entry.FilePath)
+	assert.Equal(t, "vessel-maintenance", entry.VesselID)
+	assert.True(t, entry.Audit)
+}
+
+func TestEvaluate_UserRulesCannotLoosenClassMatrix(t *testing.T) {
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, newTestAuditLog(t), &mockExecutor{}).WithWorkflowClass(policy.Delivery)
+
+	result := inter.Evaluate(Intent{Action: "file_write", Resource: ".xylem.yml", AgentID: "a"})
+	if result.Effect != Deny {
+		t.Fatalf("effect: got %q, want %q", result.Effect, Deny)
+	}
+	if result.MatchedRule != nil {
+		t.Fatalf("MatchedRule = %#v, want nil because matrix denial should happen before glob rules", result.MatchedRule)
+	}
+}
+
+func TestSmoke_S3_UserGlobRulesCannotLoosenWorkflowClassMatrix(t *testing.T) {
+	exec := &mockExecutor{}
+	al := newTestAuditLog(t)
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, al, exec).WithWorkflowClass(policy.Delivery)
+
+	effect, err := inter.Submit(context.Background(), Intent{
+		Action:        "file_write",
+		Resource:      ".xylem/HARNESS.md",
+		AgentID:       "vessel-tighten-only",
+		Justification: "user policy must not bypass class matrix",
+	})
+
+	require.NoError(t, err)
+	assert.Equal(t, Deny, effect)
+	assert.Equal(t, 0, exec.calls())
+
+	entries, readErr := al.Entries()
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+
+	entry := entries[0]
+	assert.Equal(t, Deny, entry.Decision)
+	assert.Equal(t, "delivery.write_control_plane.deny", entry.RuleMatched)
+	assert.Equal(t, string(policy.Delivery), entry.WorkflowClass)
+}
+
+func TestSubmit_AuditEntryIncludesWorkflowClassOperationAndPath(t *testing.T) {
+	al := newTestAuditLog(t)
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, al, &mockExecutor{}).WithWorkflowClass(policy.HarnessMaintenance)
+
+	_, err := inter.Submit(context.Background(), Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "vessel-1",
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	entries, err := al.Entries()
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries: got %d, want 1", len(entries))
+	}
+	entry := entries[0]
+	if entry.WorkflowClass != string(policy.HarnessMaintenance) {
+		t.Fatalf("WorkflowClass = %q", entry.WorkflowClass)
+	}
+	if entry.Operation != string(policy.OpWriteControlPlane) {
+		t.Fatalf("Operation = %q", entry.Operation)
+	}
+	if entry.RuleMatched != "harness-maintenance.write_control_plane.allow" {
+		t.Fatalf("RuleMatched = %q", entry.RuleMatched)
+	}
+	if entry.FilePath != ".xylem/HARNESS.md" {
+		t.Fatalf("FilePath = %q", entry.FilePath)
+	}
+	if entry.VesselID != "vessel-1" {
+		t.Fatalf("VesselID = %q", entry.VesselID)
+	}
+	if !entry.Audit {
+		t.Fatal("Audit = false, want true")
 	}
 }
 

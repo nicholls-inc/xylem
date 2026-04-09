@@ -11,6 +11,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cadence"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -210,6 +211,7 @@ type ProtectedSurfacesConfig struct {
 }
 
 type PolicyConfig struct {
+	Mode  string             `yaml:"mode,omitempty"`
 	Rules []PolicyRuleConfig `yaml:"rules,omitempty"`
 }
 
@@ -465,6 +467,10 @@ func (c *Config) EffectiveAuditLogPath() string {
 	return DefaultAuditLogPath
 }
 
+func (c *Config) HarnessPolicyMode() policy.Mode {
+	return policy.NormalizeMode(c.Harness.Policy.Mode)
+}
+
 func (c *Config) HarnessReviewCadence() string {
 	if !c.Harness.Review.Enabled {
 		return "manual"
@@ -541,14 +547,15 @@ func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 		return []intermediary.Policy{DefaultPolicy()}
 	}
 
-	rules := make([]intermediary.Rule, len(c.Harness.Policy.Rules))
-	for i, rule := range c.Harness.Policy.Rules {
-		rules[i] = intermediary.Rule{
+	rules := make([]intermediary.Rule, 0, len(c.Harness.Policy.Rules)+1)
+	for _, rule := range c.Harness.Policy.Rules {
+		rules = append(rules, intermediary.Rule{
 			Action:   rule.Action,
 			Resource: rule.Resource,
 			Effect:   intermediary.Effect(rule.Effect),
-		}
+		})
 	}
+	rules = append(rules, intermediary.Rule{Action: "*", Resource: "*", Effect: intermediary.Allow})
 
 	return []intermediary.Policy{{
 		Name:  "user",
@@ -556,28 +563,13 @@ func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 	}}
 }
 
-// DefaultPolicy returns the default intermediary policy. Protected control
-// surfaces are denied, and all currently classified execution actions —
-// including git_commit, git_push, and pr_create — are allowed so the daemon can
-// operate autonomously.
-//
-// Destructive git operations and deploy-class actions are not yet emitted as
-// separate intents at the runner/intermediary boundary; they currently inherit
-// the enclosing phase action. Operators who want human gates on those surfaces
-// can override the defaults with `harness.policy.rules` or workflow gates.
+// DefaultPolicy returns the default intermediary overlay policy. The workflow
+// class matrix is authoritative; this glob policy exists only as the fallback
+// allow rule that keeps user-defined rules in "tightening only" mode.
 func DefaultPolicy() intermediary.Policy {
 	return intermediary.Policy{
 		Name: "default",
 		Rules: []intermediary.Rule{
-			// Protected control surfaces are denied.
-			{Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
-			// All other actions — including git_commit, git_push, and pr_create
-			// — are allowed. Autonomous operation requires publication steps to
-			// complete without a built-in approval pause. Override via
-			// harness.policy for stricter rules.
 			{Action: "*", Resource: "*", Effect: intermediary.Allow},
 		},
 	}
@@ -606,6 +598,9 @@ func (c *Config) validateHarness() error {
 		default:
 			return fmt.Errorf("harness.policy.rules[%d]: invalid effect %q (must be allow, deny, or require_approval)", i, rule.Effect)
 		}
+	}
+	if c.Harness.Policy.Mode != "" && c.Harness.Policy.Mode != string(policy.ModeWarn) && c.Harness.Policy.Mode != string(policy.ModeEnforce) {
+		return fmt.Errorf("harness.policy.mode: invalid mode %q (must be warn or enforce)", c.Harness.Policy.Mode)
 	}
 
 	if cadence := c.Harness.Review.Cadence; cadence != "" {

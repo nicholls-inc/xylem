@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"pgregory.net/rapid"
 )
 
@@ -198,6 +199,31 @@ func TestProp_DenyOnlyPolicyDeniesEverything(t *testing.T) {
 		result := inter.Evaluate(intent)
 		if result.Effect != Deny {
 			t.Fatalf("deny-only policy returned %q for %+v", result.Effect, intent)
+		}
+	})
+}
+
+func TestProp_ClassMatrixDenialCannotBeLoosened(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		resource := rapid.SampledFrom([]string{
+			".xylem/HARNESS.md",
+			".xylem.yml",
+			".xylem/workflows/fix-bug.yaml",
+			".xylem/prompts/fix-bug/analyze.md",
+		}).Draw(t, "resource")
+		class := rapid.SampledFrom([]policy.Class{policy.Delivery, policy.Ops}).Draw(t, "class")
+
+		dir := mustTempDir(t)
+		defer os.RemoveAll(dir)
+		al := NewAuditLog(filepath.Join(dir, "audit.jsonl"))
+		inter := NewIntermediary([]Policy{{
+			Name:  "allow-all",
+			Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+		}}, al, &mockExecutor{}).WithWorkflowClass(class)
+
+		result := inter.Evaluate(Intent{Action: "file_write", Resource: resource, AgentID: "agent-1"})
+		if result.Effect != Deny {
+			t.Fatalf("effect = %q, want deny for class %q resource %q", result.Effect, class, resource)
 		}
 	})
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
@@ -455,8 +456,18 @@ func TestBuildCommand(t *testing.T) {
 	}
 }
 
+type testWorkflowOptions struct {
+	class                         string
+	allowAdditiveProtectedWrites  bool
+	allowCanonicalProtectedWrites bool
+}
+
 // writeWorkflowFile creates a workflow YAML and its prompt files in the given dir.
 func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
+	writeWorkflowFileWithOptions(t, dir, name, testWorkflowOptions{}, phases)
+}
+
+func writeWorkflowFileWithOptions(t *testing.T, dir, name string, opts testWorkflowOptions, phases []testPhase) {
 	t.Helper()
 	workflowDir := filepath.Join(dir, ".xylem", "workflows")
 	os.MkdirAll(workflowDir, 0o755)
@@ -494,7 +505,19 @@ func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
 		}
 	}
 
-	workflowContent := fmt.Sprintf("name: %s\nphases:\n%s", name, phaseYAML.String())
+	var workflowHeader strings.Builder
+	fmt.Fprintf(&workflowHeader, "name: %s\n", name)
+	if opts.class != "" {
+		fmt.Fprintf(&workflowHeader, "class: %s\n", opts.class)
+	}
+	if opts.allowAdditiveProtectedWrites {
+		workflowHeader.WriteString("allow_additive_protected_writes: true\n")
+	}
+	if opts.allowCanonicalProtectedWrites {
+		workflowHeader.WriteString("allow_canonical_protected_writes: true\n")
+	}
+	workflowHeader.WriteString("phases:\n")
+	workflowContent := workflowHeader.String() + phaseYAML.String()
 	os.WriteFile(filepath.Join(workflowDir, name+".yaml"), []byte(workflowContent), 0o644)
 }
 
@@ -857,6 +880,25 @@ func TestPhasePolicyIntents_ClassifiesHighRiskCommandActions(t *testing.T) {
 	assert.Equal(t, "pr_create", intents[3].Action)
 	assert.Equal(t, "owner/repo", intents[3].Resource)
 	assert.Equal(t, "command", intents[1].Metadata["classified_from"])
+}
+
+func TestPhasePolicyIntents_ExtractsRefspecTargetBranch(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "publish", Type: "command"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, `git push origin HEAD:refs/heads/main`, "")
+	require.Len(t, intents, 2)
+
+	assert.Equal(t, "git_push", intents[1].Action)
+	assert.Equal(t, "main", intents[1].Resource)
 }
 
 func TestPhasePolicyIntents_ClassifiesHighRiskPromptActions(t *testing.T) {
@@ -6142,12 +6184,39 @@ func TestSmoke_S21_SurfacePostVerificationAllowsReferencedCanonicalProtectedWrit
 }
 
 func TestSmoke_S23_AuditLogRecordsDeniedCanonicalProtectedWriteWithoutIssuePathReference(t *testing.T) {
-	r, auditLog, worktreeDir, protectedPath, before := setupCanonicalProtectedWriteSmokeTest(t)
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "prompts", "doctor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "prompts", "doctor", "analyze.md"), []byte("analyze"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "doctor.yaml"), []byte(`name: doctor
+class: delivery
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doctor/analyze.md
+    max_turns: 1
+`), 0o644))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	protectedPath := filepath.Join(worktreeDir, ".xylem", "workflows", "doctor.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(protectedPath), 0o755))
+	require.NoError(t, os.WriteFile(protectedPath, []byte("name: doctor\nphases: []\n"), 0o644))
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	require.NoError(t, err)
+	require.True(t, ok)
 
 	modifiedContents := "name: doctor\nupdated: true\n"
 	require.NoError(t, os.WriteFile(protectedPath, []byte(modifiedContents), 0o644))
 
-	err := r.verifyProtectedSurfaces(
+	err = r.verifyProtectedSurfaces(
 		queue.Vessel{
 			ID:       "issue-canonical-denied",
 			Source:   "github-issue",
@@ -6170,6 +6239,187 @@ func TestSmoke_S23_AuditLogRecordsDeniedCanonicalProtectedWriteWithoutIssuePathR
 	assert.Equal(t, "file_write", entries[0].Intent.Action)
 	assert.Equal(t, ".xylem/workflows/doctor.yaml", entries[0].Intent.Resource)
 	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+	assert.Equal(t, string(policy.Delivery), entries[0].WorkflowClass)
+	assert.Equal(t, "write_control_plane", entries[0].Operation)
+	assert.Equal(t, "delivery.write_control_plane.deny", entries[0].RuleMatched)
+}
+
+func TestSmoke_WorkflowClassHarnessMaintenanceProtectedWriteAllowedWithAudit(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	withTestWorkingDir(t, dir)
+	writeWorkflowFileWithOptions(t, dir, "implement-harness", testWorkflowOptions{class: string(policy.HarnessMaintenance)}, []testPhase{
+		{name: "implement", promptContent: "Update harness", maxTurns: 1},
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".xylem"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("before\n"), 0o644))
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), dir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("after\n"), 0o644))
+
+	err = r.verifyProtectedSurfaces(queue.Vessel{
+		ID:       "issue-allow",
+		Source:   "github-issue",
+		Workflow: "implement-harness",
+	}, workflow.Phase{Name: "implement"}, dir, before)
+	require.NoError(t, err)
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, intermediary.Allow, entries[0].Decision)
+	assert.Equal(t, string(policy.HarnessMaintenance), entries[0].WorkflowClass)
+	assert.Equal(t, "write_control_plane", entries[0].Operation)
+	assert.Equal(t, ".xylem/HARNESS.md", entries[0].FilePath)
+	assert.True(t, entries[0].Audit)
+}
+
+func TestSmoke_S4_HarnessMaintenancePushToDefaultBranchDeniedAtRunnerLayer(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	cfg.DefaultBranch = "main"
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	err := r.enforcePhasePolicy(context.Background(), queue.Vessel{
+		ID:       "issue-push",
+		Source:   "github-issue",
+		Workflow: "implement-harness",
+	}, &workflow.Workflow{
+		Name:  "implement-harness",
+		Class: string(policy.HarnessMaintenance),
+	}, workflow.Phase{Name: "publish", Type: "command"}, dir, "git push origin main", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "denied by policy")
+
+	entries, readErr := auditLog.Entries()
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+	assert.Equal(t, "commit_default_branch", entries[0].Operation)
+	assert.Equal(t, "policy.class.no-main-commits", entries[0].RuleMatched)
+	assert.Equal(t, string(policy.HarnessMaintenance), entries[0].WorkflowClass)
+}
+
+func TestSmoke_HarnessMaintenancePushRefspecToDefaultBranchDeniedAtRunnerLayer(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	cfg.DefaultBranch = "main"
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	err := r.enforcePhasePolicy(context.Background(), queue.Vessel{
+		ID:       "issue-push-refspec",
+		Source:   "github-issue",
+		Workflow: "implement-harness",
+	}, &workflow.Workflow{
+		Name:  "implement-harness",
+		Class: string(policy.HarnessMaintenance),
+	}, workflow.Phase{Name: "publish", Type: "command"}, dir, "git push origin HEAD:refs/heads/main", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "denied by policy")
+
+	entries, readErr := auditLog.Entries()
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+	assert.Equal(t, "main", entries[0].Intent.Resource)
+	assert.Equal(t, "commit_default_branch", entries[0].Operation)
+	assert.Equal(t, "policy.class.no-main-commits", entries[0].RuleMatched)
+	assert.Equal(t, string(policy.HarnessMaintenance), entries[0].WorkflowClass)
+}
+
+func TestSmoke_S5_WarnModeLogsProtectedWriteViolationWithoutFailing(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	cfg.Harness.Policy.Mode = string(policy.ModeWarn)
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	withTestWorkingDir(t, dir)
+	writeWorkflowFileWithOptions(t, dir, "delivery-write", testWorkflowOptions{class: string(policy.Delivery)}, []testPhase{
+		{name: "implement", promptContent: "Update harness", maxTurns: 1},
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".xylem"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("before\n"), 0o644))
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), dir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("after\n"), 0o644))
+
+	err = r.verifyProtectedSurfaces(queue.Vessel{
+		ID:       "issue-warn",
+		Source:   "github-issue",
+		Workflow: "delivery-write",
+	}, workflow.Phase{Name: "implement"}, dir, before)
+	require.NoError(t, err)
+
+	entries, readErr := auditLog.Entries()
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+	assert.Equal(t, "write_control_plane", entries[0].Operation)
+	assert.Equal(t, "delivery.write_control_plane.deny", entries[0].RuleMatched)
+}
+
+func TestSmoke_S6_EnforceModeFailsProtectedWriteViolation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	cfg.Harness.Policy.Mode = string(policy.ModeEnforce)
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	withTestWorkingDir(t, dir)
+	writeWorkflowFileWithOptions(t, dir, "delivery-write", testWorkflowOptions{class: string(policy.Delivery)}, []testPhase{
+		{name: "implement", promptContent: "Update harness", maxTurns: 1},
+	})
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".xylem"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("before\n"), 0o644))
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), dir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("after\n"), 0o644))
+
+	err = r.verifyProtectedSurfaces(queue.Vessel{
+		ID:       "issue-enforce",
+		Source:   "github-issue",
+		Workflow: "delivery-write",
+	}, workflow.Phase{Name: "implement"}, dir, before)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "violated protected surfaces")
+
+	entries, readErr := auditLog.Entries()
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+	assert.Equal(t, string(policy.Delivery), entries[0].WorkflowClass)
+	assert.Equal(t, "write_control_plane", entries[0].Operation)
+	assert.Equal(t, "delivery.write_control_plane.deny", entries[0].RuleMatched)
 }
 
 func TestSmoke_S23_AuditLogRecordsDeniedAdditiveProtectedWriteWithoutWorkflowOptIn(t *testing.T) {

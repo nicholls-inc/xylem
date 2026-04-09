@@ -12,7 +12,9 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
@@ -229,6 +231,43 @@ func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 			if exceeded && !tracker.BudgetExceeded() {
 				t.Fatal("BudgetExceeded reverted to false")
 			}
+		}
+	})
+}
+
+func TestProp_DefaultBranchPushGuardMatchesClassAndTarget(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		class := rapid.SampledFrom([]policy.Class{policy.Delivery, policy.HarnessMaintenance, policy.Ops}).Draw(t, "class")
+		target := rapid.SampledFrom([]string{"main", "feature-1", "release"}).Draw(t, "target")
+
+		dir, err := os.MkdirTemp("", "runner-push-guard-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(dir)
+
+		cfg := makeTestConfig(dir, 1)
+		cfg.DefaultBranch = "main"
+		cfg.StateDir = filepath.Join(dir, ".xylem-state")
+		if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+			t.Fatalf("MkdirAll() error = %v", err)
+		}
+
+		r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, &mockCmdRunner{})
+		r.AuditLog = intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+
+		err = r.enforcePhasePolicy(context.Background(), queue.Vessel{
+			ID:       "issue-1",
+			Source:   "github-issue",
+			Workflow: "wf",
+		}, &workflow.Workflow{
+			Name:  "wf",
+			Class: string(class),
+		}, workflow.Phase{Name: "publish", Type: "command"}, dir, "git push origin "+target, "")
+
+		wantErr := class == policy.HarnessMaintenance && target == "main"
+		if (err != nil) != wantErr {
+			t.Fatalf("enforcePhasePolicy() error = %v, want error=%t for class=%q target=%q", err, wantErr, class, target)
 		}
 	})
 }

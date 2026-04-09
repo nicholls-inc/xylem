@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -221,6 +222,76 @@ phases:
 	got, err := Load(path)
 	require.NoError(t, err)
 	assert.True(t, got.AllowAdditiveProtectedWrites)
+}
+
+func TestLoadWorkflowClassDefaultsToDelivery(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(policy.Delivery), got.Class)
+}
+
+func TestLoadWorkflowMigratesLegacyProtectedWriteFlagsToHarnessMaintenance(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, string(policy.HarnessMaintenance), got.Class)
+}
+
+func TestLoadWorkflowRejectsInvalidClass(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+class: unsupported
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `workflow class "unsupported" is invalid`)
+}
+
+func TestLoadWorkflowRejectsProtectedWriteFlagsForDelivery(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+class: delivery
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `workflow class "delivery" must not set allow_canonical_protected_writes`)
 }
 
 func TestLoadWorkflowAllowCanonicalProtectedWrites(t *testing.T) {

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1738,6 +1739,7 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 	assert.Equal(t, 50, cfg.HarnessReviewLookbackRuns())
 	assert.Equal(t, 3, cfg.HarnessReviewMinSamples())
 	assert.Equal(t, "reviews", cfg.HarnessReviewOutputDir())
+	assert.Equal(t, policy.ModeEnforce, cfg.HarnessPolicyMode())
 	assert.True(t, cfg.ObservabilityEnabled())
 	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
 	assert.Nil(t, cfg.VesselBudget())
@@ -1787,6 +1789,24 @@ func TestSmoke_S5_InvalidPolicyEffectRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "approve_maybe")
 }
 
+func TestSmoke_PolicyWarnModeParses(t *testing.T) {
+	cfg, err := Load(writeSmokeConfigFile(t, `harness:
+  policy:
+    mode: warn
+`))
+	require.NoError(t, err)
+	assert.Equal(t, policy.ModeWarn, cfg.HarnessPolicyMode())
+}
+
+func TestSmoke_InvalidPolicyModeRejected(t *testing.T) {
+	_, err := Load(writeSmokeConfigFile(t, `harness:
+  policy:
+    mode: block
+`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.policy.mode")
+}
+
 func TestSmoke_S6_DefaultPolicyDeniesHarnessWrite(t *testing.T) {
 	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
 		Action:   "file_write",
@@ -1795,9 +1815,8 @@ func TestSmoke_S6_DefaultPolicyDeniesHarnessWrite(t *testing.T) {
 	})
 
 	assert.Equal(t, intermediary.Deny, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, "file_write", result.MatchedRule.Action)
-	assert.Equal(t, ".xylem/HARNESS.md", result.MatchedRule.Resource)
+	assert.Equal(t, "write_control_plane", result.Operation)
+	assert.Equal(t, "delivery.write_control_plane.deny", result.RuleMatched)
 }
 
 func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
@@ -1814,6 +1833,21 @@ func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
 	require.NotNil(t, result.MatchedRule)
 	assert.Equal(t, "*", result.MatchedRule.Action)
 	assert.Equal(t, "*", result.MatchedRule.Resource)
+}
+
+func TestSmoke_ClassMatrixAllowsHarnessMaintenanceControlPlaneWrite(t *testing.T) {
+	result := newSmokeIntermediary(t, validConfig()).
+		WithWorkflowClass(policy.HarnessMaintenance).
+		Evaluate(intermediary.Intent{
+			Action:   "file_write",
+			Resource: ".xylem/HARNESS.md",
+			AgentID:  "vessel-003",
+		})
+
+	assert.Equal(t, intermediary.Allow, result.Effect)
+	assert.Equal(t, "write_control_plane", result.Operation)
+	assert.Equal(t, "harness-maintenance.write_control_plane.allow", result.RuleMatched)
+	assert.True(t, result.Audit)
 }
 
 func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
@@ -1863,8 +1897,8 @@ func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {
 	})
 
 	assert.Equal(t, intermediary.Deny, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, ".xylem/prompts/*/*.md", result.MatchedRule.Resource)
+	assert.Equal(t, "write_control_plane", result.Operation)
+	assert.Equal(t, "delivery.write_control_plane.deny", result.RuleMatched)
 }
 
 func TestSmoke_S8_DefaultPolicyAllowsPhaseExecute(t *testing.T) {

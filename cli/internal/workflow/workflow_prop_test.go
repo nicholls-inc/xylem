@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"pgregory.net/rapid"
 )
 
@@ -76,6 +77,27 @@ func TestPropValidateGateAllowsEmptyEvidenceLevel(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("validateGate() error = %v for empty level", err)
+		}
+	})
+}
+
+func TestPropNormalizeClassMigratesLegacyProtectedWriteFlags(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		allowAdditive := rapid.Bool().Draw(t, "allowAdditive")
+		allowCanonical := rapid.Bool().Draw(t, "allowCanonical")
+		wf := &Workflow{
+			AllowAdditiveProtectedWrites:  allowAdditive,
+			AllowCanonicalProtectedWrites: allowCanonical,
+		}
+
+		wf.normalizeClass()
+
+		want := policy.Delivery
+		if allowAdditive || allowCanonical {
+			want = policy.HarnessMaintenance
+		}
+		if wf.Class != string(want) {
+			t.Fatalf("normalizeClass() = %q, want %q", wf.Class, want)
 		}
 	})
 }

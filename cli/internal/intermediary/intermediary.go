@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 )
 
 // Effect represents the outcome of a policy evaluation.
@@ -57,15 +58,24 @@ type PolicyResult struct {
 	Effect      Effect `json:"effect"`
 	MatchedRule *Rule  `json:"matched_rule,omitempty"`
 	Reason      string `json:"reason"`
+	Operation   string `json:"operation,omitempty"`
+	RuleMatched string `json:"rule_matched,omitempty"`
+	Audit       bool   `json:"audit,omitempty"`
 }
 
 // AuditEntry records a single intermediary decision for the tamper-proof log.
 type AuditEntry struct {
-	Intent     Intent    `json:"intent"`
-	Decision   Effect    `json:"decision"`
-	Timestamp  time.Time `json:"timestamp"`
-	ApprovedBy string    `json:"approved_by,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	Intent        Intent    `json:"intent"`
+	Decision      Effect    `json:"decision"`
+	Timestamp     time.Time `json:"timestamp"`
+	ApprovedBy    string    `json:"approved_by,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	Audit         bool      `json:"audit,omitempty"`
+	WorkflowClass string    `json:"workflow_class,omitempty"`
+	Operation     string    `json:"operation,omitempty"`
+	RuleMatched   string    `json:"rule_matched,omitempty"`
+	FilePath      string    `json:"file_path,omitempty"`
+	VesselID      string    `json:"vessel_id,omitempty"`
 }
 
 // AuditLog provides an append-only JSONL-backed audit log with file locking.
@@ -163,19 +173,32 @@ type Executor interface {
 // crossing the sandbox boundary. It evaluates intents against policies, executes
 // allowed actions, and maintains a tamper-proof audit log.
 type Intermediary struct {
-	policies []Policy
-	auditLog *AuditLog
-	executor Executor
+	policies      []Policy
+	auditLog      *AuditLog
+	executor      Executor
+	workflowClass policy.Class
 }
 
 // NewIntermediary creates an intermediary with the given policies, audit log,
 // and executor.
 func NewIntermediary(policies []Policy, auditLog *AuditLog, executor Executor) *Intermediary {
 	return &Intermediary{
-		policies: policies,
-		auditLog: auditLog,
-		executor: executor,
+		policies:      policies,
+		auditLog:      auditLog,
+		executor:      executor,
+		workflowClass: policy.Delivery,
 	}
+}
+
+// WithWorkflowClass returns a shallow copy that evaluates intents against the
+// supplied workflow class.
+func (i *Intermediary) WithWorkflowClass(class policy.Class) *Intermediary {
+	if i == nil {
+		return nil
+	}
+	clone := *i
+	clone.workflowClass = policy.NormalizeClass(string(class))
+	return &clone
 }
 
 // Submit validates an intent, evaluates it against policies, executes it if
@@ -187,10 +210,12 @@ func NewIntermediary(policies []Policy, auditLog *AuditLog, executor Executor) *
 func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error) {
 	if err := ValidateIntent(intent); err != nil {
 		entry := AuditEntry{
-			Intent:    intent,
-			Decision:  Deny,
-			Timestamp: time.Now().UTC(),
-			Error:     err.Error(),
+			Intent:        intent,
+			Decision:      Deny,
+			Timestamp:     time.Now().UTC(),
+			Error:         err.Error(),
+			WorkflowClass: string(i.workflowClass),
+			VesselID:      intent.AgentID,
 		}
 		if appendErr := i.auditLog.Append(entry); appendErr != nil {
 			return Deny, fmt.Errorf("audit validation failure: %w", appendErr)
@@ -201,9 +226,17 @@ func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error
 	result := i.Evaluate(intent)
 
 	entry := AuditEntry{
-		Intent:    intent,
-		Decision:  result.Effect,
-		Timestamp: time.Now().UTC(),
+		Intent:        intent,
+		Decision:      result.Effect,
+		Timestamp:     time.Now().UTC(),
+		Audit:         result.Audit,
+		WorkflowClass: string(i.workflowClass),
+		Operation:     result.Operation,
+		RuleMatched:   result.RuleMatched,
+		VesselID:      intent.AgentID,
+	}
+	if intent.Action == "file_write" {
+		entry.FilePath = intent.Resource
 	}
 
 	switch result.Effect {
@@ -233,21 +266,41 @@ func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error
 // INV: Policy evaluation is deterministic for the same input.
 // INV: Default effect is Deny if no rule matches.
 func (i *Intermediary) Evaluate(intent Intent) PolicyResult {
+	op := policy.OperationFromActionResource(intent.Action, intent.Resource)
+	matrixDecision := policy.Evaluate(i.workflowClass, op)
+	if !matrixDecision.Allowed {
+		return PolicyResult{
+			Effect:      Deny,
+			Reason:      fmt.Sprintf("matched workflow class rule %q", matrixDecision.Rule),
+			Operation:   string(op),
+			RuleMatched: matrixDecision.Rule,
+			Audit:       matrixDecision.Audit,
+		}
+	}
 	for _, policy := range i.policies {
 		for _, rule := range policy.Rules {
 			if MatchGlob(rule.Action, intent.Action) && MatchGlob(rule.Resource, intent.Resource) {
+				ruleMatched := fmt.Sprintf("%s:%s %s", policy.Name, rule.Action, rule.Resource)
+				if matrixDecision.Audit && rule.Effect == Allow && matrixDecision.Rule != "" {
+					ruleMatched = matrixDecision.Rule
+				}
 				return PolicyResult{
 					Effect:      rule.Effect,
 					MatchedRule: &rule,
 					Reason:      fmt.Sprintf("matched rule in policy %q", policy.Name),
+					Operation:   string(op),
+					RuleMatched: ruleMatched,
+					Audit:       matrixDecision.Audit,
 				}
 			}
 		}
 	}
 	// INV: Default effect is Deny if no rule matches.
 	return PolicyResult{
-		Effect: Deny,
-		Reason: "no matching rule; default deny",
+		Effect:    Deny,
+		Reason:    "no matching rule; default deny",
+		Operation: string(op),
+		Audit:     matrixDecision.Audit,
 	}
 }
 

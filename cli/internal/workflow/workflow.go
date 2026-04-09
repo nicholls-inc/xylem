@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -21,6 +22,7 @@ var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 type Workflow struct {
 	Name                          string  `yaml:"name"`
 	Description                   string  `yaml:"description,omitempty"`
+	Class                         string  `yaml:"class,omitempty"`
 	LLM                           *string `yaml:"llm,omitempty"`
 	Model                         *string `yaml:"model,omitempty"`
 	AllowAdditiveProtectedWrites  bool    `yaml:"allow_additive_protected_writes,omitempty"`
@@ -152,6 +154,8 @@ func Load(path string) (*Workflow, error) {
 		return nil, fmt.Errorf("parse workflow yaml %q: %w", path, err)
 	}
 
+	s.normalizeClass()
+
 	if err := s.Validate(path); err != nil {
 		return nil, fmt.Errorf("validate workflow %q: %w", path, err)
 	}
@@ -164,6 +168,8 @@ func Load(path string) (*Workflow, error) {
 // filename. Prompt file paths are resolved relative to the current working
 // directory (repo root).
 func (s *Workflow) Validate(workflowFilePath string) error {
+	s.normalizeClass()
+
 	if s.Name == "" {
 		return fmt.Errorf(`"name" is required`)
 	}
@@ -179,6 +185,18 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 
 	if err := validateLLM(s.LLM, "workflow"); err != nil {
 		return err
+	}
+	if !policy.NormalizeClass(s.Class).Valid() || s.Class != string(policy.NormalizeClass(s.Class)) {
+		return fmt.Errorf("workflow class %q is invalid; must be delivery, harness-maintenance, or ops", s.Class)
+	}
+	switch policy.Class(s.Class) {
+	case policy.Delivery, policy.Ops:
+		if s.AllowAdditiveProtectedWrites {
+			return fmt.Errorf("workflow class %q must not set allow_additive_protected_writes", s.Class)
+		}
+		if s.AllowCanonicalProtectedWrites {
+			return fmt.Errorf("workflow class %q must not set allow_canonical_protected_writes", s.Class)
+		}
 	}
 
 	// Collect all phase names upfront for dependency reference validation.
@@ -263,6 +281,20 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 	}
 
 	return nil
+}
+
+func (s *Workflow) normalizeClass() {
+	if strings.TrimSpace(s.Class) != "" {
+		if policy.Class(s.Class).Valid() {
+			s.Class = string(policy.Class(s.Class))
+		}
+		return
+	}
+	if s.AllowAdditiveProtectedWrites || s.AllowCanonicalProtectedWrites {
+		s.Class = string(policy.HarnessMaintenance)
+		return
+	}
+	s.Class = string(policy.Delivery)
 }
 
 // HasDependencies returns true if any phase declares explicit depends_on.
