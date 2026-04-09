@@ -126,6 +126,12 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {
 	sources := make(map[string]source.Source)
+	addSource := func(configName string, src source.Source) {
+		sources[configName] = src
+		if _, exists := sources[src.Name()]; !exists {
+			sources[src.Name()] = src
+		}
+	}
 	for name, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
 		case "github":
@@ -140,7 +146,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gh.Name()] = gh
+			addSource(name, gh)
 		case "github-pr":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -153,7 +159,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pr.Name()] = pr
+			addSource(name, pr)
 		case "github-pr-events":
 			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -175,7 +181,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pre.Name()] = pre
+			addSource(name, pre)
 		case "github-merge":
 			mergeTasks := make(map[string]source.MergeTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -189,7 +195,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gm.Name()] = gm
+			addSource(name, gm)
 		case "scheduled":
 			scheduledTasks := make(map[string]source.ScheduledTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -209,7 +215,16 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Schedule:   scheduledDur,
 				Tasks:      scheduledTasks,
 			}
-			sources[scheduled.Name()] = scheduled
+			addSource(name, scheduled)
+		case "schedule":
+			sched := &source.Schedule{
+				ConfigName: name,
+				Cadence:    srcCfg.Cadence,
+				Workflow:   srcCfg.Workflow,
+				StateDir:   cfg.StateDir,
+				Queue:      q,
+			}
+			addSource(name, sched)
 		}
 	}
 	return sources

@@ -59,6 +59,11 @@ sources:
         labels: [enhancement, low-effort, ready-for-work]
         workflow: implement-feature
 
+  doc-gardener:
+    type: schedule
+    cadence: "@daily"
+    workflow: doc-garden
+
 # ---------------------------------------------------------------------------
 # Execution limits
 # ---------------------------------------------------------------------------
@@ -128,13 +133,15 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"scheduled"`. |
-| `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
-| `schedule` | string | -- | Required for `scheduled` | Positive Go duration string (for example `1h`, `24h`) that controls how often xylem enqueues the source's tasks. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`, `"scheduled"`. |
+| `repo` | string | -- | Yes (GitHub sources and `scheduled`) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `schedule` | string | -- | Required for `scheduled` | Positive Go duration string (for example `1h`, `24h`) that controls how often xylem enqueues the source's task map. |
+| `cadence` | string | -- | Yes (`schedule`) | Recurrence for scheduled sources. Accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions. |
+| `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue each time a scheduled source fires. Scheduled sources define the workflow directly and do not use `tasks`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
-| `tasks` | map | -- | Yes | Map of task names to task configurations. At least one task is required per source. |
+| `tasks` | map | -- | Yes (GitHub sources and `scheduled`) | Map of task names to task configurations. Required for GitHub-based sources and `scheduled`; not used by `schedule`. |
 
 ### Tasks
 
@@ -153,11 +160,35 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 - `github-pr`: requires `labels`, supports `status_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
-- `scheduled`: requires `workflow`; tasks are enqueued once per configured time bucket and do not use labels
+- `schedule`: does not use `tasks`; configure `cadence` and `workflow` directly on the source
+- `scheduled`: uses `tasks` plus `schedule`; optimized for recurring task-backed hygiene workflows such as `context-weight-audit`
+
+### `schedule`
+
+Scheduled sources create a synthetic vessel when their cadence elapses. Xylem persists the last-fired timestamp under `<state_dir>/state/schedule.json`, so the cadence survives daemon restarts and repeated `scan` invocations.
+
+```yaml
+sources:
+  doctor:
+    type: schedule
+    cadence: "6h"
+    workflow: doctor
+
+  doc-gardener:
+    type: schedule
+    cadence: "@daily"
+    workflow: doc-garden
+```
+
+Behavior:
+
+- The first scan fires immediately.
+- Later scans enqueue only when the cadence boundary has elapsed since the last successful enqueue.
+- Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
 
 ### `scheduled`
 
-`scheduled` sources create recurring vessels on a fixed cadence instead of scanning GitHub labels or events. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work.
+`scheduled` sources create recurring task-backed vessels on a fixed Go-duration cadence. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work.
 
 ```yaml
 sources:

@@ -380,7 +380,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 				}
-				src := r.resolveSource(vessel.Source)
+				src := r.resolveSource(vessel)
 				if err := src.OnTimedOut(ctx, vessel); err != nil {
 					log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -421,7 +421,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 
 func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome string) {
 	// Look up source for this vessel
-	src := r.resolveSource(vessel.Source)
+	src := r.resolveSource(vessel)
 
 	// Source-specific start hook (e.g., add in-progress label)
 	startErr := src.OnStart(ctx, vessel)
@@ -1021,9 +1021,14 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	return r.completeVessel(ctx, vessel, worktreePath, nil, vrs, nil)
 }
 
-func (r *Runner) resolveSource(name string) source.Source {
+func (r *Runner) resolveSource(vessel queue.Vessel) source.Source {
 	if r.Sources != nil {
-		if src, ok := r.Sources[name]; ok {
+		if configName := r.sourceConfigNameFromMeta(vessel); configName != "" {
+			if src, ok := r.Sources[configName]; ok {
+				return src
+			}
+		}
+		if src, ok := r.Sources[vessel.Source]; ok {
 			return src
 		}
 	}
@@ -2110,6 +2115,33 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 		return nil
 	}
 
+	// Pre-verify restore: if the phase temporarily removed protected files
+	// (e.g., resolve-conflicts workflow runs `gh pr checkout` on a PR branch
+	// that predates the .xylem/ tracking commit (#157), then git switches
+	// branches and drops tracked files that the target branch doesn't have),
+	// restore them from the canonical source root before comparing the
+	// after-snapshot. Only MISSING files are restored (those with
+	// violation.After == "deleted" against the source root); modifications
+	// are untouched and will still be caught by the Compare below.
+	//
+	// This closes the loop on issue #174: Fix B's post-phase self-heal was
+	// correctly running but only AFTER the violation was recorded, so
+	// vessels still failed. Restoring before the snapshot eliminates the
+	// spurious "deleted" category while preserving all other enforcement.
+	//
+	// Uses context.Background() because the vessel's ctx may already be
+	// cancelling (e.g., phase timeout) — cleanup work should survive.
+	if sourceRoot, srcErr := r.protectedSurfaceSourceRoot(context.Background(), worktreePath); srcErr == nil {
+		restored, restoreErr := restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot, patterns)
+		if restoreErr != nil {
+			log.Printf("%sphase %q pre-verify restore failed: %v",
+				vesselLabel(vessel), p.Name, restoreErr)
+		} else if restored > 0 {
+			log.Printf("%sphase %q pre-verify restored %d protected surface file(s) from source root",
+				vesselLabel(vessel), p.Name, restored)
+		}
+	}
+
 	after, err := surface.TakeSnapshot(worktreePath, patterns)
 	if err != nil {
 		log.Printf("%sphase %q protected surface verification skipped: %v",
@@ -2191,13 +2223,110 @@ func copyProtectedSurfaceFile(sourceRoot, worktreePath, relPath string) error {
 	if err != nil {
 		return fmt.Errorf("read source file: %w", err)
 	}
+	// Idempotency: a prior call may have left the destination chmod'd
+	// 0o444 (read-only). Make it writable before os.WriteFile so repeated
+	// restores across multiple pre-verify cycles succeed.
+	if dstInfo, statErr := os.Stat(dstPath); statErr == nil && dstInfo.Mode().Perm()&0o200 == 0 {
+		if chmodErr := os.Chmod(dstPath, 0o644); chmodErr != nil {
+			return fmt.Errorf("chmod writable for rewrite: %w", chmodErr)
+		}
+	}
 	if err := os.WriteFile(dstPath, data, info.Mode()); err != nil {
 		return fmt.Errorf("write restored file: %w", err)
 	}
 	if err := os.Chmod(dstPath, 0o444); err != nil {
 		return fmt.Errorf("mark restored file read-only: %w", err)
 	}
+	// Add the restored path to the worktree's .git/info/exclude so that
+	// subsequent `git add -A` (e.g., in resolve-conflicts's push phase) does
+	// NOT stage the restored file into the PR commit. This only affects
+	// untracked files; a file that's already tracked on the PR branch is
+	// unaffected by exclude entries.
+	//
+	// Fail-soft: exclude is a best-effort pollution guard, not a safety
+	// invariant. If it fails (e.g., .git dir missing in a test or some
+	// corner case), the file restore still succeeds — worst case a later
+	// `git add -A` stages the restored file into a PR commit, which is no
+	// worse than the pre-fix behavior of failing the vessel outright.
+	if err := addWorktreeExcludeEntry(worktreePath, relPath); err != nil {
+		log.Printf("warn: copyProtectedSurfaceFile: add exclude entry for %s: %v", relPath, err)
+	}
 	return nil
+}
+
+// addWorktreeExcludeEntry appends a path to the worktree's .git/info/exclude
+// file if not already present. For linked worktrees (the xylem vessel case),
+// $GIT_DIR points to .git/worktrees/<name>, and info/exclude there is
+// per-worktree — it does NOT affect sibling worktrees.
+//
+// Idempotent: a second call with the same relPath no-ops because the exact
+// line is already present.
+func addWorktreeExcludeEntry(worktreePath, relPath string) error {
+	gitdir, err := resolveWorktreeGitdir(worktreePath)
+	if err != nil {
+		return fmt.Errorf("resolve gitdir: %w", err)
+	}
+	excludePath := filepath.Join(gitdir, "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir info: %w", err)
+	}
+
+	// Use a leading slash so the pattern anchors at the worktree root,
+	// matching exactly this file (not any subdirectory with the same name).
+	line := "/" + relPath
+
+	existing, err := os.ReadFile(excludePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read exclude: %w", err)
+	}
+	for _, e := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(e) == line {
+			return nil
+		}
+	}
+
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open exclude: %w", err)
+	}
+	defer f.Close()
+
+	prefix := ""
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		prefix = "\n"
+	}
+	if _, err := f.WriteString(prefix + line + "\n"); err != nil {
+		return fmt.Errorf("write exclude: %w", err)
+	}
+	return nil
+}
+
+// resolveWorktreeGitdir returns the $GIT_DIR for a worktree. For the main
+// repo, .git is a directory and that IS the gitdir. For linked worktrees,
+// .git is a file containing "gitdir: <absolute-or-relative-path>".
+func resolveWorktreeGitdir(worktreePath string) (string, error) {
+	gitPath := filepath.Join(worktreePath, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return gitPath, nil
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(string(data))
+	const prefix = "gitdir:"
+	if !strings.HasPrefix(line, prefix) {
+		return "", fmt.Errorf("unexpected .git file content: %q", line)
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(worktreePath, gitdir)
+	}
+	return gitdir, nil
 }
 
 func (r *Runner) restoreDeletedProtectedSurfaces(ctx context.Context, worktreePath string, violations []surface.Violation) error {
@@ -2470,13 +2599,7 @@ func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 }
 
 func (r *Runner) resolveRepo(vessel queue.Vessel) string {
-	if r.Sources == nil {
-		return ""
-	}
-	src, ok := r.Sources[vessel.Source]
-	if !ok {
-		return ""
-	}
+	src := r.resolveSource(vessel)
 	switch s := src.(type) {
 	case *source.GitHub:
 		return s.Repo

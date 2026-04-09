@@ -1109,7 +1109,26 @@ func TestValidateScheduledSourceValid(t *testing.T) {
 		},
 	}
 	if err := cfg.Validate(); err != nil {
-		t.Fatalf("expected valid config, got: %v", err)
+		t.Fatalf("expected valid scheduled config, got: %v", err)
+	}
+}
+
+func TestValidateScheduleValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "@daily",
+				Workflow: "doctor",
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid schedule config, got: %v", err)
 	}
 }
 
@@ -1131,6 +1150,62 @@ func TestValidateScheduledSourceMissingSchedule(t *testing.T) {
 	}
 	err := cfg.Validate()
 	requireErrorContains(t, err, "schedule is required")
+}
+
+func TestValidateScheduleMissingWorkflow(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:    "schedule",
+				Cadence: "1h",
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "workflow is required")
+}
+
+func TestValidateScheduleMalformedCadence(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "bad cadence",
+				Workflow: "doctor",
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "parse cadence")
+}
+
+func TestValidateScheduleRejectsTasks(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "1h",
+				Workflow: "doctor",
+				Tasks: map[string]Task{
+					"unused": {Workflow: "other"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "tasks are not supported")
 }
 
 func TestValidateUnknownSourceType(t *testing.T) {
