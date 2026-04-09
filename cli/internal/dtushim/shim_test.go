@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testStore(t *testing.T, state *dtu.State) (*dtu.Store, string) {
@@ -178,6 +180,7 @@ func TestExecuteGHPRMergeUpdatesStateAndGitVisibility(t *testing.T) {
 	t.Parallel()
 
 	state := sampleState()
+	state.Repositories[0].PullRequests[0].Checks[0].State = dtu.CheckStateSuccess
 	state.Repositories[0].Branches = []dtu.Branch{
 		{Name: "main", SHA: "1111111111111111111111111111111111111111"},
 		{Name: "fix/issue-1-bug-one", SHA: "abc12345deadbeef"},
@@ -190,7 +193,7 @@ func TestExecuteGHPRMergeUpdatesStateAndGitVisibility(t *testing.T) {
 	code := Execute(
 		context.Background(),
 		"gh",
-		[]string{"pr", "merge", "10", "--repo", "owner/repo", "--delete-branch", "--squash", "--admin"},
+		[]string{"pr", "merge", "10", "--repo", "owner/repo", "--delete-branch", "--squash", "--auto"},
 		nil,
 		&mergeOut,
 		&mergeErr,
@@ -261,6 +264,46 @@ func TestExecuteGHPRMergeUpdatesStateAndGitVisibility(t *testing.T) {
 	if strings.Contains(headOut.String(), "fix/issue-1-bug-one") {
 		t.Fatalf("git ls-remote head output = %q, want deleted head branch to disappear", headOut.String())
 	}
+}
+
+func TestSmoke_S2_GHPRMergeWithAutoQueuesUntilChecksPass(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Repositories[0].PullRequests[0].Checks[0].State = dtu.CheckStatePending
+	state.Repositories[0].Branches = []dtu.Branch{
+		{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+		{Name: "fix/issue-1-bug-one", SHA: "abc12345deadbeef"},
+	}
+	store, stateDir := testStore(t, state)
+	env := envForStore(store, stateDir, state.UniverseID)
+
+	var mergeOut, mergeErr bytes.Buffer
+	code := Execute(
+		context.Background(),
+		"gh",
+		[]string{"pr", "merge", "10", "--repo", "owner/repo", "--delete-branch", "--squash", "--auto"},
+		nil,
+		&mergeOut,
+		&mergeErr,
+		env,
+	)
+	require.Zero(t, code, "stderr = %q", mergeErr.String())
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	repo := loaded.RepositoryBySlug("owner/repo")
+	require.NotNil(t, repo)
+	pr := repo.PullRequestByNumber(10)
+	require.NotNil(t, pr)
+	assert.Equal(t, dtu.PullRequestStateOpen, pr.State)
+	assert.False(t, pr.Merged)
+	assert.True(t, pr.AutoMergeEnabled)
+	assert.True(t, pr.AutoMergeDeleteBranch)
+	main := repo.BranchByName("main")
+	require.NotNil(t, main)
+	assert.Equal(t, "1111111111111111111111111111111111111111", main.SHA)
+	assert.NotNil(t, repo.BranchByName(pr.HeadBranch))
 }
 
 func TestExecuteGHAPIAndIssueCommentUseStateStore(t *testing.T) {

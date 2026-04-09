@@ -1302,7 +1302,10 @@ func runGHPRMerge(_ context.Context, store *dtu.Store, args []string, stderr io.
 				return fmt.Errorf("repository %q not found", opts.repo)
 			}
 		}
-		return repo.MergePullRequest(number, opts.deleteBranch)
+		return repo.MergePullRequest(number, dtu.MergePullRequestOptions{
+			DeleteHeadBranch: opts.deleteBranch,
+			AutoMerge:        opts.autoMerge,
+		})
 	})
 	if err != nil {
 		return writeError(stderr, 1, err)
@@ -1383,6 +1386,7 @@ type ghOptions struct {
 	body         string
 	limit        int
 	deleteBranch bool
+	autoMerge    bool
 	addLabels    []string
 	removeLabels []string
 }
@@ -1453,6 +1457,8 @@ func parseGHFlags(args []string) (ghOptions, error) {
 			i = next
 		case "--delete-branch", "-d":
 			opts.deleteBranch = true
+		case "--auto":
+			opts.autoMerge = true
 		case "--add-label":
 			value, next, err := requireValue(args, i, args[i])
 			if err != nil {
