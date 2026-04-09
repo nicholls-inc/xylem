@@ -12,6 +12,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
@@ -188,6 +189,52 @@ func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 			if exceeded && !tracker.BudgetExceeded() {
 				t.Fatal("BudgetExceeded reverted to false")
 			}
+		}
+	})
+}
+
+func TestProp_ValidateIssueDataForWorkflowRequiresIssueNumberForCommandTemplates(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		phaseUsesIssue := rapid.Bool().Draw(t, "phaseUsesIssue")
+		gateUsesIssue := rapid.Bool().Draw(t, "gateUsesIssue")
+		phaseType := rapid.SampledFrom([]string{"", "command"}).Draw(t, "phaseType")
+		issueNumber := rapid.IntRange(0, 3).Draw(t, "issueNumber")
+
+		phaseRun := "echo ready"
+		if phaseUsesIssue {
+			phaseRun = "gh pr merge {{.Issue.Number}}"
+		}
+
+		var gateCfg *workflow.Gate
+		if rapid.Bool().Draw(t, "hasGate") {
+			gateRun := "echo gate"
+			if gateUsesIssue {
+				gateRun = "gh pr view {{.Issue.Number}} --json mergeable"
+			}
+			gateCfg = &workflow.Gate{
+				Type: "command",
+				Run:  gateRun,
+			}
+		}
+
+		p := workflow.Phase{
+			Name:       "resolve",
+			Type:       phaseType,
+			Run:        phaseRun,
+			PromptFile: ".xylem/prompts/resolve-conflicts/resolve.md",
+			MaxTurns:   10,
+			Gate:       gateCfg,
+		}
+		wf := &workflow.Workflow{Phases: []workflow.Phase{p}}
+		err := validateIssueDataForWorkflow(queue.Vessel{ID: "issue-1"}, phase.IssueData{Number: issueNumber}, wf)
+
+		wantErr := issueNumber == 0 &&
+			((phaseType == "command" && phaseUsesIssue) || (gateCfg != nil && gateUsesIssue))
+		if wantErr && err == nil {
+			t.Fatalf("validateIssueDataForWorkflow() error = nil, want error for phaseType=%q phaseUsesIssue=%t gateUsesIssue=%t", phaseType, phaseUsesIssue, gateUsesIssue)
+		}
+		if !wantErr && err != nil {
+			t.Fatalf("validateIssueDataForWorkflow() error = %v, want nil for phaseType=%q phaseUsesIssue=%t gateUsesIssue=%t issueNumber=%d", err, phaseType, phaseUsesIssue, gateUsesIssue, issueNumber)
 		}
 	})
 }
