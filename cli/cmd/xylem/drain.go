@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"os/signal"
 	"path/filepath"
@@ -78,6 +79,7 @@ func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeMana
 
 	r := runner.New(cfg, q, wt, cmdRunner)
 	r.Sources = buildSourceMap(cfg, q, cmdRunner)
+	r.BuiltinWorkflows = buildBuiltinWorkflowHandlers(cfg, wt, cmdRunner)
 	wireRunnerScaffolding(cfg, r, tracer)
 
 	return r, func() {

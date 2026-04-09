@@ -180,12 +180,18 @@ sources:
     type: schedule
     cadence: "@daily"
     workflow: doc-garden
+
+  lessons:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
 ```
 
 Behavior:
 
 - The first scan fires immediately.
 - Later scans enqueue only when the cadence boundary has elapsed since the last successful enqueue.
+- Scheduled sources do not use `tasks`.
 - Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
 
 ### `scheduled`
@@ -609,6 +615,25 @@ sources:
       followup:
         workflow: post-merge-followup
 ```
+
+### Schedule recurring vessels
+
+```yaml
+sources:
+  lessons:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
+```
+
+`schedule` sources persist their last-fired state under `<state_dir>/schedule-state.json`. The generated vessel metadata includes:
+
+- `schedule_name`
+- `schedule_cadence`
+- `schedule_fired_at`
+- `schedule_next_due_at`
+
+The built-in `lessons` workflow is designed for this source type: it synthesizes recurring failures into `.xylem/HARNESS.md` proposals, records them under `<state_dir>/reviews/lessons.{json,md}`, and opens reviewable PRs instead of editing the default branch directly.
 
 ## Legacy config format
 

@@ -143,7 +143,7 @@ func GenerateContextWeightAudit(stateDir string, opts ContextWeightOptions) (*Co
 		opts.Now = opts.Now.UTC()
 	}
 
-	runs, totalRuns, warnings, err := loadRuns(stateDir, opts.LookbackRuns)
+	runs, totalRuns, warnings, err := LoadRuns(stateDir, opts.LookbackRuns)
 	if err != nil {
 		return nil, fmt.Errorf("generate context-weight audit: %w", err)
 	}
@@ -294,7 +294,7 @@ func PublishContextWeightIssues(ctx context.Context, stateDir, repo string, runn
 	return published, nil
 }
 
-func buildContextWeightFindings(runs []loadedRun, minSamples int) ([]ContextWeightFinding, ContextWeightBaseline) {
+func buildContextWeightFindings(runs []LoadedRun, minSamples int) ([]ContextWeightFinding, ContextWeightBaseline) {
 	workflows := make(map[string]*contextWeightWorkflowAccumulator)
 	for _, run := range runs {
 		if run.Summary.TotalInputTokensEst == 0 && run.Summary.TotalOutputTokensEst == 0 {

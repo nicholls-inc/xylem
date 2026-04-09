@@ -15,6 +15,8 @@ import (
 )
 
 // Schedule emits recurring synthetic vessels based on a configured cadence.
+const legacyScheduleStateFileName = "schedule-state.json"
+
 type Schedule struct {
 	ConfigName string
 	Cadence    string
@@ -32,9 +34,16 @@ type scheduleStateFile struct {
 	Sources map[string]scheduleStateRecord `json:"sources"`
 }
 
+type legacyScheduleStateEntry struct {
+	LastFiredAt *time.Time `json:"last_fired_at,omitempty"`
+}
+
 func (s *Schedule) Name() string { return "schedule" }
 
 func (s *Schedule) Scan(_ context.Context) ([]queue.Vessel, error) {
+	if strings.TrimSpace(s.ConfigName) == "" {
+		return nil, fmt.Errorf("schedule source: config name is required")
+	}
 	spec, err := cadence.Parse(s.Cadence)
 	if err != nil {
 		return nil, fmt.Errorf("schedule source %q: %w", s.ConfigName, err)
@@ -68,6 +77,9 @@ func (s *Schedule) Scan(_ context.Context) ([]queue.Vessel, error) {
 func (s *Schedule) OnEnqueue(_ context.Context, vessel queue.Vessel) error {
 	firedAtRaw := vessel.Meta["schedule.fired_at"]
 	if firedAtRaw == "" {
+		firedAtRaw = vessel.Meta["schedule_fired_at"]
+	}
+	if firedAtRaw == "" {
 		return nil
 	}
 	firedAt, err := time.Parse(time.RFC3339, firedAtRaw)
@@ -90,8 +102,18 @@ func (s *Schedule) RemoveRunningLabel(_ context.Context, _ queue.Vessel) error {
 
 func (s *Schedule) BranchName(vessel queue.Vessel) string {
 	sourceName := scheduleSlug(s.ConfigName)
-	firedAt := scheduleFiredAtKey(vessel.Meta["schedule.fired_at"])
+	if raw := vessel.Meta["schedule.source_name"]; strings.TrimSpace(raw) != "" {
+		sourceName = scheduleSlug(raw)
+	} else if raw := vessel.Meta["schedule_name"]; strings.TrimSpace(raw) != "" {
+		sourceName = scheduleSlug(raw)
+	}
+	firedAt := scheduleFiredAtKey(scheduleFiredAtMeta(vessel))
 	return fmt.Sprintf("chore/schedule-%s-%s", sourceName, firedAt)
+}
+
+func ValidateCadence(expr string) error {
+	_, err := cadence.Parse(expr)
+	return err
 }
 
 func (s *Schedule) buildVessel(firedAt time.Time, rawCadence string) queue.Vessel {
@@ -111,6 +133,9 @@ func (s *Schedule) buildVessel(firedAt time.Time, rawCadence string) queue.Vesse
 			"schedule.cadence":     rawCadence,
 			"schedule.fired_at":    refTime,
 			"schedule.source_name": configName,
+			"schedule_cadence":     rawCadence,
+			"schedule_fired_at":    refTime,
+			"schedule_name":        configName,
 		},
 		State:     queue.StatePending,
 		CreatedAt: firedAt,
@@ -124,7 +149,7 @@ func (s *Schedule) loadLastFiredAt() (*time.Time, error) {
 	}
 	record, ok := state.Sources[s.ConfigName]
 	if !ok || strings.TrimSpace(record.LastFiredAt) == "" {
-		return nil, nil
+		return s.loadLegacyLastFiredAt()
 	}
 	ts, err := time.Parse(time.RFC3339, record.LastFiredAt)
 	if err != nil {
@@ -203,6 +228,10 @@ func (s *Schedule) statePath() string {
 	return filepath.Join(s.StateDir, "state", "schedule.json")
 }
 
+func (s *Schedule) legacyStatePath() string {
+	return filepath.Join(s.StateDir, legacyScheduleStateFileName)
+}
+
 func (s *Schedule) now() time.Time {
 	if s.Now != nil {
 		return s.Now().UTC()
@@ -223,11 +252,39 @@ func (s *Schedule) hasActiveVessel() (bool, error) {
 		if vessel.State.IsTerminal() {
 			continue
 		}
-		if vessel.Meta["schedule.source_name"] == s.ConfigName {
+		if vessel.Meta["schedule.source_name"] == s.ConfigName || vessel.Meta["schedule_name"] == s.ConfigName {
 			return true, nil
 		}
 	}
 	return false, nil
+}
+
+func (s *Schedule) loadLegacyLastFiredAt() (*time.Time, error) {
+	data, err := os.ReadFile(s.legacyStatePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read legacy schedule state: %w", err)
+	}
+
+	var state map[string]legacyScheduleStateEntry
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse legacy schedule state: %w", err)
+	}
+	record, ok := state[s.ConfigName]
+	if !ok || record.LastFiredAt == nil {
+		return nil, nil
+	}
+	firedAt := record.LastFiredAt.UTC().Truncate(time.Second)
+	return &firedAt, nil
+}
+
+func scheduleFiredAtMeta(vessel queue.Vessel) string {
+	if raw := vessel.Meta["schedule.fired_at"]; raw != "" {
+		return raw
+	}
+	return vessel.Meta["schedule_fired_at"]
 }
 
 func scheduleSlug(name string) string {

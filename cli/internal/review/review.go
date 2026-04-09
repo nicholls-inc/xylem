@@ -108,7 +108,7 @@ func Generate(stateDir string, opts Options) (*Result, error) {
 		opts.Now = opts.Now.UTC()
 	}
 
-	runs, totalRuns, warnings, err := loadRuns(stateDir, opts.LookbackRuns)
+	runs, totalRuns, warnings, err := LoadRuns(stateDir, opts.LookbackRuns)
 	if err != nil {
 		return nil, fmt.Errorf("generate review: %w", err)
 	}
@@ -171,7 +171,7 @@ func LoadLatestReport(stateDir, outputDir string) (*Report, error) {
 	return &report, nil
 }
 
-func buildGroupReviews(runs []loadedRun, minSamples int) ([]GroupReview, []CostAnomaly) {
+func buildGroupReviews(runs []LoadedRun, minSamples int) ([]GroupReview, []CostAnomaly) {
 	groups := make(map[groupKey]*groupAccumulator)
 	costAnomalies := detectCostAnomalies(runs)
 	anomalousRuns := make(map[string]CostAnomaly, len(costAnomalies))
@@ -260,7 +260,7 @@ func buildGroupReviews(runs []loadedRun, minSamples int) ([]GroupReview, []CostA
 	return reviews, costAnomalies
 }
 
-func detectCostAnomalies(runs []loadedRun) []CostAnomaly {
+func detectCostAnomalies(runs []LoadedRun) []CostAnomaly {
 	historyByWorkflow := make(map[string][]*cost.CostReport)
 	anomalies := make([]CostAnomaly, 0)
 	for _, run := range runs {

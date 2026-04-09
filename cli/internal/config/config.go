@@ -774,7 +774,7 @@ func validateScheduleSource(name string, src SourceConfig) error {
 		return fmt.Errorf("source %q (schedule): tasks are not supported; configure workflow at the source level", name)
 	}
 	if _, err := cadence.Parse(src.Cadence); err != nil {
-		return fmt.Errorf("source %q (schedule): %w", name, err)
+		return fmt.Errorf("source %q (schedule): cadence is invalid: %w", name, err)
 	}
 	return nil
 }
