@@ -99,7 +99,13 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		return runDrain(ctx, cfg, q, wt, drainInterval)
 	}
 	check := func(ctx context.Context) {
-		cmdRunner := &realCmdRunner{}
+		// Use newCmdRunner(cfg) here (not a bare &realCmdRunner{}) so the
+		// periodic label-poll and hang-detection paths receive the same
+		// configured env (claude.env / copilot.env) as the scan/drain
+		// paths. A bare runner silently strips any configured env which
+		// caused gh/copilot auth failures on hosts that rely on the
+		// config-declared tokens during label polling.
+		cmdRunner := newCmdRunner(cfg)
 		r := runner.New(cfg, q, wt, cmdRunner)
 		r.Sources = buildSourceMap(cfg, q, cmdRunner)
 		r.CheckWaitingVessels(ctx)
