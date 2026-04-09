@@ -2397,6 +2397,7 @@ concurrency: 2
 max_turns: 50
 timeout: "30m"
 claude:
+  command: "claude"
   default_model: "claude-sonnet-4-6"
 `)
 
@@ -2413,6 +2414,113 @@ claude:
 	assert.True(t, task.On.PRHeadUpdated)
 	assert.Equal(t, "10m", task.On.Debounce)
 	assert.Equal(t, "review-pr", task.Workflow)
+}
+
+func TestSmoke_S1_LoadsValidationAndAutoMergeConfig(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-checks:
+        labels: [ci]
+        workflow: fix-pr-checks
+validation:
+  format: "fmt ./..."
+  lint: "vet ./..."
+  build: "build ./..."
+  test: "test ./..."
+daemon:
+  auto_merge: true
+  auto_merge_repo: owner/name
+  auto_merge_labels: [ready-to-merge, harness-impl]
+  auto_merge_branch_pattern: "^feat/"
+  auto_merge_reviewer: "copilot-bot"
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "fmt ./...", cfg.Validation.Format)
+	assert.Equal(t, "vet ./...", cfg.Validation.Lint)
+	assert.Equal(t, "build ./...", cfg.Validation.Build)
+	assert.Equal(t, "test ./...", cfg.Validation.Test)
+	assert.Equal(t, []string{"ready-to-merge", "harness-impl"}, cfg.Daemon.AutoMergeLabels)
+	assert.Equal(t, "^feat/", cfg.Daemon.AutoMergeBranchPattern)
+	assert.Equal(t, "copilot-bot", cfg.Daemon.AutoMergeReviewer)
+}
+
+func TestSmoke_S2_RejectsEmptyValidationForActivePRValidationWorkflows(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-checks:
+        labels: [ci]
+        workflow: fix-pr-checks
+      resolve-conflicts:
+        labels: [merge]
+        workflow: resolve-conflicts
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "validation: at least one of format, lint, build, or test must be set")
+	assert.Contains(t, err.Error(), "fix-pr-checks")
+	assert.Contains(t, err.Error(), "resolve-conflicts")
+}
+
+func TestSmoke_S3_AllowsPartialValidationForActivePRValidationWorkflow(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-checks:
+        labels: [ci]
+        workflow: fix-pr-checks
+validation:
+  test: "go test ./..."
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	assert.Equal(t, "go test ./...", cfg.Validation.Test)
+}
+
+func TestValidateRejectsInvalidAutoMergeBranchPattern(t *testing.T) {
+	cfg := validConfig()
+	cfg.Daemon.AutoMergeBranchPattern = "("
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon.auto_merge_branch_pattern")
 }
 
 func TestSourceTimeoutValid(t *testing.T) {

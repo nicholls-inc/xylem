@@ -4849,6 +4849,46 @@ func TestResolveRepoPrefersConfigSource(t *testing.T) {
 	}
 }
 
+func TestSmoke_S4_BuildTemplateDataExposesRepoAndValidation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.DefaultBranch = "trunk"
+	cfg.Validation = config.ValidationConfig{
+		Format: "fmt ./...",
+		Lint:   "lint ./...",
+		Build:  "build ./...",
+		Test:   "test ./...",
+	}
+	cfg.Sources["harness-merge"] = config.SourceConfig{
+		Type: "github-pr",
+		Repo: "owner/config-repo",
+		Tasks: map[string]config.Task{
+			"merge-ready": {Labels: []string{"ready"}, Workflow: "merge-pr"},
+		},
+	}
+	r := &Runner{
+		Config: cfg,
+		Sources: map[string]source.Source{
+			"github-pr":     &source.GitHubPR{Repo: "owner/runtime-repo"},
+			"harness-merge": &source.GitHubPR{Repo: "owner/config-repo"},
+		},
+	}
+
+	vessel := queue.Vessel{
+		ID:     "pr-42",
+		Source: "github-pr",
+		Meta:   map[string]string{"config_source": "harness-merge"},
+	}
+	td := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "")
+
+	rendered, err := renderCommandTemplate("merge", "command", "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} && echo {{.Source.Name}} {{.Source.Repo}} {{.Repo.DefaultBranch}} {{.Validation.Format}} {{.Validation.Lint}} {{.Validation.Build}} {{.Validation.Test}}", td)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "gh pr merge 42 --repo owner/config-repo")
+	assert.Contains(t, rendered, "echo harness-merge owner/config-repo trunk fmt ./... lint ./... build ./... test ./...")
+}
+
 func TestResolveSourcePrefersConfigSource(t *testing.T) {
 	primary := &source.Scheduled{Repo: "owner/primary-repo"}
 	fallback := &source.Scheduled{Repo: "owner/fallback-repo"}

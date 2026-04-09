@@ -15,7 +15,15 @@ phases:
     model: gpt-5.4
     gate:
       type: command
-      run: "git fetch origin main && test \"$(git branch --show-current)\" = \"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\" && git merge-base --is-ancestor origin/main HEAD && cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
+      run: |
+        set -e
+        git fetch origin {{ .Repo.DefaultBranch }}
+        test "$(git branch --show-current)" = "$(gh pr view {{ .Issue.Number }} --repo {{ .Repo.Slug }} --json headRefName --jq '.headRefName')"
+        git merge-base --is-ancestor origin/{{ .Repo.DefaultBranch }} HEAD
+        {{ if .Validation.Format }}{{ .Validation.Format }}{{ end }}
+        {{ if .Validation.Lint }}{{ .Validation.Lint }}{{ end }}
+        {{ if .Validation.Build }}{{ .Validation.Build }}{{ end }}
+        {{ if .Validation.Test }}{{ .Validation.Test }}{{ end }}
       retries: 2
   - name: push
     prompt_file: .xylem/prompts/resolve-conflicts/push.md

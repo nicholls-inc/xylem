@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -73,6 +74,7 @@ type Config struct {
 	LLMRouting    LLMRoutingConfig          `yaml:"llm_routing,omitempty"`
 	Claude        ClaudeConfig              `yaml:"claude"`
 	Copilot       CopilotConfig             `yaml:"copilot,omitempty"`
+	Validation    ValidationConfig          `yaml:"validation,omitempty"`
 	Daemon        DaemonConfig              `yaml:"daemon,omitempty"`
 	Harness       HarnessConfig             `yaml:"harness,omitempty"`
 	Observability ObservabilityConfig       `yaml:"observability,omitempty"`
@@ -174,6 +176,13 @@ type CopilotConfig struct {
 	Env          map[string]string `yaml:"env,omitempty"`
 }
 
+type ValidationConfig struct {
+	Format string `yaml:"format,omitempty"`
+	Lint   string `yaml:"lint,omitempty"`
+	Build  string `yaml:"build,omitempty"`
+	Test   string `yaml:"test,omitempty"`
+}
+
 type DaemonConfig struct {
 	ScanInterval  string `yaml:"scan_interval,omitempty"`
 	DrainInterval string `yaml:"drain_interval,omitempty"`
@@ -190,6 +199,15 @@ type DaemonConfig struct {
 	// AutoMergeRepo is the GitHub repo slug (owner/name) for auto-merge.
 	// If empty, gh CLI uses the current directory's origin remote.
 	AutoMergeRepo string `yaml:"auto_merge_repo,omitempty"`
+	// AutoMergeLabels are the labels a PR must carry before the daemon treats
+	// it as merge-ready. Defaults to ["ready-to-merge"].
+	AutoMergeLabels []string `yaml:"auto_merge_labels,omitempty"`
+	// AutoMergeBranchPattern filters which PR head refs the daemon manages.
+	// Defaults to ".*".
+	AutoMergeBranchPattern string `yaml:"auto_merge_branch_pattern,omitempty"`
+	// AutoMergeReviewer is the GitHub login to request before enabling
+	// auto-merge. Defaults to empty, which skips reviewer requests.
+	AutoMergeReviewer string `yaml:"auto_merge_reviewer,omitempty"`
 }
 
 type HarnessConfig struct {
@@ -353,6 +371,16 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("daemon.drain_interval must be a valid duration: %w", err)
 		}
 	}
+	if strings.TrimSpace(c.Daemon.AutoMergeBranchPattern) != "" {
+		if _, err := regexp.Compile(strings.TrimSpace(c.Daemon.AutoMergeBranchPattern)); err != nil {
+			return fmt.Errorf("daemon.auto_merge_branch_pattern must be a valid regexp: %w", err)
+		}
+	}
+	for i, label := range c.Daemon.AutoMergeLabels {
+		if strings.TrimSpace(label) == "" {
+			return fmt.Errorf("daemon.auto_merge_labels[%d] must be non-empty", i)
+		}
+	}
 
 	// Validate sources
 	for name, src := range c.Sources {
@@ -433,8 +461,51 @@ func (c *Config) Validate() error {
 	if err := c.validateProviders(); err != nil {
 		return err
 	}
+	if err := c.validateWorkflowRequirements(); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+func (c Config) ValidationConfigured() bool {
+	return !c.Validation.IsEmpty()
+}
+
+func (v ValidationConfig) IsEmpty() bool {
+	return strings.TrimSpace(v.Format) == "" &&
+		strings.TrimSpace(v.Lint) == "" &&
+		strings.TrimSpace(v.Build) == "" &&
+		strings.TrimSpace(v.Test) == ""
+}
+
+func (d DaemonConfig) EffectiveAutoMergeLabels() []string {
+	if len(d.AutoMergeLabels) == 0 {
+		return []string{"ready-to-merge"}
+	}
+	labels := make([]string, 0, len(d.AutoMergeLabels))
+	for _, label := range d.AutoMergeLabels {
+		trimmed := strings.TrimSpace(label)
+		if trimmed == "" {
+			continue
+		}
+		labels = append(labels, trimmed)
+	}
+	if len(labels) == 0 {
+		return []string{"ready-to-merge"}
+	}
+	return labels
+}
+
+func (d DaemonConfig) EffectiveAutoMergeBranchPattern() string {
+	if trimmed := strings.TrimSpace(d.AutoMergeBranchPattern); trimmed != "" {
+		return trimmed
+	}
+	return ".*"
+}
+
+func (d DaemonConfig) EffectiveAutoMergeReviewer() string {
+	return strings.TrimSpace(d.AutoMergeReviewer)
 }
 
 // CleanupAfterDuration returns the parsed cleanup_after duration, defaulting to
@@ -661,6 +732,43 @@ func (c *Config) validateCost() error {
 		return fmt.Errorf("cost.budget.max_tokens must be non-negative")
 	}
 	return nil
+}
+
+func (c *Config) validateWorkflowRequirements() error {
+	if c.ValidationConfigured() {
+		return nil
+	}
+	required := []string{"fix-pr-checks", "resolve-conflicts"}
+	active := make([]string, 0, len(required))
+	for _, workflowName := range required {
+		if c.workflowActive(workflowName) {
+			active = append(active, workflowName)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	sort.Strings(active)
+	return fmt.Errorf("validation: at least one of format, lint, build, or test must be set when workflows are active: %s", strings.Join(active, ", "))
+}
+
+func (c *Config) workflowActive(name string) bool {
+	for _, task := range c.Tasks {
+		if strings.TrimSpace(task.Workflow) == name {
+			return true
+		}
+	}
+	for _, src := range c.Sources {
+		if strings.TrimSpace(src.Workflow) == name {
+			return true
+		}
+		for _, task := range src.Tasks {
+			if strings.TrimSpace(task.Workflow) == name {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // validateProviderDefaultModels ensures every active LLM provider has a

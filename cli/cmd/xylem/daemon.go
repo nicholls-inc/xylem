@@ -113,7 +113,7 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		// harness PRs, then enable GitHub auto-merge once checks are green
 		// and the PR is mergeable.
 		if cfg.Daemon.AutoMerge {
-			autoMergeXylemPRs(ctx, cfg.Daemon.AutoMergeRepo)
+			autoMergeXylemPRs(ctx, cfg.Daemon)
 		}
 	}
 
