@@ -1537,8 +1537,17 @@ func recoveryAttributesFromMeta(meta map[string]string) observability.RecoveryDa
 		Action:          meta[recovery.MetaAction],
 		RetrySuppressed: meta[recovery.MetaRetrySuppressed],
 		RetryOutcome:    meta[recovery.MetaRetryOutcome],
-		UnlockDimension: meta[recovery.MetaUnlockDimension],
+		UnlockDimension: firstNonEmptyMeta(meta, recovery.MetaUnlockedBy, recovery.MetaUnlockDimension),
 	}
+}
+
+func firstNonEmptyMeta(meta map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(meta[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func traceContextPointer(data *TraceArtifacts) *observability.TraceContextData {

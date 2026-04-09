@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -245,6 +246,8 @@ func TestGitHubPRScanGHFailure(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error from gh failure, got nil")
 	}
+	assert.ErrorContains(t, err, "gh pr list")
+	assert.ErrorContains(t, err, errTest.Error())
 }
 
 func TestGitHubPRScanMalformedJSON(t *testing.T) {
@@ -265,6 +268,8 @@ func TestGitHubPRScanMalformedJSON(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for malformed JSON")
 	}
+	assert.ErrorContains(t, err, "parse gh pr list output")
+	assert.ErrorContains(t, err, "invalid character")
 }
 
 func TestGitHubPRScanSkipsUnchangedFailedVessel(t *testing.T) {
@@ -374,6 +379,223 @@ func TestGitHubPRScanReenqueuesChangedFailedVessel(t *testing.T) {
 	}
 }
 
+func TestSmoke_S4_GitHubPRScanAutoRetriesEligibleTransientFailure(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	qualifiedRef := prWorkflowRef(prs[0].URL, "review-pr")
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10-review-pr",
+		Source:   "github-pr",
+		Ref:      qualifiedRef,
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("pr-10-review-pr", queue.StateTimedOut, "temporary network outage"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "pr-10-review-pr",
+		Source:    "github-pr",
+		Workflow:  "review-pr",
+		Ref:       qualifiedRef,
+		State:     queue.StateTimedOut,
+		Error:     "temporary network outage",
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+
+	src := &GitHubPR{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "pr-10-review-pr-retry-1", vessels[0].ID)
+	assert.Equal(t, "pr-10-review-pr", vessels[0].RetryOf)
+	assert.Equal(t, "cooldown", vessels[0].Meta[recovery.MetaUnlockedBy])
+}
+
+func TestSmoke_S5_GitHubPRScanBlocksRetryUntilCooldownExpires(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	qualifiedRef := prWorkflowRef(prs[0].URL, "review-pr")
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10-review-pr",
+		Source:   "github-pr",
+		Ref:      qualifiedRef,
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "temporary network outage"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "pr-10-review-pr",
+		Source:    "github-pr",
+		Workflow:  "review-pr",
+		Ref:       qualifiedRef,
+		State:     queue.StateFailed,
+		Error:     "temporary network outage",
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+
+	src := &GitHubPR{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+}
+
+func TestSmoke_S6_GitHubPRScanBlocksNonTransientRecoveryClasses(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "needs refinement", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("needs refinement", "same body", []string{"review-me"})
+	qualifiedRef := prWorkflowRef(prs[0].URL, "review-pr")
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10-review-pr",
+		Source:   "github-pr",
+		Ref:      qualifiedRef,
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "missing requirement: acceptance criteria are ambiguous"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "pr-10-review-pr",
+		Source:    "github-pr",
+		Workflow:  "review-pr",
+		Ref:       qualifiedRef,
+		State:     queue.StateFailed,
+		Error:     "missing requirement: acceptance criteria are ambiguous",
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+	require.Equal(t, recovery.ActionRefine, artifact.RecoveryAction)
+
+	src := &GitHubPR{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+}
+
+func TestSmoke_S7_GitHubPRScanKeepsLegacyBlockingWhenRecoveryArtifactMissing(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	qualifiedRef := prWorkflowRef(prs[0].URL, "review-pr")
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10-review-pr",
+		Source:   "github-pr",
+		Ref:      qualifiedRef,
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "temporary network outage"))
+
+	src := &GitHubPR{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+}
+
 func TestPriorVesselBlocksReenqueue(t *testing.T) {
 	t.Parallel()
 
@@ -402,7 +624,12 @@ func TestPriorVesselBlocksReenqueue(t *testing.T) {
 		},
 		{name: "completed", vessel: &queue.Vessel{State: queue.StateCompleted}, fingerprint: fingerprint, want: false},
 		{name: "cancelled", vessel: &queue.Vessel{State: queue.StateCancelled}, fingerprint: fingerprint, want: false},
-		{name: "timed out", vessel: &queue.Vessel{State: queue.StateTimedOut}, fingerprint: fingerprint, want: false},
+		{
+			name:        "timed out fingerprint match",
+			vessel:      &queue.Vessel{State: queue.StateTimedOut, Meta: map[string]string{"source_input_fingerprint": fingerprint}},
+			fingerprint: fingerprint,
+			want:        true,
+		},
 	}
 
 	for _, tt := range tests {

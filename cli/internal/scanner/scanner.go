@@ -8,6 +8,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 )
 
@@ -66,6 +67,11 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				return result, err
 			}
 			if enqueued {
+				if vessel.RetryOf != "" {
+					if err := recovery.UpdateRetryOutcome(s.Config.StateDir, vessel.RetryOf, "enqueued"); err != nil {
+						return result, err
+					}
+				}
 				result.Added++
 				if s.RunHooks {
 					if err := entry.src.OnEnqueue(ctx, vessel); err != nil {
@@ -97,6 +103,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 					Repo:      srcCfg.Repo,
 					Tasks:     tasks,
 					Exclude:   srcCfg.Exclude,
+					StateDir:  s.Config.StateDir,
 					Queue:     s.Queue,
 					CmdRunner: s.CmdRunner,
 				},
@@ -109,6 +116,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 					Repo:      srcCfg.Repo,
 					Tasks:     tasks,
 					Exclude:   srcCfg.Exclude,
+					StateDir:  s.Config.StateDir,
 					Queue:     s.Queue,
 					CmdRunner: s.CmdRunner,
 				},

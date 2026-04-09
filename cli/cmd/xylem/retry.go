@@ -1,11 +1,11 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -39,44 +39,27 @@ func cmdRetry(q *queue.Queue, cfg *config.Config, id string, fromScratch bool) e
 		return fmt.Errorf("error: vessel %s is not in a retryable state (current: %s)", id, vessel.State)
 	}
 
-	newID := retryID(vessel.ID, q)
-
-	meta := make(map[string]string)
-	for k, v := range vessel.Meta {
-		meta[k] = v
-	}
-	meta["retry_of"] = vessel.ID
-	if vessel.Error != "" {
-		meta["retry_error"] = vessel.Error
-	}
-	if vessel.FailedPhase != "" {
-		meta["failed_phase"] = vessel.FailedPhase
-	}
-	if vessel.GateOutput != "" {
-		meta["gate_output"] = vessel.GateOutput
+	var artifact *recovery.Artifact
+	if cfg != nil && cfg.StateDir != "" {
+		loaded, loadErr := recovery.LoadForVessel(cfg.StateDir, vessel.ID)
+		if loadErr != nil && !errors.Is(loadErr, os.ErrNotExist) {
+			return fmt.Errorf("load recovery artifact: %w", loadErr)
+		}
+		if loadErr == nil {
+			artifact = loaded
+		}
 	}
 
-	newVessel := queue.Vessel{
-		ID:          newID,
-		Source:      vessel.Source,
-		Ref:         vessel.Ref,
-		Workflow:    vessel.Workflow,
-		Prompt:      vessel.Prompt,
-		Meta:        meta,
-		State:       queue.StatePending,
-		CreatedAt:   commandNow(),
-		RetryOf:     vessel.ID,
-		FailedPhase: vessel.FailedPhase,
-		GateOutput:  vessel.GateOutput,
-	}
+	now := commandNow()
+	newVessel := recovery.NextRetryVessel(*vessel, *vessel, artifact, q, now, "decision")
 
 	// Resume from failed phase unless --from-scratch or no worktree exists
 	if !fromScratch && vessel.WorktreePath != "" {
 		newVessel.CurrentPhase = vessel.CurrentPhase
 		newVessel.WorktreePath = vessel.WorktreePath
-		newVessel.PhaseOutputs = rewritePhaseOutputs(vessel.PhaseOutputs, vessel.ID, newID)
+		newVessel.PhaseOutputs = rewritePhaseOutputs(vessel.PhaseOutputs, vessel.ID, newVessel.ID)
 
-		if err := copyPhaseOutputFiles(cfg.StateDir, vessel.ID, newID); err != nil {
+		if err := copyPhaseOutputFiles(cfg.StateDir, vessel.ID, newVessel.ID); err != nil {
 			return fmt.Errorf("copy phase outputs: %w", err)
 		}
 	}
@@ -157,17 +140,4 @@ func copyFile(src, dst string) error {
 	return out.Close()
 }
 
-func retryID(originalID string, q *queue.Queue) string {
-	vessels, _ := q.List()
-	maxRetry := 0
-	prefix := originalID + "-retry-"
-	for _, v := range vessels {
-		if strings.HasPrefix(v.ID, prefix) {
-			numStr := strings.TrimPrefix(v.ID, prefix)
-			if n, err := strconv.Atoi(numStr); err == nil && n > maxRetry {
-				maxRetry = n
-			}
-		}
-	}
-	return fmt.Sprintf("%s-retry-%d", originalID, maxRetry+1)
-}
+func retryID(originalID string, q *queue.Queue) string { return recovery.RetryID(originalID, q) }
