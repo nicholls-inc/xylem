@@ -167,13 +167,40 @@ type upgradeFunc func()
 // excessive git fetches and rebuilds.
 const defaultUpgradeInterval = 5 * time.Minute
 
+// upgradeOverdueMultiplier controls the forced-upgrade escape hatch: after
+// this many upgradeIntervals have elapsed without a successful upgrade
+// (because the daemon was never idle enough to fire the normal path), the
+// next drain tick is PAUSED — new vessels are not dequeued — so that the
+// currently in-flight vessels can finish naturally and the upgrade condition
+// (`in_flight == 0`) is eventually satisfied.
+//
+// At the default 5m upgradeInterval + 3x multiplier = 15 minutes of
+// "upgrade pending" before drain starts gracefully parking. This preserves
+// the safety invariant (no exec() while subprocesses are alive) while
+// guaranteeing that a continuously-saturated scheduled source can never
+// permanently lock the daemon on a stale binary.
+//
+// 3 is chosen so that a single healthy upgrade cycle (5m interval, fires
+// reliably) is not perturbed, but a degraded "always saturated" condition
+// is resolved in bounded time.
+const upgradeOverdueMultiplier = 3
+
 // daemonLoop is the core loop extracted for testability. It accepts an
 // externally-controlled context so tests can cancel it without signals,
 // and injectable scan/drain/check functions so tests can use stubs.
 //
-// If upgrade is non-nil, it is called only when the daemon is fully idle:
-// there is no active drain tick and the shared runner reports zero in-flight
-// vessels. Pass nil/zero upgrade/upgradeInterval to disable.
+// If upgrade is non-nil, it is called under one of two conditions:
+//
+//  1. Normal path: daemon is fully idle (no active drain, zero in-flight
+//     vessels) and upgradeInterval has elapsed since the last upgrade.
+//
+//  2. Overdue path: upgrade has been pending for
+//     upgradeInterval*upgradeOverdueMultiplier without firing because the
+//     daemon was never idle enough. In this case, new drain ticks are
+//     paused (no new dequeue) so in-flight vessels can drain naturally.
+//     Once in_flight reaches zero, the normal path fires.
+//
+// Pass nil/zero upgrade/upgradeInterval to disable.
 func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
@@ -231,15 +258,35 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 			check(ctx)
 		}
 
-		if upgrade != nil && upgradeInterval > 0 &&
-			atomic.LoadInt32(&draining) == 0 &&
-			trackerInFlightCount(tracker) == 0 &&
-			now.Sub(lastUpgrade) >= upgradeInterval {
+		// Compute upgrade state once per tick so both the upgrade check and
+		// the drain-pause decision share a single snapshot of conditions.
+		upgradeReady := upgrade != nil && upgradeInterval > 0
+		upgradeElapsed := now.Sub(lastUpgrade)
+		upgradePending := upgradeReady && upgradeElapsed >= upgradeInterval
+		upgradeOverdue := upgradeReady && upgradeElapsed >= upgradeInterval*time.Duration(upgradeOverdueMultiplier)
+		inFlight := trackerInFlightCount(tracker)
+		drainIdle := atomic.LoadInt32(&draining) == 0
+
+		if upgradePending && drainIdle && inFlight == 0 {
+			// Normal path: daemon is fully idle and upgrade is due.
 			lastUpgrade = now
 			upgrade()
+		} else if upgradeOverdue && drainIdle && inFlight > 0 {
+			// Overdue: log that we're pausing new dequeue to let in-flight
+			// vessels drain naturally, creating an idle window for the
+			// normal upgrade path on a subsequent tick. This does NOT kill
+			// running vessels — we wait for them to complete on their own.
+			log.Printf("daemon: auto-upgrade overdue by %s (in_flight=%d, pausing new drain dequeue until idle)",
+				upgradeElapsed, inFlight)
 		}
 
-		if now.Sub(lastDrain) >= drainInterval {
+		// Drain dequeue is suppressed while an upgrade is overdue and
+		// in-flight vessels still exist. This creates the idle window the
+		// normal upgrade path needs, without exec()ing while subprocesses
+		// are alive. When in_flight reaches zero, the next tick fires the
+		// normal upgrade path above and dequeue resumes.
+		drainPaused := upgradeOverdue && inFlight > 0
+		if !drainPaused && now.Sub(lastDrain) >= drainInterval {
 			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
 				drainWg.Add(1)
