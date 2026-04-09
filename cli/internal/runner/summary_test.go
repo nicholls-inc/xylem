@@ -308,7 +308,7 @@ func TestSmoke_S14_SaveVesselSummaryFailureIsNonFatalCallerContinues(t *testing.
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.Failed)
@@ -545,7 +545,7 @@ func TestSmoke_S19_FailurePathBuildsSummaryWithStateFailedAndCallsSaveVesselSumm
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.Failed)
@@ -827,7 +827,7 @@ func TestVesselRunStateBuildSummaryReflectsBudgetExceeded(t *testing.T) {
 	}
 }
 
-func TestBuildGateClaimUsesEvidenceMetadata(t *testing.T) {
+func TestSmoke_S15_BuildGateClaimWithEvidenceMetadataProducesATypedClaim(t *testing.T) {
 	recordedAt := time.Date(2026, time.March, 31, 12, 0, 0, 0, time.UTC)
 	artifactPath := phaseArtifactRelativePath("vessel-1", "implement")
 	claim := buildGateClaim(workflow.Phase{
@@ -843,33 +843,17 @@ func TestBuildGateClaimUsesEvidenceMetadata(t *testing.T) {
 		},
 	}, true, artifactPath, recordedAt)
 
-	if claim.Claim != "All tests pass" {
-		t.Fatalf("Claim = %q, want %q", claim.Claim, "All tests pass")
-	}
-	if claim.Level != evidence.BehaviorallyChecked {
-		t.Fatalf("Level = %q, want %q", claim.Level, evidence.BehaviorallyChecked)
-	}
-	if claim.Checker != "go test" {
-		t.Fatalf("Checker = %q, want %q", claim.Checker, "go test")
-	}
-	if claim.TrustBoundary != "Package-level only" {
-		t.Fatalf("TrustBoundary = %q, want %q", claim.TrustBoundary, "Package-level only")
-	}
-	if !claim.Passed {
-		t.Fatal("Passed = false, want true")
-	}
-	if claim.ArtifactPath != artifactPath {
-		t.Fatalf("ArtifactPath = %q, want %q", claim.ArtifactPath, artifactPath)
-	}
-	if claim.Phase != "implement" {
-		t.Fatalf("Phase = %q, want %q", claim.Phase, "implement")
-	}
-	if !claim.Timestamp.Equal(recordedAt) {
-		t.Fatalf("Timestamp = %s, want %s", claim.Timestamp, recordedAt)
-	}
+	assert.Equal(t, "All tests pass", claim.Claim)
+	assert.Equal(t, evidence.BehaviorallyChecked, claim.Level)
+	assert.Equal(t, "go test", claim.Checker)
+	assert.Equal(t, "Package-level only", claim.TrustBoundary)
+	assert.True(t, claim.Passed)
+	assert.Equal(t, artifactPath, claim.ArtifactPath)
+	assert.Equal(t, "implement", claim.Phase)
+	assert.True(t, claim.Timestamp.Equal(recordedAt))
 }
 
-func TestBuildGateClaimUsesDefaultsWithoutEvidence(t *testing.T) {
+func TestSmoke_S16_BuildGateClaimWithoutEvidenceMetadataProducesAnUntypedClaim(t *testing.T) {
 	recordedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	artifactPath := phaseArtifactRelativePath("vessel-1", "implement")
 	claim := buildGateClaim(workflow.Phase{
@@ -877,44 +861,65 @@ func TestBuildGateClaimUsesDefaultsWithoutEvidence(t *testing.T) {
 		Gate: &workflow.Gate{Run: "cd cli && go test ./..."},
 	}, true, artifactPath, recordedAt)
 
-	if claim.Level != evidence.Untyped {
-		t.Fatalf("Level = %q, want %q", claim.Level, evidence.Untyped)
+	assert.Equal(t, evidence.Untyped, claim.Level)
+	assert.Equal(t, "No trust boundary declared", claim.TrustBoundary)
+	assert.Contains(t, claim.Claim, "implement")
+	assert.True(t, claim.Passed)
+	assert.Equal(t, artifactPath, claim.ArtifactPath)
+	assert.Equal(t, "implement", claim.Phase)
+	assert.True(t, claim.Timestamp.Equal(recordedAt))
+}
+
+func TestBuildGateClaimDefaultsLiveGatesToObservedInSitu(t *testing.T) {
+	recordedAt := time.Date(2026, time.April, 2, 8, 30, 0, 0, time.UTC)
+	artifactPath := "phases/vessel-1/evidence/implement/live-gate.json"
+	claim := buildGateClaim(workflow.Phase{
+		Name: "implement",
+		Gate: &workflow.Gate{
+			Type: "live",
+			Live: &workflow.LiveGate{Mode: "http"},
+		},
+	}, true, artifactPath, recordedAt)
+
+	if claim.Level != evidence.ObservedInSitu {
+		t.Fatalf("Level = %q, want %q", claim.Level, evidence.ObservedInSitu)
 	}
-	if claim.TrustBoundary != "No trust boundary declared" {
-		t.Fatalf("TrustBoundary = %q, want %q", claim.TrustBoundary, "No trust boundary declared")
+	if claim.Checker != "live/http" {
+		t.Fatalf("Checker = %q, want %q", claim.Checker, "live/http")
 	}
-	if !strings.Contains(claim.Claim, "implement") {
-		t.Fatalf("Claim = %q, want phase name", claim.Claim)
-	}
-	if claim.Checker != "cd cli && go test ./..." {
-		t.Fatalf("Checker = %q, want gate run command", claim.Checker)
-	}
-	if !claim.Passed {
-		t.Fatal("Passed = false, want true")
+	if claim.TrustBoundary != "Running system observation" {
+		t.Fatalf("TrustBoundary = %q, want %q", claim.TrustBoundary, "Running system observation")
 	}
 	if claim.ArtifactPath != artifactPath {
 		t.Fatalf("ArtifactPath = %q, want %q", claim.ArtifactPath, artifactPath)
 	}
-	if claim.Phase != "implement" {
-		t.Fatalf("Phase = %q, want %q", claim.Phase, "implement")
-	}
-	if !claim.Timestamp.Equal(recordedAt) {
-		t.Fatalf("Timestamp = %s, want %s", claim.Timestamp, recordedAt)
-	}
 }
 
-func TestSmoke_WS6S6_EvidenceCollectionFailureIsNonFatal(t *testing.T) {
-	t.Parallel()
+func TestSmoke_S17_BuildGateClaimSetsCheckerFromGateRunCommandWhenNoEvidence(t *testing.T) {
+	claim := buildGateClaim(workflow.Phase{
+		Name: "implement",
+		Gate: &workflow.Gate{Run: "cd cli && go test ./..."},
+	}, true, phaseArtifactRelativePath("vessel-1", "implement"), time.Date(2026, time.April, 1, 8, 31, 0, 0, time.UTC))
 
+	assert.Equal(t, "cd cli && go test ./...", claim.Checker)
+}
+
+func TestSmoke_S6_EvidenceCollectionFailureIsNonFatal(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
-	vessel := makeVessel(6, "test-workflow")
-	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	now := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-ws6-s6", "github", "test-workflow", now)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
 	buf := captureStandardLogger(t)
 
-	now := time.Date(2026, time.April, 2, 9, 0, 0, 0, time.UTC)
+	vrs := newVesselRunState(cfg, vessel, now)
+	vrs.addPhase(PhaseSummary{Name: "implement", Status: "completed"})
 	claims := []evidence.Claim{{
 		Claim:     "gate check",
 		Level:     evidence.Level("bogus-level"),
@@ -922,44 +927,47 @@ func TestSmoke_WS6S6_EvidenceCollectionFailureIsNonFatal(t *testing.T) {
 		Passed:    true,
 		Timestamp: now,
 	}}
-	vrs := newVesselRunState(cfg, vessel, now)
 
-	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, claims, now)
+	outcome := r.completeVessel(context.Background(), vessel, "", nil, vrs, claims)
 
-	if !strings.Contains(buf.String(), "warn: save evidence manifest:") {
-		t.Fatalf("expected warning log for evidence manifest save failure, got %q", buf.String())
-	}
+	assert.Equal(t, "completed", outcome)
+	assert.Equal(t, queue.StateCompleted, queueVesselByID(t, q, vessel.ID).State)
+	assert.Contains(t, buf.String(), "warn: save evidence manifest:")
 
 	manifestPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
-	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
-		t.Fatalf("expected no evidence manifest on disk after save failure, got err=%v", err)
-	}
+	assert.NoFileExists(t, manifestPath)
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, "completed", summary.State)
+	assert.Empty(t, summary.EvidenceManifestPath)
 }
 
-func TestSmoke_WS6S7_SummaryWriteFailureIsNonFatal(t *testing.T) {
-	t.Parallel()
-
+func TestSmoke_S7_SummaryWriteFailureIsNonFatal(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
-	vessel := makeVessel(7, "test-workflow")
-	summaryAsDir := filepath.Join(cfg.StateDir, "phases", vessel.ID, summaryFileName)
-	if err := os.MkdirAll(summaryAsDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll() error = %v", err)
-	}
+	now := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-ws6-s7", "github", "test-workflow", now)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
 
-	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	summaryAsDir := filepath.Join(cfg.StateDir, "phases", vessel.ID, summaryFileName)
+	require.NoError(t, os.MkdirAll(summaryAsDir, 0o755))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
 	buf := captureStandardLogger(t)
 
-	now := time.Date(2026, time.April, 2, 10, 0, 0, 0, time.UTC)
 	vrs := newVesselRunState(cfg, vessel, now)
+	vrs.addPhase(PhaseSummary{Name: "implement", Status: "completed"})
 
-	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, nil, now)
+	outcome := r.completeVessel(context.Background(), vessel, "", nil, vrs, nil)
 
-	if !strings.Contains(buf.String(), "warn: save vessel summary:") {
-		t.Fatalf("expected warning log for summary write failure, got %q", buf.String())
-	}
+	assert.Equal(t, "completed", outcome)
+	assert.Equal(t, queue.StateCompleted, queueVesselByID(t, q, vessel.ID).State)
+	assert.Contains(t, buf.String(), "warn: save vessel summary:")
+	assert.DirExists(t, summaryAsDir)
 }
 
 func TestDrainPromptOnlyWritesSummaryArtifact(t *testing.T) {
@@ -977,7 +985,7 @@ func TestDrainPromptOnlyWritesSummaryArtifact(t *testing.T) {
 	}
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1049,7 +1057,7 @@ func TestDrainWritesFailureSummaryAndEvidenceManifest(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1091,7 +1099,128 @@ func TestDrainWritesFailureSummaryAndEvidenceManifest(t *testing.T) {
 	}
 }
 
-func TestSmoke_WS6S8_ClaimsFromPriorPhasesPreservedWhenLaterPhaseFails(t *testing.T) {
+func TestSmoke_S18_EvidenceClaimsAreAccumulatedAcrossMultiplePhases(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(18, "ws4-s18")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "ws4-s18", []testPhase{
+		{
+			name:          "analyze",
+			promptContent: "Analyze the issue",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make analyze\"\n      evidence:\n        claim: \"Analyze gate passed\"\n        level: behaviorally_checked\n        checker: \"make analyze\"\n        trust_boundary: \"Analysis scope only\"",
+		},
+		{
+			name:          "implement",
+			promptContent: "Implement the fix",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make implement\"\n      evidence:\n        claim: \"Implement gate passed\"\n        level: mechanically_checked\n        checker: \"make implement\"\n        trust_boundary: \"Implementation scope only\"",
+		},
+	})
+
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze the issue": []byte("analysis output"),
+			"Implement the fix": []byte("implementation output"),
+		},
+		gateCallResults: []gateCallResult{
+			{output: []byte("analyze gate ok"), err: nil},
+			{output: []byte("implement gate ok"), err: nil},
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	manifestPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
+	assert.FileExists(t, manifestPath)
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, vessel.ID)
+	require.NoError(t, err)
+	require.Len(t, manifest.Claims, 2)
+	assert.Equal(t, "analyze", manifest.Claims[0].Phase)
+	assert.Equal(t, "implement", manifest.Claims[1].Phase)
+	assert.Equal(t, "Analyze gate passed", manifest.Claims[0].Claim)
+	assert.Equal(t, "Implement gate passed", manifest.Claims[1].Claim)
+}
+
+func TestSmoke_S19_GateFailureProducesNoClaimButPreservesClaimsFromPriorPhases(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(19, "ws4-s19")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "ws4-s19", []testPhase{
+		{
+			name:          "analyze",
+			promptContent: "Analyze the bug",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make analyze\"\n      evidence:\n        claim: \"Analyze gate passed\"\n        level: behaviorally_checked\n        checker: \"make analyze\"",
+		},
+		{
+			name:          "implement",
+			promptContent: "Implement the bugfix",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make implement\"\n      evidence:\n        claim: \"Implement gate passed\"\n        level: mechanically_checked\n        checker: \"make implement\"",
+		},
+		{
+			name:          "verify",
+			promptContent: "Verify the rollout",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make verify\"\n      retries: 0\n      evidence:\n        claim: \"Verify gate passed\"\n        level: observed_in_situ\n        checker: \"make verify\"",
+		},
+	})
+
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze the bug":      []byte("analysis output"),
+			"Implement the bugfix": []byte("implementation output"),
+			"Verify the rollout":   []byte("verification output"),
+		},
+		gateCallResults: []gateCallResult{
+			{output: []byte("phase-1 gate ok"), err: nil},
+			{output: []byte("phase-2 gate ok"), err: nil},
+			{output: []byte("phase-3 gate failed"), err: &mockExitError{code: 1}},
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, queue.StateFailed, queueVesselByID(t, q, vessel.ID).State)
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, vessel.ID)
+	require.NoError(t, err)
+	require.Len(t, manifest.Claims, 2)
+	assert.Equal(t, "analyze", manifest.Claims[0].Phase)
+	assert.Equal(t, "implement", manifest.Claims[1].Phase)
+	assert.NotContains(t, []string{manifest.Claims[0].Phase, manifest.Claims[1].Phase}, "verify")
+}
+
+func TestSmoke_S8_ClaimsFromPriorCompletedPhasesPreservedWhenALaterPhaseFails(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1135,7 +1264,7 @@ func TestSmoke_WS6S8_ClaimsFromPriorPhasesPreservedWhenLaterPhaseFails(t *testin
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1160,7 +1289,7 @@ func TestSmoke_WS6S8_ClaimsFromPriorPhasesPreservedWhenLaterPhaseFails(t *testin
 	}
 }
 
-func TestSmoke_WS6S9_ClaimsFromFailedPhaseAreDiscarded(t *testing.T) {
+func TestSmoke_S9_ClaimsFromAFailedPhaseAreDiscarded(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1193,17 +1322,18 @@ func TestSmoke_WS6S9_ClaimsFromFailedPhaseAreDiscarded(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("Failed = %d, want 1", result.Failed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, queue.StateFailed, queueVesselByID(t, q, "issue-9").State)
 
 	manifestPath := filepath.Join(cfg.StateDir, "phases", "issue-9", "evidence-manifest.json")
-	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
-		t.Fatalf("expected no evidence manifest for vessel with failed phase, got err=%v", err)
+	if _, err := os.Stat(manifestPath); err == nil {
+		manifest, loadErr := evidence.LoadManifest(cfg.StateDir, "issue-9")
+		require.NoError(t, loadErr)
+		assert.Empty(t, manifest.Claims)
+	} else {
+		require.True(t, os.IsNotExist(err))
 	}
 }
 
@@ -1259,7 +1389,7 @@ func TestDrainOrchestratedWritesSummaryManifestAndReporterEvidence(t *testing.T)
 	}
 	r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1331,7 +1461,7 @@ func TestDrainWorkflowWithoutGateOmitsEvidenceFromCompletionComment(t *testing.T
 	}
 	r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}

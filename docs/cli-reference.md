@@ -206,11 +206,12 @@ xylem scan [flags]
 ### Behavior
 
 - Iterates over every source defined in `.xylem.yml` and calls its `Scan()` method.
-- Supported source types are `github`, `github-pr`, `github-pr-events`, and `github-merge`.
+- Supported source types are `github`, `github-pr`, `github-pr-events`, `github-merge`, and `schedule`.
 - `github` scans open issues matching task labels.
 - `github-pr` scans open pull requests matching task labels.
 - `github-pr-events` scans open pull requests for configured `on` triggers such as labels, submitted reviews, failed checks, and comments.
 - `github-merge` scans merged pull requests and dedupes by merge commit SHA.
+- `schedule` emits a synthetic vessel when its configured cadence elapses.
 - If scanning is paused (via `xylem pause`), prints a message and exits without scanning.
 - Deduplication is handled automatically. Depending on the source, xylem skips refs that are already present in the queue, already present in any vessel state, or already have xylem-owned branches/open PRs.
 

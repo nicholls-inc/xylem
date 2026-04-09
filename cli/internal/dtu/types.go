@@ -401,8 +401,16 @@ func (r *Repository) DeleteBranch(name string) bool {
 	return false
 }
 
+// MergePullRequestOptions configures gh pr merge behavior inside the DTU model.
+type MergePullRequestOptions struct {
+	DeleteHeadBranch bool
+	AutoMerge        bool
+}
+
 // MergePullRequest updates pull-request and git-visible state to reflect a merge.
-func (r *Repository) MergePullRequest(number int, deleteHeadBranch bool) error {
+// When auto-merge is requested and merge-blocking checks are still present, the
+// pull request remains open with auto-merge enabled until checks pass.
+func (r *Repository) MergePullRequest(number int, opts MergePullRequestOptions) error {
 	if r == nil {
 		return fmt.Errorf("repository must not be nil")
 	}
@@ -424,8 +432,55 @@ func (r *Repository) MergePullRequest(number int, deleteHeadBranch bool) error {
 		return fmt.Errorf("pull request %d: head SHA is required", number)
 	}
 
+	if opts.AutoMerge {
+		pr.AutoMergeEnabled = true
+		pr.AutoMergeDeleteBranch = opts.DeleteHeadBranch
+		if pr.HasBlockingMergeChecks() {
+			return nil
+		}
+	}
+
+	return r.mergePullRequest(pr, opts.DeleteHeadBranch)
+}
+
+// ApplyQueuedAutoMerge finalizes a previously queued auto-merge once checks no
+// longer block the merge.
+func (r *Repository) ApplyQueuedAutoMerge(number int) error {
+	if r == nil {
+		return fmt.Errorf("repository must not be nil")
+	}
+	pr := r.PullRequestByNumber(number)
+	if pr == nil {
+		return fmt.Errorf("pull request %d not found", number)
+	}
+	if !pr.AutoMergeEnabled || pr.HasBlockingMergeChecks() {
+		return nil
+	}
+	return r.mergePullRequest(pr, pr.AutoMergeDeleteBranch)
+}
+
+func (r *Repository) mergePullRequest(pr *PullRequest, deleteHeadBranch bool) error {
+	if pr == nil {
+		return fmt.Errorf("pull request must not be nil")
+	}
+
+	baseBranch := strings.TrimSpace(pr.BaseBranch)
+	if baseBranch == "" {
+		return fmt.Errorf("pull request %d: base branch is required", pr.Number)
+	}
+	headBranch := strings.TrimSpace(pr.HeadBranch)
+	if headBranch == "" {
+		return fmt.Errorf("pull request %d: head branch is required", pr.Number)
+	}
+	headSHA := strings.TrimSpace(pr.HeadSHA)
+	if headSHA == "" {
+		return fmt.Errorf("pull request %d: head SHA is required", pr.Number)
+	}
+
 	pr.State = PullRequestStateMerged
 	pr.Merged = true
+	pr.AutoMergeEnabled = false
+	pr.AutoMergeDeleteBranch = false
 	r.UpsertBranch(Branch{Name: baseBranch, SHA: headSHA})
 
 	if deleteHeadBranch {
@@ -472,19 +527,38 @@ type Issue struct {
 
 // PullRequest describes a GitHub pull request.
 type PullRequest struct {
-	Number     int              `yaml:"number" json:"number"`
-	Title      string           `yaml:"title" json:"title"`
-	Body       string           `yaml:"body,omitempty" json:"body,omitempty"`
-	URL        string           `yaml:"url,omitempty" json:"url,omitempty"`
-	State      PullRequestState `yaml:"state,omitempty" json:"state,omitempty"`
-	Merged     bool             `yaml:"merged,omitempty" json:"merged,omitempty"`
-	Labels     []string         `yaml:"labels,omitempty" json:"labels,omitempty"`
-	BaseBranch string           `yaml:"base_branch" json:"base_branch"`
-	HeadBranch string           `yaml:"head_branch" json:"head_branch"`
-	HeadSHA    string           `yaml:"head_sha" json:"head_sha"`
-	Comments   []Comment        `yaml:"comments,omitempty" json:"comments,omitempty"`
-	Reviews    []Review         `yaml:"reviews,omitempty" json:"reviews,omitempty"`
-	Checks     []Check          `yaml:"checks,omitempty" json:"checks,omitempty"`
+	Number                int              `yaml:"number" json:"number"`
+	Title                 string           `yaml:"title" json:"title"`
+	Body                  string           `yaml:"body,omitempty" json:"body,omitempty"`
+	URL                   string           `yaml:"url,omitempty" json:"url,omitempty"`
+	State                 PullRequestState `yaml:"state,omitempty" json:"state,omitempty"`
+	Merged                bool             `yaml:"merged,omitempty" json:"merged,omitempty"`
+	AutoMergeEnabled      bool             `yaml:"auto_merge_enabled,omitempty" json:"auto_merge_enabled,omitempty"`
+	AutoMergeDeleteBranch bool             `yaml:"auto_merge_delete_branch,omitempty" json:"auto_merge_delete_branch,omitempty"`
+	Labels                []string         `yaml:"labels,omitempty" json:"labels,omitempty"`
+	BaseBranch            string           `yaml:"base_branch" json:"base_branch"`
+	HeadBranch            string           `yaml:"head_branch" json:"head_branch"`
+	HeadSHA               string           `yaml:"head_sha" json:"head_sha"`
+	Comments              []Comment        `yaml:"comments,omitempty" json:"comments,omitempty"`
+	Reviews               []Review         `yaml:"reviews,omitempty" json:"reviews,omitempty"`
+	Checks                []Check          `yaml:"checks,omitempty" json:"checks,omitempty"`
+}
+
+// HasBlockingMergeChecks reports whether any check still prevents a queued
+// auto-merge from completing.
+func (pr *PullRequest) HasBlockingMergeChecks() bool {
+	if pr == nil {
+		return false
+	}
+	for _, check := range pr.Checks {
+		switch check.State {
+		case CheckStateSuccess, CheckStateSkipped:
+			continue
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // Comment describes an issue or pull request comment.

@@ -32,6 +32,18 @@ import (
 // ws1Config returns a base config pointing at acme/widget with a single task.
 func ws1Config(stateDir, workflow string) *config.Config {
 	cfg := baseScenarioConfig(stateDir)
+	// Explicit protected surfaces because the package default is now empty
+	// (to support xylem's self-improving use case — see PR loop11 / #194).
+	// WS1 scenarios exercise the verifier and need non-empty protection
+	// patterns to trigger violations (e.g., TestWS1SurfaceViolationDetected).
+	cfg.Harness.ProtectedSurfaces = config.ProtectedSurfacesConfig{
+		Paths: []string{
+			".xylem/HARNESS.md",
+			".xylem.yml",
+			".xylem/workflows/*.yaml",
+			".xylem/prompts/*/*.md",
+		},
+	}
 	cfg.Sources = map[string]config.SourceConfig{
 		"issues": {
 			Type: "github",
@@ -65,7 +77,7 @@ func ws1Drain(t *testing.T, env *dtuScenarioEnv, cfg *config.Config) (scanner.Sc
 
 	src := &source.GitHub{Repo: "acme/widget", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -74,6 +86,7 @@ func ws1Drain(t *testing.T, env *dtuScenarioEnv, cfg *config.Config) (scanner.Sc
 
 // DrainResult is imported from runner; alias here for the helper signature.
 type DrainResult = struct {
+	Launched  int
 	Completed int
 	Failed    int
 	Skipped   int
@@ -254,7 +267,7 @@ func TestWS1PolicyDenyBlocksPhase(t *testing.T) {
 // TestWS1PolicyRequireApproval verifies that a require_approval policy blocks
 // the phase and the vessel fails with an approval message.
 //
-// Covers: S7  (default policy requires approval for git_push)
+// Covers: S7  (default policy allows classified publication actions)
 //
 //	S19 (runner policy require_approval — vessel fails with approval message)
 func TestWS1PolicyRequireApproval(t *testing.T) {
@@ -826,23 +839,11 @@ func TestWS1ConfigValidationSurfaceGlobInvalid(t *testing.T) {
 //
 // Covers: S6  (deny file_write to .xylem/HARNESS.md)
 //
-//	S7  (require_approval for git_push)
+//	S7  (allow classified publication actions)
 //	S8  (allow general phase_execute)
 func TestWS1IntermediaryPolicyEffects(t *testing.T) {
-	// Construct the default policy described in the spec (§2.3).
-	defaultPolicy := intermediary.Policy{
-		Name: "default",
-		Rules: []intermediary.Rule{
-			{Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
-			{Action: "git_push", Resource: "*", Effect: intermediary.RequireApproval},
-			{Action: "*", Resource: "*", Effect: intermediary.Allow},
-		},
-	}
-
 	auditLog := intermediary.NewAuditLog(filepath.Join(t.TempDir(), "audit.jsonl"))
-	interm := intermediary.NewIntermediary([]intermediary.Policy{defaultPolicy}, auditLog, nil)
+	interm := intermediary.NewIntermediary([]intermediary.Policy{config.DefaultPolicy()}, auditLog, nil)
 
 	// S6: deny file_write to .xylem/HARNESS.md
 	result := interm.Evaluate(intermediary.Intent{
@@ -852,12 +853,26 @@ func TestWS1IntermediaryPolicyEffects(t *testing.T) {
 		t.Fatalf("S6: effect = %q, want %q", result.Effect, intermediary.Deny)
 	}
 
-	// S7: require_approval for git_push
+	// S7: allow classified publication actions
 	result = interm.Evaluate(intermediary.Intent{
-		Action: "git_push", Resource: "main", AgentID: "vessel-002",
+		Action: "git_commit", Resource: "*", AgentID: "vessel-002",
 	})
-	if result.Effect != intermediary.RequireApproval {
-		t.Fatalf("S7: effect = %q, want %q", result.Effect, intermediary.RequireApproval)
+	if result.Effect != intermediary.Allow {
+		t.Fatalf("S7 git_commit: effect = %q, want %q", result.Effect, intermediary.Allow)
+	}
+
+	result = interm.Evaluate(intermediary.Intent{
+		Action: "git_push", Resource: "main", AgentID: "vessel-003",
+	})
+	if result.Effect != intermediary.Allow {
+		t.Fatalf("S7 git_push: effect = %q, want %q", result.Effect, intermediary.Allow)
+	}
+
+	result = interm.Evaluate(intermediary.Intent{
+		Action: "pr_create", Resource: "owner/repo", AgentID: "vessel-004",
+	})
+	if result.Effect != intermediary.Allow {
+		t.Fatalf("S7 pr_create: effect = %q, want %q", result.Effect, intermediary.Allow)
 	}
 
 	// S8: allow phase_execute

@@ -59,6 +59,11 @@ sources:
         labels: [enhancement, low-effort, ready-for-work]
         workflow: implement-feature
 
+  doc-gardener:
+    type: schedule
+    cadence: "@daily"
+    workflow: doc-garden
+
 # ---------------------------------------------------------------------------
 # Execution limits
 # ---------------------------------------------------------------------------
@@ -128,12 +133,14 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`. |
 | `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `cadence` | string | -- | Yes (`schedule`) | Recurrence for scheduled sources. Accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions. |
+| `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue each time a scheduled source fires. Scheduled sources define the workflow directly and do not use `tasks`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
-| `tasks` | map | -- | Yes | Map of task names to task configurations. At least one task is required per source. |
+| `tasks` | map | -- | Yes (GitHub sources) | Map of task names to task configurations. Required for GitHub-based sources; not used by `schedule`. |
 
 ### Tasks
 
@@ -154,6 +161,30 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 - `github` and `github-pr` also support `label_gate_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
+- `schedule`: does not use `tasks`; configure `cadence` and `workflow` directly on the source
+
+### `schedule`
+
+Scheduled sources create a synthetic vessel when their cadence elapses. Xylem persists the last-fired timestamp under `<state_dir>/state/schedule.json`, so the cadence survives daemon restarts and repeated `scan` invocations.
+
+```yaml
+sources:
+  doctor:
+    type: schedule
+    cadence: "6h"
+    workflow: doctor
+
+  doc-gardener:
+    type: schedule
+    cadence: "@daily"
+    workflow: doc-garden
+```
+
+Behavior:
+
+- The first scan fires immediately.
+- Later scans enqueue only when the cadence boundary has elapsed since the last successful enqueue.
+- Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
 
 ### `status_labels`
 
@@ -303,7 +334,16 @@ The `daemon` section controls polling intervals when running `xylem daemon`.
 
 The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, and audit logging.
 
-When `harness.policy.rules` is empty, xylem installs a default policy that denies writes to the protected control surfaces, requires approval for `git_push` and `pr_create`, and allows other actions. The runner classifies those high-risk actions from rendered command phases and from prompt phases that explicitly instruct an agent to push or open a pull request. The same `harness.protected_surfaces.paths` list also drives the worktree's read-only hardening and the runner's post-phase surface verification.
+When `harness.policy.rules` is empty, xylem installs a default policy that denies writes to protected control surfaces and otherwise allows the actions the runner currently classifies, so autonomous drains can finish without a built-in approval pause. Today that boundary is narrow: every phase is classified as `phase_execute` or `external_command`, and the runner may additionally emit `git_commit`, `git_push`, and `pr_create` when it detects those publication steps in rendered prompts or commands. The same `harness.protected_surfaces.paths` list also drives the worktree's read-only hardening and the runner's post-phase surface verification.
+
+| Action class | Current runner classification | Default effect | Notes |
+|--------------|-------------------------------|----------------|-------|
+| Protected-surface writes | `file_write` on matched path | `deny` | Prevents agents from mutating xylem control files. |
+| Git commit | `git_commit` | `allow` | Commit creation is classified separately but kept autonomous by default. |
+| Git push | `git_push` | `allow` | Publication is allowed by default so daemon runs can complete end-to-end. |
+| Pull request creation | `pr_create` | `allow` | PR creation stays autonomous unless the operator adds a stricter rule or workflow gate. |
+| Destructive git operations (`reset --hard`, branch deletion, force-push) | No separate action today; `git push --force` still collapses to `git_push`, other cases remain `phase_execute`/`external_command` | No separate default effect | If you need review here today, gate the phase or add stricter rules around the enclosing action class. |
+| Deploy or production-impacting actions | No separate action today; they remain `phase_execute`/`external_command` | No separate default effect | Add an explicit workflow gate or policy rule for the deploy phase until xylem grows deploy-specific classification. |
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
@@ -324,6 +364,8 @@ When `harness.policy.rules` is empty, xylem installs a default policy that denie
 | `action` | string | Yes | The action to match (e.g., `file_write`, `git_push`, `pr_create`, `*`). |
 | `resource` | string | Yes | The resource to match (e.g., `.xylem.yml`, `*`). Supports glob patterns. |
 | `effect` | string | Yes | The effect when matched. Valid values: `allow`, `deny`, `require_approval`. |
+
+The example below opts into human review before publication:
 
 ```yaml
 harness:

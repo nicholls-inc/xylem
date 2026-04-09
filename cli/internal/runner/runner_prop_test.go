@@ -1,20 +1,79 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"pgregory.net/rapid"
 )
+
+func TestProp_FilterAdditiveProtectedSurfaceViolationsDropsOnlyAdditions(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		allowAdditive := rapid.Bool().Draw(t, "allowAdditive")
+		count := rapid.IntRange(0, 12).Draw(t, "count")
+
+		violations := make([]surface.Violation, 0, count)
+		want := make([]surface.Violation, 0, count)
+		for i := range count {
+			before := rapid.SampledFrom([]string{
+				"absent",
+				"deleted",
+				"aaaaaaaaaaaaaaaa",
+				"bbbbbbbbbbbbbbbb",
+			}).Draw(t, fmt.Sprintf("before-%d", i))
+			violation := surface.Violation{
+				Path:   fmt.Sprintf(".xylem/generated/%d.yaml", i),
+				Before: before,
+				After: rapid.SampledFrom([]string{
+					"deleted",
+					"1111111111111111",
+					"2222222222222222",
+				}).Draw(t, fmt.Sprintf("after-%d", i)),
+			}
+			violations = append(violations, violation)
+			if !allowAdditive || violation.Before != "absent" {
+				want = append(want, violation)
+			}
+		}
+
+		got := filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("filterAdditiveProtectedSurfaceViolations() = %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestProp_IssueBodyMentionsProtectedPathHonorsTokenBoundaries(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		pathSuffix := rapid.StringMatching(`[a-z0-9._/-]{1,24}`).Draw(t, "pathSuffix")
+		path := ".xylem/" + pathSuffix
+		validBoundary := rapid.SampledFrom([]string{"", " ", "\n", "`", "(", "[", ":", "="}).Draw(t, "validBoundary")
+		invalidBoundary := rapid.SampledFrom([]string{"a", "0", ".", "/", "_", "-"}).Draw(t, "invalidBoundary")
+
+		if !issueBodyMentionsProtectedPath(validBoundary+path+validBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = false, want true for bounded path %q", path)
+		}
+		if issueBodyMentionsProtectedPath(invalidBoundary+path+validBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = true, want false for prefixed path %q", path)
+		}
+		if issueBodyMentionsProtectedPath(validBoundary+path+invalidBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = true, want false for suffixed path %q", path)
+		}
+	})
+}
 
 func TestProp_BudgetEnforcementNeverLeaksAcrossVessels(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
@@ -134,6 +193,52 @@ func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 	})
 }
 
+func TestProp_ValidateIssueDataForWorkflowRequiresIssueNumberForCommandTemplates(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		phaseUsesIssue := rapid.Bool().Draw(t, "phaseUsesIssue")
+		gateUsesIssue := rapid.Bool().Draw(t, "gateUsesIssue")
+		phaseType := rapid.SampledFrom([]string{"", "command"}).Draw(t, "phaseType")
+		issueNumber := rapid.IntRange(0, 3).Draw(t, "issueNumber")
+
+		phaseRun := "echo ready"
+		if phaseUsesIssue {
+			phaseRun = "gh pr merge {{.Issue.Number}}"
+		}
+
+		var gateCfg *workflow.Gate
+		if rapid.Bool().Draw(t, "hasGate") {
+			gateRun := "echo gate"
+			if gateUsesIssue {
+				gateRun = "gh pr view {{.Issue.Number}} --json mergeable"
+			}
+			gateCfg = &workflow.Gate{
+				Type: "command",
+				Run:  gateRun,
+			}
+		}
+
+		p := workflow.Phase{
+			Name:       "resolve",
+			Type:       phaseType,
+			Run:        phaseRun,
+			PromptFile: ".xylem/prompts/resolve-conflicts/resolve.md",
+			MaxTurns:   10,
+			Gate:       gateCfg,
+		}
+		wf := &workflow.Workflow{Phases: []workflow.Phase{p}}
+		err := validateIssueDataForWorkflow(queue.Vessel{ID: "issue-1"}, phase.IssueData{Number: issueNumber}, wf)
+
+		wantErr := issueNumber == 0 &&
+			((phaseType == "command" && phaseUsesIssue) || (gateCfg != nil && gateUsesIssue))
+		if wantErr && err == nil {
+			t.Fatalf("validateIssueDataForWorkflow() error = nil, want error for phaseType=%q phaseUsesIssue=%t gateUsesIssue=%t", phaseType, phaseUsesIssue, gateUsesIssue)
+		}
+		if !wantErr && err != nil {
+			t.Fatalf("validateIssueDataForWorkflow() error = %v, want nil for phaseType=%q phaseUsesIssue=%t gateUsesIssue=%t issueNumber=%d", err, phaseType, phaseUsesIssue, gateUsesIssue, issueNumber)
+		}
+	})
+}
+
 func TestProp_FormatViolationsIncludesEveryViolation(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		count := rapid.IntRange(0, 8).Draw(t, "count")
@@ -160,6 +265,79 @@ func TestProp_FormatViolationsIncludesEveryViolation(t *testing.T) {
 		want := strings.Join(wantParts, "; ")
 		if formatted != want {
 			t.Fatalf("formatViolations() = %q, want %q", formatted, want)
+		}
+	})
+}
+
+func TestProp_RestoreMissingProtectedSurfacesFromRootRepairsMissingFiles(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		sourceRoot, err := os.MkdirTemp("", "runner-surface-source-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp(sourceRoot) error = %v", err)
+		}
+		defer os.RemoveAll(sourceRoot)
+
+		worktreePath, err := os.MkdirTemp("", "runner-surface-worktree-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp(worktreePath) error = %v", err)
+		}
+		defer os.RemoveAll(worktreePath)
+
+		files := map[string]string{
+			".xylem.yml":                        rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "config"),
+			".xylem/HARNESS.md":                 rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "harness"),
+			".xylem/workflows/fix-bug.yaml":     rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "workflow"),
+			".xylem/prompts/fix-bug/analyze.md": rapid.StringMatching(`[a-zA-Z0-9 _:\n-]{1,48}`).Draw(t, "prompt"),
+		}
+		patterns := []string{
+			".xylem.yml",
+			".xylem/HARNESS.md",
+			".xylem/workflows/*.yaml",
+			".xylem/prompts/*/*.md",
+		}
+
+		expectedRestored := 0
+		for path, content := range files {
+			srcPath := filepath.Join(sourceRoot, filepath.FromSlash(path))
+			if err := os.MkdirAll(filepath.Dir(srcPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s) error = %v", srcPath, err)
+			}
+			if err := os.WriteFile(srcPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s) error = %v", srcPath, err)
+			}
+
+			if rapid.Bool().Draw(t, "missing-"+path) {
+				expectedRestored++
+				continue
+			}
+
+			dstPath := filepath.Join(worktreePath, filepath.FromSlash(path))
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+				t.Fatalf("MkdirAll(%s) error = %v", dstPath, err)
+			}
+			if err := os.WriteFile(dstPath, []byte(content), 0o644); err != nil {
+				t.Fatalf("WriteFile(%s) error = %v", dstPath, err)
+			}
+		}
+
+		restored, err := restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot, patterns)
+		if err != nil {
+			t.Fatalf("restoreMissingProtectedSurfacesFromRoot() error = %v", err)
+		}
+		if restored != expectedRestored {
+			t.Fatalf("restored = %d, want %d", restored, expectedRestored)
+		}
+
+		sourceSnapshot, err := surface.TakeSnapshot(sourceRoot, patterns)
+		if err != nil {
+			t.Fatalf("TakeSnapshot(sourceRoot) error = %v", err)
+		}
+		worktreeSnapshot, err := surface.TakeSnapshot(worktreePath, patterns)
+		if err != nil {
+			t.Fatalf("TakeSnapshot(worktreePath) error = %v", err)
+		}
+		if diff := surface.Compare(sourceSnapshot, worktreeSnapshot); len(diff) != 0 {
+			t.Fatalf("restored snapshot diff = %+v, want none", diff)
 		}
 	})
 }
@@ -265,6 +443,91 @@ func TestProp_PhasePolicyIntentsStayUniqueAndClassifyHighRiskActions(t *testing.
 		}
 		if resources["pr_create"] != wantPRRepo {
 			t.Fatalf("pr_create resource = %q, want %q", resources["pr_create"], wantPRRepo)
+		}
+	})
+}
+
+func TestProp_InFlightAccountingMatchesLaunchedWork(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		concurrency := rapid.IntRange(1, 4).Draw(t, "concurrency")
+		occupied := rapid.IntRange(0, concurrency-1).Draw(t, "occupied")
+		pendingCount := rapid.IntRange(0, 8).Draw(t, "pending")
+
+		dir, err := os.MkdirTemp("", "runner-inflight-prop-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(dir)
+
+		cfg := makeTestConfig(dir, concurrency)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		for i := 1; i <= pendingCount; i++ {
+			if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+				t.Fatalf("Enqueue(%d) error = %v", i, err)
+			}
+		}
+		writeSinglePhaseWorkflow(t, dir, "fix-bug")
+
+		oldWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd() error = %v", err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatalf("Chdir(%q) error = %v", dir, err)
+		}
+		defer os.Chdir(oldWd)
+
+		releaseLaunched := make(chan struct{})
+		r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{
+			phaseOutputs: map[string][]byte{
+				"Analyze": []byte("analysis complete"),
+			},
+			runPhaseHook: func(_ string, _ string, _ string, _ ...string) ([]byte, error, bool) {
+				<-releaseLaunched
+				return []byte("analysis complete"), nil, true
+			},
+		})
+		r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+		heldDone := make(chan struct{})
+		for range occupied {
+			r.sem <- struct{}{}
+			r.inFlight.Add(1)
+			r.wg.Add(1)
+			go func() {
+				<-heldDone
+				<-r.sem
+				r.inFlight.Add(-1)
+				r.wg.Done()
+			}()
+		}
+
+		result, err := r.Drain(context.Background())
+		if err != nil {
+			t.Fatalf("Drain() error = %v", err)
+		}
+
+		available := concurrency - occupied
+		wantLaunched := pendingCount
+		if wantLaunched > available {
+			wantLaunched = available
+		}
+		if result.Launched != wantLaunched {
+			t.Fatalf("Drain().Launched = %d, want %d (pending=%d, available=%d)", result.Launched, wantLaunched, pendingCount, available)
+		}
+		if got := r.InFlightCount(); got != occupied+result.Launched {
+			t.Fatalf("InFlightCount() = %d, want %d", got, occupied+result.Launched)
+		}
+
+		close(releaseLaunched)
+		close(heldDone)
+		waited := r.Wait()
+		if got := r.InFlightCount(); got != 0 {
+			t.Fatalf("InFlightCount() after Wait = %d, want 0", got)
+		}
+		if waited.Completed != result.Launched {
+			t.Fatalf("Wait().Completed = %d, want %d", waited.Completed, result.Launched)
 		}
 	})
 }

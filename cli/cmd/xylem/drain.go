@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -51,7 +51,7 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	// Check waiting vessels before draining pending ones
 	r.CheckWaitingVessels(ctx)
 
-	result, err := r.Drain(ctx)
+	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}
@@ -87,12 +87,16 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 	r.Tracer = tracer
 }
 
+var newConfiguredTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+	return newTracer(cfg)
+}
+
 func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 	if !cfg.ObservabilityEnabled() {
 		return nil
 	}
 
-	tracer, err := newTracer(observability.TracerConfig{
+	tracer, err := newConfiguredTracer(observability.TracerConfig{
 		ServiceName:    "xylem",
 		ServiceVersion: "",
 		Endpoint:       cfg.Observability.Endpoint,
@@ -100,7 +104,7 @@ func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 		SampleRate:     cfg.ObservabilitySampleRate(),
 	})
 	if err != nil {
-		log.Printf("warn: failed to initialize tracer: %v", err)
+		slog.Warn("initialize tracer", "error", err)
 		return nil
 	}
 
@@ -113,13 +117,19 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 	}
 
 	if err := tracer.Shutdown(context.Background()); err != nil {
-		log.Printf("warn: %v", fmt.Errorf("shutdown tracer: %w", err))
+		slog.Warn("shutdown tracer", "error", err)
 	}
 }
 
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {
 	sources := make(map[string]source.Source)
-	for _, srcCfg := range cfg.Sources {
+	addSource := func(configName string, src source.Source) {
+		sources[configName] = src
+		if _, exists := sources[src.Name()]; !exists {
+			sources[src.Name()] = src
+		}
+	}
+	for name, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
 		case "github":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
@@ -133,7 +143,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gh.Name()] = gh
+			addSource(name, gh)
 		case "github-pr":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -146,7 +156,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pr.Name()] = pr
+			addSource(name, pr)
 		case "github-pr-events":
 			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -168,7 +178,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pre.Name()] = pre
+			addSource(name, pre)
 		case "github-merge":
 			mergeTasks := make(map[string]source.MergeTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -182,7 +192,16 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gm.Name()] = gm
+			addSource(name, gm)
+		case "schedule":
+			sched := &source.Schedule{
+				ConfigName: name,
+				Cadence:    srcCfg.Cadence,
+				Workflow:   srcCfg.Workflow,
+				StateDir:   cfg.StateDir,
+				Queue:      q,
+			}
+			addSource(name, sched)
 		}
 	}
 	return sources

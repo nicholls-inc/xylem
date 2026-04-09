@@ -201,7 +201,8 @@ func TestInitScaffoldConfigLoads(t *testing.T) {
 
 	data, err := os.ReadFile(configPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "approval for git_push and pr_create")
+	assert.Contains(t, string(data), "allows")
+	assert.Contains(t, string(data), "git_push/pr_create")
 }
 
 func TestInitRespectsConfigFlag(t *testing.T) {
@@ -233,7 +234,8 @@ func TestInitRespectsConfigFlag(t *testing.T) {
 
 func TestPromptContentPRMentionsApprovalBoundary(t *testing.T) {
 	content := promptContent("fix-bug", "pr")
-	assert.Contains(t, content, "default harness policy")
+	assert.Contains(t, content, "publication boundary")
+	assert.Contains(t, content, "autonomous drains can finish")
 	assert.Contains(t, content, "`git_push`")
 	assert.Contains(t, content, "`pr_create`")
 }

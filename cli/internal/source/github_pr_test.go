@@ -64,7 +64,7 @@ func TestGitHubPRScanFindsPRs(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -108,7 +108,7 @@ func TestGitHubPRScanExcludedLabel(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}, {Name: "wontfix"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -144,7 +144,7 @@ func TestGitHubPRScanAlreadyQueued(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -173,7 +173,7 @@ func TestGitHubPRScanExistingBranch(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 	r.set([]byte("abc123\trefs/heads/review/pr-42-something"), "git", "ls-remote", "--heads", "origin", "review/pr-42-*")
 
 	src := &GitHubPR{
@@ -203,8 +203,8 @@ func TestGitHubPRScanDeduplicates(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}, {Name: "urgent"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "urgent", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "urgent", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo: "owner/repo",
@@ -230,7 +230,7 @@ func TestGitHubPRScanGHFailure(t *testing.T) {
 	q := queue.New(dir + "/queue.jsonl")
 	r := newMock()
 
-	r.setErr(errTest, "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.setErr(errTest, "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -250,7 +250,7 @@ func TestGitHubPRScanMalformedJSON(t *testing.T) {
 	q := queue.New(dir + "/queue.jsonl")
 	r := newMock()
 
-	r.set([]byte(`{not valid`), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set([]byte(`{not valid`), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -276,7 +276,7 @@ func TestGitHubPRScanSkipsUnchangedFailedVessel(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
 	_, err := q.Enqueue(queue.Vessel{
@@ -328,7 +328,7 @@ func TestGitHubPRScanReenqueuesChangedFailedVessel(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	oldFingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
 	_, err := q.Enqueue(queue.Vessel{
@@ -826,14 +826,17 @@ func TestGitHubPRScanDistinctWorkflowsEnqueueBoth(t *testing.T) {
 	q := queue.New(dir + "/queue.jsonl")
 	r := newMock()
 
+	// Mergeable=CONFLICTING so the resolve-conflicts vessel is not
+	// filtered out by the new mergeable-state guard.
 	prs := []ghPR{
 		{Number: 143, Title: "t", Body: "b", URL: "https://github.com/owner/repo/pull/143", HeadRefName: "feat/issue-137-137",
+			Mergeable: "CONFLICTING",
 			Labels: []struct {
 				Name string `json:"name"`
 			}{{Name: "merge-ready"}, {Name: "needs-conflict-resolution"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "merge-ready", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "merge-ready", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo: "owner/repo",
@@ -908,13 +911,16 @@ func TestGitHubPRScanFailedMergeDoesNotBlockResolveConflicts(t *testing.T) {
 	}
 
 	// Now simulate the conflict-resolution source scanning the same PR.
+	// Mergeable=CONFLICTING so the new mergeable filter does not short-circuit
+	// this test (which predates the filter but must still hold).
 	prs := []ghPR{
 		{Number: 143, Title: "t", Body: "b", URL: prURL, HeadRefName: "feat/issue-137-137",
+			Mergeable: "CONFLICTING",
 			Labels: []struct {
 				Name string `json:"name"`
 			}{{Name: "harness-impl"}, {Name: "needs-conflict-resolution"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo: "owner/repo",
@@ -978,7 +984,7 @@ func TestGitHubPRScanLegacyFailedVesselStillBlocksSameWorkflow(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -1025,7 +1031,7 @@ func TestGitHubPRScanLegacyActiveVesselStillBlocksSameWorkflow(t *testing.T) {
 				Name string `json:"name"`
 			}{{Name: "review-me"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo:      "owner/repo",
@@ -1040,6 +1046,121 @@ func TestGitHubPRScanLegacyActiveVesselStillBlocksSameWorkflow(t *testing.T) {
 	}
 	if len(vessels) != 0 {
 		t.Fatalf("expected legacy active vessel to block re-enqueue, got %d", len(vessels))
+	}
+}
+
+func TestGitHubPRScanResolveConflictsSkipsMergeablePRAndStripsLabel(t *testing.T) {
+	// Regression for bug β: PR #179 accumulated 17+ completed
+	// resolve-conflicts vessels because the PR was MERGEABLE but still
+	// carried `needs-conflict-resolution`, and nothing stripped the stale
+	// label. The source must skip the enqueue AND proactively remove the
+	// task-selector labels so the next scan cannot re-match.
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prURL := "https://github.com/owner/repo/pull/179"
+	prs := []ghPR{
+		{Number: 179, Title: "feat: scheduled lessons", Body: "b", URL: prURL, HeadRefName: "feat/issue-159-159",
+			Mergeable: "MERGEABLE",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "harness-impl"}, {Name: "needs-conflict-resolution"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	src := &GitHubPR{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"conflict-resolution": {
+				Labels:   []string{"needs-conflict-resolution", "harness-impl"},
+				Workflow: "resolve-conflicts",
+			},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels (mergeable PR must not enqueue resolve-conflicts), got %d: %+v", len(vessels), vessels)
+	}
+
+	// Assert the stale task-selector labels were proactively removed via
+	// gh pr edit ... --remove-label. Both labels must be stripped so the
+	// source cannot re-match on the next scan under either label.
+	wantRemovals := map[string]bool{
+		"needs-conflict-resolution": false,
+		"harness-impl":              false,
+	}
+	for _, call := range r.calls {
+		joined := strings.Join(call, " ")
+		if !strings.HasPrefix(joined, "gh pr edit 179 --repo owner/repo --remove-label ") {
+			continue
+		}
+		for label := range wantRemovals {
+			if strings.HasSuffix(joined, "--remove-label "+label) {
+				wantRemovals[label] = true
+			}
+		}
+	}
+	for label, seen := range wantRemovals {
+		if !seen {
+			t.Errorf("expected stripTaskLabels to remove %q from PR 179, but no gh pr edit call observed; calls=%+v", label, r.calls)
+		}
+	}
+}
+
+func TestGitHubPRScanResolveConflictsSkipsUnknownMergeablePreservingLabel(t *testing.T) {
+	// When GitHub has not yet computed the mergeable state (empty string
+	// or literal "UNKNOWN"), the source must skip the enqueue but must NOT
+	// strip the label — the next scan should re-evaluate once GitHub
+	// finishes computing the merge state. Stripping prematurely would
+	// silently drop legitimate conflict-resolution work.
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prURL := "https://github.com/owner/repo/pull/200"
+	prs := []ghPR{
+		{Number: 200, Title: "feat: x", Body: "b", URL: prURL, HeadRefName: "feat/x",
+			Mergeable: "", // unknown / not yet computed
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "harness-impl"}, {Name: "needs-conflict-resolution"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	src := &GitHubPR{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"conflict-resolution": {
+				Labels:   []string{"needs-conflict-resolution", "harness-impl"},
+				Workflow: "resolve-conflicts",
+			},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels (UNKNOWN mergeable must skip), got %d: %+v", len(vessels), vessels)
+	}
+
+	// Must NOT have issued any gh pr edit --remove-label calls — the label
+	// has to survive so the next scan can re-evaluate.
+	for _, call := range r.calls {
+		joined := strings.Join(call, " ")
+		if strings.Contains(joined, "gh pr edit 200") && strings.Contains(joined, "--remove-label") {
+			t.Errorf("expected NO label removal for UNKNOWN mergeable state, got call: %q", joined)
+		}
 	}
 }
 

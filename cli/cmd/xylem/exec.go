@@ -77,26 +77,70 @@ type realCmdRunner struct {
 
 // newCmdRunner creates a realCmdRunner with extra env vars merged from
 // claude.env and copilot.env config sections.
+//
+// When an env value contains an unset shell variable reference (e.g.
+// "${COPILOT_GITHUB_TOKEN}" when COPILOT_GITHUB_TOKEN is not exported),
+// os.ExpandEnv returns an empty string. Propagating an empty value into
+// the subprocess environment is actively harmful because it *unsets*
+// (shadows) any matching variable the subprocess might otherwise inherit
+// from the daemon's own environment. For example, if the daemon has
+// GITHUB_TOKEN set directly but .xylem.yml declares
+//
+//	copilot.env.GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
+//
+// then a naive expansion would emit "GITHUB_TOKEN=" and the gh/copilot
+// subprocess would see no token at all — producing the "No
+// authentication information found" cascade observed on 2026-04-09.
+//
+// Skip any empty-value expansions so the subprocess falls back to the
+// daemon's own env. Operators who intentionally want to unset a var can
+// remove it from .xylem.yml rather than relying on implicit blanking.
 func newCmdRunner(cfg *config.Config) *realCmdRunner {
 	if cfg == nil {
 		return &realCmdRunner{}
 	}
 	var env []string
+	addEnv := func(k, v string) {
+		expanded := os.ExpandEnv(v)
+		if expanded == "" {
+			return
+		}
+		env = append(env, k+"="+expanded)
+	}
 	for k, v := range cfg.Claude.Env {
-		env = append(env, k+"="+os.ExpandEnv(v))
+		addEnv(k, v)
 	}
 	for k, v := range cfg.Copilot.Env {
-		env = append(env, k+"="+os.ExpandEnv(v))
+		addEnv(k, v)
 	}
 	return &realCmdRunner{extraEnv: env}
 }
 
+// cmdEnv returns the environment to use for a subprocess: the daemon's
+// own env with extraEnv appended (extraEnv values take precedence
+// because Go's exec package uses the last occurrence of a given key).
+//
+// Always returning a non-nil slice means cmd.Env is set explicitly,
+// which makes the subprocess environment deterministic regardless of
+// whether extraEnv is empty.
+func (r *realCmdRunner) cmdEnv() []string {
+	base := os.Environ()
+	if len(r.extraEnv) == 0 {
+		return base
+	}
+	return append(base, r.extraEnv...)
+}
+
 func (r *realCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = r.cmdEnv()
+	return cmd.CombinedOutput()
 }
 
 func (r *realCmdRunner) RunOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
-	return exec.CommandContext(ctx, name, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, name, args...)
+	cmd.Env = r.cmdEnv()
+	return cmd.CombinedOutput()
 }
 
 func (r *realCmdRunner) RunProcess(ctx context.Context, dir string, name string, args ...string) error {
@@ -104,6 +148,7 @@ func (r *realCmdRunner) RunProcess(ctx context.Context, dir string, name string,
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = r.cmdEnv()
 	return cmd.Run()
 }
 
@@ -112,7 +157,10 @@ func (r *realCmdRunner) RunProcessWithEnv(ctx context.Context, dir string, extra
 	cmd.Dir = dir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Env = append(os.Environ(), extraEnv...)
+	// Merge the caller-supplied extraEnv on top of the runner's own
+	// configured env so caller overrides win.
+	base := r.cmdEnv()
+	cmd.Env = append(base, extraEnv...)
 	return cmd.Run()
 }
 
@@ -120,9 +168,7 @@ func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reade
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = stdin
-	if len(r.extraEnv) > 0 {
-		cmd.Env = append(os.Environ(), r.extraEnv...)
-	}
+	cmd.Env = r.cmdEnv()
 
 	var stdout bytes.Buffer
 	stderr := newLimitedWriter(maxStderrBytes)
