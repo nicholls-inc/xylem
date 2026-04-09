@@ -227,3 +227,26 @@ func WorktreeSpanAttributes(data WorktreeSpanData) []SpanAttribute {
 		{Key: "xylem.worktree.path", Value: data.Path},
 	}
 }
+
+// RecoveryData holds recovery classification attributes for failed or timed out vessels.
+type RecoveryData struct {
+	Class           string `json:"class,omitempty"`
+	Action          string `json:"action,omitempty"`
+	RetrySuppressed string `json:"retry_suppressed,omitempty"`
+	RetryOutcome    string `json:"retry_outcome,omitempty"`
+	UnlockDimension string `json:"unlock_dimension,omitempty"`
+}
+
+// RecoveryAttributes returns span attributes for recovery classification and routing.
+func RecoveryAttributes(data RecoveryData) []SpanAttribute {
+	if data.Class == "" && data.Action == "" && data.RetrySuppressed == "" && data.RetryOutcome == "" && data.UnlockDimension == "" {
+		return nil
+	}
+	return []SpanAttribute{
+		{Key: "xylem.recovery.class", Value: data.Class},
+		{Key: "xylem.recovery.action", Value: data.Action},
+		{Key: "xylem.recovery.retry_suppressed", Value: data.RetrySuppressed},
+		{Key: "xylem.recovery.retry_outcome", Value: data.RetryOutcome},
+		{Key: "xylem.recovery.unlock_dimension", Value: data.UnlockDimension},
+	}
+}

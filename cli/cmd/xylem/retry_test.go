@@ -9,6 +9,9 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newRetryTestQueue(t *testing.T) *queue.Queue {
@@ -19,6 +22,43 @@ func newRetryTestQueue(t *testing.T) *queue.Queue {
 func newRetryTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 	return &config.Config{StateDir: t.TempDir()}
+}
+
+func TestSmoke_S1_RetryCommandMarksRecoveryArtifactEnqueued(t *testing.T) {
+	q := newRetryTestQueue(t)
+	cfg := newRetryTestConfig(t)
+	now := time.Now().UTC()
+	v := queue.Vessel{
+		ID:        "issue-42",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	}
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateRunning, ""))
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "issue-42",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StateFailed,
+		Error:     "temporary failure from upstream 503",
+		CreatedAt: now.Add(time.Minute),
+	})
+	require.NoError(t, recovery.Save(cfg.StateDir, artifact))
+
+	require.NoError(t, cmdRetry(q, cfg, "issue-42", false))
+
+	loaded, err := recovery.Load(filepath.Join(cfg.StateDir, recovery.RelativePath("issue-42")))
+	require.NoError(t, err)
+	assert.Equal(t, "enqueued", loaded.RetryOutcome)
+
+	retry, err := q.FindByID("issue-42-retry-1")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StatePending, retry.State)
 }
 
 func TestRetryCreatesNewVessel(t *testing.T) {

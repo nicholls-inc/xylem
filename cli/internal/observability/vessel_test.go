@@ -1,6 +1,12 @@
 package observability
 
-import "testing"
+import (
+	"strconv"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
 
 func TestSmoke_S1_VesselSpanAttributesIncludesIDSourceWorkflowRef(t *testing.T) {
 	attrs := VesselSpanAttributes(VesselSpanData{
@@ -210,33 +216,35 @@ func TestPhaseResultAttributesFormatsNegativeDuration(t *testing.T) {
 	}
 }
 
-func TestDrainSpanAttributes_Keys(t *testing.T) {
-	attrs := DrainSpanAttributes(DrainSpanData{
-		Concurrency: 4,
-		Timeout:     "30m",
-	})
-	got := attrMap(attrs)
-
-	if len(attrs) != 2 {
-		t.Fatalf("expected 2 attributes, got %d", len(attrs))
+func TestDrainSpanAttributes_FormatAllFields(t *testing.T) {
+	tests := []struct {
+		name        string
+		concurrency int
+		timeout     string
+	}{
+		{name: "typical values", concurrency: 4, timeout: "30m"},
+		{name: "two digit concurrency", concurrency: 17, timeout: "90s"},
 	}
-	if got["xylem.drain.concurrency"] != "4" {
-		t.Fatalf("xylem.drain.concurrency = %q, want %q", got["xylem.drain.concurrency"], "4")
-	}
-	if got["xylem.drain.timeout"] != "30m" {
-		t.Fatalf("xylem.drain.timeout = %q, want %q", got["xylem.drain.timeout"], "30m")
-	}
-}
 
-func TestDrainSpanAttributes_ConcurrencyFormatted(t *testing.T) {
-	attrs := DrainSpanAttributes(DrainSpanData{
-		Concurrency: 17,
-		Timeout:     "90s",
-	})
-	got := attrMap(attrs)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			attrs := DrainSpanAttributes(DrainSpanData{
+				Concurrency: tt.concurrency,
+				Timeout:     tt.timeout,
+			})
+			got := attrMap(attrs)
 
-	if got["xylem.drain.concurrency"] != "17" {
-		t.Fatalf("xylem.drain.concurrency = %q, want %q", got["xylem.drain.concurrency"], "17")
+			if len(attrs) != 2 {
+				t.Fatalf("expected 2 attributes, got %d", len(attrs))
+			}
+			wantConcurrency := strconv.Itoa(tt.concurrency)
+			if got["xylem.drain.concurrency"] != wantConcurrency {
+				t.Fatalf("xylem.drain.concurrency = %q, want %q", got["xylem.drain.concurrency"], wantConcurrency)
+			}
+			if got["xylem.drain.timeout"] != tt.timeout {
+				t.Fatalf("xylem.drain.timeout = %q, want %q", got["xylem.drain.timeout"], tt.timeout)
+			}
+		})
 	}
 }
 
@@ -261,4 +269,27 @@ func TestDrainHealthAttributesIncludePatterns(t *testing.T) {
 	if got["xylem.drain.unhealthy_patterns"] != "budget_exceeded=2, run_failed=1" {
 		t.Fatalf("xylem.drain.unhealthy_patterns = %q, want joined patterns", got["xylem.drain.unhealthy_patterns"])
 	}
+}
+
+func TestSmoke_S6_RecoveryAttributesIncludeDecisionFields(t *testing.T) {
+	attrs := RecoveryAttributes(RecoveryData{
+		Class:           "spec_gap",
+		Action:          "refine",
+		RetrySuppressed: "true",
+		RetryOutcome:    "suppressed",
+		UnlockDimension: "decision",
+	})
+	got := attrMap(attrs)
+
+	require.Len(t, attrs, 5)
+	assert.Equal(t, "spec_gap", got["xylem.recovery.class"])
+	assert.Equal(t, "refine", got["xylem.recovery.action"])
+	assert.Equal(t, "true", got["xylem.recovery.retry_suppressed"])
+	assert.Equal(t, "suppressed", got["xylem.recovery.retry_outcome"])
+	assert.Equal(t, "decision", got["xylem.recovery.unlock_dimension"])
+}
+
+func TestSmoke_S7_RecoveryAttributesOmitEmptyRecoveryData(t *testing.T) {
+	attrs := RecoveryAttributes(RecoveryData{})
+	assert.Nil(t, attrs)
 }

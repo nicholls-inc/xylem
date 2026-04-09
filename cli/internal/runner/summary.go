@@ -13,6 +13,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
 
@@ -52,8 +53,10 @@ type VesselSummary struct {
 	CostReportPath       string           `json:"cost_report_path,omitempty"`
 	BudgetAlertsPath     string           `json:"budget_alerts_path,omitempty"`
 	EvalReportPath       string           `json:"eval_report_path,omitempty"`
+	FailureReviewPath    string           `json:"failure_review_path,omitempty"`
 	Trace                *TraceArtifacts  `json:"trace,omitempty"`
 	ReviewArtifacts      *ReviewArtifacts `json:"review_artifacts,omitempty"`
+	Recovery             *RecoverySummary `json:"recovery,omitempty"`
 
 	Note string `json:"note"`
 }
@@ -68,6 +71,16 @@ type ReviewArtifacts struct {
 	CostReport       string `json:"cost_report,omitempty"`
 	BudgetAlerts     string `json:"budget_alerts,omitempty"`
 	EvalReport       string `json:"eval_report,omitempty"`
+	FailureReview    string `json:"failure_review,omitempty"`
+}
+
+type RecoverySummary struct {
+	Class           string `json:"class,omitempty"`
+	Action          string `json:"action,omitempty"`
+	FollowUpRoute   string `json:"follow_up_route,omitempty"`
+	RetrySuppressed bool   `json:"retry_suppressed"`
+	RetryOutcome    string `json:"retry_outcome,omitempty"`
+	UnlockDimension string `json:"unlock_dimension,omitempty"`
 }
 
 // PhaseSummary records the outcome of a single phase.
@@ -290,8 +303,26 @@ func evalReportRelativePath(vesselID string) string {
 	return filepath.ToSlash(filepath.Join("phases", vesselID, evalReportFileName))
 }
 
+func failureReviewRelativePath(vesselID string) string {
+	return recovery.RelativePath(vesselID)
+}
+
 func phaseArtifactRelativePath(vesselID, phaseName string) string {
 	return filepath.ToSlash(filepath.Join("phases", vesselID, phaseName+".output"))
+}
+
+func recoverySummaryFromArtifact(artifact *recovery.Artifact) *RecoverySummary {
+	if artifact == nil {
+		return nil
+	}
+	return &RecoverySummary{
+		Class:           string(artifact.RecoveryClass),
+		Action:          string(artifact.RecoveryAction),
+		FollowUpRoute:   artifact.FollowUpRoute,
+		RetrySuppressed: artifact.RetrySuppressed,
+		RetryOutcome:    artifact.RetryOutcome,
+		UnlockDimension: artifact.UnlockDimension,
+	}
 }
 
 // SaveVesselSummary writes a summary to <stateDir>/phases/<vesselID>/summary.json.

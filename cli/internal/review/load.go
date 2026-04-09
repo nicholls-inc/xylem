@@ -12,6 +12,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
@@ -21,6 +22,7 @@ type LoadedRun struct {
 	CostReport   *cost.CostReport
 	BudgetAlerts []cost.BudgetAlert
 	EvalReport   *evaluator.LoopResult
+	Recovery     *recovery.Artifact
 }
 
 func LoadRuns(stateDir string, lookbackRuns int) ([]LoadedRun, int, []string, error) {
@@ -111,6 +113,16 @@ func LoadRuns(stateDir string, lookbackRuns int) ([]LoadedRun, int, []string, er
 			}
 		}
 
+		if recoveryPath := resolveArtifactPath(stateDir, record.summary.FailureReviewPath, reviewArtifactValue(record.summary.ReviewArtifacts, func(a *runner.ReviewArtifacts) string {
+			return a.FailureReview
+		})); recoveryPath != "" {
+			artifact, warning := loadOptionalRecoveryArtifact(recoveryPath)
+			run.Recovery = artifact
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+
 		runs = append(runs, run)
 	}
 
@@ -196,6 +208,14 @@ func loadOptionalEvalReport(path string) (*evaluator.LoopResult, string) {
 	report, err := evaluator.LoadReport(filepath.Dir(path))
 	if err == nil || errors.Is(err, os.ErrNotExist) {
 		return report, ""
+	}
+	return nil, fmt.Sprintf("%s: %v", filepath.Base(path), err)
+}
+
+func loadOptionalRecoveryArtifact(path string) (*recovery.Artifact, string) {
+	artifact, err := recovery.Load(path)
+	if err == nil || errors.Is(err, os.ErrNotExist) {
+		return artifact, ""
 	}
 	return nil, fmt.Sprintf("%s: %v", filepath.Base(path), err)
 }

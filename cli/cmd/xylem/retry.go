@@ -12,6 +12,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 )
 
 func newRetryCmd() *cobra.Command {
@@ -82,6 +83,9 @@ func cmdRetry(q *queue.Queue, cfg *config.Config, id string, fromScratch bool) e
 
 	if _, err := q.Enqueue(newVessel); err != nil {
 		return fmt.Errorf("enqueue retry: %w", err)
+	}
+	if err := recovery.UpdateRetryOutcome(cfg.StateDir, vessel.ID, "enqueued"); err != nil {
+		return fmt.Errorf("record retry outcome: %w", err)
 	}
 	fmt.Printf("Created retry vessel %s (retrying %s)\n", newVessel.ID, vessel.ID)
 	return nil
