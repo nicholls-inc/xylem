@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -203,6 +204,7 @@ phases:
 	got, err := Load(path)
 	require.NoError(t, err)
 	assert.False(t, got.AllowAdditiveProtectedWrites)
+	assert.Equal(t, policy.Delivery, got.Class)
 }
 
 func TestLoadWorkflowAllowAdditiveProtectedWritesParsesTrue(t *testing.T) {
@@ -221,6 +223,7 @@ phases:
 	got, err := Load(path)
 	require.NoError(t, err)
 	assert.True(t, got.AllowAdditiveProtectedWrites)
+	assert.Equal(t, policy.HarnessMaintenance, got.Class)
 }
 
 func TestLoadWorkflowAllowCanonicalProtectedWrites(t *testing.T) {
@@ -263,6 +266,266 @@ phases:
 			got, err := Load(path)
 			require.NoError(t, err)
 			assert.Equal(t, tt.want, got.AllowCanonicalProtectedWrites)
+			if tt.want {
+				assert.Equal(t, policy.HarnessMaintenance, got.Class)
+				return
+			}
+			assert.Equal(t, policy.Delivery, got.Class)
+		})
+	}
+}
+
+func TestLoadWorkflowClassParsesExplicitValue(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+class: ops
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, policy.Ops, got.Class)
+}
+
+func TestSmoke_S4_WorkflowClassDefaultsToDeliveryWhenOmitted(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, policy.Delivery, got.Class)
+	assert.False(t, got.AllowAdditiveProtectedWrites)
+	assert.False(t, got.AllowCanonicalProtectedWrites)
+}
+
+func TestSmoke_S5_LegacyProtectedWriteFlagsPromoteHarnessMaintenance(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, policy.HarnessMaintenance, got.Class)
+	assert.False(t, got.AllowAdditiveProtectedWrites)
+	assert.True(t, got.AllowCanonicalProtectedWrites)
+}
+
+func TestSmoke_S6_ExplicitOpsClassLoadsWithoutLegacyFlags(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+class: ops
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, policy.Ops, got.Class)
+	assert.False(t, got.AllowAdditiveProtectedWrites)
+	assert.False(t, got.AllowCanonicalProtectedWrites)
+}
+
+func TestLoadWorkflowClassRejectsUnknownValue(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+class: runtime
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `"class" is invalid: unknown workflow class "runtime"`)
+}
+
+func TestSmoke_S7_InconsistentClassAndLegacyFlagsReturnStructuredError(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+class: delivery
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `"class" "delivery" conflicts with legacy protected write flags`)
+	assert.Contains(t, err.Error(), "delivery requires both legacy flags to be false")
+}
+
+func TestLoadWorkflowClassRejectsLegacyFlagConflict(t *testing.T) {
+	tests := []struct {
+		name    string
+		yaml    string
+		wantErr string
+	}{
+		{
+			name: "delivery conflicts with true legacy flag",
+			yaml: `name: test-workflow
+class: delivery
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			wantErr: `"class" "delivery" conflicts with legacy protected write flags: delivery requires both legacy flags to be false`,
+		},
+		{
+			name: "harness maintenance conflicts with false legacy flags",
+			yaml: `name: test-workflow
+class: harness-maintenance
+allow_additive_protected_writes: false
+allow_canonical_protected_writes: false
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			wantErr: `"class" "harness-maintenance" conflicts with legacy protected write flags: harness-maintenance requires at least one legacy flag to be true`,
+		},
+		{
+			name: "ops cannot be combined with legacy flags",
+			yaml: `name: test-workflow
+class: ops
+allow_additive_protected_writes: false
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			wantErr: `"class" "ops" conflicts with legacy protected write flags: ops cannot be combined with legacy protected write flags`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+			createPromptFile(t, dir, "prompts/analyze.md")
+
+			path := writeWorkflowFile(t, dir, "test-workflow", tt.yaml)
+			_, err := Load(path)
+			requireErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestLoadWorkflowClassAllowsConsistentLegacyFlags(t *testing.T) {
+	tests := []struct {
+		name          string
+		yaml          string
+		wantClass     policy.Class
+		wantAdditive  bool
+		wantCanonical bool
+	}{
+		{
+			name: "delivery with explicit additive false legacy flag",
+			yaml: `name: test-workflow
+class: delivery
+allow_additive_protected_writes: false
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			wantClass:     policy.Delivery,
+			wantAdditive:  false,
+			wantCanonical: false,
+		},
+		{
+			name: "delivery with both explicit false legacy flags",
+			yaml: `name: test-workflow
+class: delivery
+allow_additive_protected_writes: false
+allow_canonical_protected_writes: false
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			wantClass:     policy.Delivery,
+			wantAdditive:  false,
+			wantCanonical: false,
+		},
+		{
+			name: "harness maintenance with additive legacy flag",
+			yaml: `name: test-workflow
+class: harness-maintenance
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			wantClass:     policy.HarnessMaintenance,
+			wantAdditive:  true,
+			wantCanonical: false,
+		},
+		{
+			name: "harness maintenance with canonical legacy flag",
+			yaml: `name: test-workflow
+class: harness-maintenance
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			wantClass:     policy.HarnessMaintenance,
+			wantAdditive:  false,
+			wantCanonical: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+			createPromptFile(t, dir, "prompts/analyze.md")
+
+			path := writeWorkflowFile(t, dir, "test-workflow", tt.yaml)
+			got, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantClass, got.Class)
+			assert.Equal(t, tt.wantAdditive, got.AllowAdditiveProtectedWrites)
+			assert.Equal(t, tt.wantCanonical, got.AllowCanonicalProtectedWrites)
 		})
 	}
 }
@@ -359,7 +622,7 @@ phases:
 	requireErrorContains(t, err, `live.browser is required`)
 }
 
-func TestLoadWorkflowLiveGateRejectsInvalidJSONPathAndDuration(t *testing.T) {
+func TestLoadWorkflowLiveGateRejectsInvalidCommandAssertDuration(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
 	createPromptFile(t, dir, "prompts/analyze.md")
@@ -377,13 +640,40 @@ phases:
           run: "cat status.json"
           timeout: "not-a-duration"
           expect_json:
-            - path: status
+            - path: $.status
               equals: ok
 `)
 
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `invalid live.command_assert.timeout`)
+}
+
+func TestLoadWorkflowLiveGateRejectsInvalidCommandAssertJSONPath(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      live:
+        mode: command+assert
+        command_assert:
+          run: "cat status.json"
+          timeout: "30s"
+          expect_json:
+            - path: status
+              equals: ok
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `live.command_assert.expect_json[0].path must start with '$'`)
 }
 
 func TestLoad(t *testing.T) {
@@ -426,6 +716,9 @@ phases:
 				if s.Phases[1].MaxTurns != 20 {
 					t.Fatalf("Phases[1].MaxTurns = %d, want 20", s.Phases[1].MaxTurns)
 				}
+				if s.Class != policy.Delivery {
+					t.Fatalf("Class = %q, want %q", s.Class, policy.Delivery)
+				}
 			},
 		},
 		{
@@ -465,6 +758,9 @@ phases:
 				}
 				if !s.AllowCanonicalProtectedWrites {
 					t.Fatal("AllowCanonicalProtectedWrites = false, want true")
+				}
+				if s.Class != policy.HarnessMaintenance {
+					t.Fatalf("Class = %q, want %q", s.Class, policy.HarnessMaintenance)
 				}
 				if s.Phases[0].Gate.Retries != 2 {
 					t.Fatalf("gate retries = %d, want 2", s.Phases[0].Gate.Retries)
@@ -898,6 +1194,7 @@ func TestValidate(t *testing.T) {
 		wf               Workflow
 		prompts          []string // prompt files to create relative to cwd
 		wantErr          string
+		check            func(*testing.T, Workflow)
 	}{
 		{
 			name:             "valid minimal workflow",
@@ -920,6 +1217,37 @@ func TestValidate(t *testing.T) {
 			},
 			prompts: []string{"prompt.md"},
 			wantErr: `"name" is required`,
+		},
+		{
+			name:             "invalid class",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name:  "test",
+				Class: "runtime",
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `"class" is invalid: unknown workflow class "runtime"`,
+		},
+		{
+			name:             "class is normalized",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name:  "test",
+				Class: " delivery ",
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			check: func(t *testing.T, s Workflow) {
+				t.Helper()
+				if s.Class != policy.Delivery {
+					t.Fatalf("Class = %q, want %q", s.Class, policy.Delivery)
+				}
+			},
 		},
 		{
 			name:             "no phases",
@@ -1371,6 +1699,9 @@ func TestValidate(t *testing.T) {
 
 			if err != nil {
 				t.Fatalf("Validate returned unexpected error: %v", err)
+			}
+			if tt.check != nil {
+				tt.check(t, tt.wf)
 			}
 		})
 	}
