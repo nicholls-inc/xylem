@@ -375,9 +375,14 @@ func TestProp_InFlightAccountingMatchesLaunchedWork(t *testing.T) {
 		}
 		defer os.Chdir(oldWd)
 
+		releaseLaunched := make(chan struct{})
 		r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{
 			phaseOutputs: map[string][]byte{
 				"Analyze": []byte("analysis complete"),
+			},
+			runPhaseHook: func(_ string, _ string, _ string, _ ...string) ([]byte, error, bool) {
+				<-releaseLaunched
+				return []byte("analysis complete"), nil, true
 			},
 		})
 		r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
@@ -412,6 +417,7 @@ func TestProp_InFlightAccountingMatchesLaunchedWork(t *testing.T) {
 			t.Fatalf("InFlightCount() = %d, want %d", got, occupied+result.Launched)
 		}
 
+		close(releaseLaunched)
 		close(heldDone)
 		waited := r.Wait()
 		if got := r.InFlightCount(); got != 0 {
