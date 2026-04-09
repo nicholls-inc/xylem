@@ -273,6 +273,33 @@ func (t *trackerStub) Start(duration time.Duration) {
 	}()
 }
 
+type cancellableTrackerStub struct {
+	inFlight atomic.Int32
+	maxSeen  atomic.Int32
+}
+
+func (t *cancellableTrackerStub) Wait() runner.DrainResult {
+	return runner.DrainResult{}
+}
+
+func (t *cancellableTrackerStub) InFlightCount() int {
+	return int(t.inFlight.Load())
+}
+
+func (t *cancellableTrackerStub) Start() {
+	cur := t.inFlight.Add(1)
+	for {
+		old := t.maxSeen.Load()
+		if cur <= old || t.maxSeen.CompareAndSwap(old, cur) {
+			return
+		}
+	}
+}
+
+func (t *cancellableTrackerStub) Cancel() {
+	t.inFlight.Add(-1)
+}
+
 func TestDaemonShutdown(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
@@ -551,6 +578,53 @@ func TestSmoke_S36_DaemonLoopUpgradeWaitsForTrackerIdle(t *testing.T) {
 	launchTime := time.Unix(0, launchedAt.Load())
 	upgradeTime := time.Unix(0, upgradedAt.Load())
 	assert.GreaterOrEqual(t, upgradeTime.Sub(launchTime), 60*time.Millisecond)
+}
+
+func TestSmoke_S39_DaemonAutoUpgradeProceedsAfterCancelledVesselDropsInFlight(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &cancellableTrackerStub{}
+
+	var (
+		drainCalls  atomic.Int32
+		upgradeSeen atomic.Int32
+	)
+	cancelIssued := make(chan struct{})
+
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		if drainCalls.Add(1) == 1 {
+			tracker.Start()
+			go func() {
+				time.Sleep(40 * time.Millisecond)
+				tracker.Cancel()
+				close(cancelIssued)
+			}()
+			return runner.DrainResult{Launched: 1}, nil
+		}
+		return runner.DrainResult{}, nil
+	}
+	upgrade := func() {
+		if tracker.InFlightCount() != 0 {
+			t.Errorf("upgrade fired before cancelled vessel drained: in_flight=%d", tracker.InFlightCount())
+		}
+		upgradeSeen.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 10*time.Millisecond, time.Millisecond)
+	require.NoError(t, err)
+
+	select {
+	case <-cancelIssued:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("timed out waiting for cancelled vessel to drop in-flight count")
+	}
+
+	assert.GreaterOrEqual(t, drainCalls.Load(), int32(2))
+	assert.NotZero(t, upgradeSeen.Load())
+	assert.Zero(t, tracker.InFlightCount())
 }
 
 // TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow verifies the

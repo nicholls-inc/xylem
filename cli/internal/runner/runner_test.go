@@ -204,6 +204,55 @@ func (c *countingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reade
 	return []byte("mock output"), nil
 }
 
+type blockingPhaseCmdRunner struct {
+	mu            sync.Mutex
+	phaseCalls    []string
+	resolveStart  chan struct{}
+	resolveExit   chan struct{}
+	pushStarted   atomic.Int32
+	resolveOnce   sync.Once
+	resolveExitMu sync.Once
+}
+
+func newBlockingPhaseCmdRunner() *blockingPhaseCmdRunner {
+	return &blockingPhaseCmdRunner{
+		resolveStart: make(chan struct{}),
+		resolveExit:  make(chan struct{}),
+	}
+}
+
+func (b *blockingPhaseCmdRunner) RunOutput(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func (b *blockingPhaseCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
+	return nil
+}
+
+func (b *blockingPhaseCmdRunner) RunPhase(ctx context.Context, _ string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	prompt, _ := io.ReadAll(stdin)
+	promptText := string(prompt)
+
+	b.mu.Lock()
+	b.phaseCalls = append(b.phaseCalls, promptText)
+	b.mu.Unlock()
+
+	switch {
+	case strings.Contains(promptText, "Analyze conflicts"):
+		return []byte("analysis complete"), nil
+	case strings.Contains(promptText, "Resolve conflicts"):
+		b.resolveOnce.Do(func() { close(b.resolveStart) })
+		<-ctx.Done()
+		b.resolveExitMu.Do(func() { close(b.resolveExit) })
+		return nil, ctx.Err()
+	case strings.Contains(promptText, "Push branch"):
+		b.pushStarted.Add(1)
+		return []byte("push complete"), nil
+	default:
+		return []byte("mock output"), nil
+	}
+}
+
 type mockWorktree struct {
 	mu           sync.Mutex
 	createErr    error
@@ -1569,6 +1618,89 @@ func TestDrainBudgetRespectsContextCancellation(t *testing.T) {
 	if elapsed > 500*time.Millisecond {
 		t.Errorf("Drain() took %s, expected fast cancel-driven return", elapsed)
 	}
+}
+
+func assertCancelledVesselStopsRunningPhaseAndDropsInFlight(t *testing.T) {
+	t.Helper()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(181, "resolve-conflicts")
+	vessel.Meta["issue_title"] = "Resolve PR conflicts"
+	vessel.Meta["issue_body"] = "Merge origin/main into the PR branch."
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "resolve-conflicts", []testPhase{
+		{name: "analyze", promptContent: "Analyze conflicts", maxTurns: 5},
+		{name: "resolve", promptContent: "Resolve conflicts", maxTurns: 5},
+		{name: "push", promptContent: "Push branch", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := newBlockingPhaseCmdRunner()
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldWriter)
+
+	drainResult, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, drainResult.Launched)
+
+	select {
+	case <-cmdRunner.resolveStart:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resolve phase to start")
+	}
+
+	require.NoError(t, q.Cancel(vessel.ID))
+
+	select {
+	case <-cmdRunner.resolveExit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for resolve phase to exit after cancel")
+	}
+
+	waitDone := make(chan DrainResult, 1)
+	go func() {
+		waitDone <- r.Wait()
+	}()
+
+	var waited DrainResult
+	select {
+	case waited = <-waitDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for runner.Wait() after cancel")
+	}
+
+	assert.Equal(t, 0, r.InFlightCount())
+	assert.Equal(t, 1, waited.Skipped)
+	assert.Zero(t, cmdRunner.pushStarted.Load())
+	assert.NotContains(t, logBuf.String(), "invalid state transition")
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, queue.StateCancelled, updated.State)
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, "cancelled", summary.State)
+	assert.Equal(t, vessel.ID, summary.VesselID)
+}
+
+func TestDrainCancelledVesselStopsRunningPhaseAndDropsInFlight(t *testing.T) {
+	assertCancelledVesselStopsRunningPhaseAndDropsInFlight(t)
+}
+
+func TestSmoke_S38_CancelledVesselStopsRunningPhaseAndDropsInFlight(t *testing.T) {
+	assertCancelledVesselStopsRunningPhaseAndDropsInFlight(t)
 }
 
 func TestSmoke_S33_DrainReturnsBeforeInFlightWorkCompletes(t *testing.T) {

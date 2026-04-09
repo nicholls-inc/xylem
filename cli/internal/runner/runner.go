@@ -34,6 +34,10 @@ import (
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
 
+var errVesselCancelled = errors.New("vessel cancelled")
+
+const vesselCancelPollInterval = 25 * time.Millisecond
+
 // CommandRunner abstracts subprocess execution for testing.
 type CommandRunner interface {
 	RunOutput(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -214,7 +218,9 @@ drainLoop:
 				vesselTimeout = timeout // fallback to global
 			}
 
-			vesselCtx, cancel := context.WithTimeout(vesselBaseCtx, vesselTimeout)
+			watchedCtx, stopWatching := r.watchVesselCancellation(vesselBaseCtx, j.ID)
+			defer stopWatching(nil)
+			vesselCtx, cancel := context.WithTimeout(watchedCtx, vesselTimeout)
 			defer cancel()
 
 			outcome := r.runVessel(vesselCtx, j)
@@ -356,6 +362,8 @@ func (r *Runner) recordOutcome(outcome string) {
 		r.result.Failed++
 	case "waiting":
 		r.result.Waiting++
+	case "cancelled":
+		r.result.Skipped++
 	default:
 		r.result.Skipped++
 	}
@@ -531,6 +539,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 	// Execute phases sequentially (no explicit dependencies)
 	var phaseResults []reporter.PhaseResult
 	for i := vessel.CurrentPhase; i < len(sk.Phases); i++ {
+		if r.vesselCancelled(ctx, vessel.ID) {
+			return r.cancelVessel(vessel, worktreePath, vrs, claims)
+		}
 		p := sk.Phases[i]
 		gateResult := ""
 
@@ -541,6 +552,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 		// Gate retry loop: may re-run the same phase with gate output appended
 		for {
+			if r.vesselCancelled(ctx, vessel.ID) {
+				return r.cancelVessel(vessel, worktreePath, vrs, claims)
+			}
 			log.Printf("%sphase %q starting (%d/%d)", vesselLabel(vessel), p.Name, i+1, len(sk.Phases))
 			phaseStart := r.runtimeNow()
 
@@ -710,6 +724,11 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
 			}
 
+			if r.vesselCancelled(ctx, vessel.ID) {
+				finishCurrentPhaseSpan(context.Canceled)
+				return r.cancelVessel(vessel, worktreePath, vrs, claims)
+			}
+
 			// Shared: Write phase output
 			outputPath := filepath.Join(phasesDir, p.Name+".output")
 			if wErr := os.WriteFile(outputPath, output, 0o644); wErr != nil {
@@ -784,6 +803,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			}
 			vessel.PhaseOutputs[p.Name] = outputPath
 			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+				if r.cancelledTransition(vessel.ID, updateErr) {
+					finishCurrentPhaseSpan(context.Canceled)
+					return r.cancelVessel(vessel, worktreePath, vrs, claims)
+				}
 				log.Printf("warn: persist phase progress for %s: %v", vessel.ID, updateErr)
 			}
 
@@ -807,6 +830,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, ""))
 				log.Printf("%sphase %q triggered no-op; completing workflow early", vesselLabel(vessel), p.Name)
 				finishCurrentPhaseSpan(nil)
+				if r.vesselCancelled(ctx, vessel.ID) {
+					return r.cancelVessel(vessel, worktreePath, vrs, claims)
+				}
 				return r.completeVessel(ctx, vessel, worktreePath, phaseResults, vrs, claims)
 			}
 
@@ -820,6 +846,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			switch p.Gate.Type {
 			case "command", "live":
 				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, td, worktreePath, retryAttempt)
+				if r.vesselCancelled(ctx, vessel.ID) {
+					finishCurrentPhaseSpan(context.Canceled)
+					return r.cancelVessel(vessel, worktreePath, vrs, claims)
+				}
 				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 				if gateErr != nil {
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
@@ -868,6 +898,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				vessel.GateRetries--
 				log.Printf("%sgate failed for phase %q, retries remaining=%d", vesselLabel(vessel), p.Name, vessel.GateRetries)
 				if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+					if r.cancelledTransition(vessel.ID, updateErr) {
+						finishCurrentPhaseSpan(context.Canceled)
+						return r.cancelVessel(vessel, worktreePath, vrs, claims)
+					}
 					log.Printf("warn: persist gate retries for %s: %v", vessel.ID, updateErr)
 				}
 
@@ -875,6 +909,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				gateResult = fmt.Sprintf("The following gate check failed after the previous phase. Fix the issues and try again:\n\n%s", gateOut)
 
 				if err := r.runtimeSleep(ctx, retryDelay); err != nil {
+					if r.vesselCancelled(ctx, vessel.ID) {
+						finishCurrentPhaseSpan(context.Canceled)
+						return r.cancelVessel(vessel, worktreePath, vrs, claims)
+					}
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error()))
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
@@ -902,6 +940,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				vessel.CurrentPhase = i + 1
 				vessel.State = queue.StateWaiting
 				if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+					if r.cancelledTransition(vessel.ID, updateErr) {
+						finishCurrentPhaseSpan(context.Canceled)
+						return r.cancelVessel(vessel, worktreePath, vrs, claims)
+					}
 					log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
 					finishCurrentPhaseSpan(updateErr)
 					return "failed"
@@ -931,6 +973,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		vessel.GateRetries = 0
 		if prevRetries != 0 {
 			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+				if r.cancelledTransition(vessel.ID, updateErr) {
+					return r.cancelVessel(vessel, worktreePath, vrs, claims)
+				}
 				log.Printf("warn: persist gate retry reset for %s: %v", vessel.ID, updateErr)
 			}
 		}
@@ -938,6 +983,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 	// All phases complete
 	log.Printf("%scompleted all phases", vesselLabel(vessel))
+	if r.vesselCancelled(ctx, vessel.ID) {
+		return r.cancelVessel(vessel, worktreePath, vrs, claims)
+	}
 	if err := src.OnComplete(ctx, vessel); err != nil {
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
@@ -949,6 +997,9 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	prompt := vessel.Prompt
 	if vessel.Ref != "" {
 		prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
+	}
+	if r.vesselCancelled(ctx, vessel.ID) {
+		return r.cancelVessel(vessel, worktreePath, vrs, nil)
 	}
 
 	cmd, args := buildPromptOnlyCmdArgs(r.Config, prompt)
@@ -965,6 +1016,9 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	}
 
 	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
+	if r.vesselCancelled(ctx, vessel.ID) {
+		return r.cancelVessel(vessel, worktreePath, vrs, nil)
+	}
 	if runErr != nil {
 		r.failVessel(vessel.ID, runErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
@@ -995,6 +1049,9 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		}
 	}
 
+	if r.vesselCancelled(ctx, vessel.ID) {
+		return r.cancelVessel(vessel, worktreePath, vrs, nil)
+	}
 	if err := src.OnComplete(ctx, vessel); err != nil {
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
@@ -1005,6 +1062,9 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, src source.Source, vrs *vesselRunState, handler BuiltinWorkflowHandler) string {
 	startedAt := r.runtimeNow()
 	if err := handler(ctx, vessel); err != nil {
+		if r.vesselCancelled(ctx, vessel.ID) {
+			return r.cancelVessel(vessel, "", vrs, nil)
+		}
 		duration := r.runtimeSince(startedAt)
 		if vrs != nil {
 			vrs.addPhase(PhaseSummary{
@@ -1022,6 +1082,9 @@ func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, sr
 		return "failed"
 	}
 
+	if r.vesselCancelled(ctx, vessel.ID) {
+		return r.cancelVessel(vessel, "", vrs, nil)
+	}
 	if vrs != nil {
 		vrs.addPhase(PhaseSummary{
 			Name:       vessel.Workflow,
@@ -1029,6 +1092,9 @@ func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, sr
 			DurationMS: r.runtimeSince(startedAt).Milliseconds(),
 			Status:     "completed",
 		})
+	}
+	if r.vesselCancelled(ctx, vessel.ID) {
+		return r.cancelVessel(vessel, "", vrs, nil)
 	}
 	if err := src.OnComplete(ctx, vessel); err != nil {
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
@@ -1055,6 +1121,9 @@ func (r *Runner) ensureWorktree(ctx context.Context, vessel *queue.Vessel, src s
 			worktreePath = recreated
 			vessel.WorktreePath = worktreePath
 			if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
+				if r.cancelledTransition(vessel.ID, updateErr) {
+					return "", false
+				}
 				log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
 			}
 		}
@@ -1072,6 +1141,9 @@ func (r *Runner) ensureWorktree(ctx context.Context, vessel *queue.Vessel, src s
 	}
 	vessel.WorktreePath = created
 	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
+		if r.cancelledTransition(vessel.ID, updateErr) {
+			return "", false
+		}
 		log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
 	}
 	return created, true
@@ -1118,8 +1190,80 @@ func (r *Runner) removeWorktree(worktreePath, vesselID string) {
 	}
 }
 
+func (r *Runner) watchVesselCancellation(parent context.Context, vesselID string) (context.Context, context.CancelCauseFunc) {
+	ctx, cancel := context.WithCancelCause(parent)
+	go func() {
+		ticker := time.NewTicker(vesselCancelPollInterval)
+		defer ticker.Stop()
+		for {
+			cancelled, err := r.isVesselCancelled(vesselID)
+			if err != nil {
+				log.Printf("warn: inspect cancel state for %s: %v", vesselID, err)
+			} else if cancelled {
+				cancel(errVesselCancelled)
+				return
+			}
+
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+		}
+	}()
+	return ctx, cancel
+}
+
+func (r *Runner) isVesselCancelled(vesselID string) (bool, error) {
+	vessel, err := r.Queue.FindByID(vesselID)
+	if err != nil {
+		return false, fmt.Errorf("find vessel %s: %w", vesselID, err)
+	}
+	return vessel != nil && vessel.State == queue.StateCancelled, nil
+}
+
+func (r *Runner) vesselCancelled(ctx context.Context, vesselID string) bool {
+	if errors.Is(context.Cause(ctx), errVesselCancelled) {
+		return true
+	}
+	cancelled, err := r.isVesselCancelled(vesselID)
+	if err != nil {
+		log.Printf("warn: inspect cancel state for %s: %v", vesselID, err)
+		return false
+	}
+	return cancelled
+}
+
+func (r *Runner) cancelledTransition(vesselID string, err error) bool {
+	if err == nil || !errors.Is(err, queue.ErrInvalidTransition) {
+		return false
+	}
+	cancelled, findErr := r.isVesselCancelled(vesselID)
+	if findErr != nil {
+		log.Printf("warn: inspect cancel state for %s: %v", vesselID, findErr)
+		return false
+	}
+	return cancelled
+}
+
+func (r *Runner) cancelVessel(vessel queue.Vessel, worktreePath string, vrs *vesselRunState, claims []evidence.Claim) string {
+	current := vessel
+	if latest, err := r.Queue.FindByID(vessel.ID); err != nil {
+		log.Printf("warn: inspect cancelled vessel %s: %v", vessel.ID, err)
+	} else if latest != nil {
+		current = *latest
+	}
+	log.Printf("%svessel cancelled; stopping execution", vesselLabel(current))
+	r.persistRunArtifacts(current, string(queue.StateCancelled), vrs, claims, r.runtimeNow())
+	r.removeWorktree(worktreePath, vessel.ID)
+	return "cancelled"
+}
+
 func (r *Runner) failVessel(id string, errMsg string) {
 	if updateErr := r.Queue.Update(id, queue.StateFailed, errMsg); updateErr != nil {
+		if r.cancelledTransition(id, updateErr) {
+			return
+		}
 		log.Printf("warn: failed to update vessel %s state: %v", id, updateErr)
 	}
 }
@@ -1133,6 +1277,9 @@ func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
 	vessel.Error = errMsg
 	vessel.EndedAt = &now
 	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
+		if r.cancelledTransition(vessel.ID, updateErr) {
+			return
+		}
 		log.Printf("warn: failed to persist vessel %s state: %v", vessel.ID, updateErr)
 		r.failVessel(vessel.ID, errMsg)
 	}
@@ -1140,6 +1287,9 @@ func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
 
 func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktreePath string, phaseResults []reporter.PhaseResult, vrs *vesselRunState, claims []evidence.Claim) string {
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
+		if r.cancelledTransition(vessel.ID, updateErr) {
+			return r.cancelVessel(vessel, worktreePath, vrs, claims)
+		}
 		log.Printf("warn: failed to update vessel %s state: %v", vessel.ID, updateErr)
 	}
 
@@ -1319,6 +1469,7 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 		waveFailed := false
 		waveWaiting := false
 		waveNoOp := false
+		waveCancelled := false
 		for _, res := range results {
 			p := wf.Phases[res.phaseIdx]
 			result := res.result
@@ -1344,6 +1495,8 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 				waveFailed = true
 			case "waiting":
 				waveWaiting = true
+			case "cancelled":
+				waveCancelled = true
 			}
 
 			if result.status == "completed" || result.status == "no-op" {
@@ -1362,11 +1515,25 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 		if waveFailed {
 			return "failed"
 		}
+		if waveCancelled {
+			var completedClaims []evidence.Claim
+			if claims != nil {
+				completedClaims = *claims
+			}
+			return r.cancelVessel(vessel, worktreePath, vrs, completedClaims)
+		}
 		if waveWaiting {
 			return "waiting"
 		}
 		if waveNoOp {
 			log.Printf("%sphase triggered no-op; completing workflow early", vesselLabel(vessel))
+			if r.vesselCancelled(ctx, vessel.ID) {
+				var completedClaims []evidence.Claim
+				if claims != nil {
+					completedClaims = *claims
+				}
+				return r.cancelVessel(vessel, worktreePath, vrs, completedClaims)
+			}
 			if err := src.OnComplete(ctx, vessel); err != nil {
 				log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 			}
@@ -1395,6 +1562,13 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 
 	// All waves complete.
 	log.Printf("%scompleted all phases (orchestrated, %d waves)", vesselLabel(vessel), len(graph.waves))
+	if r.vesselCancelled(ctx, vessel.ID) {
+		var completedClaims []evidence.Claim
+		if claims != nil {
+			completedClaims = *claims
+		}
+		return r.cancelVessel(vessel, worktreePath, vrs, completedClaims)
+	}
 	if err := src.OnComplete(ctx, vessel); err != nil {
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
@@ -1408,7 +1582,7 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 // singlePhaseResult holds the outcome of executing one phase including its gate.
 type singlePhaseResult struct {
 	output        string
-	status        string // "completed", "no-op", "failed", "waiting"
+	status        string // "completed", "no-op", "failed", "waiting", "cancelled"
 	duration      time.Duration
 	gateOut       string
 	phaseSummary  PhaseSummary
@@ -1436,6 +1610,9 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 	srcCfg := r.sourceConfigFromMeta(vessel)
 
 	for {
+		if r.vesselCancelled(ctx, vessel.ID) {
+			return singlePhaseResult{status: "cancelled"}
+		}
 		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
 		phaseStart := r.runtimeNow()
 
@@ -1601,6 +1778,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
 		}
 
+		if r.vesselCancelled(ctx, vessel.ID) {
+			finishCurrentPhaseSpan(context.Canceled)
+			return singlePhaseResult{status: "cancelled", duration: r.runtimeSince(phaseStart)}
+		}
+
 		// Write output file.
 		outputPath := filepath.Join(phasesDir, p.Name+".output")
 		if wErr := os.WriteFile(outputPath, output, 0o644); wErr != nil {
@@ -1711,6 +1893,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		switch p.Gate.Type {
 		case "command", "live":
 			gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, td, worktreePath, retryAttempt)
+			if r.vesselCancelled(ctx, vessel.ID) {
+				finishCurrentPhaseSpan(context.Canceled)
+				return singlePhaseResult{status: "cancelled", duration: phaseDuration}
+			}
 			gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 			if gateErr != nil {
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
@@ -1768,6 +1954,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			log.Printf("%sgate failed for phase %q, retries remaining=%d", vesselLabel(vessel), p.Name, gateRetries)
 			gateResult = fmt.Sprintf("The following gate check failed after the previous phase. Fix the issues and try again:\n\n%s", gateOut)
 			if err := r.runtimeSleep(ctx, retryDelay); err != nil {
+				if r.vesselCancelled(ctx, vessel.ID) {
+					finishCurrentPhaseSpan(context.Canceled)
+					return singlePhaseResult{status: "cancelled", duration: phaseDuration}
+				}
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
 				if failErr := src.OnFail(ctx, vessel); failErr != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
@@ -1798,6 +1988,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			vessel.State = queue.StateWaiting
 			vessel.CurrentPhase = phaseIdx + 1
 			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
+				if r.cancelledTransition(vessel.ID, updateErr) {
+					finishCurrentPhaseSpan(context.Canceled)
+					return singlePhaseResult{status: "cancelled", duration: r.runtimeSince(phaseStart)}
+				}
 				log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
 				finishCurrentPhaseSpan(updateErr)
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
