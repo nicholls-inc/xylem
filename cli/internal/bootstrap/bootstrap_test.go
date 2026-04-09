@@ -24,11 +24,27 @@ func setupRepo(t *testing.T, files []string, dirs []string) string {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			t.Fatalf("mkdir %q: %v", dir, err)
 		}
-		if err := os.WriteFile(p, []byte("// placeholder"), 0o644); err != nil {
+		if err := os.WriteFile(p, fixtureFileContent(f), 0o644); err != nil {
 			t.Fatalf("write %q: %v", p, err)
 		}
 	}
 	return root
+}
+
+func fixtureFileContent(path string) []byte {
+	base := filepath.Base(path)
+	switch {
+	case strings.HasSuffix(path, "main.go"):
+		return []byte("package main\nfunc main() {}\n")
+	case strings.HasSuffix(path, ".go"):
+		return []byte("package fixture\n")
+	case base == "go.mod":
+		return []byte("module example.com/test\n")
+	case base == "package.json":
+		return []byte("{\"name\":\"fixture\"}\n")
+	default:
+		return []byte("// placeholder")
+	}
 }
 
 func TestDetectLanguages(t *testing.T) {
@@ -208,6 +224,35 @@ func TestDetectFrameworks(t *testing.T) {
 	}
 }
 
+func TestDetectFrameworksFindsNestedGoModDependencies(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "cli", "go.mod")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	content := "module example.com/test\n\nrequire github.com/spf13/cobra v1.10.2\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	frameworks := DetectFrameworks(root)
+	names := make(map[string]Framework, len(frameworks))
+	for _, framework := range frameworks {
+		names[framework.Name] = framework
+	}
+
+	if _, ok := names["Go Modules"]; !ok {
+		t.Fatalf("expected Go Modules in %v", frameworks)
+	}
+	cobra, ok := names["Cobra"]
+	if !ok {
+		t.Fatalf("expected Cobra in %v", frameworks)
+	}
+	if !strings.Contains(strings.Join(cobra.Indicators, ","), "cli/go.mod") {
+		t.Fatalf("expected Cobra indicators to mention cli/go.mod, got %v", cobra.Indicators)
+	}
+}
+
 func TestDetectBuildTools(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -286,6 +331,22 @@ func TestDetectBuildToolsNoDuplicates(t *testing.T) {
 	}
 }
 
+func TestDetectBuildToolsFindsNestedGoMod(t *testing.T) {
+	root := setupRepo(t, []string{"cli/go.mod"}, nil)
+	tools := DetectBuildTools(root)
+
+	for _, tool := range tools {
+		if tool.Name == "Go" {
+			if tool.ConfigFile != "cli/go.mod" {
+				t.Fatalf("Go config file = %q, want cli/go.mod", tool.ConfigFile)
+			}
+			return
+		}
+	}
+
+	t.Fatalf("expected Go build tool in %v", tools)
+}
+
 func TestDiscoverEntryPoints(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -361,6 +422,29 @@ func TestDiscoverEntryPointsExists(t *testing.T) {
 			t.Fatalf("expected no error for entry point %q, got %q", ep.Name, ep.Error)
 		}
 	}
+}
+
+func TestDiscoverEntryPointsFindsNestedGoMainPackage(t *testing.T) {
+	root := t.TempDir()
+	entryFile := filepath.Join(root, "cli", "cmd", "xylem", "main.go")
+	if err := os.MkdirAll(filepath.Dir(entryFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(entryFile, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	entryPoints := DiscoverEntryPoints(root)
+	for _, entryPoint := range entryPoints {
+		if entryPoint.Path == "cli/cmd/xylem" {
+			if entryPoint.Command != "go run ./cli/cmd/xylem" {
+				t.Fatalf("command = %q, want go run ./cli/cmd/xylem", entryPoint.Command)
+			}
+			return
+		}
+	}
+
+	t.Fatalf("expected cli/cmd/xylem entry point in %v", entryPoints)
 }
 
 func TestDetectTechStack(t *testing.T) {
@@ -1250,6 +1334,62 @@ func TestBootstrapIntegration(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "feature-list.json")); err != nil {
 		t.Fatalf("feature-list.json not created: %v", err)
 	}
+}
+
+func TestAuditLegibilityFindsNestedDependencyManifest(t *testing.T) {
+	root := setupRepo(t, []string{"README.md", "CLAUDE.md", "cli/go.mod"}, nil)
+
+	profile, err := AnalyzeRepo(root)
+	if err != nil {
+		t.Fatalf("AnalyzeRepo: %v", err)
+	}
+
+	report, err := AuditLegibility(root, profile)
+	if err != nil {
+		t.Fatalf("AuditLegibility: %v", err)
+	}
+
+	for _, ds := range report.Dimensions {
+		if ds.Dimension.Name != "Bootstrap Self-Sufficiency" {
+			continue
+		}
+		for _, gap := range ds.Gaps {
+			if gap == "no dependency manifest found" {
+				t.Fatalf("unexpected dependency-manifest gap for nested go.mod: %v", ds.Gaps)
+			}
+		}
+		return
+	}
+
+	t.Fatal("missing Bootstrap Self-Sufficiency dimension")
+}
+
+func TestAuditLegibilityFindsNestedCodeDirectories(t *testing.T) {
+	root := setupRepo(t, []string{"docs/architecture.md", "cli/cmd/xylem/main.go"}, []string{"cli/internal"})
+
+	profile, err := AnalyzeRepo(root)
+	if err != nil {
+		t.Fatalf("AnalyzeRepo: %v", err)
+	}
+
+	report, err := AuditLegibility(root, profile)
+	if err != nil {
+		t.Fatalf("AuditLegibility: %v", err)
+	}
+
+	for _, ds := range report.Dimensions {
+		if ds.Dimension.Name != "Codebase Map" {
+			continue
+		}
+		for _, gap := range ds.Gaps {
+			if gap == "no organized directory structure (src/, lib/, internal/, pkg/, cmd/)" {
+				t.Fatalf("unexpected organized-directory gap for nested cmd/internal: %v", ds.Gaps)
+			}
+		}
+		return
+	}
+
+	t.Fatal("missing Codebase Map dimension")
 }
 
 func TestDetectConventionFiles(t *testing.T) {

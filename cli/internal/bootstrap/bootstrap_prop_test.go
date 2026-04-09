@@ -231,6 +231,53 @@ func TestPropClampScoreIdempotent(t *testing.T) {
 	})
 }
 
+func TestPropDiscoverEntryPointsReturnsRelativeGoPaths(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		root := propTempDir(t)
+		depth := rapid.IntRange(0, 4).Draw(t, "depth")
+
+		parts := make([]string, 0, depth)
+		for i := 0; i < depth; i++ {
+			parts = append(parts, rapid.StringMatching(`[a-z]{1,8}`).Draw(t, "part"))
+		}
+
+		relDir := "."
+		if len(parts) > 0 {
+			relDir = filepath.Join(parts...)
+		}
+
+		mainFile := filepath.Join(root, relDir, "main.go")
+		if err := os.MkdirAll(filepath.Dir(mainFile), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(mainFile, []byte("package main\nfunc main() {}\n"), 0o644); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+
+		entryPoints := DiscoverEntryPoints(root)
+		wantPath := repoRel(relDir)
+		wantCommand := goRunCommand(wantPath)
+
+		found := false
+		for _, entryPoint := range entryPoints {
+			if entryPoint.Path != wantPath {
+				continue
+			}
+			found = true
+			if filepath.IsAbs(entryPoint.Path) {
+				t.Fatalf("entry point path should be relative: %q", entryPoint.Path)
+			}
+			if entryPoint.Command != wantCommand {
+				t.Fatalf("entry point command = %q, want %q", entryPoint.Command, wantCommand)
+			}
+		}
+
+		if !found {
+			t.Fatalf("expected entry point path %q in %v", wantPath, entryPoints)
+		}
+	})
+}
+
 func TestPropDetectedLanguagesMatchExtensions(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		extOptions := []string{".go", ".py", ".js", ".ts", ".rs", ".java", ".rb"}
