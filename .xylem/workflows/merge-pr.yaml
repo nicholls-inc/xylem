@@ -8,4 +8,11 @@ phases:
       match: XYLEM_NOOP
   - name: merge
     type: command
-    run: "gh pr merge {{.Issue.Number}} --repo nicholls-inc/xylem --squash --delete-branch --admin"
+    # Use --auto so GitHub queues the merge for when required checks pass and
+    # review requirements are met, rather than failing immediately with
+    # "Pull request is not mergeable: the merge commit cannot be cleanly
+    # created" when checks are still pending. The previous --admin flag
+    # attempted to bypass protection but hit the same mergeability gate when
+    # a PR was behind main or had pending CI, producing exit status 1 and
+    # blocking further merge-pr vessels. --auto correctly waits.
+    run: "gh pr merge {{.Issue.Number}} --repo nicholls-inc/xylem --squash --delete-branch --auto"
