@@ -228,7 +228,20 @@ func retryGitCmd(ctx context.Context, runner CommandRunner, maxAttempts int, arg
 		}
 		lastErr = err
 		if attempt < maxAttempts && isRetryableGitError(err) {
-			backoff := time.Duration(1<<(attempt-1)) * time.Second
+			backoff := func() time.Duration {
+				const maxDuration = time.Duration(1<<63 - 1)
+				if attempt <= 1 {
+					return time.Second
+				}
+				delay := time.Second
+				for i := 1; i < attempt; i++ {
+					if delay >= maxDuration/2 {
+						return maxDuration
+					}
+					delay = delay * 2
+				}
+				return delay
+			}()
 			log.Printf("worktree: retrying git %s (attempt %d/%d after %v): %v",
 				args[0], attempt, maxAttempts, backoff, err)
 			if err := dtu.RuntimeSleep(ctx, backoff); err != nil {

@@ -1,6 +1,7 @@
 package recovery
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -348,6 +349,23 @@ func TestSmoke_S10_NextRetryVesselPreservesRecoveryLineageMetadata(t *testing.T)
 	assert.Equal(t, artifact.FailureFingerprint, retry.Meta[MetaFailureFingerprint])
 	assert.NotEmpty(t, retry.Meta[MetaRemediationFingerprint])
 	assert.Equal(t, "updated title", retry.Meta["issue_title"])
+}
+
+func TestRetryIDFallsBackWhenQueueListFails(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "queue.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("{\"id\":\"issue-42-retry-1\",\"state\":\"pending\"}\nnot-json\n"), 0o644))
+
+	id := RetryID("issue-42", queue.New(path))
+
+	assert.Regexp(t, `^issue-42-retry-fallback-[0-9a-f]{8}$`, id)
+}
+
+func TestRetryAfterForSaturatesAtMaxDuration(t *testing.T) {
+	const maxDuration = time.Duration(1<<63 - 1)
+
+	createdAt := time.Date(2026, time.April, 9, 18, 11, 0, 0, time.UTC)
+
+	assert.Equal(t, createdAt.Add(maxDuration).UTC(), retryAfterFor(createdAt, 63))
 }
 
 func TestSaveRejectsUnsafeVesselID(t *testing.T) {

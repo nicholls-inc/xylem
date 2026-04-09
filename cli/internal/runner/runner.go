@@ -3625,7 +3625,20 @@ func (r *Runner) runPhaseWithRateLimitRetry(
 		if attempt == rateLimitMaxRetries {
 			return output, err
 		}
-		backoff := rateLimitBaseBackoff * time.Duration(1<<uint(attempt))
+		backoff := func() time.Duration {
+			const maxBackoff = time.Duration(1<<63 - 1)
+			if attempt <= 0 {
+				return rateLimitBaseBackoff
+			}
+			delay := rateLimitBaseBackoff
+			for i := 0; i < attempt; i++ {
+				if delay >= maxBackoff/2 {
+					return maxBackoff
+				}
+				delay = delay * 2
+			}
+			return delay
+		}()
 		log.Printf("rate limit error (attempt %d/%d), retrying after %v: %v",
 			attempt+1, rateLimitMaxRetries+1, backoff, err)
 		if sleepErr := r.runtimeSleep(ctx, backoff); sleepErr != nil {

@@ -345,7 +345,11 @@ func RetryID(originalID string, q *queue.Queue) string {
 	if q == nil {
 		return originalID + "-retry-1"
 	}
-	vessels, _ := q.List()
+	vessels, err := q.List()
+	if err != nil {
+		sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", originalID, time.Now().UTC().UnixNano())))
+		return fmt.Sprintf("%s-retry-fallback-%x", originalID, sum[:4])
+	}
 	maxRetry := 0
 	prefix := originalID + "-retry-"
 	for _, vessel := range vessels {
@@ -440,8 +444,17 @@ func containsAny(text string, substrings ...string) bool {
 }
 
 func retryAfterFor(createdAt time.Time, retryCount int) time.Time {
-	backoffMultiplier := 1 << max(retryCount, 0)
-	return createdAt.Add(time.Duration(backoffMultiplier) * DefaultRetryCooldown).UTC()
+	const maxDuration = time.Duration(1<<63 - 1)
+
+	delay := DefaultRetryCooldown
+	for i := 0; i < max(retryCount, 0); i++ {
+		if delay >= maxDuration/2 {
+			delay = maxDuration
+			break
+		}
+		delay *= 2
+	}
+	return createdAt.Add(delay).UTC()
 }
 
 func computeFailureFingerprint(input Input) string {
