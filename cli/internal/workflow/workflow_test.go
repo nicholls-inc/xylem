@@ -1236,7 +1236,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
-			wantErr: `workflow class "wildcard" is invalid`,
+			wantErr: `"class" is invalid: unknown workflow class "wildcard"`,
 		},
 		{
 			name:             "empty name",

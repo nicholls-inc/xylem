@@ -36,7 +36,6 @@ type Workflow struct {
 
 type workflowYAML struct {
 	Name                          string  `yaml:"name"`
-	Class                         Class   `yaml:"class,omitempty"`
 	Description                   string  `yaml:"description,omitempty"`
 	Class                         *string `yaml:"class,omitempty"`
 	LLM                           *string `yaml:"llm,omitempty"`
@@ -47,12 +46,12 @@ type workflowYAML struct {
 }
 
 // Class identifies the policy class a workflow belongs to.
-type Class string
+type Class = policy.Class
 
 const (
-	ClassDelivery           Class = "delivery"
-	ClassHarnessMaintenance Class = "harness-maintenance"
-	ClassOps                Class = "ops"
+	ClassDelivery           = policy.Delivery
+	ClassHarnessMaintenance = policy.HarnessMaintenance
+	ClassOps                = policy.Ops
 )
 
 // Phase represents a single step in a workflow's execution pipeline.
@@ -219,10 +218,6 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 
 	if len(s.Phases) == 0 {
 		return fmt.Errorf(`"phases" is required`)
-	}
-
-	if err := validateClass(s.Class); err != nil {
-		return err
 	}
 
 	if err := validateLLM(s.LLM, "workflow"); err != nil {
@@ -449,7 +444,7 @@ func validateNoOp(phaseName string, n *NoOp) error {
 	return nil
 }
 
-func validateClass(class Class) error {
+func validateClass(class policy.Class) error {
 	switch class {
 	case "", ClassDelivery, ClassHarnessMaintenance, ClassOps:
 		return nil

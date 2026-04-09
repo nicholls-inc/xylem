@@ -99,8 +99,6 @@ func ensureAdaptRepoSeeded(ctx context.Context, cfg *config.Config, runner adapt
 	return marker, nil
 }
 
-const timeFormatRFC3339 = "2006-01-02T15:04:05Z07:00"
-
 func adaptRepoSeedMarkerPath(stateDir string) string {
 	return filepath.Join(stateDir, "state", "bootstrap", "adapt-repo-seeded.json")
 }
