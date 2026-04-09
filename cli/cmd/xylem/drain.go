@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -51,7 +51,7 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	// Check waiting vessels before draining pending ones
 	r.CheckWaitingVessels(ctx)
 
-	result, err := r.Drain(ctx)
+	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}
@@ -87,12 +87,16 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 	r.Tracer = tracer
 }
 
+var newConfiguredTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+	return newTracer(cfg)
+}
+
 func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 	if !cfg.ObservabilityEnabled() {
 		return nil
 	}
 
-	tracer, err := newTracer(observability.TracerConfig{
+	tracer, err := newConfiguredTracer(observability.TracerConfig{
 		ServiceName:    "xylem",
 		ServiceVersion: "",
 		Endpoint:       cfg.Observability.Endpoint,
@@ -100,7 +104,7 @@ func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 		SampleRate:     cfg.ObservabilitySampleRate(),
 	})
 	if err != nil {
-		log.Printf("warn: failed to initialize tracer: %v", err)
+		slog.Warn("initialize tracer", "error", err)
 		return nil
 	}
 
@@ -113,7 +117,7 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 	}
 
 	if err := tracer.Shutdown(context.Background()); err != nil {
-		log.Printf("warn: %v", fmt.Errorf("shutdown tracer: %w", err))
+		slog.Warn("shutdown tracer", "error", err)
 	}
 }
 
@@ -198,6 +202,15 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:    q,
 			}
 			registerSource(sources, name, scheduled.Name(), scheduled)
+		case "schedule":
+			sched := &source.Schedule{
+				ConfigName: name,
+				Cadence:    srcCfg.Cadence,
+				Workflow:   srcCfg.Workflow,
+				StateDir:   cfg.StateDir,
+				Queue:      q,
+			}
+			registerSource(sources, name, sched.Name(), sched)
 		}
 	}
 	return sources

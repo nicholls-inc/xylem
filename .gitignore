@@ -3,7 +3,14 @@ cli/claude
 cli/copilot
 cli/gh
 cli/xylem
+
+# Ignore everything under .xylem/ except tracked control-plane definitions and
+# the checked-in SoTA snapshot state. Fresh worktrees — including
+# .claude/worktrees/.daemon-root where the daemon runs — must load these files,
+# while operational state (phases/, queue files, daemon.pid, dtu/) stays
+# ignored.
 .xylem/*
+!.xylem/HARNESS.md
 !.xylem/eval/
 !.xylem/eval/**
 !.xylem/prompts/

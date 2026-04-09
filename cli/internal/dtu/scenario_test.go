@@ -503,7 +503,7 @@ func TestScenarioIssueLabelGateWaitsThenResumes(t *testing.T) {
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -559,14 +559,16 @@ func TestScenarioIssueLabelGateWaitsThenResumes(t *testing.T) {
 	// state (runVessel defer). It will be re-added when the vessel resumes.
 	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "plan-approved"})
 
-	drainResult, err = drainer.Drain(context.Background())
+	drainResult, err = drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("second Drain() error = %v", err)
 	}
 	if drainResult.Completed != 1 {
 		t.Fatalf("second DrainResult.Completed = %d, want 1", drainResult.Completed)
 	}
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "done", "plan-approved"})
+	// Trigger label "bug" is removed by OnComplete to prevent duplicate
+	// enqueue on the next scan. Only "done" and mid-workflow labels remain.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"done", "plan-approved"})
 
 	vessel, err = env.queue.FindByID("issue-1")
 	if err != nil {
@@ -666,7 +668,7 @@ func TestScenarioGitHubPROfflineCopilot(t *testing.T) {
 
 	src := &source.GitHubPR{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -743,7 +745,7 @@ func TestScenarioGitHubPREventsChecksFailed(t *testing.T) {
 
 	src := &source.GitHubPREvents{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -804,7 +806,7 @@ func TestScenarioGithubPREventsProviderFailure(t *testing.T) {
 
 	src := &source.GitHubPREvents{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -866,7 +868,7 @@ func TestScenarioGitHubMergeHappyPath(t *testing.T) {
 
 	src := &source.GitHubMerge{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -926,7 +928,7 @@ func TestScenarioIssueProviderFailureMarksFailed(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -992,7 +994,7 @@ func TestScenarioIssueGitFetchRetrySucceeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1062,7 +1064,7 @@ func TestScenarioIssueGitFetchRetryExitCode1Succeeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1077,7 +1079,8 @@ func TestScenarioIssueGitFetchRetryExitCode1Succeeds(t *testing.T) {
 	if vessel.State != queue.StateCompleted {
 		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
 	}
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"bug", "done"})
+	// Trigger label "bug" removed by OnComplete; only terminal status remains.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"done"})
 
 	state := loadState(t, env.store)
 	if got := len(state.RepositoryBySlug("owner/repo").Worktrees); got != 0 {
@@ -1146,7 +1149,7 @@ func TestScenarioIssueGitWorktreeAddRetryExitCode255Succeeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1161,7 +1164,8 @@ func TestScenarioIssueGitWorktreeAddRetryExitCode255Succeeds(t *testing.T) {
 	if vessel.State != queue.StateCompleted {
 		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
 	}
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 8), []string{"bug", "done"})
+	// Trigger label "bug" removed by OnComplete; only terminal status remains.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 8), []string{"done"})
 
 	state := loadState(t, env.store)
 	if got := len(state.RepositoryBySlug("owner/repo").Worktrees); got != 0 {
@@ -1233,7 +1237,7 @@ func TestScenarioIssueGitWorktreeAddRetryExitCode128Succeeds(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1310,7 +1314,7 @@ func TestScenarioIssueGitWorktreeAddExhaustRetriesExitCode128Fails(t *testing.T)
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1490,7 +1494,7 @@ func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1505,7 +1509,8 @@ func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
 	if vessel.State != queue.StateCompleted {
 		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateCompleted)
 	}
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 6), []string{"bug", "done"})
+	// Trigger label "bug" removed by OnComplete; only terminal status remains.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 6), []string{"done"})
 
 	state := loadState(t, env.store)
 	if got := len(state.RepositoryBySlug("owner/repo").Worktrees); got != 0 {
@@ -1514,10 +1519,13 @@ func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
 
 	events := readEvents(t, env.store)
 	editResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"issue", "edit", "6", "--repo", "owner/repo"})
-	// 4 calls: OnEnqueue (rate-limited), OnStart, OnComplete, RemoveRunningLabel (defer).
-	// The 4th call is a harmless double-removal of the running label.
-	if len(editResults) != 4 {
-		t.Fatalf("len(issue edit results) = %d, want 4", len(editResults))
+	// 5 calls: OnEnqueue (rate-limited), OnStart, OnComplete (status
+	// transition), OnComplete (trigger-label removal), RemoveRunningLabel
+	// (defer). The 5th call is a harmless double-removal of the running
+	// label. The 4th is the new trigger-label removal added to prevent
+	// duplicate enqueue on the next scan tick.
+	if len(editResults) != 5 {
+		t.Fatalf("len(issue edit results) = %d, want 5", len(editResults))
 	}
 	if !reflect.DeepEqual(editResults[0].Shim.Args, []string{"issue", "edit", "6", "--repo", "owner/repo", "--add-label", "queued"}) {
 		t.Fatalf("first issue edit args = %v, want queued-label mutation", editResults[0].Shim.Args)
@@ -1530,8 +1538,8 @@ func TestScenarioIssueGHRateLimitOnEnqueueDoesNotBlock(t *testing.T) {
 		}
 		gotCodes = append(gotCodes, *event.Shim.ExitCode)
 	}
-	if !reflect.DeepEqual(gotCodes, []int{1, 0, 0, 0}) {
-		t.Fatalf("issue edit exit codes = %v, want [1 0 0 0]", gotCodes)
+	if !reflect.DeepEqual(gotCodes, []int{1, 0, 0, 0, 0}) {
+		t.Fatalf("issue edit exit codes = %v, want [1 0 0 0 0]", gotCodes)
 	}
 }
 
@@ -1579,7 +1587,7 @@ func TestScenarioIssueHappyPath(t *testing.T) {
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 	drainer.Reporter = &reporter.Reporter{Runner: env.cmdRunner, Repo: "owner/repo"}
 
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1597,7 +1605,8 @@ func TestScenarioIssueHappyPath(t *testing.T) {
 	}
 
 	// --- Assert status labels ---
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"bug", "done"})
+	// Trigger label "bug" removed by OnComplete; only terminal status remains.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 1), []string{"done"})
 
 	// --- Assert completion comment posted ---
 	state := loadState(t, env.store)
@@ -1676,7 +1685,7 @@ func TestScenarioGithubMergeProviderFailure(t *testing.T) {
 
 	src := &source.GitHubMerge{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1745,7 +1754,7 @@ func TestScenarioGithubPRProviderFailure(t *testing.T) {
 
 	src := &source.GitHubPR{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1753,9 +1762,12 @@ func TestScenarioGithubPRProviderFailure(t *testing.T) {
 		t.Fatalf("DrainResult.Failed = %d, want 1", drainResult.Failed)
 	}
 
-	vessel, err := env.queue.FindByID("pr-15")
+	// Vessel IDs are workflow-qualified (pr-<n>-<workflow>) so that two
+	// github-pr sources can enqueue distinct vessels for the same PR
+	// when they target different workflows.
+	vessel, err := env.queue.FindByID("pr-15-review-pr")
 	if err != nil {
-		t.Fatalf("FindByID(pr-15) error = %v", err)
+		t.Fatalf("FindByID(pr-15-review-pr) error = %v", err)
 	}
 	if vessel.State != queue.StateFailed {
 		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateFailed)

@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 
 	"github.com/spf13/cobra"
 
@@ -52,12 +52,12 @@ func maybeAutoGenerateHarnessReview(cfg *config.Config, result runner.DrainResul
 	case "every_n_runs":
 		totalRuns, err := reviewpkg.CountAvailableRuns(cfg.StateDir)
 		if err != nil {
-			log.Printf("warn: count harness review runs: %v", err)
+			slog.Warn("count harness review runs", "error", err)
 			return
 		}
 		latest, err := reviewpkg.LoadLatestReport(cfg.StateDir, cfg.HarnessReviewOutputDir())
 		if err != nil {
-			log.Printf("warn: load latest harness review: %v", err)
+			slog.Warn("load latest harness review", "error", err)
 			return
 		}
 		lastReviewed := 0
@@ -72,6 +72,6 @@ func maybeAutoGenerateHarnessReview(cfg *config.Config, result runner.DrainResul
 	}
 
 	if _, err := generateHarnessReview(cfg); err != nil {
-		log.Printf("warn: generate harness review: %v", err)
+		slog.Warn("generate harness review", "error", err)
 	}
 }

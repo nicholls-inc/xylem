@@ -145,6 +145,17 @@ func (s *Scanner) buildSources() []sourceEntry {
 				},
 				configName: name,
 			})
+		case "schedule":
+			entries = append(entries, sourceEntry{
+				src: &source.Schedule{
+					ConfigName: name,
+					Cadence:    srcCfg.Cadence,
+					Workflow:   srcCfg.Workflow,
+					StateDir:   s.Config.StateDir,
+					Queue:      s.Queue,
+				},
+				configName: name,
+			})
 		}
 	}
 	return entries

@@ -100,6 +100,14 @@ type Claim struct {
 	Timestamp     time.Time `json:"timestamp"`
 }
 
+// Artifact captures a persisted evidence attachment.
+type Artifact struct {
+	Path        string `json:"path"`
+	MediaType   string `json:"media_type,omitempty"`
+	Description string `json:"description,omitempty"`
+	SizeBytes   int64  `json:"size_bytes"`
+}
+
 // Manifest records the evidence collected for a vessel execution.
 type Manifest struct {
 	VesselID  string          `json:"vessel_id"`
@@ -182,6 +190,28 @@ func validatePathComponent(component string) error {
 	return nil
 }
 
+func validateArtifactRelativePath(name string) (string, error) {
+	if name == "" {
+		return "", fmt.Errorf("artifact path must not be empty")
+	}
+	clean := filepath.ToSlash(filepath.Clean(name))
+	if clean == "." || clean == "/" {
+		return "", fmt.Errorf("artifact path must not resolve to current directory")
+	}
+	if strings.HasPrefix(clean, "/") {
+		return "", fmt.Errorf("artifact path must be relative")
+	}
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("artifact path must not escape the evidence directory")
+	}
+	for _, component := range strings.Split(clean, "/") {
+		if err := validatePathComponent(component); err != nil {
+			return "", fmt.Errorf("artifact path component %q: %w", component, err)
+		}
+	}
+	return clean, nil
+}
+
 func validateManifestClaims(manifest *Manifest) error {
 	for i, claim := range manifest.Claims {
 		if !claim.Level.Valid() {
@@ -250,4 +280,30 @@ func LoadManifest(stateDir, vesselID string) (*Manifest, error) {
 	manifest.BuildSummary()
 
 	return &manifest, nil
+}
+
+// SaveArtifact writes an attachment to <stateDir>/phases/<vesselID>/evidence/<name>.
+func SaveArtifact(stateDir, vesselID, name string, data []byte, mediaType, description string) (Artifact, error) {
+	if err := validatePathComponent(vesselID); err != nil {
+		return Artifact{}, fmt.Errorf("save artifact: invalid vessel ID: %w", err)
+	}
+	cleanName, err := validateArtifactRelativePath(name)
+	if err != nil {
+		return Artifact{}, fmt.Errorf("save artifact: %w", err)
+	}
+
+	path := filepath.Join(stateDir, "phases", vesselID, "evidence", filepath.FromSlash(cleanName))
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return Artifact{}, fmt.Errorf("save artifact: create dir: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		return Artifact{}, fmt.Errorf("save artifact: write: %w", err)
+	}
+
+	return Artifact{
+		Path:        filepath.ToSlash(filepath.Join("phases", vesselID, "evidence", cleanName)),
+		MediaType:   mediaType,
+		Description: description,
+		SizeBytes:   int64(len(data)),
+	}, nil
 }

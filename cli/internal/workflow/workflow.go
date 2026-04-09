@@ -19,11 +19,13 @@ var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // Workflow defines a multi-phase execution plan loaded from a YAML file.
 type Workflow struct {
-	Name        string  `yaml:"name"`
-	Description string  `yaml:"description,omitempty"`
-	LLM         *string `yaml:"llm,omitempty"`
-	Model       *string `yaml:"model,omitempty"`
-	Phases      []Phase `yaml:"phases"`
+	Name                          string  `yaml:"name"`
+	Description                   string  `yaml:"description,omitempty"`
+	LLM                           *string `yaml:"llm,omitempty"`
+	Model                         *string `yaml:"model,omitempty"`
+	AllowAdditiveProtectedWrites  bool    `yaml:"allow_additive_protected_writes,omitempty"`
+	AllowCanonicalProtectedWrites bool    `yaml:"allow_canonical_protected_writes,omitempty"`
+	Phases                        []Phase `yaml:"phases"`
 }
 
 // Phase represents a single step in a workflow's execution pipeline.
@@ -57,13 +59,85 @@ type GateEvidence struct {
 // Gate defines an inter-phase quality gate that must pass before the next phase begins.
 type Gate struct {
 	Type         string        `yaml:"type"`                    // "command" or "label"
-	Run          string        `yaml:"run,omitempty"`           // shell command (type=command)
+	Run          string        `yaml:"run,omitempty"`           // shell command (type=command), supports template variables
 	Retries      int           `yaml:"retries,omitempty"`       // default 0
 	RetryDelay   string        `yaml:"retry_delay,omitempty"`   // default "10s"
 	WaitFor      string        `yaml:"wait_for,omitempty"`      // label name (type=label)
 	Timeout      string        `yaml:"timeout,omitempty"`       // default "24h" (type=label)
 	PollInterval string        `yaml:"poll_interval,omitempty"` // default "60s" (type=label)
+	Live         *LiveGate     `yaml:"live,omitempty"`
 	Evidence     *GateEvidence `yaml:"evidence,omitempty"`
+}
+
+// LiveGate defines runtime verification against a running system.
+type LiveGate struct {
+	Mode          string                 `yaml:"mode"`
+	Timeout       string                 `yaml:"timeout,omitempty"`
+	HTTP          *LiveHTTPGate          `yaml:"http,omitempty"`
+	Browser       *LiveBrowserGate       `yaml:"browser,omitempty"`
+	CommandAssert *LiveCommandAssertGate `yaml:"command_assert,omitempty"`
+}
+
+// LiveHTTPGate defines an HTTP verification sequence.
+type LiveHTTPGate struct {
+	BaseURL string         `yaml:"base_url,omitempty"`
+	Steps   []LiveHTTPStep `yaml:"steps"`
+}
+
+// LiveHTTPStep defines a single HTTP assertion step.
+type LiveHTTPStep struct {
+	Name            string              `yaml:"name,omitempty"`
+	Method          string              `yaml:"method,omitempty"`
+	URL             string              `yaml:"url"`
+	Headers         map[string]string   `yaml:"headers,omitempty"`
+	Body            string              `yaml:"body,omitempty"`
+	Timeout         string              `yaml:"timeout,omitempty"`
+	ExpectStatus    int                 `yaml:"expect_status,omitempty"`
+	MaxLatency      string              `yaml:"max_latency,omitempty"`
+	ExpectHeaders   []LiveHeaderAssert  `yaml:"expect_headers,omitempty"`
+	ExpectJSON      []LiveJSONPathCheck `yaml:"expect_json,omitempty"`
+	ExpectBodyRegex string              `yaml:"expect_body_regex,omitempty"`
+}
+
+// LiveHeaderAssert describes a response-header assertion.
+type LiveHeaderAssert struct {
+	Name   string `yaml:"name"`
+	Equals string `yaml:"equals,omitempty"`
+	Regex  string `yaml:"regex,omitempty"`
+}
+
+// LiveJSONPathCheck describes a JSONPath-based assertion.
+type LiveJSONPathCheck struct {
+	Path   string `yaml:"path"`
+	Equals string `yaml:"equals,omitempty"`
+	Regex  string `yaml:"regex,omitempty"`
+	Exists *bool  `yaml:"exists,omitempty"`
+}
+
+// LiveBrowserGate defines a browser verification script.
+type LiveBrowserGate struct {
+	BaseURL  string            `yaml:"base_url,omitempty"`
+	Headless *bool             `yaml:"headless,omitempty"`
+	Steps    []LiveBrowserStep `yaml:"steps"`
+}
+
+// LiveBrowserStep defines one browser action or assertion.
+type LiveBrowserStep struct {
+	Name     string `yaml:"name,omitempty"`
+	Action   string `yaml:"action"`
+	URL      string `yaml:"url,omitempty"`
+	Selector string `yaml:"selector,omitempty"`
+	Text     string `yaml:"text,omitempty"`
+	Value    string `yaml:"value,omitempty"`
+	Timeout  string `yaml:"timeout,omitempty"`
+}
+
+// LiveCommandAssertGate defines a command+assert verification step.
+type LiveCommandAssertGate struct {
+	Run               string              `yaml:"run"`
+	Timeout           string              `yaml:"timeout,omitempty"`
+	ExpectStdoutRegex string              `yaml:"expect_stdout_regex,omitempty"`
+	ExpectJSON        []LiveJSONPathCheck `yaml:"expect_json,omitempty"`
 }
 
 // Load reads and validates a workflow definition YAML file at path.
@@ -274,8 +348,15 @@ func validateGate(phaseName string, g *Gate) error {
 		if g.WaitFor == "" {
 			return fmt.Errorf("phase %q: gate: wait_for is required for label gate", phaseName)
 		}
+	case "live":
+		if g.Live == nil {
+			return fmt.Errorf("phase %q: gate: live config is required for live gate", phaseName)
+		}
+		if err := validateLiveGate(phaseName, g.Live); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("phase %q: gate: type must be \"command\" or \"label\"", phaseName)
+		return fmt.Errorf("phase %q: gate: type must be \"command\", \"label\", or \"live\"", phaseName)
 	}
 
 	for _, d := range []struct {
@@ -309,6 +390,189 @@ func validateGateEvidence(phaseName string, e *GateEvidence) error {
 		return fmt.Errorf("phase %q: gate evidence level %q is not valid (must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ)", phaseName, e.Level)
 	}
 
+	return nil
+}
+
+func validateLiveGate(phaseName string, g *LiveGate) error {
+	if g == nil {
+		return fmt.Errorf("phase %q: gate: live config is required", phaseName)
+	}
+	if g.Timeout != "" {
+		if _, err := time.ParseDuration(g.Timeout); err != nil {
+			return fmt.Errorf("phase %q: gate: invalid live timeout %q: %w", phaseName, g.Timeout, err)
+		}
+	}
+
+	switch g.Mode {
+	case "http":
+		if g.HTTP == nil {
+			return fmt.Errorf("phase %q: gate: live.http is required for mode %q", phaseName, g.Mode)
+		}
+		if g.Browser != nil || g.CommandAssert != nil {
+			return fmt.Errorf("phase %q: gate: live mode %q must not set browser or command_assert config", phaseName, g.Mode)
+		}
+		return validateLiveHTTPGate(phaseName, g.HTTP)
+	case "browser":
+		if g.Browser == nil {
+			return fmt.Errorf("phase %q: gate: live.browser is required for mode %q", phaseName, g.Mode)
+		}
+		if g.HTTP != nil || g.CommandAssert != nil {
+			return fmt.Errorf("phase %q: gate: live mode %q must not set http or command_assert config", phaseName, g.Mode)
+		}
+		return validateLiveBrowserGate(phaseName, g.Browser)
+	case "command+assert":
+		if g.CommandAssert == nil {
+			return fmt.Errorf("phase %q: gate: live.command_assert is required for mode %q", phaseName, g.Mode)
+		}
+		if g.HTTP != nil || g.Browser != nil {
+			return fmt.Errorf("phase %q: gate: live mode %q must not set http or browser config", phaseName, g.Mode)
+		}
+		return validateLiveCommandAssertGate(phaseName, g.CommandAssert)
+	default:
+		return fmt.Errorf("phase %q: gate: live mode must be \"http\", \"browser\", or \"command+assert\"", phaseName)
+	}
+}
+
+func validateLiveHTTPGate(phaseName string, g *LiveHTTPGate) error {
+	if len(g.Steps) == 0 {
+		return fmt.Errorf("phase %q: gate: live.http.steps must contain at least one step", phaseName)
+	}
+
+	for i, step := range g.Steps {
+		if strings.TrimSpace(step.URL) == "" {
+			return fmt.Errorf("phase %q: gate: live.http.steps[%d].url is required", phaseName, i)
+		}
+		if step.Timeout != "" {
+			if _, err := time.ParseDuration(step.Timeout); err != nil {
+				return fmt.Errorf("phase %q: gate: invalid live.http.steps[%d].timeout %q: %w", phaseName, i, step.Timeout, err)
+			}
+		}
+		if step.MaxLatency != "" {
+			if _, err := time.ParseDuration(step.MaxLatency); err != nil {
+				return fmt.Errorf("phase %q: gate: invalid live.http.steps[%d].max_latency %q: %w", phaseName, i, step.MaxLatency, err)
+			}
+		}
+		if step.ExpectBodyRegex != "" {
+			if _, err := regexp.Compile(step.ExpectBodyRegex); err != nil {
+				return fmt.Errorf("phase %q: gate: invalid live.http.steps[%d].expect_body_regex %q: %w", phaseName, i, step.ExpectBodyRegex, err)
+			}
+		}
+		for j, header := range step.ExpectHeaders {
+			if err := validateLiveHeaderAssert(phaseName, fmt.Sprintf("live.http.steps[%d].expect_headers[%d]", i, j), header); err != nil {
+				return err
+			}
+		}
+		for j, check := range step.ExpectJSON {
+			if err := validateLiveJSONPathCheck(phaseName, fmt.Sprintf("live.http.steps[%d].expect_json[%d]", i, j), check); err != nil {
+				return err
+			}
+		}
+		if step.ExpectStatus == 0 && step.MaxLatency == "" && step.ExpectBodyRegex == "" &&
+			len(step.ExpectHeaders) == 0 && len(step.ExpectJSON) == 0 {
+			return fmt.Errorf("phase %q: gate: live.http.steps[%d] must declare at least one expectation", phaseName, i)
+		}
+	}
+
+	return nil
+}
+
+func validateLiveBrowserGate(phaseName string, g *LiveBrowserGate) error {
+	if len(g.Steps) == 0 {
+		return fmt.Errorf("phase %q: gate: live.browser.steps must contain at least one step", phaseName)
+	}
+
+	for i, step := range g.Steps {
+		if step.Timeout != "" {
+			if _, err := time.ParseDuration(step.Timeout); err != nil {
+				return fmt.Errorf("phase %q: gate: invalid live.browser.steps[%d].timeout %q: %w", phaseName, i, step.Timeout, err)
+			}
+		}
+		switch step.Action {
+		case "navigate":
+			if strings.TrimSpace(step.URL) == "" {
+				return fmt.Errorf("phase %q: gate: live.browser.steps[%d].url is required for navigate action", phaseName, i)
+			}
+		case "click", "wait_visible", "assert_visible":
+			if strings.TrimSpace(step.Selector) == "" {
+				return fmt.Errorf("phase %q: gate: live.browser.steps[%d].selector is required for %s action", phaseName, i, step.Action)
+			}
+		case "type":
+			if strings.TrimSpace(step.Selector) == "" {
+				return fmt.Errorf("phase %q: gate: live.browser.steps[%d].selector is required for type action", phaseName, i)
+			}
+			if step.Value == "" {
+				return fmt.Errorf("phase %q: gate: live.browser.steps[%d].value is required for type action", phaseName, i)
+			}
+		case "assert_text":
+			if strings.TrimSpace(step.Selector) == "" {
+				return fmt.Errorf("phase %q: gate: live.browser.steps[%d].selector is required for assert_text action", phaseName, i)
+			}
+			if step.Text == "" {
+				return fmt.Errorf("phase %q: gate: live.browser.steps[%d].text is required for assert_text action", phaseName, i)
+			}
+		default:
+			return fmt.Errorf("phase %q: gate: live.browser.steps[%d].action must be one of navigate, click, type, wait_visible, assert_visible, or assert_text", phaseName, i)
+		}
+	}
+
+	return nil
+}
+
+func validateLiveCommandAssertGate(phaseName string, g *LiveCommandAssertGate) error {
+	if strings.TrimSpace(g.Run) == "" {
+		return fmt.Errorf("phase %q: gate: live.command_assert.run is required", phaseName)
+	}
+	if g.Timeout != "" {
+		if _, err := time.ParseDuration(g.Timeout); err != nil {
+			return fmt.Errorf("phase %q: gate: invalid live.command_assert.timeout %q: %w", phaseName, g.Timeout, err)
+		}
+	}
+	if g.ExpectStdoutRegex != "" {
+		if _, err := regexp.Compile(g.ExpectStdoutRegex); err != nil {
+			return fmt.Errorf("phase %q: gate: invalid live.command_assert.expect_stdout_regex %q: %w", phaseName, g.ExpectStdoutRegex, err)
+		}
+	}
+	for i, check := range g.ExpectJSON {
+		if err := validateLiveJSONPathCheck(phaseName, fmt.Sprintf("live.command_assert.expect_json[%d]", i), check); err != nil {
+			return err
+		}
+	}
+	if g.ExpectStdoutRegex == "" && len(g.ExpectJSON) == 0 {
+		return fmt.Errorf("phase %q: gate: live.command_assert must declare expect_stdout_regex or expect_json", phaseName)
+	}
+	return nil
+}
+
+func validateLiveHeaderAssert(phaseName, field string, assert LiveHeaderAssert) error {
+	if strings.TrimSpace(assert.Name) == "" {
+		return fmt.Errorf("phase %q: gate: %s.name is required", phaseName, field)
+	}
+	if assert.Equals == "" && assert.Regex == "" {
+		return fmt.Errorf("phase %q: gate: %s must declare equals or regex", phaseName, field)
+	}
+	if assert.Regex != "" {
+		if _, err := regexp.Compile(assert.Regex); err != nil {
+			return fmt.Errorf("phase %q: gate: invalid %s.regex %q: %w", phaseName, field, assert.Regex, err)
+		}
+	}
+	return nil
+}
+
+func validateLiveJSONPathCheck(phaseName, field string, check LiveJSONPathCheck) error {
+	if strings.TrimSpace(check.Path) == "" {
+		return fmt.Errorf("phase %q: gate: %s.path is required", phaseName, field)
+	}
+	if !strings.HasPrefix(check.Path, "$") {
+		return fmt.Errorf("phase %q: gate: %s.path must start with '$'", phaseName, field)
+	}
+	if check.Equals == "" && check.Regex == "" && check.Exists == nil {
+		return fmt.Errorf("phase %q: gate: %s must declare equals, regex, or exists", phaseName, field)
+	}
+	if check.Regex != "" {
+		if _, err := regexp.Compile(check.Regex); err != nil {
+			return fmt.Errorf("phase %q: gate: invalid %s.regex %q: %w", phaseName, field, check.Regex, err)
+		}
+	}
 	return nil
 }
 

@@ -277,7 +277,7 @@ func TestScenarioIssueCommandGateRetryPassesOnRetry(t *testing.T) {
 
 	src := &source.GitHub{Repo: "owner/repo", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -298,7 +298,8 @@ func TestScenarioIssueCommandGateRetryPassesOnRetry(t *testing.T) {
 	if vessel.GateRetries != 0 {
 		t.Fatalf("vessel.GateRetries = %d, want 0", vessel.GateRetries)
 	}
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"bug", "done"})
+	// Trigger label "bug" removed by OnComplete; only terminal status remains.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"done"})
 
 	phasesDir := filepath.Join(env.stateDir, "phases", "issue-7")
 	promptPath := filepath.Join(phasesDir, "implement.prompt")

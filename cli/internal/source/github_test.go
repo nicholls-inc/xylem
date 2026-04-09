@@ -306,3 +306,141 @@ func TestScanSkipsExcludedFailedLabel(t *testing.T) {
 		t.Errorf("expected 0 vessels (xylem-failed excluded), got %d", len(vessels))
 	}
 }
+
+func TestScanPersistsTriggerLabelInMeta(t *testing.T) {
+	// Property: after Scan produces a vessel for an issue, that vessel's
+	// Meta["trigger_label"] equals one of the labels configured on the
+	// task that matched the issue. OnComplete later uses this to remove
+	// the trigger label from the source issue.
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{
+			Number: 42,
+			Title:  "add feature",
+			Body:   "body",
+			URL:    "https://github.com/owner/repo/issues/42",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "ready-for-work"}, {Name: "enhancement"}},
+		},
+	}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "ready-for-work")
+
+	g := &GitHub{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"features": {Labels: []string{"ready-for-work"}, Workflow: "implement-feature"}},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	got := vessels[0].Meta["trigger_label"]
+	if got != "ready-for-work" {
+		t.Errorf("expected Meta[trigger_label] = ready-for-work, got %q", got)
+	}
+}
+
+func TestOnCompleteRemovesTriggerLabel(t *testing.T) {
+	// Property: after a vessel completes successfully, its trigger
+	// label is removed from the source issue via a separate gh call.
+	// This prevents duplicate-enqueue risk after PR lifecycle events
+	// and keeps the issue's UI state consistent with workflow state.
+	r := newMock()
+	g := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:     "issue-156",
+		Source: "github-issue",
+		Meta: map[string]string{
+			"issue_num":              "156",
+			"status_label_completed": "xylem-completed",
+			"status_label_running":   "in-progress",
+			"trigger_label":          "ready-for-work",
+		},
+	}
+	if err := g.OnComplete(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 2 {
+		t.Fatalf("expected 2 gh calls (status transition + trigger-label removal), got %d: %v", len(r.calls), r.calls)
+	}
+	status := strings.Join(r.calls[0], " ")
+	if !strings.Contains(status, "--add-label xylem-completed") {
+		t.Errorf("call 0: expected --add-label xylem-completed, got %q", status)
+	}
+	if !strings.Contains(status, "--remove-label in-progress") {
+		t.Errorf("call 0: expected --remove-label in-progress, got %q", status)
+	}
+	trig := strings.Join(r.calls[1], " ")
+	if !strings.Contains(trig, "--remove-label ready-for-work") {
+		t.Errorf("call 1: expected --remove-label ready-for-work, got %q", trig)
+	}
+	if strings.Contains(trig, "--add-label") {
+		t.Errorf("call 1: trigger-label removal must not add anything, got %q", trig)
+	}
+}
+
+func TestOnCompleteBackwardCompatNoTriggerLabel(t *testing.T) {
+	// Backward-compat: a vessel enqueued before trigger_label was
+	// introduced has no such key. OnComplete must not crash, must not
+	// emit a second gh call, and must continue to perform the
+	// status-label transition exactly as before.
+	r := newMock()
+	g := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:     "issue-100",
+		Source: "github-issue",
+		Meta: map[string]string{
+			"issue_num":              "100",
+			"status_label_completed": "done",
+			"status_label_running":   "wip",
+		},
+	}
+	if err := g.OnComplete(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 gh call (no trigger label present), got %d: %v", len(r.calls), r.calls)
+	}
+}
+
+func TestOnCompleteRemovesTriggerLabelEvenWhenNoStatusLabels(t *testing.T) {
+	// When status labels are not configured, OnComplete still emits a
+	// gh call to remove the "in-progress" backward-compat running
+	// label. The trigger_label removal must still fire in that case
+	// as an independent second call.
+	r := newMock()
+	g := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID:     "issue-117",
+		Source: "github-issue",
+		Meta: map[string]string{
+			"issue_num":     "117",
+			"trigger_label": "needs-refinement",
+		},
+	}
+	if err := g.OnComplete(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 2 {
+		t.Fatalf("expected 2 calls, got %d: %v", len(r.calls), r.calls)
+	}
+	trig := strings.Join(r.calls[1], " ")
+	if !strings.Contains(trig, "--remove-label needs-refinement") {
+		t.Errorf("expected --remove-label needs-refinement in second call, got %q", trig)
+	}
+}

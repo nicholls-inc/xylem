@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,7 +40,7 @@ func newDaemonCmd() *cobra.Command {
 }
 
 func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
-	log.Printf("daemon: starting, binary built from commit %s", buildInfo())
+	slog.Info("daemon starting", "commit", buildInfo())
 
 	// Isolation check: refuse to run in the main git worktree because vessel
 	// subprocesses may switch branches or modify the working tree, which
@@ -70,7 +70,7 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	if cfg.Daemon.AutoUpgrade {
 		execPath, execErr := os.Executable()
 		if execErr != nil {
-			log.Printf("daemon: auto-upgrade: resolve executable path: %v (skipping upgrade)", execErr)
+			slog.Warn("daemon auto-upgrade skipped: resolve executable path", "error", execErr)
 		} else {
 			repoDir := filepath.Dir(filepath.Dir(execPath))
 			selfUpgrade(repoDir, execPath)
@@ -91,23 +91,26 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	scan := func(ctx context.Context) (scanner.ScanResult, error) {
 		return runScan(ctx, cfg, q)
 	}
+	cmdRunner := newCmdRunner(cfg)
+	drainRunner, cleanupDrainRunner := buildDrainRunner(cfg, q, wt, cmdRunner)
+	defer cleanupDrainRunner()
+	drainRunner.Reporter = buildReporter(cfg, cmdRunner)
+	drainRunner.DrainBudget = drainInterval
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
-		return runDrain(ctx, cfg, q, wt)
+		return drainRunner.Drain(ctx)
 	}
 	check := func(ctx context.Context) {
-		cmdRunner := &realCmdRunner{}
-		r := runner.New(cfg, q, wt, cmdRunner)
-		r.Sources = buildSourceMap(cfg, q, cmdRunner)
-		r.CheckWaitingVessels(ctx)
-		r.CheckHungVessels(ctx)
-		// Auto-merge: request copilot review on unreviewed xylem PRs,
-		// and merge PRs that are approved + CI-green + mergeable.
+		drainRunner.CheckWaitingVessels(ctx)
+		drainRunner.CheckHungVessels(ctx)
+		// Auto-merge: best-effort request copilot review on merge-ready
+		// harness PRs, then enable GitHub auto-merge once checks are green
+		// and the PR is mergeable.
 		if cfg.Daemon.AutoMerge {
 			autoMergeXylemPRs(ctx, cfg.Daemon.AutoMergeRepo)
 		}
 	}
 
-	return daemonLoop(ctx, q, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+	return daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
 }
 
 // parseUpgradeInterval returns the effective periodic upgrade interval. If
@@ -119,7 +122,9 @@ func parseUpgradeInterval(dc config.DaemonConfig) time.Duration {
 	}
 	d, err := time.ParseDuration(dc.UpgradeInterval)
 	if err != nil || d <= 0 {
-		log.Printf("daemon: invalid upgrade_interval %q, using default %s", dc.UpgradeInterval, defaultUpgradeInterval)
+		slog.Warn("daemon invalid upgrade interval; using default",
+			"value", dc.UpgradeInterval,
+			"default", defaultUpgradeInterval)
 		return defaultUpgradeInterval
 	}
 	return d
@@ -145,6 +150,10 @@ func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
 // scanFunc and drainFunc abstract scan/drain for testability.
 type scanFunc func(ctx context.Context) (scanner.ScanResult, error)
 type drainFunc func(ctx context.Context) (runner.DrainResult, error)
+type inFlightTracker interface {
+	Wait() runner.DrainResult
+	InFlightCount() int
+}
 
 // checkFunc runs periodic vessel health checks (waiting vessel label checks,
 // hung vessel timeouts). May be nil if no checks are needed.
@@ -161,17 +170,41 @@ type upgradeFunc func()
 // excessive git fetches and rebuilds.
 const defaultUpgradeInterval = 5 * time.Minute
 
+// upgradeOverdueMultiplier controls the forced-upgrade escape hatch: after
+// this many upgradeIntervals have elapsed without a successful upgrade
+// (because the daemon was never idle enough to fire the normal path), the
+// next drain tick is PAUSED — new vessels are not dequeued — so that the
+// currently in-flight vessels can finish naturally and the upgrade condition
+// (`in_flight == 0`) is eventually satisfied.
+//
+// At the default 5m upgradeInterval + 3x multiplier = 15 minutes of
+// "upgrade pending" before drain starts gracefully parking. This preserves
+// the safety invariant (no exec() while subprocesses are alive) while
+// guaranteeing that a continuously-saturated scheduled source can never
+// permanently lock the daemon on a stale binary.
+//
+// 3 is chosen so that a single healthy upgrade cycle (5m interval, fires
+// reliably) is not perturbed, but a degraded "always saturated" condition
+// is resolved in bounded time.
+const upgradeOverdueMultiplier = 3
+
 // daemonLoop is the core loop extracted for testability. It accepts an
 // externally-controlled context so tests can cancel it without signals,
 // and injectable scan/drain/check functions so tests can use stubs.
 //
-// If upgrade is non-nil, it is called at the END of each drain cycle — when
-// every vessel processed in that cycle has reached a terminal state and no
-// subprocesses are alive — provided at least upgradeInterval has elapsed
-// since the last attempt. This gives the daemon a guaranteed-idle window to
-// exec() into a newer binary without killing in-flight vessel work. Pass
-// nil/zero upgrade/upgradeInterval to disable.
-func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
+// If upgrade is non-nil, it is called under one of two conditions:
+//
+//  1. Normal path: daemon is fully idle (no active drain, zero in-flight
+//     vessels) and upgradeInterval has elapsed since the last upgrade.
+//
+//  2. Overdue path: upgrade has been pending for
+//     upgradeInterval*upgradeOverdueMultiplier without firing because the
+//     daemon was never idle enough. In this case, new drain ticks are
+//     paused (no new dequeue) so in-flight vessels can drain naturally.
+//     Once in_flight reaches zero, the normal path fires.
+//
+// Pass nil/zero upgrade/upgradeInterval to disable.
+func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
@@ -186,20 +219,28 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 	// startup upgrade.
 	lastUpgrade = daemonNow()
 
-	log.Printf("daemon started: scan_interval=%s drain_interval=%s upgrade_interval=%s",
-		scanInterval, drainInterval, upgradeInterval)
+	slog.Info("daemon started",
+		"scan_interval", scanInterval,
+		"drain_interval", drainInterval,
+		"upgrade_interval", upgradeInterval)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("daemon: received shutdown signal, waiting for in-flight drain")
+			slog.Info("daemon received shutdown signal", "waiting_for", "in-flight drain")
 			waitDone := make(chan struct{})
-			go func() { drainWg.Wait(); close(waitDone) }()
+			go func() {
+				drainWg.Wait()
+				if tracker != nil {
+					tracker.Wait()
+				}
+				close(waitDone)
+			}()
 			select {
 			case <-waitDone:
-				log.Println("daemon: in-flight drain finished")
+				slog.Info("daemon drain finished during shutdown")
 			case <-time.After(drainShutdownTimeout):
-				log.Println("daemon: drain shutdown timeout exceeded, exiting")
+				slog.Warn("daemon drain shutdown timeout exceeded", "timeout", drainShutdownTimeout)
 			}
 			return nil
 		default:
@@ -210,10 +251,10 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 		if now.Sub(lastScan) >= scanInterval {
 			scanResult, err := scan(ctx)
 			if err != nil {
-				log.Printf("daemon: scan error: %v", err)
+				slog.Error("daemon scan failed", "error", err)
 			} else {
 				lastScan = now
-				log.Printf("daemon: scan complete — added=%d skipped=%d", scanResult.Added, scanResult.Skipped)
+				slog.Info("daemon scan complete", "added", scanResult.Added, "skipped", scanResult.Skipped)
 			}
 		}
 
@@ -222,7 +263,36 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 			check(ctx)
 		}
 
-		if now.Sub(lastDrain) >= drainInterval {
+		// Compute upgrade state once per tick so both the upgrade check and
+		// the drain-pause decision share a single snapshot of conditions.
+		upgradeReady := upgrade != nil && upgradeInterval > 0
+		upgradeElapsed := now.Sub(lastUpgrade)
+		upgradePending := upgradeReady && upgradeElapsed >= upgradeInterval
+		upgradeOverdue := upgradeReady && upgradeElapsed >= upgradeInterval*time.Duration(upgradeOverdueMultiplier)
+		inFlight := trackerInFlightCount(tracker)
+		drainIdle := atomic.LoadInt32(&draining) == 0
+
+		if upgradePending && drainIdle && inFlight == 0 {
+			// Normal path: daemon is fully idle and upgrade is due.
+			lastUpgrade = now
+			upgrade()
+		} else if upgradeOverdue && drainIdle && inFlight > 0 {
+			// Overdue: log that we're pausing new dequeue to let in-flight
+			// vessels drain naturally, creating an idle window for the
+			// normal upgrade path on a subsequent tick. This does NOT kill
+			// running vessels — we wait for them to complete on their own.
+			slog.Warn("daemon auto-upgrade overdue; pausing new drain dequeue until idle",
+				"elapsed", upgradeElapsed,
+				"in_flight", inFlight)
+		}
+
+		// Drain dequeue is suppressed while an upgrade is overdue and
+		// in-flight vessels still exist. This creates the idle window the
+		// normal upgrade path needs, without exec()ing while subprocesses
+		// are alive. When in_flight reaches zero, the next tick fires the
+		// normal upgrade path above and dequeue resumes.
+		drainPaused := upgradeOverdue && inFlight > 0
+		if !drainPaused && now.Sub(lastDrain) >= drainInterval {
 			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
 				drainWg.Add(1)
@@ -231,27 +301,16 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 					defer atomic.StoreInt32(&draining, 0)
 					drainResult, err := drain(ctx)
 					if err != nil {
-						log.Printf("daemon: drain error: %v", err)
-					} else {
-						log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
-							drainResult.Completed, drainResult.Failed, drainResult.Skipped)
+						slog.Error("daemon drain failed", "error", err)
+						return
 					}
-
-					// Drain-end self-upgrade: every vessel processed in this
-					// cycle has reached a terminal state (completed, failed,
-					// or timed_out) — there are no subprocesses alive right
-					// now, so exec() is safe. Runs regardless of drain
-					// success/failure, since vessels are in persistent state
-					// either way. lastUpgrade is only written from within
-					// this goroutine (and the CAS guard ensures one drain
-					// runs at a time), so no synchronisation is required.
-					if upgrade != nil && upgradeInterval > 0 {
-						drainEnd := daemonNow()
-						if drainEnd.Sub(lastUpgrade) >= upgradeInterval {
-							lastUpgrade = drainEnd
-							upgrade()
-						}
-					}
+					slog.Info("daemon drain complete",
+						"launched", drainResult.Launched,
+						"completed", drainResult.Completed,
+						"failed", drainResult.Failed,
+						"skipped", drainResult.Skipped,
+						"waiting", drainResult.Waiting,
+						"in_flight", trackerInFlightCount(tracker))
 				}()
 			}
 		}
@@ -260,14 +319,20 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 
 		select {
 		case <-ctx.Done():
-			log.Println("daemon: received shutdown signal, waiting for in-flight drain")
+			slog.Info("daemon received shutdown signal", "waiting_for", "in-flight drain")
 			waitDone := make(chan struct{})
-			go func() { drainWg.Wait(); close(waitDone) }()
+			go func() {
+				drainWg.Wait()
+				if tracker != nil {
+					tracker.Wait()
+				}
+				close(waitDone)
+			}()
 			select {
 			case <-waitDone:
-				log.Println("daemon: in-flight drain finished")
+				slog.Info("daemon drain finished during shutdown")
 			case <-time.After(drainShutdownTimeout):
-				log.Println("daemon: drain shutdown timeout exceeded, exiting")
+				slog.Warn("daemon drain shutdown timeout exceeded", "timeout", drainShutdownTimeout)
 			}
 			return nil
 		case <-daemonAfter(ctx, tickInterval):
@@ -281,15 +346,23 @@ func runScan(ctx context.Context, cfg *config.Config, q *queue.Queue) (scanner.S
 	return s.Scan(ctx)
 }
 
-func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager) (runner.DrainResult, error) {
+func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, budget time.Duration) (runner.DrainResult, error) {
 	cmdRunner := newCmdRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
-	result, err := r.Drain(ctx)
+	r.DrainBudget = budget
+	result, err := r.DrainAndWait(ctx)
 	if err == nil {
 		maybeAutoGenerateHarnessReview(cfg, result)
 	}
 	return result, err
+}
+
+func trackerInFlightCount(tracker inFlightTracker) int {
+	if tracker == nil {
+		return 0
+	}
+	return tracker.InFlightCount()
 }
 
 func logTickSummary(q *queue.Queue) {
@@ -301,9 +374,11 @@ func logTickSummary(q *queue.Queue) {
 	for _, v := range vessels {
 		counts[v.State]++
 	}
-	log.Printf("daemon: tick summary — pending=%d running=%d completed=%d failed=%d",
-		counts[queue.StatePending], counts[queue.StateRunning],
-		counts[queue.StateCompleted], counts[queue.StateFailed])
+	slog.Info("daemon tick summary",
+		"pending", counts[queue.StatePending],
+		"running", counts[queue.StateRunning],
+		"completed", counts[queue.StateCompleted],
+		"failed", counts[queue.StateFailed])
 }
 
 // reconcileStaleVessels transitions ALL running vessels to timed_out. The
@@ -313,7 +388,7 @@ func logTickSummary(q *queue.Queue) {
 func reconcileStaleVessels(q *queue.Queue, wt *worktree.Manager) {
 	vessels, err := q.List()
 	if err != nil {
-		log.Printf("daemon: reconcile: failed to list vessels: %v", err)
+		slog.Error("daemon reconcile failed to list vessels", "error", err)
 		return
 	}
 
@@ -322,9 +397,9 @@ func reconcileStaleVessels(q *queue.Queue, wt *worktree.Manager) {
 		if v.State != queue.StateRunning {
 			continue
 		}
-		log.Printf("daemon: reconcile: vessel %s orphaned in running state, marking timed_out", v.ID)
+		slog.Warn("daemon reconcile found orphaned running vessel", "vessel", v.ID, "target_state", queue.StateTimedOut)
 		if err := q.Update(v.ID, queue.StateTimedOut, "orphaned by daemon restart"); err != nil {
-			log.Printf("daemon: reconcile: failed to update vessel %s: %v", v.ID, err)
+			slog.Error("daemon reconcile failed to update vessel", "vessel", v.ID, "error", err)
 			continue
 		}
 		recovered++
@@ -332,19 +407,19 @@ func reconcileStaleVessels(q *queue.Queue, wt *worktree.Manager) {
 		// Best-effort worktree cleanup.
 		if v.WorktreePath != "" && wt != nil {
 			if err := wt.Remove(context.Background(), v.WorktreePath); err != nil {
-				log.Printf("daemon: reconcile: failed to remove worktree for %s: %v", v.ID, err)
+				slog.Error("daemon reconcile failed to remove worktree", "vessel", v.ID, "worktree", v.WorktreePath, "error", err)
 			}
 		}
 	}
 	if recovered > 0 {
-		log.Printf("daemon: reconcile: recovered %d orphaned vessel(s)", recovered)
+		slog.Info("daemon reconcile recovered orphaned vessels", "recovered", recovered)
 	}
 }
 
 func daemonNow() time.Time {
 	now, err := dtu.RuntimeNow()
 	if err != nil {
-		log.Printf("warn: daemon: resolve runtime clock: %v", err)
+		slog.Warn("daemon resolve runtime clock", "error", err)
 		return time.Now()
 	}
 	return now
@@ -393,11 +468,11 @@ func acquireDaemonLock(pidPath string) (unlock func(), err error) {
 		return nil, fmt.Errorf("daemon lock: write PID: %w", writeErr)
 	}
 
-	log.Printf("daemon: acquired lock %s (PID %d)", pidPath, pid)
+	slog.Info("daemon acquired lock", "path", pidPath, "pid", pid)
 
 	return func() {
 		if unlockErr := fl.Unlock(); unlockErr != nil {
-			log.Printf("daemon: failed to release lock: %v", unlockErr)
+			slog.Error("daemon failed to release lock", "path", pidPath, "error", unlockErr)
 		}
 		os.Remove(pidPath) //nolint:errcheck
 	}, nil

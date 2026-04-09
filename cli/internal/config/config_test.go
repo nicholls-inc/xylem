@@ -1091,6 +1091,81 @@ func TestValidateGitHubMergeMissingRepo(t *testing.T) {
 	requireErrorContains(t, err, "repo is required")
 }
 
+func TestValidateScheduleValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "@daily",
+				Workflow: "doctor",
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid schedule config, got: %v", err)
+	}
+}
+
+func TestValidateScheduleMissingWorkflow(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:    "schedule",
+				Cadence: "1h",
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "workflow is required")
+}
+
+func TestValidateScheduleMalformedCadence(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "bad cadence",
+				Workflow: "doctor",
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "parse cadence")
+}
+
+func TestValidateScheduleRejectsTasks(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "1h",
+				Workflow: "doctor",
+				Tasks: map[string]Task{
+					"unused": {Workflow: "other"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "tasks are not supported")
+}
+
 func TestValidateUnknownSourceType(t *testing.T) {
 	cfg := &Config{
 		Concurrency: 2,
@@ -1271,7 +1346,12 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	assert.Equal(t, DefaultProtectedSurfaces, cfg.EffectiveProtectedSurfaces())
+	// DefaultProtectedSurfaces is now empty (see rationale in config.go).
+	// EffectiveProtectedSurfaces() returns nil when no paths are configured,
+	// which is equivalent to "nothing protected" — the self-improving
+	// default. Deployments that want strict enforcement opt in explicitly
+	// via harness.protected_surfaces.paths.
+	assert.Empty(t, cfg.EffectiveProtectedSurfaces())
 	assert.Equal(t, DefaultAuditLogPath, cfg.EffectiveAuditLogPath())
 	assert.Equal(t, "manual", cfg.HarnessReviewCadence())
 	assert.Equal(t, 10, cfg.HarnessReviewEveryNRuns())
@@ -1354,6 +1434,45 @@ func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
 	require.NotNil(t, result.MatchedRule)
 	assert.Equal(t, "*", result.MatchedRule.Action)
 	assert.Equal(t, "*", result.MatchedRule.Resource)
+}
+
+func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
+	tests := []struct {
+		name     string
+		action   string
+		resource string
+	}{
+		{
+			name:     "git commit",
+			action:   "git_commit",
+			resource: "*",
+		},
+		{
+			name:     "git push",
+			action:   "git_push",
+			resource: "main",
+		},
+		{
+			name:     "pull request create",
+			action:   "pr_create",
+			resource: "owner/name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+				Action:   tt.action,
+				Resource: tt.resource,
+				AgentID:  "vessel-009",
+			})
+
+			assert.Equal(t, intermediary.Allow, result.Effect)
+			require.NotNil(t, result.MatchedRule)
+			assert.Equal(t, "*", result.MatchedRule.Action)
+			assert.Equal(t, "*", result.MatchedRule.Resource)
+		})
+	}
 }
 
 func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {

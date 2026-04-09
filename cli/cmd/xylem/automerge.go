@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -18,10 +18,15 @@ var xylemBranchPattern = regexp.MustCompile(`^(feat|fix|chore)/issue-\d+`)
 // copilotReviewerLogin is the GitHub bot that performs automated code review.
 const copilotReviewerLogin = "copilot-pull-request-reviewer"
 
+const (
+	harnessImplLabel  = "harness-impl"
+	readyToMergeLabel = "ready-to-merge"
+)
+
 // conflictResolutionLabels are the labels that trigger the resolve-conflicts
 // workflow via the conflict-resolution github-pr source. Auto-merge adds
 // these to any CONFLICTING xylem PR so the workflow picks it up.
-var conflictResolutionLabels = []string{"needs-conflict-resolution", "harness-impl"}
+var conflictResolutionLabels = []string{"needs-conflict-resolution", harnessImplLabel}
 
 // isBenignGhWarning reports whether a gh CLI error is a non-fatal warning
 // that should not block the intended operation. The most common case is the
@@ -45,13 +50,28 @@ func isBenignGhWarning(err error) bool {
 	return false
 }
 
+// isReviewerNotCollaborator reports whether a gh api error from the
+// requested_reviewers endpoint is the GitHub 422 "not a collaborator"
+// response. This condition is terminal for a given (repo, reviewer)
+// pair: the reviewer will not spontaneously become a collaborator, so
+// retrying on every drain tick only spams the log. Callers should treat
+// this as "review cannot be requested from this bot; continue with
+// auto-merge and let branch protection wait for some other approval".
+func isReviewerNotCollaborator(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "Reviews may only be requested from collaborators")
+}
+
 // prSummary is a minimal projection of `gh pr list` / `gh pr view` output.
 type prSummary struct {
-	Number            int    `json:"number"`
-	HeadRefName       string `json:"headRefName"`
-	Mergeable         string `json:"mergeable"`
-	State             string `json:"state"`
-	ReviewDecision    string `json:"reviewDecision"`
+	Number            int       `json:"number"`
+	HeadRefName       string    `json:"headRefName"`
+	Mergeable         string    `json:"mergeable"`
+	State             string    `json:"state"`
+	ReviewDecision    string    `json:"reviewDecision"`
+	AutoMergeRequest  *struct{} `json:"autoMergeRequest"`
 	StatusCheckRollup []struct {
 		Conclusion string `json:"conclusion"`
 		Status     string `json:"status"`
@@ -84,14 +104,14 @@ func (p prSummary) hasLabel(name string) bool {
 type autoMergeAction int
 
 const (
-	actionSkip             autoMergeAction = iota // not a xylem PR, or skip for other reasons
-	actionRequestReview                           // no reviewer assigned; request copilot review
-	actionWaitForReview                           // review requested but not yet complete
+	actionSkip             autoMergeAction = iota // not a merge-ready xylem PR, or skip for other reasons
+	actionRequestReview                           // request copilot review, then enable auto-merge
 	actionWaitForChecks                           // CI still running
 	actionWaitForMergeable                        // unknown mergeable state (github computing)
 	actionRouteConflict                           // conflicts — add labels so resolve-conflicts workflow picks it up
 	actionAddressReview                           // changes requested; another workflow handles
-	actionMerge                                   // approved + green + mergeable
+	actionEnableAutoMerge                         // enable GitHub auto-merge
+	actionWaitForAutoMerge                        // auto-merge already enabled; wait for GitHub
 )
 
 // decideAutoMergeAction returns the action to take for a given PR. It does
@@ -99,18 +119,18 @@ const (
 // unit-tested.
 //
 // Decision order:
-// 1. Non-xylem branch → skip
+// 1. Non-xylem branch or not merge-ready → skip
 // 2. Closed/merged → skip
 // 3. Conflicts + missing resolve-conflicts labels → add labels (routeConflict)
 // 4. Conflicts + labels already present → wait (workflow handles)
 // 5. Unknown mergeable state → wait (github computing)
 // 6. CI failing/running → wait (fix-pr-checks handles failures)
 // 7. Changes requested → wait (respond-to-pr-review handles)
-// 8. No copilot review requested or submitted → request review
-// 9. Review pending → wait
-// 10. Approved + mergeable + green → merge
+// 8. Auto-merge already enabled → wait for GitHub
+// 9. No copilot review requested or submitted → request review, then enable auto-merge
+// 10. Otherwise enable auto-merge and let branch protection enforce review
 func decideAutoMergeAction(pr prSummary) autoMergeAction {
-	if !xylemBranchPattern.MatchString(pr.HeadRefName) {
+	if !isMergeReadyXylemPR(pr) {
 		return actionSkip
 	}
 	if pr.State != "OPEN" && pr.State != "" {
@@ -121,7 +141,7 @@ func decideAutoMergeAction(pr prSummary) autoMergeAction {
 		// If the PR already has the labels that trigger resolve-conflicts
 		// workflow, just wait — the workflow is (or will be) processing it.
 		// Otherwise, add the labels so the workflow picks it up.
-		if pr.hasLabel("needs-conflict-resolution") && pr.hasLabel("harness-impl") {
+		if pr.hasLabel("needs-conflict-resolution") && pr.hasLabel(harnessImplLabel) {
 			return actionWaitForMergeable
 		}
 		return actionRouteConflict
@@ -136,15 +156,23 @@ func decideAutoMergeAction(pr prSummary) autoMergeAction {
 	if pr.ReviewDecision == "CHANGES_REQUESTED" {
 		return actionAddressReview
 	}
-	if pr.ReviewDecision == "APPROVED" {
-		return actionMerge
+	if autoMergeEnabled(pr) {
+		return actionWaitForAutoMerge
 	}
-	// No decision yet (REVIEW_REQUIRED or empty): check if copilot has been
-	// asked to review. If not, request it.
 	if !copilotReviewRequestedOrSubmitted(pr) {
 		return actionRequestReview
 	}
-	return actionWaitForReview
+	return actionEnableAutoMerge
+}
+
+func isMergeReadyXylemPR(pr prSummary) bool {
+	return xylemBranchPattern.MatchString(pr.HeadRefName) &&
+		pr.hasLabel(readyToMergeLabel) &&
+		pr.hasLabel(harnessImplLabel)
+}
+
+func autoMergeEnabled(pr prSummary) bool {
+	return pr.AutoMergeRequest != nil
 }
 
 // copilotReviewRequestedOrSubmitted returns true if copilot has either been
@@ -180,19 +208,20 @@ func allChecksGreen(pr prSummary) bool {
 
 // autoMergeXylemPRs runs one cycle of the auto-merge loop. For each open PR
 // it decides the appropriate action: request copilot review, wait for an
-// in-progress review/CI/conflict, or merge.
+// in-progress review/CI/conflict, or enable GitHub auto-merge.
 //
 // The existing `respond-to-pr-review`, `fix-pr-checks`, and
 // `resolve-conflicts` workflows handle the intermediate steps via the
 // `github-pr-events` source, so auto-merge only needs to (1) kick off the
-// review cycle and (2) merge when everything is green.
+// review cycle and (2) enable GitHub auto-merge when the PR is otherwise
+// merge-ready.
 //
 // Repo is the GitHub repo slug (e.g., "owner/name"). If empty, gh uses the
 // current directory's origin remote.
 func autoMergeXylemPRs(ctx context.Context, repo string) {
-	prs, err := listOpenPRs(ctx, repo)
+	prs, err := listOpenPRsFn(ctx, repo)
 	if err != nil {
-		log.Printf("daemon: auto-merge: list PRs: %v", err)
+		slog.Error("daemon auto-merge failed to list PRs", "repo", repo, "error", err)
 		return
 	}
 
@@ -202,46 +231,101 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 		case actionSkip:
 			continue
 		case actionRequestReview:
-			if err := requestCopilotReview(ctx, repo, pr.Number); err != nil {
+			if err := requestCopilotReviewFn(ctx, repo, pr.Number); err != nil {
 				if isBenignGhWarning(err) {
-					log.Printf("daemon: auto-merge: requested copilot review on PR #%d (gh warning ignored): %s", pr.Number, pr.HeadRefName)
-					continue
+					slog.Info("daemon auto-merge requested copilot review with gh warning ignored",
+						"repo", repo,
+						"pr", pr.Number,
+						"head_ref", pr.HeadRefName,
+						"error", err)
+				} else if isReviewerNotCollaborator(err) {
+					slog.Warn("daemon auto-merge skipping copilot review request; reviewer is not a collaborator",
+						"repo", repo,
+						"pr", pr.Number,
+						"reviewer", copilotReviewerLogin,
+						"error", err)
+				} else {
+					slog.Warn("daemon auto-merge request review failed; enabling auto-merge anyway",
+						"repo", repo,
+						"pr", pr.Number,
+						"error", err)
 				}
-				log.Printf("daemon: auto-merge: PR #%d request review failed: %v", pr.Number, err)
+			} else {
+				slog.Info("daemon auto-merge requested copilot review",
+					"repo", repo,
+					"pr", pr.Number,
+					"head_ref", pr.HeadRefName)
+			}
+			if err := enableAutoMergePRFn(ctx, repo, pr.Number); err != nil {
+				slog.Error("daemon auto-merge failed to enable auto-merge",
+					"repo", repo,
+					"pr", pr.Number,
+					"error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: requested copilot review on PR #%d (%s)", pr.Number, pr.HeadRefName)
+			slog.Info("daemon auto-merge enabled auto-merge",
+				"repo", repo,
+				"pr", pr.Number,
+				"head_ref", pr.HeadRefName)
 		case actionRouteConflict:
-			if err := addPRLabels(ctx, repo, pr.Number, conflictResolutionLabels); err != nil {
+			if err := addPRLabelsFn(ctx, repo, pr.Number, conflictResolutionLabels); err != nil {
 				if isBenignGhWarning(err) {
-					log.Printf("daemon: auto-merge: routed PR #%d to resolve-conflicts workflow (gh warning ignored)", pr.Number)
+					slog.Info("daemon auto-merge routed PR to resolve-conflicts workflow with gh warning ignored",
+						"repo", repo,
+						"pr", pr.Number,
+						"error", err)
 					continue
 				}
-				log.Printf("daemon: auto-merge: PR #%d add conflict labels failed: %v", pr.Number, err)
+				slog.Error("daemon auto-merge failed to add conflict labels",
+					"repo", repo,
+					"pr", pr.Number,
+					"error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: routed PR #%d to resolve-conflicts workflow (%s)", pr.Number, pr.HeadRefName)
-		case actionWaitForReview:
-			log.Printf("daemon: auto-merge: PR #%d waiting for copilot review to complete", pr.Number)
+			slog.Info("daemon auto-merge routed PR to resolve-conflicts workflow",
+				"repo", repo,
+				"pr", pr.Number,
+				"head_ref", pr.HeadRefName)
 		case actionWaitForChecks:
-			log.Printf("daemon: auto-merge: PR #%d waiting for CI checks", pr.Number)
+			slog.Info("daemon auto-merge waiting for CI checks", "repo", repo, "pr", pr.Number)
 		case actionWaitForMergeable:
-			log.Printf("daemon: auto-merge: PR #%d waiting for mergeable state (conflicts being resolved or computing)", pr.Number)
+			slog.Info("daemon auto-merge waiting for mergeable state",
+				"repo", repo,
+				"pr", pr.Number)
 		case actionAddressReview:
-			log.Printf("daemon: auto-merge: PR #%d has changes requested, respond-to-pr-review workflow will handle", pr.Number)
-		case actionMerge:
-			if err := mergePR(ctx, repo, pr.Number); err != nil {
-				log.Printf("daemon: auto-merge: PR #%d merge failed: %v", pr.Number, err)
+			slog.Info("daemon auto-merge waiting for review follow-up",
+				"repo", repo,
+				"pr", pr.Number)
+		case actionEnableAutoMerge:
+			if err := enableAutoMergePRFn(ctx, repo, pr.Number); err != nil {
+				slog.Error("daemon auto-merge failed to enable auto-merge",
+					"repo", repo,
+					"pr", pr.Number,
+					"error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: merged PR #%d (%s)", pr.Number, pr.HeadRefName)
+			slog.Info("daemon auto-merge enabled auto-merge",
+				"repo", repo,
+				"pr", pr.Number,
+				"head_ref", pr.HeadRefName)
+		case actionWaitForAutoMerge:
+			slog.Info("daemon auto-merge waiting for GitHub auto-merge",
+				"repo", repo,
+				"pr", pr.Number)
 		}
 	}
 }
 
+var (
+	listOpenPRsFn          = listOpenPRs
+	requestCopilotReviewFn = requestCopilotReview
+	addPRLabelsFn          = addPRLabels
+	enableAutoMergePRFn    = enableAutoMergePR
+)
+
 func listOpenPRs(ctx context.Context, repo string) ([]prSummary, error) {
 	args := []string{"pr", "list", "--state", "open", "--json",
-		"number,headRefName,mergeable,state,reviewDecision,statusCheckRollup,reviewRequests,latestReviews,labels",
+		"number,headRefName,mergeable,state,reviewDecision,autoMergeRequest,statusCheckRollup,reviewRequests,latestReviews,labels",
 		"--limit", "50"}
 	if repo != "" {
 		args = append(args, "--repo", repo)
@@ -315,8 +399,8 @@ func requestCopilotReview(ctx context.Context, repo string, number int) error {
 	return nil
 }
 
-func mergePR(ctx context.Context, repo string, number int) error {
-	args := []string{"pr", "merge", "--squash", "--admin", "--delete-branch"}
+func enableAutoMergePR(ctx context.Context, repo string, number int) error {
+	args := []string{"pr", "merge", "--auto", "--squash", "--delete-branch"}
 	if repo != "" {
 		args = append(args, "--repo", repo)
 	}

@@ -188,6 +188,85 @@ phases:
 	assert.Equal(t, "", e.TrustBoundary)
 }
 
+func TestLoadWorkflowAllowAdditiveProtectedWritesDefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.False(t, got.AllowAdditiveProtectedWrites)
+}
+
+func TestLoadWorkflowAllowAdditiveProtectedWritesParsesTrue(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, got.AllowAdditiveProtectedWrites)
+}
+
+func TestLoadWorkflowAllowCanonicalProtectedWrites(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "defaults false",
+			yaml: `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			want: false,
+		},
+		{
+			name: "parses true",
+			yaml: `name: test-workflow
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+			createPromptFile(t, dir, "prompts/analyze.md")
+
+			path := writeWorkflowFile(t, dir, "test-workflow", tt.yaml)
+
+			got, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.AllowCanonicalProtectedWrites)
+		})
+	}
+}
+
 func TestLoadWorkflowGateWithEvidenceAndEmptyLevel(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
@@ -217,6 +296,94 @@ phases:
 	if got.Phases[0].Gate.Evidence.Level != "" {
 		t.Fatalf("Evidence.Level = %q, want empty string", got.Phases[0].Gate.Evidence.Level)
 	}
+}
+
+func TestLoadWorkflowLiveHTTPGateParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      retries: 1
+      live:
+        mode: http
+        timeout: "30s"
+        http:
+          base_url: "http://127.0.0.1:3000"
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200
+              max_latency: "2s"
+              expect_body_regex: '"status":"ok"'
+              expect_headers:
+                - name: Content-Type
+                  regex: 'application/json'
+              expect_json:
+                - path: $.status
+                  equals: ok
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	require.NotNil(t, got.Phases[0].Gate.Live)
+	assert.Equal(t, "http", got.Phases[0].Gate.Live.Mode)
+	require.Len(t, got.Phases[0].Gate.Live.HTTP.Steps, 1)
+	assert.Equal(t, "/health", got.Phases[0].Gate.Live.HTTP.Steps[0].URL)
+}
+
+func TestLoadWorkflowLiveGateRejectsMissingModeSpecificConfig(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      live:
+        mode: browser
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `live.browser is required`)
+}
+
+func TestLoadWorkflowLiveGateRejectsInvalidJSONPathAndDuration(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      live:
+        mode: command+assert
+        command_assert:
+          run: "cat status.json"
+          timeout: "not-a-duration"
+          expect_json:
+            - path: status
+              equals: ok
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid live.command_assert.timeout`)
 }
 
 func TestLoad(t *testing.T) {
@@ -266,6 +433,8 @@ phases:
 			workflowName: "deploy",
 			yaml: `name: deploy
 description: Deploy with gates
+allow_additive_protected_writes: true
+allow_canonical_protected_writes: true
 phases:
   - name: build
     prompt_file: prompts/build.md
@@ -290,6 +459,12 @@ phases:
 				t.Helper()
 				if s.Phases[0].Gate.Type != "command" {
 					t.Fatalf("gate type = %q, want command", s.Phases[0].Gate.Type)
+				}
+				if !s.AllowAdditiveProtectedWrites {
+					t.Fatal("AllowAdditiveProtectedWrites = false, want true")
+				}
+				if !s.AllowCanonicalProtectedWrites {
+					t.Fatal("AllowCanonicalProtectedWrites = false, want true")
 				}
 				if s.Phases[0].Gate.Retries != 2 {
 					t.Fatalf("gate retries = %d, want 2", s.Phases[0].Gate.Retries)
@@ -399,7 +574,7 @@ phases:
       type: webhook
 `,
 			prompts: []string{"prompts/analyze.md"},
-			wantErr: `type must be "command" or "label"`,
+			wantErr: `type must be "command", "label", or "live"`,
 		},
 		{
 			name:         "command gate missing run",
@@ -838,7 +1013,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
-			wantErr: `type must be "command" or "label"`,
+			wantErr: `type must be "command", "label", or "live"`,
 		},
 		{
 			name:             "command gate missing run",
