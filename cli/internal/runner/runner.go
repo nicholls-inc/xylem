@@ -59,6 +59,7 @@ type Runner struct {
 	Queue    *queue.Queue
 	Worktree WorktreeManager
 	Runner   CommandRunner
+	LiveGate gate.LiveGateRunner
 	Sources  map[string]source.Source
 	Reporter *reporter.Reporter // may be nil for non-github vessels
 	// Shared harness scaffolding for phase policy enforcement, audit logging,
@@ -70,7 +71,7 @@ type Runner struct {
 
 // New creates a Runner.
 func New(cfg *config.Config, q *queue.Queue, wt WorktreeManager, r CommandRunner) *Runner {
-	return &Runner{Config: cfg, Queue: q, Worktree: wt, Runner: r}
+	return &Runner{Config: cfg, Queue: q, Worktree: wt, Runner: r, LiveGate: gate.NewLiveVerifier()}
 }
 
 // Drain dequeues pending vessels and launches sessions up to Config.Concurrency concurrently.
@@ -404,7 +405,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		gateResult := ""
 
 		// Initialize gate retries for this phase (once, before retry loop)
-		if p.Gate != nil && p.Gate.Type == "command" && p.Gate.Retries > 0 && vessel.GateRetries == 0 {
+		if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") && p.Gate.Retries > 0 && vessel.GateRetries == 0 {
 			vessel.GateRetries = p.Gate.Retries
 		}
 
@@ -436,7 +437,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			provider := resolveProvider(r.Config, srcCfg, sk, &p)
 			model := resolveModel(r.Config, srcCfg, sk, &p, provider)
 			retryAttempt := 0
-			if p.Gate != nil && p.Gate.Type == "command" {
+			if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 				retryAttempt = providerAttempt(&p, vessel.GateRetries)
 			}
 			phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, sk, p, i)
@@ -490,7 +491,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
-					r.failVessel(vessel.ID, policyErr.Error())
+					r.failUpdatedVessel(&vessel, policyErr.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -552,7 +553,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
-					r.failVessel(vessel.ID, policyErr.Error())
+					r.failUpdatedVessel(&vessel, policyErr.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -600,7 +601,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, runErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -618,7 +619,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
 					vessel.FailedPhase = p.Name
-					r.failVessel(vessel.ID, err.Error())
+					r.failUpdatedVessel(&vessel, err.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -638,7 +639,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg))
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, errMsg)
+				r.failUpdatedVessel(&vessel, errMsg)
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -695,14 +696,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			}
 
 			switch p.Gate.Type {
-			case "command":
-				gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-				gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
-				finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
-					Type:         p.Gate.Type,
-					Passed:       passed,
-					RetryAttempt: retryAttempt,
-				}, gateErr)
+			case "command", "live":
+				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 				if gateErr != nil {
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
 					finishCurrentPhaseSpan(nil)
@@ -715,8 +711,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if passed {
 					log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, gatePassedPointer(true), ""))
-					gateRecordedAt := r.runtimeNow()
-					claims = append(claims, buildGateClaim(p, true, phaseArtifactRelativePath(vessel.ID, p.Name), gateRecordedAt))
+					if gateResultExec.evidenceClaim != nil {
+						claims = append(claims, *gateResultExec.evidenceClaim)
+					}
 					finishCurrentPhaseSpan(nil)
 					break // gate passed, proceed to next phase
 				}
@@ -735,7 +732,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					finishCurrentPhaseSpan(nil)
 					vessel.FailedPhase = p.Name
 					vessel.GateOutput = gateOut
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+					r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -919,6 +916,20 @@ func (r *Runner) removeWorktree(worktreePath, vesselID string) {
 func (r *Runner) failVessel(id string, errMsg string) {
 	if updateErr := r.Queue.Update(id, queue.StateFailed, errMsg); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", id, updateErr)
+	}
+}
+
+func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
+	if vessel == nil {
+		return
+	}
+	now := r.runtimeNow()
+	vessel.State = queue.StateFailed
+	vessel.Error = errMsg
+	vessel.EndedAt = &now
+	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
+		log.Printf("warn: failed to persist vessel %s state: %v", vessel.ID, updateErr)
+		r.failVessel(vessel.ID, errMsg)
 	}
 }
 
@@ -1199,6 +1210,13 @@ type singlePhaseResult struct {
 	evidenceClaim *evidence.Claim
 }
 
+type gateExecutionResult struct {
+	output        string
+	passed        bool
+	err           error
+	evidenceClaim *evidence.Claim
+}
+
 // runSinglePhase executes a single workflow phase (prompt or command), including
 // gate evaluation and retries. It returns the outcome without mutating the
 // vessel's queue state directly (the caller handles that).
@@ -1206,7 +1224,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 	p := wf.Phases[phaseIdx]
 	gateResult := ""
 	gateRetries := 0
-	if p.Gate != nil && p.Gate.Type == "command" && p.Gate.Retries > 0 {
+	if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") && p.Gate.Retries > 0 {
 		gateRetries = p.Gate.Retries
 	}
 
@@ -1238,7 +1256,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		provider := resolveProvider(r.Config, srcCfg, wf, &p)
 		model := resolveModel(r.Config, srcCfg, wf, &p, provider)
 		retryAttempt := 0
-		if p.Gate != nil && p.Gate.Type == "command" {
+		if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 			retryAttempt = providerAttempt(&p, gateRetries)
 		}
 		phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, wf, p, phaseIdx)
@@ -1290,7 +1308,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, policyErr.Error())
+				r.failUpdatedVessel(&vessel, policyErr.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1351,7 +1369,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, policyErr.Error())
+				r.failUpdatedVessel(&vessel, policyErr.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1398,7 +1416,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			finishCurrentPhaseSpan(runErr)
 			log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 			vessel.FailedPhase = p.Name
-			r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+			r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, runErr))
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 			}
@@ -1419,7 +1437,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				finishCurrentPhaseSpan(err)
 				log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, err.Error())
+				r.failUpdatedVessel(&vessel, err.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1442,7 +1460,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
 				p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 			vessel.FailedPhase = p.Name
-			r.failVessel(vessel.ID, errMsg)
+			r.failUpdatedVessel(&vessel, errMsg)
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 			}
@@ -1494,14 +1512,9 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 
 		switch p.Gate.Type {
-		case "command":
-			gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-			gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
-			finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
-				Type:         p.Gate.Type,
-				Passed:       passed,
-				RetryAttempt: retryAttempt,
-			}, gateErr)
+		case "command", "live":
+			gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+			gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 			if gateErr != nil {
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -1517,15 +1530,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			if passed {
 				log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
-				gateRecordedAt := r.runtimeNow()
-				claim := buildGateClaim(p, true, phaseArtifactRelativePath(vessel.ID, p.Name), gateRecordedAt)
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
 					output:        string(output),
 					status:        "completed",
 					duration:      phaseDuration,
 					phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", gatePassedPointer(true), ""),
-					evidenceClaim: &claim,
+					evidenceClaim: gateResultExec.evidenceClaim,
 				}
 			}
 
@@ -1540,7 +1551,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
 				vessel.FailedPhase = p.Name
 				vessel.GateOutput = gateOut
-				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1664,6 +1675,107 @@ func finishGateSpan(tracer *observability.Tracer, span observability.SpanContext
 	span.End()
 }
 
+func startGateStepSpan(tracer *observability.Tracer, gateSpan observability.SpanContext, ctx context.Context, name string) observability.SpanContext {
+	if tracer == nil {
+		return observability.SpanContext{}
+	}
+
+	stepCtx := ctx
+	if gateCtx := gateSpan.Context(); gateCtx != nil {
+		stepCtx = gateCtx
+	}
+
+	return tracer.StartSpan(stepCtx, "gate_step:"+name, nil)
+}
+
+func finishGateStepSpan(tracer *observability.Tracer, span observability.SpanContext, data observability.GateStepSpanData, err error) {
+	if tracer == nil {
+		return
+	}
+
+	span.AddAttributes(observability.GateStepSpanAttributes(data))
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.End()
+}
+
+func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observability.SpanContext, vessel queue.Vessel, p workflow.Phase, worktreePath string, retryAttempt int) gateExecutionResult {
+	if p.Gate == nil {
+		return gateExecutionResult{passed: true}
+	}
+
+	switch p.Gate.Type {
+	case "command":
+		gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
+		gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
+		finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
+			Type:         p.Gate.Type,
+			Passed:       passed,
+			RetryAttempt: retryAttempt,
+		}, gateErr)
+		result := gateExecutionResult{
+			output: gateOut,
+			passed: passed,
+			err:    gateErr,
+		}
+		if passed {
+			gateRecordedAt := r.runtimeNow()
+			claim := buildGateClaim(p, true, phaseArtifactRelativePath(vessel.ID, p.Name), gateRecordedAt)
+			result.evidenceClaim = &claim
+		}
+		return result
+	case "live":
+		gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
+		liveGate := r.LiveGate
+		if liveGate == nil {
+			liveGate = gate.NewLiveVerifier()
+		}
+		liveResult, gateErr := liveGate.Run(ctx, r.Runner, gate.LiveRequest{
+			StateDir:    r.Config.StateDir,
+			VesselID:    vessel.ID,
+			PhaseName:   p.Name,
+			WorktreeDir: worktreePath,
+			Gate:        p.Gate,
+		})
+		if liveResult != nil {
+			for _, step := range liveResult.Steps {
+				stepSpan := startGateStepSpan(r.Tracer, gateSpan, ctx, step.Name)
+				var stepErr error
+				if !step.Passed && step.Message != "" {
+					stepErr = fmt.Errorf("%s", step.Message)
+				}
+				finishGateStepSpan(r.Tracer, stepSpan, observability.GateStepSpanData{
+					Name:   step.Name,
+					Mode:   step.Mode,
+					Passed: step.Passed,
+				}, stepErr)
+			}
+		}
+		passed := gateErr == nil && liveResult != nil && liveResult.Passed
+		finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
+			Type:         p.Gate.Type,
+			Passed:       passed,
+			RetryAttempt: retryAttempt,
+		}, gateErr)
+		result := gateExecutionResult{
+			passed: passed,
+			err:    gateErr,
+		}
+		if liveResult != nil {
+			result.output = liveResult.Output
+			if liveResult.Passed {
+				gateRecordedAt := r.runtimeNow()
+				claim := buildGateClaim(p, true, liveResult.ReportPath, gateRecordedAt)
+				result.evidenceClaim = &claim
+			}
+		}
+		return result
+	default:
+		return gateExecutionResult{passed: true}
+	}
+}
+
 func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, renderedPrompt, output string, duration time.Duration) observability.PhaseResultData {
 	data := observability.PhaseResultData{
 		DurationMS: duration.Milliseconds(),
@@ -1697,7 +1809,18 @@ func buildGateClaim(p workflow.Phase, passed bool, artifactPath string, recorded
 	}
 
 	if p.Gate != nil {
-		claim.Checker = p.Gate.Run
+		switch p.Gate.Type {
+		case "live":
+			claim.Level = evidence.ObservedInSitu
+			if p.Gate.Live != nil {
+				claim.Checker = "live/" + p.Gate.Live.Mode
+			} else {
+				claim.Checker = "live"
+			}
+			claim.TrustBoundary = "Running system observation"
+		default:
+			claim.Checker = p.Gate.Run
+		}
 	}
 	if p.Gate == nil || p.Gate.Evidence == nil {
 		return claim

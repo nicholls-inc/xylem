@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +19,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
@@ -5959,4 +5963,184 @@ func TestResolveTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunVesselLiveHTTPGatePersistsObservedInSituEvidence(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(401, "live-http-pass")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "live-http-pass", []testPhase{{
+		name:          "implement",
+		promptContent: "Implement the fix",
+		maxTurns:      5,
+		gate: fmt.Sprintf(`      type: live
+      retries: 0
+      evidence:
+        claim: "Smoke check passes against the running service"
+        level: observed_in_situ
+        checker: "xylem live gate"
+        trust_boundary: "running service"
+      live:
+        mode: http
+        http:
+          base_url: %q
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200
+              expect_json:
+                - path: $.status
+                  equals: ok`, server.URL),
+	}})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement the fix": []byte("done"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.LiveGate = &gate.LiveVerifier{HTTPClient: server.Client()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	final := queueVesselByID(t, q, vessel.ID)
+	assert.Equal(t, queue.StateCompleted, final.State)
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, vessel.ID)
+	require.NoError(t, err)
+	require.Len(t, manifest.Claims, 1)
+	assert.Equal(t, evidence.ObservedInSitu, manifest.Claims[0].Level)
+	assert.Contains(t, manifest.Claims[0].ArtifactPath, "live-gate.json")
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, evidenceManifestRelativePath(vessel.ID), summary.EvidenceManifestPath)
+}
+
+func TestRunVesselLiveHTTPGateFailureFailsVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"degraded"}`))
+	}))
+	defer server.Close()
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(402, "live-http-fail")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "live-http-fail", []testPhase{{
+		name:          "implement",
+		promptContent: "Implement the fix",
+		maxTurns:      5,
+		gate: fmt.Sprintf(`      type: live
+      retries: 0
+      live:
+        mode: http
+        http:
+          base_url: %q
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200
+              expect_json:
+                - path: $.status
+                  equals: ok`, server.URL),
+	}})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement the fix": []byte("done"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.LiveGate = &gate.LiveVerifier{HTTPClient: server.Client()}
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	final := queueVesselByID(t, q, vessel.ID)
+	assert.Equal(t, queue.StateFailed, final.State)
+	assert.Contains(t, final.Error, "gate failed")
+	assert.Contains(t, final.GateOutput, "live gate failed")
+}
+
+func TestRunVesselLiveGateEmitsStepSpans(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(403, "live-http-trace"))
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "live-http-trace", []testPhase{{
+		name:          "implement",
+		promptContent: "Implement the fix",
+		maxTurns:      5,
+		gate: fmt.Sprintf(`      type: live
+      retries: 0
+      live:
+        mode: http
+        http:
+          base_url: %q
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200`, server.URL),
+	}})
+	withTestWorkingDir(t, dir)
+
+	tracer, rec := newTestTracer(t)
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement the fix": []byte("done"),
+		},
+	})
+	r.Tracer = tracer
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.LiveGate = &gate.LiveVerifier{HTTPClient: server.Client()}
+
+	_, err = r.Drain(context.Background())
+	require.NoError(t, err)
+
+	gateSpan := endedSpanByName(t, rec, "gate:live")
+	gateAttrs := spanAttrMap(gateSpan)
+	assert.Equal(t, "live", gateAttrs["xylem.gate.type"])
+	assert.Equal(t, "true", gateAttrs["xylem.gate.passed"])
+
+	stepSpan := endedSpanByName(t, rec, "gate_step:health")
+	stepAttrs := spanAttrMap(stepSpan)
+	assert.Equal(t, "health", stepAttrs["xylem.gate.step.name"])
+	assert.Equal(t, "http", stepAttrs["xylem.gate.step.mode"])
+	assert.Equal(t, "true", stepAttrs["xylem.gate.step.passed"])
+	assert.Equal(t, gateSpan.SpanContext().SpanID(), stepSpan.Parent().SpanID())
 }

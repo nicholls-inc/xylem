@@ -219,6 +219,94 @@ phases:
 	}
 }
 
+func TestLoadWorkflowLiveHTTPGateParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      retries: 1
+      live:
+        mode: http
+        timeout: "30s"
+        http:
+          base_url: "http://127.0.0.1:3000"
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200
+              max_latency: "2s"
+              expect_body_regex: '"status":"ok"'
+              expect_headers:
+                - name: Content-Type
+                  regex: 'application/json'
+              expect_json:
+                - path: $.status
+                  equals: ok
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	require.NotNil(t, got.Phases[0].Gate.Live)
+	assert.Equal(t, "http", got.Phases[0].Gate.Live.Mode)
+	require.Len(t, got.Phases[0].Gate.Live.HTTP.Steps, 1)
+	assert.Equal(t, "/health", got.Phases[0].Gate.Live.HTTP.Steps[0].URL)
+}
+
+func TestLoadWorkflowLiveGateRejectsMissingModeSpecificConfig(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      live:
+        mode: browser
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `live.browser is required`)
+}
+
+func TestLoadWorkflowLiveGateRejectsInvalidJSONPathAndDuration(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      live:
+        mode: command+assert
+        command_assert:
+          run: "cat status.json"
+          timeout: "not-a-duration"
+          expect_json:
+            - path: status
+              equals: ok
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid live.command_assert.timeout`)
+}
+
 func TestLoad(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -399,7 +487,7 @@ phases:
       type: webhook
 `,
 			prompts: []string{"prompts/analyze.md"},
-			wantErr: `type must be "command" or "label"`,
+			wantErr: `type must be "command", "label", or "live"`,
 		},
 		{
 			name:         "command gate missing run",
@@ -838,7 +926,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
-			wantErr: `type must be "command" or "label"`,
+			wantErr: `type must be "command", "label", or "live"`,
 		},
 		{
 			name:             "command gate missing run",

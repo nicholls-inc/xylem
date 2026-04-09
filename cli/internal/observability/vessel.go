@@ -133,3 +133,19 @@ func GateSpanAttributes(data GateSpanData) []SpanAttribute {
 		{Key: "xylem.gate.retry_attempt", Value: fmt.Sprintf("%d", data.RetryAttempt)},
 	}
 }
+
+// GateStepSpanData holds verification-step information for live gates.
+type GateStepSpanData struct {
+	Name   string `json:"name"`
+	Mode   string `json:"mode"`
+	Passed bool   `json:"passed"`
+}
+
+// GateStepSpanAttributes returns span attributes for a gate step span.
+func GateStepSpanAttributes(data GateStepSpanData) []SpanAttribute {
+	return []SpanAttribute{
+		{Key: "xylem.gate.step.name", Value: data.Name},
+		{Key: "xylem.gate.step.mode", Value: data.Mode},
+		{Key: "xylem.gate.step.passed", Value: fmt.Sprintf("%t", data.Passed)},
+	}
+}
