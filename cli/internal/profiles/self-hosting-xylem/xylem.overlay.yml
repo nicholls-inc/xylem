@@ -1,3 +1,130 @@
-# Reserved for follow-up self-hosting overlay migration.
+sources:
+  bugs:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
+    tasks:
+      fix-bugs:
+        labels: [bug, ready-for-work]
+        workflow: fix-bug
+        status_labels:
+          failed: xylem-failed
+          timed_out: xylem-failed
+
+  features:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
+    tasks:
+      implement-features:
+        labels: [enhancement, ready-for-work]
+        workflow: implement-feature
+        status_labels:
+          failed: xylem-failed
+          timed_out: xylem-failed
+
+  triage:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot, needs-refinement, xylem-failed]
+    llm: copilot
+    model: gpt-5-mini
+    tasks:
+      triage-issues:
+        labels: [needs-triage]
+        workflow: triage
+        status_labels:
+          failed: xylem-failed
+          timed_out: xylem-failed
+
+  refinement:
+    type: github
+    repo: nicholls-inc/xylem
+    exclude: [wontfix, duplicate, in-progress, no-bot, xylem-failed]
+    tasks:
+      refine-issues:
+        labels: [needs-refinement]
+        workflow: refine-issue
+        status_labels:
+          failed: xylem-failed
+          timed_out: xylem-failed
+
+  harness-impl:
+    type: github
+    repo: nicholls-inc/xylem
+    timeout: "90m"
+    exclude: [wontfix, duplicate, in-progress, no-bot, blocked, xylem-failed]
+    tasks:
+      implement-harness-steps:
+        labels: [harness-impl, ready-for-work]
+        workflow: implement-harness
+        status_labels:
+          running: in-progress
+          failed: xylem-failed
+          timed_out: xylem-failed
+
+  harness-pr-lifecycle:
+    type: github-pr-events
+    repo: nicholls-inc/xylem
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      respond-reviews:
+        workflow: respond-to-pr-review
+        on:
+          review_submitted: true
+          author_allow:
+            - "copilot-pull-request-reviewer[bot]"
+      fix-checks:
+        workflow: fix-pr-checks
+        on:
+          checks_failed: true
+
+  harness-merge:
+    type: github-pr
+    repo: nicholls-inc/xylem
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      merge-ready:
+        labels: [ready-to-merge, harness-impl]
+        workflow: merge-pr
+        status_labels:
+          running: pr-vessel-active
+          completed: pr-vessel-merged
+          failed: xylem-failed
+
+  conflict-resolution:
+    type: github-pr
+    repo: nicholls-inc/xylem
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      resolve-conflicts:
+        labels: [needs-conflict-resolution, harness-impl]
+        workflow: resolve-conflicts
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+
+  sota-gap:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-self-gap-analysis:
+        workflow: sota-gap-analysis
+        ref: sota-gap-analysis
+
+  harness-post-merge:
+    type: github-merge
+    repo: nicholls-inc/xylem
+    tasks:
+      unblock-deps:
+        workflow: unblock-wave
+
 daemon:
-  scan_interval: "60s"
+  auto_upgrade: true
+  auto_merge: true
+  auto_merge_repo: nicholls-inc/xylem
+  auto_merge_labels: [ready-to-merge, harness-impl]
+  auto_merge_branch_pattern: "^(feat|fix|chore)/issue-\\d+"
+  auto_merge_reviewer: "copilot-pull-request-reviewer"

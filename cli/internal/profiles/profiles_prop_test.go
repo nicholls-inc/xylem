@@ -8,16 +8,25 @@ import (
 	"pgregory.net/rapid"
 )
 
-func TestPropComposeCoreReturnsIndependentBytes(t *testing.T) {
+func TestPropComposeReturnsIndependentBytes(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
-		first, err := Compose("core")
-		if err != nil {
-			t.Fatalf("Compose(core) error = %v", err)
+		names := []string{"core"}
+		if rapid.Bool().Draw(t, "includeSelfHosting") {
+			if rapid.Bool().Draw(t, "selfHostingFirst") {
+				names = []string{"self-hosting-xylem", "core"}
+			} else {
+				names = []string{"core", "self-hosting-xylem"}
+			}
 		}
 
-		stable, err := Compose("core")
+		first, err := Compose(names...)
 		if err != nil {
-			t.Fatalf("Compose(core) second call error = %v", err)
+			t.Fatalf("Compose(%v) error = %v", names, err)
+		}
+
+		stable, err := Compose(names...)
+		if err != nil {
+			t.Fatalf("Compose(%v) second call error = %v", names, err)
 		}
 		expected := composedSignature(stable)
 
@@ -36,12 +45,12 @@ func TestPropComposeCoreReturnsIndependentBytes(t *testing.T) {
 			t.Fatalf("mutating %s changed another composition: got %q, want %q", asset.name, got, expected)
 		}
 
-		fresh, err := Compose("core")
+		fresh, err := Compose(names...)
 		if err != nil {
-			t.Fatalf("Compose(core) fresh call error = %v", err)
+			t.Fatalf("Compose(%v) fresh call error = %v", names, err)
 		}
 		if got := composedSignature(fresh); got != expected {
-			t.Fatalf("Compose(core) fresh signature mismatch after mutating %s: got %q, want %q", asset.name, got, expected)
+			t.Fatalf("Compose(%v) fresh signature mismatch after mutating %s: got %q, want %q", names, asset.name, got, expected)
 		}
 	})
 }

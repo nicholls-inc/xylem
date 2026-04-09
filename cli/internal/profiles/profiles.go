@@ -168,7 +168,7 @@ func mergeSources(profileName, filePath string, data []byte, dest map[string][]b
 	sort.Strings(names)
 
 	for _, sourceName := range names {
-		if prevOwner, ok := owners[sourceName]; ok {
+		if prevOwner, ok := owners[sourceName]; ok && prevOwner == profileName {
 			return fmt.Errorf("compose profiles: source %q conflicts between %q and %q", sourceName, prevOwner, profileName)
 		}
 		payload, err := yaml.Marshal(overlay.Sources[sourceName])
