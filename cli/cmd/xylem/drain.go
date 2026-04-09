@@ -20,6 +20,8 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
 
+var newTracer = observability.NewTracer
+
 func newDrainCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "drain",
@@ -86,11 +88,11 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 }
 
 func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
-	if !cfg.ObservabilityEnabled() || cfg.Observability.Endpoint == "" {
+	if !cfg.ObservabilityEnabled() {
 		return nil
 	}
 
-	tracer, err := observability.NewTracer(observability.TracerConfig{
+	tracer, err := newTracer(observability.TracerConfig{
 		ServiceName:    "xylem",
 		ServiceVersion: "",
 		Endpoint:       cfg.Observability.Endpoint,
@@ -98,7 +100,7 @@ func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 		SampleRate:     cfg.ObservabilitySampleRate(),
 	})
 	if err != nil {
-		log.Printf("warn: %v", fmt.Errorf("initialize tracer: %w", err))
+		log.Printf("warn: failed to initialize tracer: %v", err)
 		return nil
 	}
 

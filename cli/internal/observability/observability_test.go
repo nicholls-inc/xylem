@@ -1,15 +1,47 @@
 package observability
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/signal"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func captureTracerStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	old := os.Stdout
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	os.Stdout = pw
+	defer func() {
+		os.Stdout = old
+	}()
+
+	fn()
+
+	if err := pw.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	var buf bytes.Buffer
+	if _, err := io.Copy(&buf, pr); err != nil {
+		t.Fatalf("io.Copy() error = %v", err)
+	}
+	return buf.String()
+}
 
 func attrMap(attrs []SpanAttribute) map[string]string {
 	m := make(map[string]string, len(attrs))
@@ -258,10 +290,26 @@ func TestNewTracerWithEndpointShutdown(t *testing.T) {
 	}
 }
 
-func TestNewTracerNoEndpointReturnsError(t *testing.T) {
-	_, err := NewTracer(DefaultTracerConfig())
-	if err == nil {
-		t.Fatal("expected error when no endpoint is configured")
+func TestNewTracerNoEndpointUsesStdoutExporter(t *testing.T) {
+	out := captureTracerStdout(t, func() {
+		tracer, err := NewTracer(DefaultTracerConfig())
+		if err != nil {
+			t.Fatalf("NewTracer(DefaultTracerConfig()) error = %v", err)
+		}
+		if tracer == nil {
+			t.Fatal("expected non-nil tracer with empty endpoint")
+		}
+
+		sc := tracer.StartSpan(context.Background(), "stdout-span", nil)
+		sc.End()
+
+		if err := tracer.Shutdown(context.Background()); err != nil {
+			t.Fatalf("Shutdown() error = %v", err)
+		}
+	})
+
+	if !strings.Contains(out, `"Name":"stdout-span"`) {
+		t.Fatalf("stdout output %q does not contain exported span", out)
 	}
 }
 
@@ -280,27 +328,27 @@ func TestNewTracerShutdown(t *testing.T) {
 	}
 }
 
-func TestSmoke_S6_TracerInitNoEndpointReturnsError(t *testing.T) {
-	_, err := NewTracer(DefaultTracerConfig())
-	if err == nil {
-		t.Fatal("expected error from NewTracer(DefaultTracerConfig()) with no endpoint")
-	}
+func TestSmoke_S6_TracerInitializationWithDefaultConfigUsesStdoutExporter(t *testing.T) {
+	tracer, err := NewTracer(DefaultTracerConfig())
+	require.NoError(t, err)
+	require.NotNil(t, tracer)
+	t.Cleanup(func() {
+		assert.NoError(t, tracer.Shutdown(context.Background()))
+	})
 }
 
-func TestSmoke_S7_TracerInitOTLPEndpointConfigured(t *testing.T) {
+func TestSmoke_S7_TracerInitializationWithOTLPEndpointUsesGRPCExporter(t *testing.T) {
 	tracer, err := NewTracer(TracerConfig{
 		ServiceName: "xylem-test",
 		SampleRate:  1.0,
 		Endpoint:    "localhost:4317",
 		Insecure:    true,
 	})
-	if err != nil {
-		t.Fatalf("NewTracer() error = %v", err)
-	}
-	if tracer == nil {
-		t.Fatal("expected non-nil tracer")
-	}
-	_ = tracer.Shutdown(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, tracer)
+	t.Cleanup(func() {
+		_ = tracer.Shutdown(context.Background())
+	})
 }
 
 func TestStartSpanAndEnd(t *testing.T) {
