@@ -1,0 +1,12 @@
+name: diagnose-failures
+description: "Diagnose xylem vessel failures and file refined GitHub issues"
+phases:
+  - name: diagnose
+    prompt_file: .xylem/prompts/diagnose-failures/diagnose.md
+    max_turns: 20
+  - name: create-issues
+    prompt_file: .xylem/prompts/diagnose-failures/create-issues.md
+    max_turns: 20
+  - name: refine
+    prompt_file: .xylem/prompts/diagnose-failures/refine.md
+    max_turns: 40
