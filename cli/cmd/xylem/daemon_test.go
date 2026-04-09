@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -189,6 +191,94 @@ func (daemonNoopRunner) Run(_ context.Context, _ string, _ ...string) ([]byte, e
 	return []byte("[]"), nil
 }
 
+type daemonSmokeCmdRunner struct {
+	mu           sync.Mutex
+	runPhaseHook func(dir, prompt, name string, args ...string) ([]byte, error, bool)
+	phaseCalls   []daemonSmokePhaseCall
+}
+
+type daemonSmokePhaseCall struct {
+	dir    string
+	prompt string
+	name   string
+	args   []string
+}
+
+func (r *daemonSmokeCmdRunner) RunOutput(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func (r *daemonSmokeCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
+	return nil
+}
+
+func (r *daemonSmokeCmdRunner) RunPhase(_ context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	prompt, err := io.ReadAll(stdin)
+	if err != nil {
+		return nil, err
+	}
+
+	r.mu.Lock()
+	r.phaseCalls = append(r.phaseCalls, daemonSmokePhaseCall{
+		dir:    dir,
+		prompt: string(prompt),
+		name:   name,
+		args:   append([]string(nil), args...),
+	})
+	r.mu.Unlock()
+
+	if r.runPhaseHook != nil {
+		if out, hookErr, handled := r.runPhaseHook(dir, string(prompt), name, args...); handled {
+			return out, hookErr
+		}
+	}
+	return []byte("ok"), nil
+}
+
+type daemonSmokeWorktree struct {
+	path string
+}
+
+func (w *daemonSmokeWorktree) Create(_ context.Context, _ string) (string, error) {
+	return w.path, nil
+}
+
+func (w *daemonSmokeWorktree) Remove(_ context.Context, _ string) error {
+	return nil
+}
+
+func daemonSmokeDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", sum)
+}
+
+func writeDaemonSmokeWorkflow(t *testing.T, dir, name string, phases map[string]string) string {
+	t.Helper()
+
+	workflowDir := filepath.Join(dir, ".xylem", "workflows")
+	require.NoError(t, os.MkdirAll(workflowDir, 0o755))
+
+	promptDir := filepath.Join(dir, ".xylem", "prompts", name)
+	require.NoError(t, os.MkdirAll(promptDir, 0o755))
+
+	for phaseName, content := range phases {
+		require.NoError(t, os.WriteFile(filepath.Join(promptDir, phaseName+".md"), []byte(content), 0o644))
+	}
+
+	workflow := fmt.Sprintf(`name: %s
+phases:
+  - name: analyze
+    prompt_file: %s
+    max_turns: 3
+  - name: implement
+    prompt_file: %s
+    max_turns: 3
+`, name, filepath.Join(promptDir, "analyze.md"), filepath.Join(promptDir, "implement.md"))
+	workflowPath := filepath.Join(workflowDir, name+".yaml")
+	require.NoError(t, os.WriteFile(workflowPath, []byte(workflow), 0o644))
+	return workflowPath
+}
+
 func TestDaemonLoopScheduledSourceRunsSingleTick(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
@@ -366,6 +456,128 @@ func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
 	assert.Equal(t, "1h", vessels[0].Meta["schedule.cadence"])
 	assert.Equal(t, "doctor", vessels[0].Meta["schedule.source_name"])
 	assert.NotEmpty(t, vessels[0].Meta["schedule.fired_at"])
+}
+
+func TestSmoke_S5_DaemonReload(t *testing.T) {
+	repoDir := t.TempDir()
+	worktreeDir := t.TempDir()
+	stateDir := filepath.Join(repoDir, ".xylem")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".xylem.yml"), []byte("daemon:\n  scan_interval: 5ms\n"), 0o644))
+
+	cfg := &config.Config{
+		Concurrency: 1,
+		MaxTurns:    50,
+		Timeout:     "30s",
+		StateDir:    stateDir,
+		Claude: config.ClaudeConfig{
+			Command: "claude",
+		},
+	}
+	q := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "manual-1",
+		Source:    "manual",
+		Workflow:  "daemon-reload-smoke",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	workflowPath := writeDaemonSmokeWorkflow(t, repoDir, "daemon-reload-smoke", map[string]string{
+		"analyze":   "Analyze using original workflow",
+		"implement": "Implement using original workflow",
+	})
+	originalWorkflow, err := os.ReadFile(workflowPath)
+	require.NoError(t, err)
+
+	reloadedPromptPath := filepath.Join(repoDir, ".xylem", "prompts", "daemon-reload-smoke", "implement-reloaded.md")
+	require.NoError(t, os.WriteFile(reloadedPromptPath, []byte("Implement using reloaded workflow"), 0o644))
+
+	restoreWd := withDaemonWorkingDir(t, repoDir)
+	defer restoreWd()
+
+	analyzeStarted := make(chan struct{})
+	reloadApplied := make(chan struct{})
+	var analyzeOnce sync.Once
+
+	cmdRunner := &daemonSmokeCmdRunner{
+		runPhaseHook: func(_ string, prompt, _ string, _ ...string) ([]byte, error, bool) {
+			if !strings.Contains(prompt, "Analyze using original workflow") {
+				return []byte("ok"), nil, true
+			}
+			analyzeOnce.Do(func() { close(analyzeStarted) })
+			select {
+			case <-reloadApplied:
+			case <-time.After(250 * time.Millisecond):
+				return nil, fmt.Errorf("timed out waiting for daemon reload"), true
+			}
+			return []byte("ok"), nil, true
+		},
+	}
+
+	drainRunner := runner.New(cfg, q, &daemonSmokeWorktree{path: worktreeDir}, cmdRunner)
+	drain := func(ctx context.Context) (runner.DrainResult, error) {
+		return drainRunner.Drain(ctx)
+	}
+
+	var reloads atomic.Int32
+	scan := func(_ context.Context) (scanner.ScanResult, error) {
+		select {
+		case <-analyzeStarted:
+		default:
+			return scanner.ScanResult{}, nil
+		}
+		if !reloads.CompareAndSwap(0, 1) {
+			return scanner.ScanResult{}, nil
+		}
+
+		require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".xylem.yml"), []byte("daemon:\n  scan_interval: 10ms\n"), 0o644))
+		reloadedWorkflow := fmt.Sprintf(`name: daemon-reload-smoke
+phases:
+  - name: analyze
+    prompt_file: %s
+    max_turns: 3
+  - name: implement
+    prompt_file: %s
+    max_turns: 3
+`, filepath.Join(repoDir, ".xylem", "prompts", "daemon-reload-smoke", "analyze.md"), reloadedPromptPath)
+		require.NoError(t, os.WriteFile(workflowPath, []byte(reloadedWorkflow), 0o644))
+		close(reloadApplied)
+		return scanner.ScanResult{}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer cancel()
+
+	err = daemonLoop(ctx, q, drainRunner, scan, drain, nil, nil, 5*time.Millisecond, 5*time.Millisecond, 0)
+	require.NoError(t, err)
+
+	select {
+	case <-reloadApplied:
+	default:
+		t.Fatal("expected daemon reload to be applied during the smoke scenario")
+	}
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, queue.StateCompleted, vessels[0].State)
+	assert.Equal(t, daemonSmokeDigest(originalWorkflow), vessels[0].WorkflowDigest)
+
+	snapshotPath := filepath.Join(stateDir, "vessels", vessels[0].ID, "workflow.snapshot.yaml")
+	snapshotData, err := os.ReadFile(snapshotPath)
+	require.NoError(t, err)
+	assert.Equal(t, originalWorkflow, snapshotData)
+
+	liveWorkflow, err := os.ReadFile(workflowPath)
+	require.NoError(t, err)
+	assert.NotEqual(t, string(originalWorkflow), string(liveWorkflow))
+
+	require.Len(t, cmdRunner.phaseCalls, 2)
+	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Implement using original workflow")
+	assert.NotContains(t, cmdRunner.phaseCalls[1].prompt, "Implement using reloaded workflow")
+	assert.Equal(t, int32(1), reloads.Load())
 }
 
 func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {

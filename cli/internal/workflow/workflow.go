@@ -146,17 +146,32 @@ func Load(path string) (*Workflow, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read workflow file %q: %w", path, err)
 	}
+	return LoadBytes(data, path)
+}
 
+// ParseBytes parses workflow YAML without validating prompt file existence.
+// Call Validate on the returned workflow once any path rewriting is complete.
+func ParseBytes(data []byte, workflowFilePath string) (*Workflow, error) {
 	var s Workflow
 	if err := yaml.Unmarshal(data, &s); err != nil {
-		return nil, fmt.Errorf("parse workflow yaml %q: %w", path, err)
+		return nil, fmt.Errorf("parse workflow yaml %q: %w", workflowFilePath, err)
 	}
-
-	if err := s.Validate(path); err != nil {
-		return nil, fmt.Errorf("validate workflow %q: %w", path, err)
-	}
-
 	return &s, nil
+}
+
+// LoadBytes parses and validates workflow YAML using workflowFilePath as the
+// logical source path for filename validation and prompt-file checks.
+func LoadBytes(data []byte, workflowFilePath string) (*Workflow, error) {
+	s, err := ParseBytes(data, workflowFilePath)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := s.Validate(workflowFilePath); err != nil {
+		return nil, fmt.Errorf("validate workflow %q: %w", workflowFilePath, err)
+	}
+
+	return s, nil
 }
 
 // Validate checks that the workflow definition is well-formed. workflowFilePath is

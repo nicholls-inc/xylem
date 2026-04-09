@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -198,6 +199,17 @@ func TestProp_PromptOnlyUsageAccumulatesEstimatedTotals(t *testing.T) {
 		}
 		if len(summary.Phases) != 0 {
 			t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
+		}
+	})
+}
+
+func TestProp_WorkflowSnapshotDigestMatchesSHA256(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		data := []byte(rapid.StringMatching(`[\x09\x0a\x0d\x20-\x7e]{0,256}`).Draw(t, "data"))
+		sum := sha256.Sum256(data)
+		want := fmt.Sprintf("sha256:%x", sum)
+		if got := workflowSnapshotDigest(data); got != want {
+			t.Fatalf("workflowSnapshotDigest() = %q, want %q", got, want)
 		}
 	})
 }

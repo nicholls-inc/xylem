@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -396,7 +397,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 		if vessel.WaitingSince != nil {
 			timeoutDur := 24 * time.Hour // default
 			if vessel.Workflow != "" {
-				if s, loadErr := r.loadWorkflow(vessel.Workflow); loadErr == nil {
+				if s, loadErr := r.loadWorkflowForVessel(vessel); loadErr == nil {
 					if int(vessel.CurrentPhase) > 0 && int(vessel.CurrentPhase) <= len(s.Phases) {
 						prevPhase := s.Phases[vessel.CurrentPhase-1]
 						if prevPhase.Gate != nil && prevPhase.Gate.Timeout != "" {
@@ -526,17 +527,20 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		return r.runBuiltinWorkflow(ctx, vessel, src, vrs, builtin)
 	}
 
-	worktreePath, ok := r.ensureWorktree(ctx, &vessel, src)
-	if !ok {
-		return "failed"
-	}
-
-	sk, err := r.loadWorkflow(vessel.Workflow)
+	vessel, sk, err := r.prepareWorkflowSnapshot(vessel)
 	if err != nil {
-		r.failVessel(vessel.ID, fmt.Sprintf("load workflow: %v", err))
+		if r.cancelledTransition(vessel.ID, err) {
+			return r.cancelVessel(vessel, "", vrs, claims)
+		}
+		r.failUpdatedVessel(&vessel, fmt.Sprintf("prepare workflow snapshot: %v", err))
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 		}
+		return "failed"
+	}
+
+	worktreePath, ok := r.ensureWorktree(ctx, &vessel, src)
+	if !ok {
 		return "failed"
 	}
 
@@ -2936,7 +2940,7 @@ func (r *Runner) workflowProtectedWritePolicy(vessel queue.Vessel, violations []
 		return protectedSurfaceWorkflowPolicy{}, nil
 	}
 
-	sk, err := r.loadWorkflow(vessel.Workflow)
+	sk, err := r.loadWorkflowForVessel(vessel)
 	if err != nil {
 		return protectedSurfaceWorkflowPolicy{}, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
 	}
@@ -3372,8 +3376,145 @@ func (r *Runner) sourceConfigNameFromMeta(v queue.Vessel) string {
 }
 
 func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, error) {
-	path := filepath.Join(".xylem", "workflows", name+".yaml")
-	return workflow.Load(path)
+	return workflow.Load(r.workflowPath(name))
+}
+
+func (r *Runner) loadWorkflowForVessel(vessel queue.Vessel) (*workflow.Workflow, error) {
+	if strings.TrimSpace(vessel.Workflow) == "" {
+		return nil, fmt.Errorf("vessel %s has no workflow", vessel.ID)
+	}
+	if strings.TrimSpace(vessel.WorkflowDigest) == "" {
+		return r.loadWorkflow(vessel.Workflow)
+	}
+
+	snapshotPath := r.workflowSnapshotPath(vessel.ID)
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return nil, fmt.Errorf("read workflow snapshot %q: %w", snapshotPath, err)
+	}
+	if got := workflowSnapshotDigest(data); got != vessel.WorkflowDigest {
+		return nil, fmt.Errorf("workflow snapshot digest mismatch: got %s want %s", got, vessel.WorkflowDigest)
+	}
+
+	wf, err := workflow.ParseBytes(data, r.workflowPath(vessel.Workflow))
+	if err != nil {
+		return nil, fmt.Errorf("parse workflow snapshot %q: %w", snapshotPath, err)
+	}
+	if err := r.rewriteWorkflowPromptPathsToSnapshots(vessel.ID, wf); err != nil {
+		return nil, fmt.Errorf("rewrite workflow snapshot prompts: %w", err)
+	}
+	if err := wf.Validate(r.workflowPath(vessel.Workflow)); err != nil {
+		return nil, fmt.Errorf("validate workflow snapshot %q: %w", snapshotPath, err)
+	}
+	return wf, nil
+}
+
+func (r *Runner) prepareWorkflowSnapshot(vessel queue.Vessel) (queue.Vessel, *workflow.Workflow, error) {
+	if strings.TrimSpace(vessel.Workflow) == "" {
+		return vessel, nil, fmt.Errorf("vessel %s has no workflow", vessel.ID)
+	}
+	if strings.TrimSpace(vessel.WorkflowDigest) != "" {
+		wf, err := r.loadWorkflowForVessel(vessel)
+		if err != nil {
+			return vessel, nil, err
+		}
+		return vessel, wf, nil
+	}
+
+	workflowPath := r.workflowPath(vessel.Workflow)
+	data, err := os.ReadFile(workflowPath)
+	if err != nil {
+		return vessel, nil, fmt.Errorf("read workflow file %q: %w", workflowPath, err)
+	}
+
+	wf, err := workflow.LoadBytes(data, workflowPath)
+	if err != nil {
+		return vessel, nil, err
+	}
+
+	snapshotPath := r.workflowSnapshotPath(vessel.ID)
+	if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o755); err != nil {
+		return vessel, nil, fmt.Errorf("create workflow snapshot dir: %w", err)
+	}
+	if err := os.WriteFile(snapshotPath, data, 0o644); err != nil {
+		return vessel, nil, fmt.Errorf("write workflow snapshot %q: %w", snapshotPath, err)
+	}
+	if err := r.snapshotWorkflowPromptFiles(vessel.ID, wf); err != nil {
+		return vessel, nil, fmt.Errorf("snapshot workflow prompts: %w", err)
+	}
+	if err := r.rewriteWorkflowPromptPathsToSnapshots(vessel.ID, wf); err != nil {
+		return vessel, nil, fmt.Errorf("rewrite workflow prompts to snapshots: %w", err)
+	}
+
+	vessel.WorkflowDigest = workflowSnapshotDigest(data)
+	if err := r.Queue.UpdateVessel(vessel); err != nil {
+		return vessel, nil, fmt.Errorf("persist workflow digest: %w", err)
+	}
+
+	return vessel, wf, nil
+}
+
+func (r *Runner) workflowPath(name string) string {
+	return filepath.Join(".xylem", "workflows", name+".yaml")
+}
+
+func (r *Runner) workflowSnapshotPath(vesselID string) string {
+	return filepath.Join(r.workflowSnapshotDir(vesselID), "workflow.snapshot.yaml")
+}
+
+func (r *Runner) workflowSnapshotDir(vesselID string) string {
+	stateDir := ".xylem"
+	if r.Config != nil && r.Config.StateDir != "" {
+		stateDir = r.Config.StateDir
+	}
+	return filepath.Join(stateDir, "vessels", vesselID)
+}
+
+func (r *Runner) workflowPromptSnapshotPath(vesselID string, p workflow.Phase) string {
+	ext := filepath.Ext(p.PromptFile)
+	if ext == "" {
+		ext = ".md"
+	}
+	return filepath.Join(r.workflowSnapshotDir(vesselID), "prompts", p.Name+ext)
+}
+
+func (r *Runner) snapshotWorkflowPromptFiles(vesselID string, wf *workflow.Workflow) error {
+	for _, p := range wf.Phases {
+		if strings.TrimSpace(p.PromptFile) == "" {
+			continue
+		}
+		data, err := os.ReadFile(p.PromptFile)
+		if err != nil {
+			return fmt.Errorf("read prompt file %q for phase %q: %w", p.PromptFile, p.Name, err)
+		}
+		snapshotPath := r.workflowPromptSnapshotPath(vesselID, p)
+		if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o755); err != nil {
+			return fmt.Errorf("create prompt snapshot dir for phase %q: %w", p.Name, err)
+		}
+		if err := os.WriteFile(snapshotPath, data, 0o644); err != nil {
+			return fmt.Errorf("write prompt snapshot %q for phase %q: %w", snapshotPath, p.Name, err)
+		}
+	}
+	return nil
+}
+
+func (r *Runner) rewriteWorkflowPromptPathsToSnapshots(vesselID string, wf *workflow.Workflow) error {
+	for i := range wf.Phases {
+		if strings.TrimSpace(wf.Phases[i].PromptFile) == "" {
+			continue
+		}
+		snapshotPath := r.workflowPromptSnapshotPath(vesselID, wf.Phases[i])
+		if _, err := os.Stat(snapshotPath); err != nil {
+			return fmt.Errorf("stat prompt snapshot %q for phase %q: %w", snapshotPath, wf.Phases[i].Name, err)
+		}
+		wf.Phases[i].PromptFile = snapshotPath
+	}
+	return nil
+}
+
+func workflowSnapshotDigest(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("sha256:%x", sum)
 }
 
 func (r *Runner) readHarness() string {

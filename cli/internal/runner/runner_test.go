@@ -8023,3 +8023,217 @@ func TestRunVesselLiveGateEmitsStepSpans(t *testing.T) {
 	assert.Equal(t, "true", stepAttrs["xylem.gate.step.passed"])
 	assert.Equal(t, gateSpan.SpanContext().SpanID(), stepSpan.Parent().SpanID())
 }
+
+func TestRunnerPrepareWorkflowSnapshotPersistsDigestAndSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(dir, ".xylem"), 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	_, err := q.Enqueue(makeVessel(1, "snapshot"))
+	require.NoError(t, err)
+	writeWorkflowFile(t, dir, "snapshot", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 3},
+	})
+	withTestWorkingDir(t, dir)
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	originalWorkflow, err := os.ReadFile(filepath.Join(dir, ".xylem", "workflows", "snapshot.yaml"))
+	require.NoError(t, err)
+
+	updated, wf, err := r.prepareWorkflowSnapshot(*vessel)
+	require.NoError(t, err)
+	require.NotNil(t, wf)
+	assert.Equal(t, "snapshot", wf.Name)
+	assert.Equal(t, workflowSnapshotDigest(originalWorkflow), updated.WorkflowDigest)
+
+	snapshotData, err := os.ReadFile(r.workflowSnapshotPath(updated.ID))
+	require.NoError(t, err)
+	assert.Equal(t, originalWorkflow, snapshotData)
+
+	persisted, err := q.FindByID(updated.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	assert.Equal(t, updated.WorkflowDigest, persisted.WorkflowDigest)
+}
+
+func TestRunnerUsesWorkflowSnapshotAfterLiveWorkflowChanges(t *testing.T) {
+	repoDir := t.TempDir()
+	worktreeDir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(repoDir, ".xylem"), 1)
+	q := queue.New(filepath.Join(repoDir, "queue.jsonl"))
+
+	_, err := q.Enqueue(makeVessel(1, "snapshot-reuse"))
+	require.NoError(t, err)
+	writeWorkflowFile(t, repoDir, "snapshot-reuse", []testPhase{
+		{name: "analyze", promptContent: "Analyze using original workflow", maxTurns: 3},
+		{name: "implement", promptContent: "Implement using original workflow", maxTurns: 3},
+	})
+	withTestWorkingDir(t, repoDir)
+
+	workflowPath := filepath.Join(repoDir, ".xylem", "workflows", "snapshot-reuse.yaml")
+	analyzePromptPath := filepath.Join(repoDir, ".xylem", "prompts", "snapshot-reuse", "analyze.md")
+	reloadedPromptPath := filepath.Join(repoDir, ".xylem", "prompts", "snapshot-reuse", "implement-reloaded.md")
+	require.NoError(t, os.WriteFile(reloadedPromptPath, []byte("Implement using reloaded workflow"), 0o644))
+
+	originalWorkflow, err := os.ReadFile(workflowPath)
+	require.NoError(t, err)
+
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(_ string, prompt, _ string, _ ...string) ([]byte, error, bool) {
+			if !strings.Contains(prompt, "Analyze using original workflow") {
+				return []byte("ok"), nil, true
+			}
+			reloadedWorkflow := fmt.Sprintf(`name: snapshot-reuse
+phases:
+  - name: analyze
+    prompt_file: %s
+    max_turns: 3
+  - name: implement
+    prompt_file: %s
+    max_turns: 3
+`, analyzePromptPath, reloadedPromptPath)
+			if err := os.WriteFile(workflowPath, []byte(reloadedWorkflow), 0o644); err != nil {
+				return nil, err, true
+			}
+			return []byte("ok"), nil, true
+		},
+	}
+
+	r := New(cfg, q, &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+	assert.Equal(t, workflowSnapshotDigest(originalWorkflow), vessel.WorkflowDigest)
+
+	snapshotData, err := os.ReadFile(r.workflowSnapshotPath(vessel.ID))
+	require.NoError(t, err)
+	assert.Equal(t, originalWorkflow, snapshotData)
+	require.Len(t, cmdRunner.phaseCalls, 2)
+	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Implement using original workflow")
+	assert.NotContains(t, cmdRunner.phaseCalls[1].prompt, "Implement using reloaded workflow")
+}
+
+func TestRunnerUsesSnapshottedPromptFilesAfterLivePromptChanges(t *testing.T) {
+	repoDir := t.TempDir()
+	worktreeDir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(repoDir, ".xylem"), 1)
+	q := queue.New(filepath.Join(repoDir, "queue.jsonl"))
+
+	_, err := q.Enqueue(makeVessel(1, "prompt-snapshot"))
+	require.NoError(t, err)
+	writeWorkflowFile(t, repoDir, "prompt-snapshot", []testPhase{
+		{name: "analyze", promptContent: "Analyze using original prompt", maxTurns: 3},
+		{name: "implement", promptContent: "Implement using original prompt", maxTurns: 3},
+	})
+	withTestWorkingDir(t, repoDir)
+
+	implementPromptPath := filepath.Join(repoDir, ".xylem", "prompts", "prompt-snapshot", "implement.md")
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(_ string, prompt, _ string, _ ...string) ([]byte, error, bool) {
+			if !strings.Contains(prompt, "Analyze using original prompt") {
+				return []byte("ok"), nil, true
+			}
+			if err := os.WriteFile(implementPromptPath, []byte("Implement using edited prompt"), 0o644); err != nil {
+				return nil, err, true
+			}
+			return []byte("ok"), nil, true
+		},
+	}
+
+	r := New(cfg, q, &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	require.Len(t, cmdRunner.phaseCalls, 2)
+	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Implement using original prompt")
+	assert.NotContains(t, cmdRunner.phaseCalls[1].prompt, "Implement using edited prompt")
+}
+
+func TestRunnerLoadWorkflowForLegacyVesselFallsBackToLiveDisk(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(dir, ".xylem"), 1)
+	writeWorkflowFile(t, dir, "legacy", []testPhase{
+		{name: "plan", promptContent: "Plan the change", maxTurns: 3},
+	})
+	withTestWorkingDir(t, dir)
+
+	livePromptPath := filepath.Join(dir, ".xylem", "prompts", "legacy", "implement.md")
+	require.NoError(t, os.WriteFile(livePromptPath, []byte("Implement from live workflow"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "workflows", "legacy.yaml"), []byte(fmt.Sprintf(`name: legacy
+phases:
+  - name: implement
+    prompt_file: %s
+    max_turns: 3
+`, livePromptPath)), 0o644))
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	wf, err := r.loadWorkflowForVessel(queue.Vessel{ID: "issue-1", Workflow: "legacy"})
+	require.NoError(t, err)
+	require.Len(t, wf.Phases, 1)
+	assert.Equal(t, "implement", wf.Phases[0].Name)
+}
+
+func TestRunnerLoadWorkflowForVesselUsesSnapshottedPromptFiles(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(dir, ".xylem"), 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	_, err := q.Enqueue(makeVessel(1, "snapshotted-prompts"))
+	require.NoError(t, err)
+	writeWorkflowFile(t, dir, "snapshotted-prompts", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 3},
+	})
+	withTestWorkingDir(t, dir)
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	updated, _, err := r.prepareWorkflowSnapshot(*vessel)
+	require.NoError(t, err)
+
+	livePromptPath := filepath.Join(dir, ".xylem", "prompts", "snapshotted-prompts", "implement.md")
+	require.NoError(t, os.Remove(livePromptPath))
+
+	wf, err := r.loadWorkflowForVessel(updated)
+	require.NoError(t, err)
+	require.Len(t, wf.Phases, 1)
+	assert.Equal(t, r.workflowPromptSnapshotPath(updated.ID, wf.Phases[0]), wf.Phases[0].PromptFile)
+}
+
+func TestRunnerLoadWorkflowForVesselRejectsSnapshotDigestMismatch(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(dir, ".xylem"), 1)
+	writeWorkflowFile(t, dir, "digest-mismatch", []testPhase{
+		{name: "implement", promptContent: "Implement the fix", maxTurns: 3},
+	})
+	withTestWorkingDir(t, dir)
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	workflowData, err := os.ReadFile(filepath.Join(dir, ".xylem", "workflows", "digest-mismatch.yaml"))
+	require.NoError(t, err)
+	snapshotPath := r.workflowSnapshotPath("issue-1")
+	require.NoError(t, os.MkdirAll(filepath.Dir(snapshotPath), 0o755))
+	require.NoError(t, os.WriteFile(snapshotPath, workflowData, 0o644))
+
+	_, err = r.loadWorkflowForVessel(queue.Vessel{
+		ID:             "issue-1",
+		Workflow:       "digest-mismatch",
+		WorkflowDigest: "sha256:deadbeef",
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "workflow snapshot digest mismatch")
+}

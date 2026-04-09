@@ -64,17 +64,20 @@ func (s VesselState) IsTerminal() bool {
 }
 
 type Vessel struct {
-	ID        string            `json:"id"`
-	Source    string            `json:"source"`
-	Ref       string            `json:"ref,omitempty"`
-	Workflow  string            `json:"workflow,omitempty"`
-	Prompt    string            `json:"prompt,omitempty"`
-	Meta      map[string]string `json:"meta,omitempty"`
-	State     VesselState       `json:"state"`
-	CreatedAt time.Time         `json:"created_at"`
-	StartedAt *time.Time        `json:"started_at,omitempty"`
-	EndedAt   *time.Time        `json:"ended_at,omitempty"`
-	Error     string            `json:"error,omitempty"`
+	ID       string `json:"id"`
+	Source   string `json:"source"`
+	Ref      string `json:"ref,omitempty"`
+	Workflow string `json:"workflow,omitempty"`
+	// WorkflowDigest fingerprints the frozen workflow YAML persisted at vessel
+	// launch so resumed phases can keep using the same definition after reloads.
+	WorkflowDigest string            `json:"workflow_digest,omitempty"`
+	Prompt         string            `json:"prompt,omitempty"`
+	Meta           map[string]string `json:"meta,omitempty"`
+	State          VesselState       `json:"state"`
+	CreatedAt      time.Time         `json:"created_at"`
+	StartedAt      *time.Time        `json:"started_at,omitempty"`
+	EndedAt        *time.Time        `json:"ended_at,omitempty"`
+	Error          string            `json:"error,omitempty"`
 
 	// v2 phase-based execution fields
 	CurrentPhase int               `json:"current_phase,omitempty"`
