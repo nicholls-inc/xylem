@@ -1,0 +1,3 @@
+# Reserved for follow-up self-hosting overlay migration.
+daemon:
+  scan_interval: "60s"

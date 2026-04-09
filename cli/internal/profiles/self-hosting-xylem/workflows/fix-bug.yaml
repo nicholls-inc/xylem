@@ -1,0 +1,6 @@
+name: fix-bug
+description: "Conflicting placeholder for composition validation"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/fix-bug/analyze.md
+    max_turns: 1

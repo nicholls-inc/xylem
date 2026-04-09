@@ -1,0 +1,50 @@
+# xylem configuration
+# Docs: https://github.com/nicholls-inc/claude-code-marketplace/tree/main/xylem
+
+sources:
+  bugs:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      fix-bugs:
+        labels: [bug, ready-for-work]
+        workflow: fix-bug
+  # features:
+  #   type: github
+  #   repo: "{{ .Repo }}"
+  #   exclude: [wontfix, duplicate, in-progress, no-bot]
+  #   tasks:
+  #     implement-features:
+  #       labels: [enhancement, low-effort, ready-for-work]
+  #       workflow: implement-feature
+
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+state_dir: ".xylem"
+
+# Default harness policy denies writes to xylem control files and allows
+# git_push/pr_create so autonomous drains can finish. If you want a strategic
+# human gate before publication, add workflow review steps or
+# harness.policy.rules that require approval for those actions.
+
+# llm selects the global default LLM provider: "claude" (default) or "copilot"
+llm: claude
+
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+  flags: "--bare --dangerously-skip-permissions"
+  env:
+    ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+  # allowed_tools:
+  #   - "Bash(gh issue view *)"
+  #   - "Bash(gh pr create *)"
+  #   - "WebFetch"
+
+# copilot:
+#   command: "copilot"
+#   flags: ""
+#   default_model: ""
+#   env: {}

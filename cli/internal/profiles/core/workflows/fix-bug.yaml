@@ -1,0 +1,35 @@
+name: fix-bug
+description: "Diagnose and fix a bug from a GitHub issue"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/fix-bug/analyze.md
+    max_turns: 5
+    noop:
+      match: XYLEM_NOOP
+  - name: plan
+    prompt_file: .xylem/prompts/fix-bug/plan.md
+    max_turns: 3
+  - name: implement
+    prompt_file: .xylem/prompts/fix-bug/implement.md
+    max_turns: 15
+    gate:
+      type: command
+      run: "make test"
+      retries: 2
+      # Optional live smoke test example:
+      # type: live
+      # retries: 1
+      # live:
+      #   mode: http
+      #   http:
+      #     base_url: "http://127.0.0.1:3000"
+      #     steps:
+      #       - name: health
+      #         url: /health
+      #         expect_status: 200
+  - name: pr
+    prompt_file: .xylem/prompts/fix-bug/pr.md
+    max_turns: 3
+    # Publication phase: git_push/pr_create are allowed by default so autonomous
+    # drains can finish. Add a review gate or restrictive harness.policy.rules
+    # if you want a human checkpoint here.
