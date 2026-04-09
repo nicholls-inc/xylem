@@ -5716,6 +5716,171 @@ func TestVerifyProtectedSurfacesStillCatchesMutualDeletion(t *testing.T) {
 	}
 }
 
+// TestVerifyProtectedSurfacesSuppressesAlignmentModifications documents the
+// loop 9 fix for the final Fix B cascade: when a resolve-conflicts vessel
+// runs `git merge origin/main --no-commit` on a pre-#157 PR branch, the
+// protected prompts get updated from the branch's old content to main's
+// canonical content. The verifier previously flagged this as a modification
+// violation (b72aa068 → 1d19afcf), blocking PR #143 and #164 from ever
+// resolving. This test verifies the alignment filter suppresses such
+// violations when the after-hash matches the source root's current hash.
+func TestVerifyProtectedSurfacesSuppressesAlignmentModifications(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-align")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".git", "info"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .git) = %v", err)
+	}
+
+	// Source root has the NEW (canonical) version of the protected file.
+	canonicalContent := []byte("# hardened prompt (PR #172 version)\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+
+	// Worktree starts with the OLD version (simulating a PR branch cut before #172).
+	oldContent := []byte("# old prompt (pre-#172 version)\n")
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), oldContent, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot = %v %v", err, ok)
+	}
+
+	// Phase simulation: git merge origin/main --no-commit updates the file
+	// to match main's version (exactly the source root's content).
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile simulated merge = %v", err)
+	}
+
+	// verifyProtectedSurfaces should NOT return a violation — the modification
+	// brought the file into alignment with the source root.
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "pr-143-resolve-conflicts-retry", Source: "github-pr", Workflow: "resolve-conflicts"},
+		workflow.Phase{Name: "analyze"},
+		worktreeDir,
+		before,
+	)
+	if err != nil {
+		t.Fatalf("verifyProtectedSurfaces() = %v, want nil (alignment should be suppressed)", err)
+	}
+}
+
+// TestVerifyProtectedSurfacesStillCatchesRogueModifications ensures the
+// alignment filter does NOT mask modifications to content that doesn't
+// match the source root — those are still rogue modifications and should
+// raise violations.
+func TestVerifyProtectedSurfacesStillCatchesRogueModifications(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-rogue")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".git", "info"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .git) = %v", err)
+	}
+
+	canonicalContent := []byte("# canonical\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot = %v %v", err, ok)
+	}
+
+	// Rogue modification: agent writes content that matches NEITHER the
+	// before state (canonical) NOR any other source-root state.
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), []byte("# evil rogue content\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile rogue = %v", err)
+	}
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-rogue-mod", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() = nil, want violation for rogue modification that does NOT match source root")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("error = %q, want containing 'violated protected surfaces'", err)
+	}
+}
+
+// TestFilterViolationsAlignedWithSourceRootUnit is a focused unit test on the
+// filter helper to verify edge cases: absent Before, deleted After, path not
+// in source snapshot, multi-violation mix.
+func TestFilterViolationsAlignedWithSourceRootUnit(t *testing.T) {
+	source := surface.Snapshot{Files: []surface.FileHash{
+		{Path: ".xylem.yml", Hash: "src-yml-hash"},
+		{Path: ".xylem/workflows/fix-bug.yaml", Hash: "src-wf-hash"},
+	}}
+	violations := []surface.Violation{
+		// Aligned: suppress
+		{Path: ".xylem.yml", Before: "old-yml", After: "src-yml-hash"},
+		// Rogue mod: keep
+		{Path: ".xylem/workflows/fix-bug.yaml", Before: "old-wf", After: "rogue-wf-hash"},
+		// Addition: keep (not a modification, filter passes through)
+		{Path: ".xylem/prompts/new/file.md", Before: "absent", After: "added-hash"},
+		// Deletion: keep (not a modification, filter passes through)
+		{Path: ".xylem/HARNESS.md", Before: "old-harness", After: "deleted"},
+		// Path not in source: keep (can't verify alignment)
+		{Path: ".xylem/workflows/unknown.yaml", Before: "old", After: "new"},
+	}
+	vessel := queue.Vessel{ID: "unit-test", Workflow: "resolve-conflicts"}
+	phase := workflow.Phase{Name: "analyze"}
+
+	filtered := filterViolationsAlignedWithSourceRoot(vessel, phase, violations, source)
+
+	if len(filtered) != 4 {
+		t.Fatalf("filtered count = %d, want 4 (1 aligned suppressed, 4 kept)", len(filtered))
+	}
+	// Ensure the aligned one is NOT in the filtered list
+	for _, v := range filtered {
+		if v.Path == ".xylem.yml" {
+			t.Fatalf("filtered still contains aligned violation on .xylem.yml")
+		}
+	}
+}
+
 func TestSmoke_S19_VesselRunStateIsOwnedByRunVesselOrchestratedNotSharedAcrossGoroutines(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)

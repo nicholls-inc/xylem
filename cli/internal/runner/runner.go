@@ -2212,6 +2212,43 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 		return fmt.Errorf("resolve protected surface policy: %w", err)
 	}
 	violations = filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
+
+	// Source-root alignment filter: drop modification violations where the
+	// after-hash matches the canonical source root's current hash for that
+	// path. This handles the resolve-conflicts cascade where the phase runs
+	// `git merge origin/main --no-commit` on a PR branch that predates the
+	// .xylem/ control-plane tracking commit (#157). The merge brings the PR
+	// branch's view of .xylem/ files INTO ALIGNMENT with main's canonical
+	// state — exactly the outcome the control plane wants. Flagging this as
+	// a violation blocks PR #143, PR #164, and any other PR cut from a
+	// pre-#157 commit that needs a conflict resolution merge.
+	//
+	// Rationale: the protected-surface policy exists to prevent vessels
+	// from DIVERGING the control plane from its canonical state. A
+	// modification that CONVERGES to the canonical state is the opposite —
+	// it's the intended normalization. We suppress it and log for audit.
+	//
+	// This does NOT mask legitimate violations where the agent modifies a
+	// file to some other content (neither the branch's original hash nor
+	// the canonical source root's hash): those still raise violations.
+	//
+	// GUARD: we only apply the filter when the source root is DIFFERENT
+	// from the worktree path. If they're the same (as in tests where
+	// `git rev-parse --git-common-dir` fails and the helper falls back to
+	// returning worktreePath), the source snapshot would be the same as
+	// the after snapshot — every modification would "align" and every
+	// violation would be suppressed. The existing SuppressesTransient /
+	// StillCatchesMutation tests would break. Requiring a distinct source
+	// root ensures we only suppress real merge-alignment cases.
+	//
+	// Source snapshot uses context.Background() because the vessel's ctx
+	// may be cancelling; the snapshot is a fast read-only filesystem walk.
+	if sourceRoot, srcErr := r.protectedSurfaceSourceRoot(context.Background(), worktreePath); srcErr == nil && sourceRoot != worktreePath {
+		if sourceSnapshot, sErr := surface.TakeSnapshot(sourceRoot, patterns); sErr == nil {
+			violations = filterViolationsAlignedWithSourceRoot(vessel, p, violations, sourceSnapshot)
+		}
+	}
+
 	if len(violations) == 0 {
 		return nil
 	}
@@ -2261,6 +2298,57 @@ func filterAdditiveProtectedSurfaceViolations(violations []surface.Violation, al
 			continue
 		}
 		filtered = append(filtered, violation)
+	}
+	return filtered
+}
+
+// filterViolationsAlignedWithSourceRoot drops modification violations whose
+// after-hash exactly matches the canonical source root's current hash for
+// that path. See the extended comment at the call site in verifyProtectedSurfaces
+// for rationale.
+//
+// A violation is suppressed if ALL of:
+//   - it has a real before-hash (not "absent" — those are additions, handled
+//     separately by filterAdditiveProtectedSurfaceViolations)
+//   - it has a real after-hash (not "deleted" — those are handled by the
+//     post-phase self-heal and pre-verify restore code paths)
+//   - the path exists in the source snapshot
+//   - the after-hash exactly equals the source snapshot's hash for that path
+//
+// All other violations pass through unchanged, preserving detection of
+// rogue modifications and any deletion/addition patterns that weren't
+// already covered upstream.
+func filterViolationsAlignedWithSourceRoot(vessel queue.Vessel, p workflow.Phase, violations []surface.Violation, sourceSnapshot surface.Snapshot) []surface.Violation {
+	if len(violations) == 0 {
+		return violations
+	}
+	sourceHashByPath := make(map[string]string, len(sourceSnapshot.Files))
+	for _, f := range sourceSnapshot.Files {
+		sourceHashByPath[f.Path] = f.Hash
+	}
+	filtered := make([]surface.Violation, 0, len(violations))
+	for _, v := range violations {
+		if v.Before == "absent" || v.After == "deleted" {
+			// Not a modification — pass through (additions and deletions
+			// are handled by other filters / self-heal paths).
+			filtered = append(filtered, v)
+			continue
+		}
+		sourceHash, ok := sourceHashByPath[v.Path]
+		if !ok {
+			// Path not tracked in source root — can't determine alignment,
+			// preserve as violation to be safe.
+			filtered = append(filtered, v)
+			continue
+		}
+		if v.After == sourceHash {
+			// Modification brings file INTO ALIGNMENT with canonical source.
+			// Suppress and log for audit visibility.
+			log.Printf("%sphase %q: suppressing alignment violation on %s (after-hash matches source root)",
+				vesselLabel(vessel), p.Name, v.Path)
+			continue
+		}
+		filtered = append(filtered, v)
 	}
 	return filtered
 }
