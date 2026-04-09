@@ -123,6 +123,28 @@ func TestSmoke_S5_GateSpanAttributesFormatsBooleanAndIntAsStrings(t *testing.T) 
 	}
 }
 
+func TestGateStepSpanAttributesExposeStepMetadata(t *testing.T) {
+	attrs := GateStepSpanAttributes(GateStepSpanData{
+		Name:   "health",
+		Mode:   "http",
+		Passed: true,
+	})
+	got := attrMap(attrs)
+
+	if len(attrs) != 3 {
+		t.Fatalf("expected 3 attributes, got %d", len(attrs))
+	}
+	if got["xylem.gate.step.name"] != "health" {
+		t.Fatalf("xylem.gate.step.name = %q, want %q", got["xylem.gate.step.name"], "health")
+	}
+	if got["xylem.gate.step.mode"] != "http" {
+		t.Fatalf("xylem.gate.step.mode = %q, want %q", got["xylem.gate.step.mode"], "http")
+	}
+	if got["xylem.gate.step.passed"] != "true" {
+		t.Fatalf("xylem.gate.step.passed = %q, want %q", got["xylem.gate.step.passed"], "true")
+	}
+}
+
 func TestVesselSpanAttributesAllowsEmptyCoreFields(t *testing.T) {
 	attrs := VesselSpanAttributes(VesselSpanData{})
 	got := attrMap(attrs)

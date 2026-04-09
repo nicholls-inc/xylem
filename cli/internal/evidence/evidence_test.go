@@ -531,6 +531,43 @@ func TestSmoke_S16_LevelJSONUsesSerializedNames(t *testing.T) {
 	}
 }
 
+func TestSmoke_S17_SaveArtifactWritesUnderEvidenceDirectory(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	artifact, err := SaveArtifact(stateDir, "vessel-artifact", "implement/http-response.txt", []byte("ok"), "text/plain", "HTTP response")
+	if err != nil {
+		t.Fatalf("SaveArtifact() error = %v", err)
+	}
+
+	if artifact.Path != "phases/vessel-artifact/evidence/implement/http-response.txt" {
+		t.Fatalf("Path = %q, want %q", artifact.Path, "phases/vessel-artifact/evidence/implement/http-response.txt")
+	}
+	if artifact.SizeBytes != 2 {
+		t.Fatalf("SizeBytes = %d, want 2", artifact.SizeBytes)
+	}
+
+	data, err := os.ReadFile(filepath.Join(stateDir, filepath.FromSlash(artifact.Path)))
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if string(data) != "ok" {
+		t.Fatalf("artifact contents = %q, want %q", string(data), "ok")
+	}
+}
+
+func TestSmoke_S18_SaveArtifactRejectsEscapingPaths(t *testing.T) {
+	t.Parallel()
+
+	_, err := SaveArtifact(t.TempDir(), "vessel-artifact", "../escape.txt", []byte("oops"), "text/plain", "")
+	if err == nil {
+		t.Fatal("SaveArtifact() error = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "must not escape the evidence directory") {
+		t.Fatalf("SaveArtifact() error = %v, want path-escape message", err)
+	}
+}
+
 func assertClaimEqual(t *testing.T, got, want Claim) {
 	t.Helper()
 
