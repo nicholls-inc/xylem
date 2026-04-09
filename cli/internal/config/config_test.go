@@ -187,7 +187,7 @@ claude:
 }
 
 func validConfig() *Config {
-	return &Config{
+	cfg := &Config{
 		Repo: "owner/name",
 		Tasks: map[string]Task{
 			"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug"},
@@ -208,7 +208,13 @@ func validConfig() *Config {
 			Command:      "claude",
 			DefaultModel: "claude-sonnet-4-6",
 		},
+		Copilot: CopilotConfig{
+			Command:      "copilot",
+			DefaultModel: "gpt-5.4",
+		},
 	}
+	cfg.normalize()
+	return cfg
 }
 
 func TestValidateMissingRepoInGitHubSource(t *testing.T) {
@@ -606,9 +612,12 @@ claude:
 	if cfg.Claude.DefaultModel != "claude-sonnet-4-20250514" {
 		t.Fatalf("Claude.DefaultModel = %q, want claude-sonnet-4-20250514", cfg.Claude.DefaultModel)
 	}
+	if got := cfg.Providers["claude"].Tiers[DefaultLLMRoutingTier]; got != "claude-sonnet-4-20250514" {
+		t.Fatalf("Providers[claude].Tiers[%q] = %q, want claude-sonnet-4-20250514", DefaultLLMRoutingTier, got)
+	}
 }
 
-func TestValidateClaudeDefaultModelRequired(t *testing.T) {
+func TestValidateLegacyClaudeDefaultModelRequired(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:
     type: github
@@ -625,7 +634,243 @@ claude:
 `)
 
 	_, err := Load(path)
-	requireErrorContains(t, err, "claude.default_model must be set")
+	requireErrorContains(t, err, "providers.claude.tiers.med must be set")
+}
+
+func TestLoadLegacyProvidersNormalizesIntoRouting(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+        tier: high
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+llm: copilot
+model: gpt-5.4
+claude:
+  command: "claude"
+  flags: "--dangerously-skip-permissions"
+  default_model: "claude-sonnet-4-6"
+  env:
+    ANTHROPIC_API_KEY: "test-key"
+copilot:
+  command: "copilot"
+  flags: "--yolo --autopilot"
+  default_model: "gpt-5.4"
+  env:
+    GITHUB_TOKEN: "gh-token"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	require.Equal(t, "high", cfg.Sources["github"].Tasks["fix-bugs"].Tier)
+	require.Equal(t, DefaultLLMRoutingTier, cfg.LLMRouting.DefaultTier)
+	require.Equal(t, []string{"copilot", "claude"}, cfg.LLMRouting.Tiers[DefaultLLMRoutingTier].Providers)
+	require.Equal(t, ProviderConfig{
+		Kind:    "claude",
+		Command: "claude",
+		Flags:   "--dangerously-skip-permissions",
+		Tiers: map[string]string{
+			DefaultLLMRoutingTier: "claude-sonnet-4-6",
+		},
+		Env: map[string]string{
+			"ANTHROPIC_API_KEY": "test-key",
+		},
+	}, cfg.Providers["claude"])
+	require.Equal(t, ProviderConfig{
+		Kind:    "copilot",
+		Command: "copilot",
+		Flags:   "--yolo --autopilot",
+		Tiers: map[string]string{
+			DefaultLLMRoutingTier: "gpt-5.4",
+		},
+		Env: map[string]string{
+			"GITHUB_TOKEN": "gh-token",
+		},
+	}, cfg.Providers["copilot"])
+}
+
+func TestLoadNewProvidersAndRoutingShape(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+providers:
+  claude:
+    kind: claude
+    command: "claude"
+    flags: "--dangerously-skip-permissions"
+    tiers:
+      high: "claude-opus-4-6"
+      med: "claude-sonnet-4-6"
+      low: "claude-haiku-4-5"
+    env:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+  copilot:
+    kind: copilot
+    command: "copilot"
+    flags: "--yolo --autopilot"
+    tiers:
+      high: "gpt-5.4"
+      med: "gpt-5.2-codex"
+      low: "gpt-5-mini"
+    env:
+      GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
+llm_routing:
+  default_tier: med
+  tiers:
+    high:
+      providers: [claude]
+    med:
+      providers: [claude, copilot]
+    low:
+      providers: [copilot, claude]
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	require.Equal(t, "med", cfg.LLMRouting.DefaultTier)
+	require.Equal(t, []string{"claude"}, cfg.LLMRouting.Tiers["high"].Providers)
+	require.Equal(t, []string{"claude", "copilot"}, cfg.LLMRouting.Tiers["med"].Providers)
+	require.Equal(t, []string{"copilot", "claude"}, cfg.LLMRouting.Tiers["low"].Providers)
+	require.Equal(t, "claude-opus-4-6", cfg.Providers["claude"].Tiers["high"])
+	require.Equal(t, "gpt-5-mini", cfg.Providers["copilot"].Tiers["low"])
+}
+
+func TestValidateRoutingRejectsUnknownProvider(t *testing.T) {
+	cfg := validConfig()
+	cfg.Providers = map[string]ProviderConfig{
+		"claude": {
+			Kind:    "claude",
+			Command: "claude",
+			Tiers: map[string]string{
+				"med": "claude-sonnet-4-6",
+			},
+		},
+	}
+	cfg.LLMRouting = LLMRoutingConfig{
+		DefaultTier: "med",
+		Tiers: map[string]TierRouting{
+			"med": {Providers: []string{"claude", "copilot"}},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `llm_routing.tiers.med.providers references unknown provider "copilot"`)
+}
+
+func TestValidateRoutingRejectsMissingTierModel(t *testing.T) {
+	cfg := validConfig()
+	cfg.Providers = map[string]ProviderConfig{
+		"claude": {
+			Kind:    "claude",
+			Command: "claude",
+			Tiers: map[string]string{
+				"med": "claude-sonnet-4-6",
+			},
+		},
+	}
+	cfg.LLMRouting = LLMRoutingConfig{
+		DefaultTier: "med",
+		Tiers: map[string]TierRouting{
+			"med":  {Providers: []string{"claude"}},
+			"high": {Providers: []string{"claude"}},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "providers.claude.tiers.high must be set")
+}
+
+func TestValidateRoutingRejectsUnknownKind(t *testing.T) {
+	cfg := validConfig()
+	cfg.Providers = map[string]ProviderConfig{
+		"gemini": {
+			Kind:    "gemini",
+			Command: "gemini",
+			Tiers: map[string]string{
+				"med": "gemini-pro",
+			},
+		},
+	}
+	cfg.LLMRouting = LLMRoutingConfig{
+		DefaultTier: "med",
+		Tiers: map[string]TierRouting{
+			"med": {Providers: []string{"gemini"}},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `providers.gemini.kind must be one of claude or copilot`)
+}
+
+func TestValidateRoutingRejectsUnknownDefaultTier(t *testing.T) {
+	cfg := validConfig()
+	cfg.Providers = map[string]ProviderConfig{
+		"claude": {
+			Kind:    "claude",
+			Command: "claude",
+			Tiers: map[string]string{
+				"med": "claude-sonnet-4-6",
+			},
+		},
+	}
+	cfg.LLMRouting = LLMRoutingConfig{
+		DefaultTier: "high",
+		Tiers: map[string]TierRouting{
+			"med": {Providers: []string{"claude"}},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `llm_routing.default_tier "high" must exist in llm_routing.tiers`)
+}
+
+func TestLoadProvidersWithoutRoutingSynthesizesDefaultChain(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+llm: copilot
+providers:
+  claude:
+    kind: claude
+    command: "claude"
+    tiers:
+      med: "claude-sonnet-4-6"
+  copilot:
+    kind: copilot
+    command: "copilot"
+    tiers:
+      med: "gpt-5.4"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	require.Equal(t, DefaultLLMRoutingTier, cfg.LLMRouting.DefaultTier)
+	require.Equal(t, []string{"copilot", "claude"}, cfg.LLMRouting.Tiers[DefaultLLMRoutingTier].Providers)
 }
 
 func TestLoadStatusLabels(t *testing.T) {
@@ -1782,6 +2027,279 @@ func TestSmoke_S38_ScheduledSourceRejectsInvalidSchedule(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "schedule is invalid")
+}
+
+func TestSmoke_S39_LegacyProvidersNormalizeWithPreferredProviderFirst(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+        tier: high
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+llm: copilot
+model: "gpt-5.4"
+claude:
+  command: "claude"
+  flags: "--dangerously-skip-permissions"
+  default_model: "claude-sonnet-4-6"
+  env:
+    ANTHROPIC_API_KEY: "test-key"
+copilot:
+  command: "copilot"
+  flags: "--yolo --autopilot"
+  default_model: "gpt-5.4"
+  env:
+    GITHUB_TOKEN: "gh-token"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Contains(t, cfg.Sources, "github")
+	require.Contains(t, cfg.Sources["github"].Tasks, "fix-bugs")
+	require.Contains(t, cfg.Providers, "claude")
+	require.Contains(t, cfg.Providers, "copilot")
+	require.Contains(t, cfg.LLMRouting.Tiers, DefaultLLMRoutingTier)
+
+	assert.Equal(t, "high", cfg.Sources["github"].Tasks["fix-bugs"].Tier)
+	assert.Equal(t, DefaultLLMRoutingTier, cfg.LLMRouting.DefaultTier)
+	assert.Equal(t, []string{"copilot", "claude"}, cfg.LLMRouting.Tiers[DefaultLLMRoutingTier].Providers)
+	assert.Equal(t, ProviderConfig{
+		Kind:    "claude",
+		Command: "claude",
+		Flags:   "--dangerously-skip-permissions",
+		Tiers: map[string]string{
+			DefaultLLMRoutingTier: "claude-sonnet-4-6",
+		},
+		Env: map[string]string{
+			"ANTHROPIC_API_KEY": "test-key",
+		},
+	}, cfg.Providers["claude"])
+	assert.Equal(t, ProviderConfig{
+		Kind:    "copilot",
+		Command: "copilot",
+		Flags:   "--yolo --autopilot",
+		Tiers: map[string]string{
+			DefaultLLMRoutingTier: "gpt-5.4",
+		},
+		Env: map[string]string{
+			"GITHUB_TOKEN": "gh-token",
+		},
+	}, cfg.Providers["copilot"])
+}
+
+func TestSmoke_S40_NewProvidersAndRoutingShapeLoadsCleanly(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+providers:
+  claude:
+    kind: claude
+    command: "claude"
+    flags: "--dangerously-skip-permissions"
+    tiers:
+      high: "claude-opus-4-6"
+      med: "claude-sonnet-4-6"
+      low: "claude-haiku-4-5"
+    env:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+  copilot:
+    kind: copilot
+    command: "copilot"
+    flags: "--yolo --autopilot"
+    tiers:
+      high: "gpt-5.4"
+      med: "gpt-5.2-codex"
+      low: "gpt-5-mini"
+    env:
+      GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
+llm_routing:
+  default_tier: med
+  tiers:
+    high:
+      providers: [claude]
+    med:
+      providers: [claude, copilot]
+    low:
+      providers: [copilot, claude]
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Contains(t, cfg.Providers, "claude")
+	require.Contains(t, cfg.Providers, "copilot")
+	require.Contains(t, cfg.LLMRouting.Tiers, "high")
+	require.Contains(t, cfg.LLMRouting.Tiers, "med")
+	require.Contains(t, cfg.LLMRouting.Tiers, "low")
+
+	assert.Equal(t, "med", cfg.LLMRouting.DefaultTier)
+	assert.Equal(t, []string{"claude"}, cfg.LLMRouting.Tiers["high"].Providers)
+	assert.Equal(t, []string{"claude", "copilot"}, cfg.LLMRouting.Tiers["med"].Providers)
+	assert.Equal(t, []string{"copilot", "claude"}, cfg.LLMRouting.Tiers["low"].Providers)
+	assert.Equal(t, "claude", cfg.Providers["claude"].Kind)
+	assert.Equal(t, "claude-opus-4-6", cfg.Providers["claude"].Tiers["high"])
+	assert.Equal(t, "claude-haiku-4-5", cfg.Providers["claude"].Tiers["low"])
+	assert.Equal(t, "copilot", cfg.Providers["copilot"].Kind)
+	assert.Equal(t, "gpt-5.2-codex", cfg.Providers["copilot"].Tiers["med"])
+	assert.Equal(t, "gpt-5-mini", cfg.Providers["copilot"].Tiers["low"])
+}
+
+func TestSmoke_S41_RoutingValidationRejectsInvalidConfigurations(t *testing.T) {
+	const prefix = `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+`
+
+	tests := []struct {
+		name string
+		yaml string
+		want []string
+	}{
+		{
+			name: "unknown provider in tier chain",
+			yaml: prefix + `providers:
+  claude:
+    kind: claude
+    command: "claude"
+    tiers:
+      med: "claude-sonnet-4-6"
+llm_routing:
+  default_tier: med
+  tiers:
+    med:
+      providers: [claude, copilot]
+`,
+			want: []string{
+				`llm_routing.tiers.med.providers references unknown provider "copilot"`,
+			},
+		},
+		{
+			name: "missing tier model on provider",
+			yaml: prefix + `providers:
+  claude:
+    kind: claude
+    command: "claude"
+    tiers:
+      med: "claude-sonnet-4-6"
+llm_routing:
+  default_tier: med
+  tiers:
+    med:
+      providers: [claude]
+    high:
+      providers: [claude]
+`,
+			want: []string{
+				"providers.claude.tiers.high must be set",
+			},
+		},
+		{
+			name: "unknown provider kind",
+			yaml: prefix + `providers:
+  gemini:
+    kind: gemini
+    command: "gemini"
+    tiers:
+      med: "gemini-pro"
+llm_routing:
+  default_tier: med
+  tiers:
+    med:
+      providers: [gemini]
+`,
+			want: []string{
+				`providers.gemini.kind must be one of claude or copilot`,
+			},
+		},
+		{
+			name: "bad default tier",
+			yaml: prefix + `providers:
+  claude:
+    kind: claude
+    command: "claude"
+    tiers:
+      med: "claude-sonnet-4-6"
+llm_routing:
+  default_tier: high
+  tiers:
+    med:
+      providers: [claude]
+`,
+			want: []string{
+				`llm_routing.default_tier "high" must exist in llm_routing.tiers`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Load(writeConfigFile(t, tt.yaml))
+			require.Error(t, err)
+			for _, want := range tt.want {
+				assert.Contains(t, err.Error(), want)
+			}
+		})
+	}
+}
+
+func TestSmoke_S42_ProvidersWithoutRoutingSynthesizeDefaultChain(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+llm: copilot
+providers:
+  claude:
+    kind: claude
+    command: "claude"
+    tiers:
+      med: "claude-sonnet-4-6"
+  copilot:
+    kind: copilot
+    command: "copilot"
+    tiers:
+      med: "gpt-5.4"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+	require.Contains(t, cfg.LLMRouting.Tiers, DefaultLLMRoutingTier)
+
+	assert.Equal(t, DefaultLLMRoutingTier, cfg.LLMRouting.DefaultTier)
+	assert.Equal(t, []string{"copilot", "claude"}, cfg.LLMRouting.Tiers[DefaultLLMRoutingTier].Providers)
+	assert.Equal(t, "claude-sonnet-4-6", cfg.Providers["claude"].Tiers[DefaultLLMRoutingTier])
+	assert.Equal(t, "gpt-5.4", cfg.Providers["copilot"].Tiers[DefaultLLMRoutingTier])
 }
 
 func TestSourceTimeoutValid(t *testing.T) {
