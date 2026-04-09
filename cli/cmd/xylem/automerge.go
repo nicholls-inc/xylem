@@ -45,6 +45,20 @@ func isBenignGhWarning(err error) bool {
 	return false
 }
 
+// isReviewerNotCollaborator reports whether a gh api error from the
+// requested_reviewers endpoint is the GitHub 422 "not a collaborator"
+// response. This condition is terminal for a given (repo, reviewer)
+// pair: the reviewer will not spontaneously become a collaborator, so
+// retrying on every drain tick only spams the log. Callers should treat
+// this as "review cannot be requested from this bot; fall through to
+// waiting for an external approval".
+func isReviewerNotCollaborator(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "Reviews may only be requested from collaborators")
+}
+
 // prSummary is a minimal projection of `gh pr list` / `gh pr view` output.
 type prSummary struct {
 	Number            int    `json:"number"`
@@ -205,6 +219,15 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 			if err := requestCopilotReview(ctx, repo, pr.Number); err != nil {
 				if isBenignGhWarning(err) {
 					log.Printf("daemon: auto-merge: requested copilot review on PR #%d (gh warning ignored): %s", pr.Number, pr.HeadRefName)
+					continue
+				}
+				if isReviewerNotCollaborator(err) {
+					// Terminal: the reviewer bot is not a collaborator on
+					// this repo. Retrying every tick cannot succeed, so
+					// fall through to wait-for-review semantics and let
+					// an approval from any other source drive the PR to
+					// actionMerge. Log once per tick for observability.
+					log.Printf("daemon: auto-merge: PR #%d skipping copilot review request (%q is not a collaborator on %s); waiting for external approval", pr.Number, copilotReviewerLogin, repo)
 					continue
 				}
 				log.Printf("daemon: auto-merge: PR #%d request review failed: %v", pr.Number, err)

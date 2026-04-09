@@ -29,6 +29,53 @@ func TestIsBenignGhWarning(t *testing.T) {
 	}
 }
 
+func TestIsReviewerNotCollaborator(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil is not a collaborator error", nil, false},
+		{"plain error is not a collaborator error", errors.New("exit status 1: HTTP 500"), false},
+		{"422 not a collaborator is detected",
+			errors.New(`exit status 1: {"message":"Reviews may only be requested from collaborators. One or more of the users or teams you specified is not a collaborator of the nicholls-inc/xylem repository.","documentation_url":"..."}`),
+			true},
+		{"bare phrase is detected",
+			errors.New("Reviews may only be requested from collaborators"),
+			true},
+		{"benign projects warning is not a collaborator error",
+			errors.New("exit status 1: Projects (classic) is being deprecated"), false},
+		{"unrelated 422 is not a collaborator error",
+			errors.New(`exit status 1: {"message":"Validation failed"}`), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReviewerNotCollaborator(tt.err); got != tt.want {
+				t.Errorf("isReviewerNotCollaborator(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestGhErrorPredicatesDisjoint asserts that the benign-warning and
+// reviewer-not-collaborator predicates never match the same error, so
+// the actionRequestReview switch branches cannot both fire.
+func TestGhErrorPredicatesDisjoint(t *testing.T) {
+	samples := []error{
+		nil,
+		errors.New("exit status 1"),
+		errors.New("exit status 1: Projects (classic) is being deprecated"),
+		errors.New("exit status 1: Reviews may only be requested from collaborators"),
+		errors.New("exit status 1: projectCards query failed"),
+		errors.New("exit status 1: HTTP 500"),
+	}
+	for _, e := range samples {
+		if isBenignGhWarning(e) && isReviewerNotCollaborator(e) {
+			t.Errorf("predicates overlap for error: %v", e)
+		}
+	}
+}
+
 func TestPRSummary_HasLabel(t *testing.T) {
 	pr := prSummary{
 		Labels: []struct {

@@ -32,6 +32,24 @@ type ghPR struct {
 
 func (g *GitHubPR) Name() string { return "github-pr" }
 
+// prWorkflowSeenKey identifies a (PR number, workflow) pair so that one
+// Scan() call can produce vessels for the same PR under multiple distinct
+// workflows (e.g., merge-pr AND resolve-conflicts) without false-positive
+// intra-scan dedup.
+type prWorkflowSeenKey struct {
+	prNum    int
+	workflow string
+}
+
+// prWorkflowRef qualifies a PR URL with its target workflow. Two sources
+// may scan the same PR for different workflows (e.g., harness-merge runs
+// merge-pr, conflict-resolution runs resolve-conflicts); without this
+// qualifier they would share a dedup namespace and a failed vessel for
+// one workflow would block enqueue of the other.
+func prWorkflowRef(prURL, workflow string) string {
+	return fmt.Sprintf("%s#workflow=%s", prURL, workflow)
+}
+
 func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	excludeSet := make(map[string]bool, len(g.Exclude))
 	for _, ex := range g.Exclude {
@@ -39,7 +57,7 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	}
 
 	var vessels []queue.Vessel
-	seen := make(map[int]bool)
+	seen := make(map[prWorkflowSeenKey]bool)
 
 	for _, task := range g.Tasks {
 		for _, label := range task.Labels {
@@ -63,17 +81,17 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 			}
 
 			for _, pr := range prs {
-				if seen[pr.Number] {
+				key := prWorkflowSeenKey{prNum: pr.Number, workflow: task.Workflow}
+				if seen[key] {
 					continue
 				}
 				fingerprint := githubSourceFingerprint(pr.Title, pr.Body, issueLabelNames(pr.Labels))
 				if g.hasExcludedLabel(pr, excludeSet) ||
-					g.Queue.HasRef(pr.URL) ||
-					g.hasMatchingFailedFingerprint(pr.URL, fingerprint) ||
+					g.isBlockedByPriorVessel(pr.URL, fingerprint, task.Workflow) ||
 					g.hasBranch(ctx, pr.Number) {
 					continue
 				}
-				seen[pr.Number] = true
+				seen[key] = true
 				meta := map[string]string{
 					"pr_num":                   strconv.Itoa(pr.Number),
 					"pr_title":                 pr.Title,
@@ -90,9 +108,9 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					meta["status_label_timed_out"] = sl.TimedOut
 				}
 				vessels = append(vessels, queue.Vessel{
-					ID:        fmt.Sprintf("pr-%d", pr.Number),
+					ID:        fmt.Sprintf("pr-%d-%s", pr.Number, task.Workflow),
 					Source:    "github-pr",
-					Ref:       pr.URL,
+					Ref:       prWorkflowRef(pr.URL, task.Workflow),
 					Workflow:  task.Workflow,
 					Meta:      meta,
 					State:     queue.StatePending,
@@ -197,4 +215,51 @@ func (g *GitHubPR) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
 		return false
 	}
 	return latest.State == queue.StateFailed && latest.Meta["source_input_fingerprint"] == fingerprint
+}
+
+// isBlockedByPriorVessel reports whether a prior vessel already occupies
+// the dedup slot for this (PR URL, workflow) pair and so the scanner
+// should not enqueue a new vessel. It checks the new workflow-qualified
+// ref (`<url>#workflow=<name>`) first; then for backward-compat with
+// queue entries written before refs were qualified, it falls back to
+// the legacy bare-URL ref and only treats a legacy vessel as blocking
+// when it belongs to the SAME workflow as the current task.
+//
+// Blocking conditions:
+//   - A pending/running/waiting vessel at the qualified ref (via HasRef).
+//   - A failed vessel at the qualified ref whose fingerprint equals the
+//     current PR input fingerprint (hasMatchingFailedFingerprint).
+//   - A legacy bare-URL vessel whose Workflow matches and is either
+//     active (pending/running/waiting) or terminally failed with a
+//     matching fingerprint.
+//
+// This preserves the dedup guarantees of the pre-qualification scheme
+// for in-flight workflows while allowing distinct workflows over the
+// same PR (e.g., merge-pr and resolve-conflicts) to coexist.
+func (g *GitHubPR) isBlockedByPriorVessel(prURL, fingerprint, workflow string) bool {
+	qualifiedRef := prWorkflowRef(prURL, workflow)
+	if g.Queue.HasRef(qualifiedRef) {
+		return true
+	}
+	if g.hasMatchingFailedFingerprint(qualifiedRef, fingerprint) {
+		return true
+	}
+	// Backward-compat: legacy queue entries were written with ref = prURL.
+	latest, err := g.Queue.FindLatestByRef(prURL)
+	if err != nil || latest == nil {
+		return false
+	}
+	// Only a legacy vessel belonging to the SAME workflow is blocking.
+	// Otherwise a failed merge-pr vessel would block resolve-conflicts
+	// enqueue for the same PR — the exact regression this fix addresses.
+	if latest.Workflow != workflow {
+		return false
+	}
+	switch latest.State {
+	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
+		return true
+	case queue.StateFailed:
+		return latest.Meta["source_input_fingerprint"] == fingerprint
+	}
+	return false
 }
