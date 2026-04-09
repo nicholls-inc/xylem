@@ -106,12 +106,14 @@ func PhaseSpanAttributes(data PhaseSpanData) []SpanAttribute {
 
 // PhaseResultData holds phase result information for attribute extraction.
 type PhaseResultData struct {
-	InputTokensEst     int     `json:"input_tokens_est"`
-	OutputTokensEst    int     `json:"output_tokens_est"`
-	CostUSDEst         float64 `json:"cost_usd_est"`
-	DurationMS         int64   `json:"duration_ms"`
-	Status             string  `json:"status"`
-	OutputArtifactPath string  `json:"output_artifact_path,omitempty"`
+	InputTokensEst         int     `json:"input_tokens_est"`
+	OutputTokensEst        int     `json:"output_tokens_est"`
+	CostUSDEst             float64 `json:"cost_usd_est"`
+	DurationMS             int64   `json:"duration_ms"`
+	Status                 string  `json:"status"`
+	UsageSource            string  `json:"usage_source,omitempty"`
+	UsageUnavailableReason string  `json:"usage_unavailable_reason,omitempty"`
+	OutputArtifactPath     string  `json:"output_artifact_path,omitempty"`
 }
 
 // PhaseResultAttributes returns span attributes added to a phase span
@@ -123,7 +125,31 @@ func PhaseResultAttributes(data PhaseResultData) []SpanAttribute {
 		{Key: "xylem.phase.cost_usd_est", Value: fmt.Sprintf("%.6f", data.CostUSDEst)},
 		{Key: "xylem.phase.duration_ms", Value: fmt.Sprintf("%d", data.DurationMS)},
 		{Key: "xylem.phase.status", Value: data.Status},
+		{Key: "xylem.phase.usage_source", Value: data.UsageSource},
+		{Key: "xylem.phase.usage_unavailable_reason", Value: data.UsageUnavailableReason},
 		{Key: "xylem.phase.output_artifact_path", Value: data.OutputArtifactPath},
+	}
+}
+
+// VesselCostData holds vessel-level cost telemetry attributes.
+type VesselCostData struct {
+	TotalTokens            int     `json:"total_tokens"`
+	TotalCostUSDEst        float64 `json:"total_cost_usd_est"`
+	UsageSource            string  `json:"usage_source,omitempty"`
+	UsageUnavailableReason string  `json:"usage_unavailable_reason,omitempty"`
+	BudgetExceeded         bool    `json:"budget_exceeded"`
+	BudgetWarning          bool    `json:"budget_warning"`
+}
+
+// VesselCostAttributes returns span attributes for vessel-level cost telemetry.
+func VesselCostAttributes(data VesselCostData) []SpanAttribute {
+	return []SpanAttribute{
+		{Key: "xylem.vessel.total_tokens_est", Value: fmt.Sprintf("%d", data.TotalTokens)},
+		{Key: "xylem.vessel.total_cost_usd_est", Value: fmt.Sprintf("%.6f", data.TotalCostUSDEst)},
+		{Key: "xylem.vessel.usage_source", Value: data.UsageSource},
+		{Key: "xylem.vessel.usage_unavailable_reason", Value: data.UsageUnavailableReason},
+		{Key: "xylem.vessel.budget_exceeded", Value: fmt.Sprintf("%t", data.BudgetExceeded)},
+		{Key: "xylem.vessel.budget_warning", Value: fmt.Sprintf("%t", data.BudgetWarning)},
 	}
 }
 

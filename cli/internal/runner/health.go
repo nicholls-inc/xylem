@@ -124,6 +124,9 @@ func AnalyzeVesselStatus(vessel queue.Vessel, summary *VesselSummary) VesselStat
 			}
 			addAnomaly("budget_exceeded", severity, "budget exceeded")
 		}
+		if summary.BudgetWarning && !summary.BudgetExceeded {
+			addAnomaly("budget_warning", "warning", "budget warning")
+		}
 		for _, phase := range summary.Phases {
 			if phase.GatePassed != nil && !*phase.GatePassed {
 				msg := "gate failed"

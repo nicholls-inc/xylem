@@ -176,7 +176,7 @@ func TestPropPhaseAttrsIndexStringified(t *testing.T) {
 	})
 }
 
-func TestPropPhaseResultAttrsAlwaysSix(t *testing.T) {
+func TestPropPhaseResultAttrsAlwaysEight(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		attrs := PhaseResultAttributes(PhaseResultData{
 			InputTokensEst:     rapid.IntRange(0, 1000000).Draw(t, "input_tokens"),
@@ -186,8 +186,8 @@ func TestPropPhaseResultAttrsAlwaysSix(t *testing.T) {
 			Status:             genVesselString().Draw(t, "status"),
 			OutputArtifactPath: genVesselString().Draw(t, "output_artifact_path"),
 		})
-		if len(attrs) != 6 {
-			t.Fatalf("expected 6 attributes, got %d", len(attrs))
+		if len(attrs) != 8 {
+			t.Fatalf("expected 8 attributes, got %d", len(attrs))
 		}
 	})
 }

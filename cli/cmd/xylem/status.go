@@ -32,8 +32,11 @@ func newStatusCmd() *cobra.Command {
 
 type statusRow struct {
 	queue.Vessel
-	Health    string                 `json:"health"`
-	Anomalies []runner.VesselAnomaly `json:"anomalies,omitempty"`
+	Health           string                 `json:"health"`
+	Anomalies        []runner.VesselAnomaly `json:"anomalies,omitempty"`
+	EstimatedCostUSD float64                `json:"estimated_cost_usd,omitempty"`
+	UsageSource      string                 `json:"usage_source,omitempty"`
+	BudgetWarning    bool                   `json:"budget_warning,omitempty"`
 }
 
 func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter string) error {
@@ -64,9 +67,12 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 	for i, vessel := range vessels {
 		status := runner.AnalyzeVesselStatus(vessel, summaries[vessel.ID])
 		rows[i] = statusRow{
-			Vessel:    vessel,
-			Health:    string(status.Health),
-			Anomalies: status.Anomalies,
+			Vessel:           vessel,
+			Health:           string(status.Health),
+			Anomalies:        status.Anomalies,
+			EstimatedCostUSD: summaryCost(summaries[vessel.ID]),
+			UsageSource:      summaryUsageSource(summaries[vessel.ID]),
+			BudgetWarning:    summaries[vessel.ID] != nil && summaries[vessel.ID].BudgetWarning,
 		}
 	}
 	fleet := runner.AnalyzeFleetStatus(vessels, summaries)
@@ -83,10 +89,10 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 		return nil
 	}
 
-	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
-		"ID", "Source", "Workflow", "State", "Health", "Info", "Started", "Duration")
-	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
-		"----", "------", "-----", "-----", "------", "----", "-------", "--------")
+	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-12s  %-42s  %-12s  %s\n",
+		"ID", "Source", "Workflow", "State", "Health", "Cost", "Info", "Started", "Duration")
+	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-12s  %-42s  %-12s  %s\n",
+		"----", "------", "-----", "-----", "------", "----", "----", "-------", "--------")
 
 	counts := map[queue.VesselState]int{}
 	for i, j := range vessels {
@@ -105,9 +111,9 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 		if wf == "" {
 			wf = "(prompt)"
 		}
-		info := vesselInfo(j, rows[i].Anomalies)
-		fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
-			j.ID, j.Source, wf, string(j.State), rows[i].Health, info, started, duration)
+		info := vesselInfo(j, summaries[j.ID], rows[i].Anomalies)
+		fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-12s  %-42s  %-12s  %s\n",
+			j.ID, j.Source, wf, string(j.State), rows[i].Health, formatSummaryCost(summaries[j.ID]), info, started, duration)
 	}
 
 	fmt.Printf("\nSummary: %d pending, %d running, %d completed, %d failed, %d cancelled, %d waiting, %d timed_out\n",
@@ -124,7 +130,7 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 }
 
 // vesselInfo returns additional context for the Info column based on vessel state.
-func vesselInfo(v queue.Vessel, anomalies []runner.VesselAnomaly) string {
+func vesselInfo(v queue.Vessel, summary *runner.VesselSummary, anomalies []runner.VesselAnomaly) string {
 	parts := make([]string, 0, len(anomalies)+1)
 	if v.State == queue.StateWaiting && v.WaitingFor != "" {
 		elapsed := "unknown"
@@ -139,7 +145,41 @@ func vesselInfo(v queue.Vessel, anomalies []runner.VesselAnomaly) string {
 		}
 		parts = append(parts, anomaly.Message)
 	}
+	if summary != nil && summary.UsageUnavailableReason != "" && summary.UsageSource == "unavailable" {
+		parts = append(parts, summary.UsageUnavailableReason)
+	}
 	return strings.Join(parts, "; ")
+}
+
+func summaryCost(summary *runner.VesselSummary) float64 {
+	if summary == nil {
+		return 0
+	}
+	return summary.TotalCostUSDEst
+}
+
+func summaryUsageSource(summary *runner.VesselSummary) string {
+	if summary == nil {
+		return ""
+	}
+	return string(summary.UsageSource)
+}
+
+func formatSummaryCost(summary *runner.VesselSummary) string {
+	if summary == nil {
+		return "—"
+	}
+	switch summary.UsageSource {
+	case "estimated", "provider":
+		return fmt.Sprintf("$%.4f", summary.TotalCostUSDEst)
+	case "not_applicable", "unavailable":
+		return "n/a"
+	default:
+		if summary.TotalCostUSDEst > 0 {
+			return fmt.Sprintf("$%.4f", summary.TotalCostUSDEst)
+		}
+		return "—"
+	}
 }
 
 func pauseMarkerPath(cfg *config.Config) string {
