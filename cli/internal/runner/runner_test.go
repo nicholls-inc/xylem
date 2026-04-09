@@ -5458,6 +5458,97 @@ func TestVerifyProtectedSurfacesStillCatchesModificationsAfterPreVerifyRestore(t
 	}
 }
 
+func TestSmoke_S21_SurfacePostVerificationAllowsOptedInAdditiveWrites(t *testing.T) {
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "prompts", "doctor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "prompts", "doctor", "analyze.md"), []byte("analyze"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "doctor.yaml"), []byte(`name: doctor
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doctor/analyze.md
+    max_turns: 1
+`), 0o644))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0o755))
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "doctor.yaml"), []byte("name: doctor\n"), 0o644))
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-additive-allowed", Source: "manual", Workflow: "doctor"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.NoError(t, err)
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestSmoke_S23_AuditLogRecordsDeniedAdditiveProtectedWriteWithoutWorkflowOptIn(t *testing.T) {
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "prompts", "doctor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "prompts", "doctor", "analyze.md"), []byte("analyze"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "doctor.yaml"), []byte(`name: doctor
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doctor/analyze.md
+    max_turns: 1
+`), 0o644))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0o755))
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "doctor.yaml"), []byte("name: doctor\n"), 0o644))
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-additive-denied", Source: "manual", Workflow: "doctor"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "violated protected surfaces")
+	assert.Contains(t, err.Error(), ".xylem/workflows/doctor.yaml")
+	assert.Contains(t, err.Error(), "before: absent")
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "file_write", entries[0].Intent.Action)
+	assert.Equal(t, ".xylem/workflows/doctor.yaml", entries[0].Intent.Resource)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+}
+
 // TestCopyProtectedSurfaceFileAddsWorktreeExcludeEntry verifies that the
 // pre-verify restore's copyProtectedSurfaceFile helper appends the restored
 // path to .git/info/exclude, so subsequent `git add -A` in the push phase
