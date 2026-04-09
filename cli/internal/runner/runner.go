@@ -66,6 +66,19 @@ type Runner struct {
 	Intermediary *intermediary.Intermediary // nil = no policy enforcement
 	AuditLog     *intermediary.AuditLog     // nil = no audit logging
 	Tracer       *observability.Tracer      // nil = no tracing
+	// DrainBudget bounds the wall time that Drain() spends dequeueing new
+	// vessels. When the deadline elapses, Drain() stops dequeueing and
+	// waits for the already-started goroutines to finish via wg.Wait(),
+	// then returns a partial DrainResult. Any pending vessels are picked
+	// up by the next drain tick. Zero means unbounded (legacy behavior).
+	//
+	// Set this to drainInterval in the daemon so that Drain() returns
+	// roughly once per tick even under sustained pool saturation. Without
+	// this bound, the daemon's drain-end auto-upgrade check at
+	// cli/cmd/xylem/daemon.go:248-254 can never fire because Drain()
+	// never returns — the upgrade goroutine is wired post-drain and the
+	// CAS guard prevents a fresh tick from starting.
+	DrainBudget time.Duration
 }
 
 // New creates a Runner.
@@ -101,11 +114,25 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 	healthCounts := FleetStatusReport{}
 	patternCounts := map[string]int{}
 
+	// Drain budget: if set, Drain() stops dequeueing once the deadline
+	// elapses. Already-started goroutines continue until wg.Wait() below.
+	// This guarantees Drain() returns in bounded time so the daemon's
+	// periodic self-upgrade (wired post-drain) can fire under load.
+	var drainDeadline time.Time
+	if r.DrainBudget > 0 {
+		drainDeadline = time.Now().Add(r.DrainBudget)
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
 			goto wait
 		default:
+		}
+
+		if !drainDeadline.IsZero() && time.Now().After(drainDeadline) {
+			log.Printf("drain: budget %s elapsed, stopping dequeue (waiting for %d in-flight)", r.DrainBudget, len(sem))
+			goto wait
 		}
 
 		vessel, err := r.Queue.Dequeue()
