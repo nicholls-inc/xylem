@@ -17,6 +17,13 @@ type StatusLabels struct {
 	TimedOut  string
 }
 
+// LabelGateLabels holds the label names to apply when a vessel enters and exits
+// a label-gate wait. Empty strings disable the corresponding operation.
+type LabelGateLabels struct {
+	Waiting string
+	Ready   string
+}
+
 // GitHubTaskFromConfig converts a config.Task to a GitHubTask.
 // When t.StatusLabels is nil (block omitted from config), the returned task's
 // StatusLabels is also nil, preserving the legacy "in-progress" fallback in
@@ -37,6 +44,12 @@ func GitHubTaskFromConfig(t config.Task) GitHubTask {
 			TimedOut:  t.StatusLabels.TimedOut,
 		}
 	}
+	if t.LabelGateLabels != nil {
+		task.LabelGateLabels = &LabelGateLabels{
+			Waiting: t.LabelGateLabels.Waiting,
+			Ready:   t.LabelGateLabels.Ready,
+		}
+	}
 	return task
 }
 
@@ -51,6 +64,52 @@ func ResolveRunningLabel(vessel queue.Vessel) string {
 	return running
 }
 
+func resolveWaitingLabel(vessel queue.Vessel) string {
+	return vessel.Meta["label_gate_label_waiting"]
+}
+
+func resolveReadyLabel(vessel queue.Vessel) string {
+	return vessel.Meta["label_gate_label_ready"]
+}
+
+func normalizeLabelOps(add []string, remove []string) ([]string, []string) {
+	added := normalizeLabels(add...)
+	removed := normalizeLabels(remove...)
+	if len(added) == 0 || len(removed) == 0 {
+		return added, removed
+	}
+
+	addSet := make(map[string]struct{}, len(added))
+	for _, label := range added {
+		addSet[label] = struct{}{}
+	}
+
+	filtered := removed[:0]
+	for _, label := range removed {
+		if _, ok := addSet[label]; ok {
+			continue
+		}
+		filtered = append(filtered, label)
+	}
+	return added, filtered
+}
+
+func normalizeLabels(labels ...string) []string {
+	seen := make(map[string]struct{}, len(labels))
+	out := make([]string, 0, len(labels))
+	for _, label := range labels {
+		if label == "" {
+			continue
+		}
+		if _, ok := seen[label]; ok {
+			continue
+		}
+		seen[label] = struct{}{}
+		out = append(out, label)
+	}
+	return out
+}
+
 // Source discovers tasks and produces Vessels.
 type Source interface {
 	// Name returns the source identifier (e.g., "github-issue").
@@ -63,6 +122,10 @@ type Source interface {
 	// OnStart is called when a vessel from this source begins running.
 	// Used for side effects like adding an "in-progress" label.
 	OnStart(ctx context.Context, vessel queue.Vessel) error
+	// OnWait is called when a vessel enters waiting due to a label gate.
+	OnWait(ctx context.Context, vessel queue.Vessel) error
+	// OnResume is called when a waiting vessel is unblocked and returned to pending.
+	OnResume(ctx context.Context, vessel queue.Vessel) error
 	// OnComplete is called when a vessel completes all phases successfully.
 	OnComplete(ctx context.Context, vessel queue.Vessel) error
 	// OnFail is called when a vessel fails (phase error or gate exhausted).

@@ -402,6 +402,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 		// Check label
 		issueNum := r.parseIssueNum(vessel)
 		repo := r.resolveRepo(vessel)
+		src := r.resolveSource(vessel)
 		if issueNum == 0 || repo == "" {
 			continue
 		}
@@ -417,6 +418,10 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 			// pick the vessel back up through the normal dequeue flow.
 			if err := r.Queue.Update(vessel.ID, queue.StatePending, ""); err != nil {
 				log.Printf("warn: failed to resume vessel %s: %v", vessel.ID, err)
+				continue
+			}
+			if err := src.OnResume(ctx, vessel); err != nil {
+				log.Printf("warn: OnResume hook for vessel %s: %v", vessel.ID, err)
 			}
 		}
 	}
@@ -918,6 +923,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
 					finishCurrentPhaseSpan(updateErr)
 					return "failed"
+				}
+				if err := src.OnWait(ctx, vessel); err != nil {
+					log.Printf("warn: OnWait hook for vessel %s: %v", vessel.ID, err)
 				}
 				finishCurrentPhaseSpan(nil)
 				return "waiting"
@@ -1736,6 +1744,9 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
 				finishCurrentPhaseSpan(updateErr)
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
+			}
+			if err := src.OnWait(ctx, vessel); err != nil {
+				log.Printf("warn: OnWait hook for vessel %s: %v", vessel.ID, err)
 			}
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{output: string(output), status: "waiting", duration: r.runtimeSince(phaseStart)}

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -442,5 +443,107 @@ func TestOnCompleteRemovesTriggerLabelEvenWhenNoStatusLabels(t *testing.T) {
 	trig := strings.Join(r.calls[1], " ")
 	if !strings.Contains(trig, "--remove-label needs-refinement") {
 		t.Errorf("expected --remove-label needs-refinement in second call, got %q", trig)
+	}
+}
+
+func TestGitHubTaskFromConfigCopiesLabelGateLabels(t *testing.T) {
+	task := GitHubTaskFromConfig(config.Task{
+		Labels:   []string{"bug"},
+		Workflow: "fix-bug",
+		LabelGateLabels: &config.LabelGateLabels{
+			Waiting: "blocked",
+			Ready:   "ready-for-implementation",
+		},
+	})
+
+	if task.LabelGateLabels == nil {
+		t.Fatal("LabelGateLabels should not be nil when config block is present")
+	}
+	if task.LabelGateLabels.Waiting != "blocked" {
+		t.Errorf("LabelGateLabels.Waiting = %q, want blocked", task.LabelGateLabels.Waiting)
+	}
+	if task.LabelGateLabels.Ready != "ready-for-implementation" {
+		t.Errorf("LabelGateLabels.Ready = %q, want ready-for-implementation", task.LabelGateLabels.Ready)
+	}
+}
+
+func TestGitHubOnWaitAppliesWaitingLabel(t *testing.T) {
+	r := newMock()
+	g := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID: "issue-1",
+		Meta: map[string]string{
+			"issue_num":                "1",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
+	}
+
+	if err := g.OnWait(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label blocked") {
+		t.Errorf("expected --add-label blocked, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label ready-for-implementation") {
+		t.Errorf("expected --remove-label ready-for-implementation, got %q", joined)
+	}
+}
+
+func TestGitHubOnResumeAppliesReadyLabel(t *testing.T) {
+	r := newMock()
+	g := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID: "issue-1",
+		Meta: map[string]string{
+			"issue_num":                "1",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
+	}
+
+	if err := g.OnResume(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label ready-for-implementation") {
+		t.Errorf("expected --add-label ready-for-implementation, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked, got %q", joined)
+	}
+}
+
+func TestGitHubOnTimedOutRemovesWaitingLabel(t *testing.T) {
+	r := newMock()
+	g := &GitHub{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID: "issue-1",
+		Meta: map[string]string{
+			"issue_num":                "1",
+			"status_label_timed_out":   "timed-out",
+			"label_gate_label_waiting": "blocked",
+		},
+	}
+
+	if err := g.OnTimedOut(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label timed-out") {
+		t.Errorf("expected --add-label timed-out, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked, got %q", joined)
 	}
 }

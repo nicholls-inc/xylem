@@ -686,6 +686,71 @@ claude:
 	}
 }
 
+func TestLoadLabelGateLabels(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+        label_gate_labels:
+          waiting: "blocked"
+          ready: "ready-for-implementation"
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	task := cfg.Sources["github"].Tasks["fix-bugs"]
+	if task.LabelGateLabels == nil {
+		t.Fatal("LabelGateLabels should not be nil when label_gate_labels block is present")
+	}
+	if task.LabelGateLabels.Waiting != "blocked" {
+		t.Errorf("LabelGateLabels.Waiting = %q, want blocked", task.LabelGateLabels.Waiting)
+	}
+	if task.LabelGateLabels.Ready != "ready-for-implementation" {
+		t.Errorf("LabelGateLabels.Ready = %q, want ready-for-implementation", task.LabelGateLabels.Ready)
+	}
+}
+
+func TestLoadLabelGateLabelsOmitted(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	task := cfg.Sources["github"].Tasks["fix-bugs"]
+	if task.LabelGateLabels != nil {
+		t.Errorf("expected LabelGateLabels to be nil when label_gate_labels block is omitted, got %+v", task.LabelGateLabels)
+	}
+}
+
 func TestLoadDaemonConfig(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:

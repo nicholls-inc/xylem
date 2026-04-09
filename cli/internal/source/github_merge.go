@@ -89,6 +89,8 @@ func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
 
 func (g *GitHubMerge) OnEnqueue(_ context.Context, _ queue.Vessel) error          { return nil }
 func (g *GitHubMerge) OnStart(_ context.Context, _ queue.Vessel) error            { return nil }
+func (g *GitHubMerge) OnWait(_ context.Context, _ queue.Vessel) error             { return nil }
+func (g *GitHubMerge) OnResume(_ context.Context, _ queue.Vessel) error           { return nil }
 func (g *GitHubMerge) OnComplete(_ context.Context, _ queue.Vessel) error         { return nil }
 func (g *GitHubMerge) OnFail(_ context.Context, _ queue.Vessel) error             { return nil }
 func (g *GitHubMerge) OnTimedOut(_ context.Context, _ queue.Vessel) error         { return nil }
