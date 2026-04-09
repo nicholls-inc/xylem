@@ -8,6 +8,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 )
 
@@ -67,6 +68,11 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 			}
 			if enqueued {
 				result.Added++
+				if vessel.RetryOf != "" {
+					if err := recovery.UpdateRetryOutcome(s.Config.StateDir, vessel.RetryOf, "enqueued"); err != nil {
+						log.Printf("warn: record retry outcome for %s failed: %v", vessel.RetryOf, err)
+					}
+				}
 				if s.RunHooks {
 					if err := entry.src.OnEnqueue(ctx, vessel); err != nil {
 						log.Printf("warn: OnEnqueue hook for vessel %s failed: %v", vessel.ID, err)
@@ -95,6 +101,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 			entries = append(entries, sourceEntry{
 				src: &source.GitHub{
 					Repo:      srcCfg.Repo,
+					StateDir:  s.Config.StateDir,
 					Tasks:     tasks,
 					Exclude:   srcCfg.Exclude,
 					Queue:     s.Queue,
@@ -107,6 +114,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubPR{
 					Repo:      srcCfg.Repo,
+					StateDir:  s.Config.StateDir,
 					Tasks:     tasks,
 					Exclude:   srcCfg.Exclude,
 					Queue:     s.Queue,

@@ -3,11 +3,14 @@ package source
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -374,6 +377,69 @@ func TestGitHubPRScanReenqueuesChangedFailedVessel(t *testing.T) {
 	}
 }
 
+func TestGitHubPRScanWorkflowChangeUnlocksRetry(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := setupRecoveryScanStateDir(t, dir, "review-pr")
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	createdAt := time.Now().UTC().Add(-20 * time.Minute)
+	seed := queue.Vessel{
+		ID:       "pr-10-review-pr",
+		Source:   "github-pr",
+		Ref:      prWorkflowRef("https://github.com/owner/repo/pull/10", "review-pr"),
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StateTimedOut,
+		CreatedAt: createdAt,
+	}
+	_, err := q.Enqueue(seed)
+	require.NoError(t, err)
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  seed.ID,
+		Source:    seed.Source,
+		Workflow:  seed.Workflow,
+		Ref:       seed.Ref,
+		State:     seed.State,
+		Error:     "context deadline exceeded",
+		Meta:      seed.Meta,
+		CreatedAt: createdAt,
+	})
+	require.NoError(t, recovery.PopulateUnlock(stateDir, artifact, fingerprint, createdAt))
+	require.NoError(t, recovery.Save(stateDir, artifact))
+	promptPath := filepath.Join(stateDir, "prompts", "review-pr.md")
+	workflowYAML := "name: review-pr\nphases:\n  - name: analyze\n    prompt_file: " + promptPath + "\n    max_turns: 2\n"
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "workflows", "review-pr.yaml"), []byte(workflowYAML), 0o644))
+
+	src := &GitHubPR{
+		Repo:      "owner/repo",
+		StateDir:  stateDir,
+		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, seed.ID, vessels[0].RetryOf)
+	assert.Equal(t, "workflow", vessels[0].Meta[recovery.MetaUnlockedBy])
+	assert.Equal(t, "pr-10-review-pr-retry-1", vessels[0].ID)
+}
+
 func TestPriorVesselBlocksReenqueue(t *testing.T) {
 	t.Parallel()
 
@@ -402,7 +468,12 @@ func TestPriorVesselBlocksReenqueue(t *testing.T) {
 		},
 		{name: "completed", vessel: &queue.Vessel{State: queue.StateCompleted}, fingerprint: fingerprint, want: false},
 		{name: "cancelled", vessel: &queue.Vessel{State: queue.StateCancelled}, fingerprint: fingerprint, want: false},
-		{name: "timed out", vessel: &queue.Vessel{State: queue.StateTimedOut}, fingerprint: fingerprint, want: false},
+		{
+			name:        "timed out fingerprint match",
+			vessel:      &queue.Vessel{State: queue.StateTimedOut, Meta: map[string]string{"source_input_fingerprint": fingerprint}},
+			fingerprint: fingerprint,
+			want:        true,
+		},
 	}
 
 	for _, tt := range tests {

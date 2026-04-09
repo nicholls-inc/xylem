@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -392,6 +394,84 @@ func TestScanPersistsTriggerLabelInMeta(t *testing.T) {
 	}
 }
 
+func TestGitHubScanHarnessChangeUnlocksRetry(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := setupRecoveryScanStateDir(t, dir, "fix-bug")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{
+			Number: 42,
+			Title:  "same title",
+			Body:   "same body",
+			URL:    "https://github.com/owner/repo/issues/42",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "bug"}},
+		},
+	}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+	for _, prefix := range []string{"fix", "feat"} {
+		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 42))
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 42), "--state", "open", "--json", "number,headRefName", "--limit", "5")
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 42), "--state", "merged", "--json", "number,headRefName", "--limit", "5")
+	}
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"bug"})
+	createdAt := time.Now().UTC().Add(-20 * time.Minute)
+	seed := queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      "https://github.com/owner/repo/issues/42",
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StateTimedOut,
+		CreatedAt: createdAt,
+	}
+	_, err := q.Enqueue(seed)
+	require.NoError(t, err)
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  seed.ID,
+		Source:    seed.Source,
+		Workflow:  seed.Workflow,
+		Ref:       seed.Ref,
+		State:     seed.State,
+		Error:     "context deadline exceeded",
+		Meta:      seed.Meta,
+		CreatedAt: createdAt,
+	})
+	require.NoError(t, recovery.PopulateUnlock(stateDir, artifact, fingerprint, createdAt))
+	require.NoError(t, recovery.Save(stateDir, artifact))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "HARNESS.md"), []byte("updated harness"), 0o644))
+
+	g := &GitHub{
+		Repo:      "owner/repo",
+		StateDir:  stateDir,
+		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "issue-42", vessels[0].RetryOf)
+	assert.Equal(t, "harness", vessels[0].Meta[recovery.MetaUnlockedBy])
+	assert.Equal(t, "issue-42-retry-1", vessels[0].ID)
+	assert.Equal(t, artifact.FailureFingerprint, vessels[0].Meta[recovery.MetaFailureFingerprint])
+}
+
 func TestOnCompleteRemovesTriggerLabel(t *testing.T) {
 	// Property: after a vessel completes successfully, its trigger
 	// label is removed from the source issue via a separate gh call.
@@ -429,6 +509,22 @@ func TestOnCompleteRemovesTriggerLabel(t *testing.T) {
 	if strings.Contains(trig, "--add-label") {
 		t.Errorf("call 1: trigger-label removal must not add anything, got %q", trig)
 	}
+}
+
+func setupRecoveryScanStateDir(t *testing.T, baseDir, workflowName string) string {
+	t.Helper()
+
+	stateDir := filepath.Join(baseDir, ".xylem")
+	workflowDir := filepath.Join(stateDir, "workflows")
+	promptDir := filepath.Join(stateDir, "prompts")
+	require.NoError(t, os.MkdirAll(workflowDir, 0o755))
+	require.NoError(t, os.MkdirAll(promptDir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "HARNESS.md"), []byte("initial harness"), 0o644))
+	promptPath := filepath.Join(promptDir, workflowName+".md")
+	require.NoError(t, os.WriteFile(promptPath, []byte("initial prompt"), 0o644))
+	workflowYAML := "name: " + workflowName + "\nphases:\n  - name: analyze\n    prompt_file: " + promptPath + "\n    max_turns: 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(workflowDir, workflowName+".yaml"), []byte(workflowYAML), 0o644))
+	return stateDir
 }
 
 func TestOnCompleteBackwardCompatNoTriggerLabel(t *testing.T) {

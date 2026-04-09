@@ -5,7 +5,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -41,10 +40,19 @@ func cmdRetry(q *queue.Queue, cfg *config.Config, id string, fromScratch bool) e
 
 	newID := retryID(vessel.ID, q)
 
-	meta := make(map[string]string)
-	for k, v := range vessel.Meta {
-		meta[k] = v
-	}
+	meta := recovery.PrepareRetryMeta(vessel.Meta, recovery.Build(recovery.Input{
+		VesselID:    vessel.ID,
+		Source:      vessel.Source,
+		Workflow:    vessel.Workflow,
+		Ref:         vessel.Ref,
+		State:       vessel.State,
+		FailedPhase: vessel.FailedPhase,
+		Error:       vessel.Error,
+		GateOutput:  vessel.GateOutput,
+		RetryOf:     vessel.RetryOf,
+		Meta:        vessel.Meta,
+		CreatedAt:   commandNow(),
+	}), "", vessel.Meta[recovery.MetaRemediationFingerprint])
 	meta["retry_of"] = vessel.ID
 	if vessel.Error != "" {
 		meta["retry_error"] = vessel.Error
@@ -159,15 +167,5 @@ func copyFile(src, dst string) error {
 
 func retryID(originalID string, q *queue.Queue) string {
 	vessels, _ := q.List()
-	maxRetry := 0
-	prefix := originalID + "-retry-"
-	for _, v := range vessels {
-		if strings.HasPrefix(v.ID, prefix) {
-			numStr := strings.TrimPrefix(v.ID, prefix)
-			if n, err := strconv.Atoi(numStr); err == nil && n > maxRetry {
-				maxRetry = n
-			}
-		}
-	}
-	return fmt.Sprintf("%s-retry-%d", originalID, maxRetry+1)
+	return recovery.NextRetryID(originalID, vessels)
 }

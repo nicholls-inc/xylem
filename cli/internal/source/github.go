@@ -27,6 +27,7 @@ type GitHubTask struct {
 // GitHub scans GitHub issues and produces vessels.
 type GitHub struct {
 	Repo      string
+	StateDir  string
 	Tasks     map[string]GitHubTask
 	Exclude   []string
 	Queue     *queue.Queue
@@ -80,16 +81,23 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					continue
 				}
 				fingerprint := githubSourceFingerprint(issue.Title, issue.Body, issueLabelNames(issue.Labels))
+				prior, err := g.Queue.FindLatestByRef(issue.URL)
+				if err != nil {
+					prior = nil
+				}
+				retryDecision, err := recovery.EvaluateRetryGate(g.StateDir, prior, task.Workflow, fingerprint, sourceNow())
+				if err != nil {
+					return vessels, fmt.Errorf("evaluate retry gate for %s: %w", issue.URL, err)
+				}
 				if g.hasExcludedLabel(issue, excludeSet) ||
-					g.Queue.HasRef(issue.URL) ||
-					g.hasMatchingFailedFingerprint(issue.URL, fingerprint) ||
+					retryDecision.Blocked ||
 					g.hasBranch(ctx, issue.Number) ||
 					g.hasOpenPR(ctx, issue.Number) ||
 					g.hasMergedPR(ctx, issue.Number) {
 					continue
 				}
 				seen[issue.Number] = true
-				meta := map[string]string{
+				meta := recovery.PrepareRetryMeta(map[string]string{
 					"issue_num":                strconv.Itoa(issue.Number),
 					"issue_title":              issue.Title,
 					"issue_body":               issue.Body,
@@ -103,6 +111,16 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					// (close/merge) and keeping the issue's UI state
 					// consistent with its workflow state.
 					"trigger_label": label,
+				}, retryDecision.Artifact, retryDecision.UnlockDimension, retryDecision.RemediationFingerprint)
+				id := fmt.Sprintf("issue-%d", issue.Number)
+				retryOf := ""
+				if prior != nil && (prior.State == queue.StateFailed || prior.State == queue.StateTimedOut) {
+					all, listErr := g.Queue.List()
+					if listErr != nil {
+						return vessels, fmt.Errorf("list queue for retry id: %w", listErr)
+					}
+					id = recovery.NextRetryID(prior.ID, all)
+					retryOf = prior.ID
 				}
 				sl := task.StatusLabels
 				if sl != nil {
@@ -118,11 +136,12 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					meta["label_gate_label_ready"] = lgl.Ready
 				}
 				vessels = append(vessels, queue.Vessel{
-					ID:        fmt.Sprintf("issue-%d", issue.Number),
+					ID:        id,
 					Source:    "github-issue",
 					Ref:       issue.URL,
 					Workflow:  task.Workflow,
 					Meta:      meta,
+					RetryOf:   retryOf,
 					State:     queue.StatePending,
 					CreatedAt: sourceNow(),
 				})
@@ -266,15 +285,6 @@ func sourceNow() time.Time {
 		return time.Now().UTC()
 	}
 	return now.UTC()
-}
-
-func (g *GitHub) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
-	latest, err := g.Queue.FindLatestByRef(ref)
-	if err != nil || latest == nil {
-		return false
-	}
-	isTerminalFailure := latest.State == queue.StateFailed || latest.State == queue.StateTimedOut
-	return isTerminalFailure && latest.Meta["source_input_fingerprint"] == fingerprint
 }
 
 func (g *GitHub) recoveryAwareVessel(vessel queue.Vessel) queue.Vessel {

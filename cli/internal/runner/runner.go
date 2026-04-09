@@ -1353,7 +1353,7 @@ func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
 	vessel.State = queue.StateFailed
 	vessel.Error = errMsg
 	vessel.EndedAt = &now
-	vessel.Meta = recovery.ApplyToMeta(vessel.Meta, recovery.Build(recovery.Input{
+	artifact := recovery.Build(recovery.Input{
 		VesselID:    vessel.ID,
 		Source:      vessel.Source,
 		Workflow:    vessel.Workflow,
@@ -1365,7 +1365,11 @@ func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
 		RetryOf:     vessel.RetryOf,
 		Meta:        vessel.Meta,
 		CreatedAt:   now,
-	}))
+	})
+	if err := recovery.PopulateUnlock(r.Config.StateDir, artifact, vessel.Meta["source_input_fingerprint"], now); err != nil {
+		log.Printf("warn: populate recovery unlock for vessel %s: %v", vessel.ID, err)
+	}
+	vessel.Meta = recovery.ApplyToMeta(vessel.Meta, artifact)
 	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
 		if r.cancelledTransition(vessel.ID, updateErr) {
 			return
@@ -1383,7 +1387,7 @@ func (r *Runner) annotateRecoveryMetadata(id string, state queue.VesselState, er
 	if err != nil || current == nil {
 		return
 	}
-	current.Meta = recovery.ApplyToMeta(current.Meta, recovery.Build(recovery.Input{
+	artifact := recovery.Build(recovery.Input{
 		VesselID:    current.ID,
 		Source:      current.Source,
 		Workflow:    current.Workflow,
@@ -1396,7 +1400,11 @@ func (r *Runner) annotateRecoveryMetadata(id string, state queue.VesselState, er
 		Meta:        current.Meta,
 		Trace:       trace,
 		CreatedAt:   r.runtimeNow(),
-	}))
+	})
+	if err := recovery.PopulateUnlock(r.Config.StateDir, artifact, current.Meta["source_input_fingerprint"], artifact.CreatedAt); err != nil {
+		log.Printf("warn: populate recovery unlock for vessel %s: %v", id, err)
+	}
+	current.Meta = recovery.ApplyToMeta(current.Meta, artifact)
 	if updateErr := r.Queue.UpdateVessel(*current); updateErr != nil {
 		log.Printf("warn: annotate recovery metadata for vessel %s: %v", id, updateErr)
 	}
@@ -1493,6 +1501,9 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 			Trace:       traceContextPointer(vrs.trace),
 			CreatedAt:   now,
 		})
+		if err := recovery.PopulateUnlock(r.Config.StateDir, reviewArtifact, artifactVessel.Meta["source_input_fingerprint"], now); err != nil {
+			log.Printf("warn: populate recovery unlock: %v", err)
+		}
 		if err := recovery.Save(r.Config.StateDir, reviewArtifact); err != nil {
 			log.Printf("warn: save recovery artifact: %v", err)
 		} else {
