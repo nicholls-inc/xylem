@@ -1356,6 +1356,45 @@ func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
 	assert.Equal(t, "*", result.MatchedRule.Resource)
 }
 
+func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
+	tests := []struct {
+		name     string
+		action   string
+		resource string
+	}{
+		{
+			name:     "git commit",
+			action:   "git_commit",
+			resource: "*",
+		},
+		{
+			name:     "git push",
+			action:   "git_push",
+			resource: "main",
+		},
+		{
+			name:     "pull request create",
+			action:   "pr_create",
+			resource: "owner/name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+				Action:   tt.action,
+				Resource: tt.resource,
+				AgentID:  "vessel-009",
+			})
+
+			assert.Equal(t, intermediary.Allow, result.Effect)
+			require.NotNil(t, result.MatchedRule)
+			assert.Equal(t, "*", result.MatchedRule.Action)
+			assert.Equal(t, "*", result.MatchedRule.Resource)
+		})
+	}
+}
+
 func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {
 	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
 		Action:   "file_write",

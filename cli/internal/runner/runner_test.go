@@ -809,6 +809,27 @@ func TestPhasePolicyIntents_IgnoresHighRiskPhrasesFromRenderedPromptContext(t *t
 	assert.Equal(t, "analyze", intents[0].Resource)
 }
 
+func TestPhasePolicyIntents_DoesNotClassifyDestructiveGitOrDeploySeparately(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "publish", Type: "command"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, "git reset --hard HEAD~1 && git push --force origin main && ./deploy.sh production", "")
+	require.Len(t, intents, 2)
+
+	assert.Equal(t, "external_command", intents[0].Action)
+	assert.Equal(t, "publish", intents[0].Resource)
+	assert.Equal(t, "git_push", intents[1].Action)
+	assert.Equal(t, "main", intents[1].Resource)
+}
+
 func TestSmoke_S1_PolicyDenialShortCircuitsBeforeSurfaceSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)

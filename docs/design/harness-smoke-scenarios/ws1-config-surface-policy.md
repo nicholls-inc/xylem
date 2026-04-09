@@ -113,17 +113,17 @@ harness:
 
 ---
 
-### S7: Default policy requires approval for git_push
+### S7: Default policy allows classified publication actions
 
 **Spec ref:** Section 2.3 (`DefaultPolicy`)
 
 **Preconditions:** A `Config` with no policy rules configured (default policy active).
 
-**Action:** Construct an `Intermediary` from `cfg.BuildIntermediaryPolicies()`, call `Evaluate` with intent `{Action: "git_push", Resource: "main", AgentID: "vessel-002"}`.
+**Action:** Construct an `Intermediary` from `cfg.BuildIntermediaryPolicies()`, then call `Evaluate` with intents for `{Action: "git_commit", Resource: "*", AgentID: "vessel-002"}`, `{Action: "git_push", Resource: "main", AgentID: "vessel-003"}`, and `{Action: "pr_create", Resource: "owner/name", AgentID: "vessel-004"}`.
 
-**Expected outcome:** `PolicyResult.Effect` equals `intermediary.RequireApproval`.
+**Expected outcome:** Each `PolicyResult.Effect` equals `intermediary.Allow`, with the wildcard allow rule recorded as the match.
 
-**Verification:** Assert `result.Effect == intermediary.RequireApproval`.
+**Verification:** Assert each result equals `intermediary.Allow`.
 
 ---
 
