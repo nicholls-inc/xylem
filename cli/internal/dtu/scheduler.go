@@ -223,6 +223,9 @@ func applyMutationOperations(state *State, mutation ScheduledMutation) error {
 			}
 			check := findOrAppendCheck(state, pr, operation.Check)
 			check.State = CheckState(operation.State)
+			if err := repo.ApplyQueuedAutoMerge(operation.Number); err != nil {
+				return fmt.Errorf("apply queued auto-merge for pull request %d in %s: %w", operation.Number, operation.Repo, err)
+			}
 		case MutationOperationPRAddComment:
 			pr := repo.PullRequestByNumber(operation.Number)
 			if pr == nil {

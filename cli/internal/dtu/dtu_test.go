@@ -451,7 +451,7 @@ func TestRepositoryMergePullRequestRetainsHeadBranchWhenNotDeleting(t *testing.T
 		}},
 	}
 
-	if err := repo.MergePullRequest(7, false); err != nil {
+	if err := repo.MergePullRequest(7, MergePullRequestOptions{}); err != nil {
 		t.Fatalf("MergePullRequest() error = %v", err)
 	}
 
@@ -490,7 +490,7 @@ func TestRepositoryMergePullRequestDeletesHeadBranchAndUpsertsBase(t *testing.T)
 		}},
 	}
 
-	if err := repo.MergePullRequest(8, true); err != nil {
+	if err := repo.MergePullRequest(8, MergePullRequestOptions{DeleteHeadBranch: true}); err != nil {
 		t.Fatalf("MergePullRequest() error = %v", err)
 	}
 
@@ -509,6 +509,157 @@ func TestRepositoryMergePullRequestDeletesHeadBranchAndUpsertsBase(t *testing.T)
 	}
 	if branch := repo.BranchByName("keep-me"); branch == nil {
 		t.Fatal("unrelated branch was removed")
+	}
+}
+
+func TestRepositoryMergePullRequestQueuesAutoMergeUntilChecksPass(t *testing.T) {
+	t.Parallel()
+
+	repo := &Repository{
+		Owner:         "owner",
+		Name:          "repo",
+		DefaultBranch: "main",
+		Branches: []Branch{
+			{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+			{Name: "feature/merge-me", SHA: "deadbeefcafebabe"},
+		},
+		PullRequests: []PullRequest{{
+			Number:     9,
+			Title:      "Queue me",
+			State:      PullRequestStateOpen,
+			BaseBranch: "main",
+			HeadBranch: "feature/merge-me",
+			HeadSHA:    "feedfacecafebeef",
+			Checks:     []Check{{ID: 1, Name: "ci", State: CheckStatePending}},
+		}},
+	}
+
+	if err := repo.MergePullRequest(9, MergePullRequestOptions{DeleteHeadBranch: true, AutoMerge: true}); err != nil {
+		t.Fatalf("MergePullRequest() error = %v", err)
+	}
+
+	pr := repo.PullRequestByNumber(9)
+	if pr == nil {
+		t.Fatal("PullRequestByNumber() = nil")
+	}
+	if pr.State != PullRequestStateOpen || pr.Merged {
+		t.Fatalf("pull request = %#v, want open queued auto-merge", pr)
+	}
+	if !pr.AutoMergeEnabled || !pr.AutoMergeDeleteBranch {
+		t.Fatalf("pull request auto-merge flags = %#v, want enabled delete-branch queue", pr)
+	}
+	if branch := repo.BranchByName("main"); branch == nil || branch.SHA != "1111111111111111111111111111111111111111" {
+		t.Fatalf("main branch = %#v, want original SHA preserved", branch)
+	}
+	if branch := repo.BranchByName(pr.HeadBranch); branch == nil {
+		t.Fatalf("head branch = %#v, want branch retained while auto-merge is queued", branch)
+	}
+
+	pr.Checks[0].State = CheckStateSuccess
+	if err := repo.ApplyQueuedAutoMerge(9); err != nil {
+		t.Fatalf("ApplyQueuedAutoMerge() error = %v", err)
+	}
+	if pr.State != PullRequestStateMerged || !pr.Merged {
+		t.Fatalf("pull request after check success = %#v, want merged state", pr)
+	}
+	if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch {
+		t.Fatalf("pull request auto-merge flags after merge = %#v, want cleared", pr)
+	}
+	if branch := repo.BranchByName("main"); branch == nil || branch.SHA != pr.HeadSHA {
+		t.Fatalf("main branch = %#v, want SHA %q", branch, pr.HeadSHA)
+	}
+	if branch := repo.BranchByName(pr.HeadBranch); branch != nil {
+		t.Fatalf("head branch = %#v, want deleted after queued auto-merge", branch)
+	}
+}
+
+func TestStoreRecordObservationPRCheckMutationAppliesQueuedAutoMerge(t *testing.T) {
+	t.Parallel()
+
+	appliedAt := time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC)
+	state := &State{
+		UniverseID: "universe-1",
+		Metadata:   ManifestMetadata{Name: "sample"},
+		Clock:      ClockState{Now: appliedAt.Format(time.RFC3339)},
+		Repositories: []Repository{{
+			Owner:         "owner",
+			Name:          "repo",
+			DefaultBranch: "main",
+			Branches: []Branch{
+				{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+				{Name: "feature/merge-me", SHA: "deadbeefcafebabe"},
+			},
+			PullRequests: []PullRequest{{
+				Number:                12,
+				Title:                 "Queue me",
+				State:                 PullRequestStateOpen,
+				BaseBranch:            "main",
+				HeadBranch:            "feature/merge-me",
+				HeadSHA:               "feedfacecafebeef",
+				AutoMergeEnabled:      true,
+				AutoMergeDeleteBranch: true,
+				Checks:                []Check{{ID: 1, Name: "ci", State: CheckStatePending}},
+			}},
+		}},
+		ScheduledMutations: []ScheduledMutation{{
+			Name: "complete-check-and-merge",
+			Trigger: MutationTrigger{
+				Command:    ShimCommandGH,
+				ArgsPrefix: []string{"pr", "checks", "12"},
+			},
+			Operations: []MutationOperation{{
+				Type:   MutationOperationPRSetCheckState,
+				Repo:   "owner/repo",
+				Number: 12,
+				Check:  "ci",
+				State:  string(CheckStateSuccess),
+			}},
+		}},
+		Counters: Counters{NextCommentID: 1, NextReviewID: 1, NextCheckID: 2},
+	}
+
+	store, err := NewStoreWithClock(t.TempDir(), state.UniverseID, NewFixedClock(appliedAt))
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	if err := store.Save(state); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+
+	result, err := store.RecordObservation(ShimInvocation{
+		Command: ShimCommandGH,
+		Args:    []string{"pr", "checks", "12", "--repo", "owner/repo", "--json", "name,state"},
+	})
+	if err != nil {
+		t.Fatalf("RecordObservation() error = %v", err)
+	}
+	if len(result.Applied) != 1 || result.Applied[0].Name != "complete-check-and-merge" {
+		t.Fatalf("Applied = %#v, want queued auto-merge mutation", result.Applied)
+	}
+
+	loaded, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	loadedRepo := loaded.Repository("owner", "repo")
+	if loadedRepo == nil {
+		t.Fatal("Repository() = nil")
+	}
+	pr := loadedRepo.PullRequestByNumber(12)
+	if pr == nil {
+		t.Fatal("PullRequestByNumber() = nil")
+	}
+	if pr.State != PullRequestStateMerged || !pr.Merged {
+		t.Fatalf("pull request = %#v, want merged state", pr)
+	}
+	if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch {
+		t.Fatalf("pull request auto-merge flags = %#v, want cleared after merge", pr)
+	}
+	if branch := loadedRepo.BranchByName("main"); branch == nil || branch.SHA != pr.HeadSHA {
+		t.Fatalf("main branch = %#v, want SHA %q", branch, pr.HeadSHA)
+	}
+	if branch := loadedRepo.BranchByName(pr.HeadBranch); branch != nil {
+		t.Fatalf("head branch = %#v, want deleted after queued auto-merge", branch)
 	}
 }
 
