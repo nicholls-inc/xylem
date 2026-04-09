@@ -17,11 +17,15 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/dtushim"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 type daemonDTUCmdRunner struct {
@@ -193,17 +197,47 @@ func TestDaemonShutdown(t *testing.T) {
 }
 
 func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
+	oldNewTracer := newTracer
+	defer func() { newTracer = oldNewTracer }()
+
+	exporter := &recordingExporter{}
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	var calls int
+	newTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+		calls++
+		if cfg.Endpoint != "" {
+			t.Fatalf("cfg.Endpoint = %q, want empty endpoint for stdout-mode tracer", cfg.Endpoint)
+		}
+		return observability.NewTracerFromProvider(tp), nil
+	}
+
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
 	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
-	if err != nil {
-		t.Fatalf("runDrain() error = %v", err)
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, result)
+	assert.Equal(t, 1, calls)
+}
+
+func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
+	oldNewTracer := newTracer
+	defer func() { newTracer = oldNewTracer }()
+
+	exporter := &recordingExporter{}
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	newTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+		return observability.NewTracerFromProvider(tp), nil
 	}
-	if result != (runner.DrainResult{}) {
-		t.Fatalf("DrainResult = %+v, want zero value", result)
-	}
+
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	_, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
+	require.NoError(t, err)
+	assert.True(t, exporter.shutdownCalled)
 }
 
 func TestDaemonLoopPeriodicUpgradeFiresAfterInterval(t *testing.T) {
