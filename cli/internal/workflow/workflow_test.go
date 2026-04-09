@@ -223,6 +223,50 @@ phases:
 	assert.True(t, got.AllowAdditiveProtectedWrites)
 }
 
+func TestLoadWorkflowAllowCanonicalProtectedWrites(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want bool
+	}{
+		{
+			name: "defaults false",
+			yaml: `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			want: false,
+		},
+		{
+			name: "parses true",
+			yaml: `name: test-workflow
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`,
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+			createPromptFile(t, dir, "prompts/analyze.md")
+
+			path := writeWorkflowFile(t, dir, "test-workflow", tt.yaml)
+
+			got, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got.AllowCanonicalProtectedWrites)
+		})
+	}
+}
+
 func TestLoadWorkflowGateWithEvidenceAndEmptyLevel(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
@@ -390,6 +434,7 @@ phases:
 			yaml: `name: deploy
 description: Deploy with gates
 allow_additive_protected_writes: true
+allow_canonical_protected_writes: true
 phases:
   - name: build
     prompt_file: prompts/build.md
@@ -417,6 +462,9 @@ phases:
 				}
 				if !s.AllowAdditiveProtectedWrites {
 					t.Fatal("AllowAdditiveProtectedWrites = false, want true")
+				}
+				if !s.AllowCanonicalProtectedWrites {
+					t.Fatal("AllowCanonicalProtectedWrites = false, want true")
 				}
 				if s.Phases[0].Gate.Retries != 2 {
 					t.Fatalf("gate retries = %d, want 2", s.Phases[0].Gate.Retries)

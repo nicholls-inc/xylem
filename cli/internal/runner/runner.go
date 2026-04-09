@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -2274,11 +2275,12 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	}
 
 	violations := surface.Compare(before, after)
-	allowAdditive, err := r.workflowAllowsAdditiveProtectedWrites(vessel, violations)
+	policy, err := r.workflowProtectedWritePolicy(vessel, violations)
 	if err != nil {
 		return fmt.Errorf("resolve protected surface policy: %w", err)
 	}
-	violations = filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
+	violations = filterAdditiveProtectedSurfaceViolations(violations, policy.allowAdditive)
+	violations = filterCanonicalProtectedSurfaceViolations(vessel, p, violations, policy.allowCanonical)
 
 	// Source-root alignment filter: drop modification violations where the
 	// after-hash matches the canonical source root's current hash for that
@@ -2330,24 +2332,44 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	return fmt.Errorf("%s", errMsg)
 }
 
-func (r *Runner) workflowAllowsAdditiveProtectedWrites(vessel queue.Vessel, violations []surface.Violation) (bool, error) {
-	if !containsAdditiveProtectedSurfaceViolation(violations) {
-		return false, nil
+type protectedSurfaceWorkflowPolicy struct {
+	allowAdditive  bool
+	allowCanonical bool
+}
+
+func (r *Runner) workflowProtectedWritePolicy(vessel queue.Vessel, violations []surface.Violation) (protectedSurfaceWorkflowPolicy, error) {
+	needsAdditivePolicy := containsAdditiveProtectedSurfaceViolation(violations)
+	needsCanonicalPolicy := containsCanonicalProtectedSurfaceModification(violations) &&
+		strings.TrimSpace(vessel.Meta["issue_body"]) != ""
+	if !needsAdditivePolicy && !needsCanonicalPolicy {
+		return protectedSurfaceWorkflowPolicy{}, nil
 	}
 	if strings.TrimSpace(vessel.Workflow) == "" {
-		return false, nil
+		return protectedSurfaceWorkflowPolicy{}, nil
 	}
 
 	sk, err := r.loadWorkflow(vessel.Workflow)
 	if err != nil {
-		return false, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
+		return protectedSurfaceWorkflowPolicy{}, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
 	}
-	return sk.AllowAdditiveProtectedWrites, nil
+	return protectedSurfaceWorkflowPolicy{
+		allowAdditive:  sk.AllowAdditiveProtectedWrites,
+		allowCanonical: sk.AllowCanonicalProtectedWrites,
+	}, nil
 }
 
 func containsAdditiveProtectedSurfaceViolation(violations []surface.Violation) bool {
 	for _, violation := range violations {
 		if violation.Before == "absent" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCanonicalProtectedSurfaceModification(violations []surface.Violation) bool {
+	for _, violation := range violations {
+		if isProtectedSurfaceModification(violation) {
 			return true
 		}
 	}
@@ -2367,6 +2389,41 @@ func filterAdditiveProtectedSurfaceViolations(violations []surface.Violation, al
 		filtered = append(filtered, violation)
 	}
 	return filtered
+}
+
+func filterCanonicalProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, violations []surface.Violation, allowCanonical bool) []surface.Violation {
+	if !allowCanonical || len(violations) == 0 {
+		return violations
+	}
+
+	issueBody := strings.TrimSpace(vessel.Meta["issue_body"])
+	if issueBody == "" {
+		return violations
+	}
+
+	filtered := make([]surface.Violation, 0, len(violations))
+	for _, violation := range violations {
+		if !isProtectedSurfaceModification(violation) || !issueBodyMentionsProtectedPath(issueBody, violation.Path) {
+			filtered = append(filtered, violation)
+			continue
+		}
+		log.Printf("%sphase %q: suppressing canonical protected-surface violation on %s (workflow opt-in + issue body reference)",
+			vesselLabel(vessel), p.Name, violation.Path)
+	}
+	return filtered
+}
+
+func isProtectedSurfaceModification(violation surface.Violation) bool {
+	return violation.Before != "absent" && violation.After != "deleted"
+}
+
+func issueBodyMentionsProtectedPath(issueBody, path string) bool {
+	normalizedPath := filepath.ToSlash(strings.TrimSpace(path))
+	if normalizedPath == "" {
+		return false
+	}
+	re := regexp.MustCompile(`(^|[^A-Za-z0-9._/-])` + regexp.QuoteMeta(normalizedPath) + `([^A-Za-z0-9._/-]|$)`)
+	return re.FindStringIndex(issueBody) != nil
 }
 
 // filterViolationsAlignedWithSourceRoot drops modification violations whose

@@ -90,7 +90,11 @@ phases:
 | `description` | No | Human-readable description of the workflow's purpose. |
 | `llm` | No | Default provider for prompt phases in this workflow. Valid values: `claude`, `copilot`. |
 | `model` | No | Default model for prompt phases in this workflow. Provider-specific string. |
+| `allow_additive_protected_writes` | No | Permits this workflow to create new files that match configured protected-surface patterns without failing post-phase verification. Existing protected files are still immutable. |
+| `allow_canonical_protected_writes` | No | Permits this workflow to modify existing protected files when the vessel's issue body explicitly names the same protected path being changed. |
 | `phases` | Yes | Ordered list of phases. At least one is required. |
+
+Protected-surface write allowances are intentionally narrow. `allow_additive_protected_writes` only covers new protected files, while `allow_canonical_protected_writes` still requires the triggering issue body to name the protected path being edited so a workflow cannot silently rewrite unrelated control-plane files.
 
 **Phase fields:**
 
