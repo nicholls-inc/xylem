@@ -4371,10 +4371,22 @@ func TestDrainPolicyBlocksPhaseBeforeExecution(t *testing.T) {
 	}
 }
 
+// TestDrainCommandPhaseHighRiskActionRequiresApproval verifies the intermediary
+// correctly enforces a RequireApproval policy on git_push when the operator
+// explicitly configures one. The default policy now allows git_push for
+// autonomous self-healing, so this test uses an explicit restrictive policy
+// to preserve enforcement-mechanism coverage.
 func TestDrainCommandPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	// Opt into the old restrictive policy via harness.policy.rules.
+	cfg.Harness.Policy = config.PolicyConfig{
+		Rules: []config.PolicyRuleConfig{
+			{Action: "git_push", Resource: "*", Effect: "require_approval"},
+			{Action: "*", Resource: "*", Effect: "allow"},
+		},
+	}
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makeVessel(1, "push-command"))
 
@@ -4410,10 +4422,21 @@ func TestDrainCommandPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	assert.Equal(t, "feature-1", entries[1].Intent.Resource)
 }
 
+// TestDrainPromptPhaseHighRiskActionRequiresApproval verifies the intermediary
+// correctly enforces a RequireApproval policy on prompt-phase git_push when
+// the operator explicitly configures one. The default policy now allows
+// git_push for autonomous self-healing.
 func TestDrainPromptPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	// Opt into the old restrictive policy via harness.policy.rules.
+	cfg.Harness.Policy = config.PolicyConfig{
+		Rules: []config.PolicyRuleConfig{
+			{Action: "git_push", Resource: "*", Effect: "require_approval"},
+			{Action: "*", Resource: "*", Effect: "allow"},
+		},
+	}
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makeVessel(1, "pr-phase"))
 
