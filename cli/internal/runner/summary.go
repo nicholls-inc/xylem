@@ -52,6 +52,7 @@ type VesselSummary struct {
 	CostReportPath       string           `json:"cost_report_path,omitempty"`
 	BudgetAlertsPath     string           `json:"budget_alerts_path,omitempty"`
 	EvalReportPath       string           `json:"eval_report_path,omitempty"`
+	FailureReviewPath    string           `json:"failure_review_path,omitempty"`
 	Trace                *TraceArtifacts  `json:"trace,omitempty"`
 	ReviewArtifacts      *ReviewArtifacts `json:"review_artifacts,omitempty"`
 
@@ -68,6 +69,7 @@ type ReviewArtifacts struct {
 	CostReport       string `json:"cost_report,omitempty"`
 	BudgetAlerts     string `json:"budget_alerts,omitempty"`
 	EvalReport       string `json:"eval_report,omitempty"`
+	FailureReview    string `json:"failure_review,omitempty"`
 }
 
 // PhaseSummary records the outcome of a single phase.
@@ -288,6 +290,10 @@ func budgetAlertsRelativePath(vesselID string) string {
 
 func evalReportRelativePath(vesselID string) string {
 	return filepath.ToSlash(filepath.Join("phases", vesselID, evalReportFileName))
+}
+
+func failureReviewRelativePath(vesselID string) string {
+	return filepath.ToSlash(filepath.Join("phases", vesselID, "failure-review.json"))
 }
 
 func phaseArtifactRelativePath(vesselID, phaseName string) string {

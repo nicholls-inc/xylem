@@ -10,6 +10,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
@@ -194,21 +195,63 @@ func TestGenerateToleratesMissingOptionalArtifacts(t *testing.T) {
 	}
 }
 
+func TestLoadRunsLoadsFailureReviewArtifact(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, time.April, 8, 14, 0, 0, 0, time.UTC)
+	retryAfter := now.Add(15 * time.Minute)
+
+	writeRunArtifacts(t, stateDir, runFixture{
+		vesselID:  "failed-run",
+		source:    "github-issue",
+		workflow:  "fix-bug",
+		state:     "failed",
+		startedAt: now,
+		endedAt:   now.Add(time.Minute),
+		failureReview: &recovery.FailureReview{
+			VesselID:           "failed-run",
+			Workflow:           "fix-bug",
+			Class:              "unknown",
+			RecommendedAction:  "retry",
+			RetryCap:           2,
+			RetryAfter:         &retryAfter,
+			FailureFingerprint: "fail-123",
+		},
+	})
+
+	runs, total, warnings, err := LoadRuns(stateDir, 10)
+	if err != nil {
+		t.Fatalf("LoadRuns() error = %v", err)
+	}
+	if total != 1 {
+		t.Fatalf("total = %d, want 1", total)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("warnings = %v, want none", warnings)
+	}
+	if len(runs) != 1 || runs[0].FailureReview == nil {
+		t.Fatalf("runs = %#v, want one run with failure review", runs)
+	}
+	if runs[0].FailureReview.FailureFingerprint != "fail-123" {
+		t.Fatalf("FailureFingerprint = %q, want fail-123", runs[0].FailureReview.FailureFingerprint)
+	}
+}
+
 type runFixture struct {
-	vesselID     string
-	source       string
-	workflow     string
-	state        string
-	startedAt    time.Time
-	endedAt      time.Time
-	phases       []runner.PhaseSummary
-	totalInput   int
-	totalOutput  int
-	totalCost    float64
-	manifest     *evidence.Manifest
-	costReport   *cost.CostReport
-	budgetAlerts []cost.BudgetAlert
-	evalReport   *evaluator.LoopResult
+	vesselID      string
+	source        string
+	workflow      string
+	state         string
+	startedAt     time.Time
+	endedAt       time.Time
+	phases        []runner.PhaseSummary
+	totalInput    int
+	totalOutput   int
+	totalCost     float64
+	manifest      *evidence.Manifest
+	costReport    *cost.CostReport
+	budgetAlerts  []cost.BudgetAlert
+	evalReport    *evaluator.LoopResult
+	failureReview *recovery.FailureReview
 }
 
 func writeRunArtifacts(t *testing.T, stateDir string, fixture runFixture) {
@@ -281,7 +324,16 @@ func writeRunArtifacts(t *testing.T, stateDir string, fixture runFixture) {
 		summary.BudgetAlertsPath = filepath.ToSlash(filepath.Join("phases", fixture.vesselID, "budget-alerts.json"))
 		artifacts.BudgetAlerts = summary.BudgetAlertsPath
 	}
-	if artifacts.EvidenceManifest != "" || artifacts.CostReport != "" || artifacts.BudgetAlerts != "" || artifacts.EvalReport != "" {
+	if fixture.failureReview != nil {
+		reviewDoc := *fixture.failureReview
+		reviewDoc.VesselID = fixture.vesselID
+		if err := recovery.SaveFailureReview(stateDir, &reviewDoc); err != nil {
+			t.Fatalf("SaveFailureReview() error = %v", err)
+		}
+		summary.FailureReviewPath = filepath.ToSlash(filepath.Join("phases", fixture.vesselID, recovery.FailureReviewFileName))
+		artifacts.FailureReview = summary.FailureReviewPath
+	}
+	if artifacts.EvidenceManifest != "" || artifacts.CostReport != "" || artifacts.BudgetAlerts != "" || artifacts.EvalReport != "" || artifacts.FailureReview != "" {
 		summary.ReviewArtifacts = artifacts
 	}
 	requireSummaryOnly(t, stateDir, summary)

@@ -27,6 +27,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
@@ -1424,8 +1425,19 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 		reviewArtifacts.EvalReport = summary.EvalReportPath
 	}
 
+	if state == string(queue.StateFailed) || state == string(queue.StateTimedOut) {
+		failureReview := r.buildFailureReview(vessel, summary, now)
+		if err := recovery.SaveFailureReview(r.Config.StateDir, failureReview); err != nil {
+			log.Printf("warn: save failure review: %v", err)
+		} else {
+			summary.FailureReviewPath = recovery.FailureReviewRelativePath(vessel.ID)
+			reviewArtifacts.FailureReview = summary.FailureReviewPath
+		}
+	}
+
 	if reviewArtifacts.EvidenceManifest != "" || reviewArtifacts.CostReport != "" ||
-		reviewArtifacts.BudgetAlerts != "" || reviewArtifacts.EvalReport != "" {
+		reviewArtifacts.BudgetAlerts != "" || reviewArtifacts.EvalReport != "" ||
+		reviewArtifacts.FailureReview != "" {
 		summary.ReviewArtifacts = reviewArtifacts
 	}
 
@@ -1434,6 +1446,45 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	}
 
 	return manifest
+}
+
+func (r *Runner) buildFailureReview(vessel queue.Vessel, summary *VesselSummary, now time.Time) *recovery.FailureReview {
+	evidencePaths := []string{filepath.ToSlash(filepath.Join("phases", vessel.ID, summaryFileName))}
+	for _, path := range []string{
+		summary.EvidenceManifestPath,
+		summary.CostReportPath,
+		summary.BudgetAlertsPath,
+		summary.EvalReportPath,
+	} {
+		if strings.TrimSpace(path) == "" {
+			continue
+		}
+		evidencePaths = append(evidencePaths, path)
+	}
+
+	hypothesis := strings.TrimSpace(vessel.Error)
+	if hypothesis == "" {
+		hypothesis = strings.TrimSpace(vessel.GateOutput)
+	}
+
+	return &recovery.FailureReview{
+		VesselID:           vessel.ID,
+		FailureFingerprint: recovery.FailureFingerprint(vessel),
+		SourceRef:          vessel.Ref,
+		Workflow:           vessel.Workflow,
+		FailedPhase:        vessel.FailedPhase,
+		Class:              "unknown",
+		RecommendedAction:  "retry",
+		RetryCount:         recovery.RetryCountFromVessel(vessel),
+		RetryCap:           2,
+		EvidencePaths:      evidencePaths,
+		Hypothesis:         hypothesis,
+		Unlock: recovery.UnlockFingerprint{
+			SourceInputFingerprint: vessel.Meta["source_input_fingerprint"],
+			HarnessDigest:          recovery.CurrentHarnessDigest(),
+			WorkflowDigest:         recovery.CurrentWorkflowDigest(vessel.Workflow),
+		},
+	}
 }
 
 func saveJSONArtifact(path string, value any) error {

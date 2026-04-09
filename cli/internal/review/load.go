@@ -12,15 +12,17 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
 type LoadedRun struct {
-	Summary      runner.VesselSummary
-	Evidence     *evidence.Manifest
-	CostReport   *cost.CostReport
-	BudgetAlerts []cost.BudgetAlert
-	EvalReport   *evaluator.LoopResult
+	Summary       runner.VesselSummary
+	Evidence      *evidence.Manifest
+	CostReport    *cost.CostReport
+	BudgetAlerts  []cost.BudgetAlert
+	EvalReport    *evaluator.LoopResult
+	FailureReview *recovery.FailureReview
 }
 
 func LoadRuns(stateDir string, lookbackRuns int) ([]LoadedRun, int, []string, error) {
@@ -106,6 +108,16 @@ func LoadRuns(stateDir string, lookbackRuns int) ([]LoadedRun, int, []string, er
 		})); evalPath != "" {
 			report, warning := loadOptionalEvalReport(evalPath)
 			run.EvalReport = report
+			if warning != "" {
+				warnings = append(warnings, warning)
+			}
+		}
+
+		if failureReviewPath := resolveArtifactPath(stateDir, record.summary.FailureReviewPath, reviewArtifactValue(record.summary.ReviewArtifacts, func(a *runner.ReviewArtifacts) string {
+			return a.FailureReview
+		})); failureReviewPath != "" {
+			reviewArtifact, warning := loadOptionalFailureReview(failureReviewPath)
+			run.FailureReview = reviewArtifact
 			if warning != "" {
 				warnings = append(warnings, warning)
 			}
@@ -198,4 +210,19 @@ func loadOptionalEvalReport(path string) (*evaluator.LoopResult, string) {
 		return report, ""
 	}
 	return nil, fmt.Sprintf("%s: %v", filepath.Base(path), err)
+}
+
+func loadOptionalFailureReview(path string) (*recovery.FailureReview, string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ""
+		}
+		return nil, fmt.Sprintf("%s: %v", filepath.Base(path), err)
+	}
+	var review recovery.FailureReview
+	if err := json.Unmarshal(data, &review); err != nil {
+		return nil, fmt.Sprintf("%s: unmarshal failure review: %v", filepath.Base(path), err)
+	}
+	return &review, ""
 }

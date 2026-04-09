@@ -95,6 +95,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 			entries = append(entries, sourceEntry{
 				src: &source.GitHub{
 					Repo:      srcCfg.Repo,
+					StateDir:  s.Config.StateDir,
 					Tasks:     tasks,
 					Exclude:   srcCfg.Exclude,
 					Queue:     s.Queue,
@@ -107,6 +108,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubPR{
 					Repo:      srcCfg.Repo,
+					StateDir:  s.Config.StateDir,
 					Tasks:     tasks,
 					Exclude:   srcCfg.Exclude,
 					Queue:     s.Queue,

@@ -17,6 +17,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
@@ -497,6 +498,38 @@ func TestSmoke_S18b_PersistRunArtifactsLinksExistingEvalReport(t *testing.T) {
 	assert.Equal(t, evalReportRelativePath(vessel.ID), summary.EvalReportPath)
 	require.NotNil(t, summary.ReviewArtifacts)
 	assert.Equal(t, summary.EvalReportPath, summary.ReviewArtifacts.EvalReport)
+}
+
+func TestSmoke_S18c_PersistRunArtifactsWritesFailureReviewForFailedRuns(t *testing.T) {
+	dir := t.TempDir()
+	t.Chdir(dir)
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "HARNESS.md"), []byte("follow the harness"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".xylem", "workflows", "fix-bug.yaml"), []byte("name: fix-bug\nphases:\n  - name: implement\n    prompt_file: .xylem/prompts/fix-bug/implement.md\n    max_turns: 5\n"), 0o644))
+
+	startedAt := time.Date(2026, time.April, 8, 20, 33, 0, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-failure-review", "github", "fix-bug", startedAt)
+	vessel.Error = "network timeout"
+	vessel.FailedPhase = "implement"
+	vessel.Meta = map[string]string{"source_input_fingerprint": "src-123"}
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	r.persistRunArtifacts(vessel, string(queue.StateFailed), newVesselRunState(cfg, vessel, startedAt), nil, startedAt.Add(time.Second))
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, failureReviewRelativePath(vessel.ID), summary.FailureReviewPath)
+	require.NotNil(t, summary.ReviewArtifacts)
+	assert.Equal(t, summary.FailureReviewPath, summary.ReviewArtifacts.FailureReview)
+
+	reviewDoc, err := recovery.LoadFailureReview(cfg.StateDir, vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "retry", reviewDoc.RecommendedAction)
+	assert.Equal(t, 2, reviewDoc.RetryCap)
+	assert.Equal(t, "src-123", reviewDoc.Unlock.SourceInputFingerprint)
+	assert.NotEmpty(t, reviewDoc.RemediationFingerprint)
 }
 
 func TestSmoke_S19_FailurePathBuildsSummaryWithStateFailedAndCallsSaveVesselSummary(t *testing.T) {

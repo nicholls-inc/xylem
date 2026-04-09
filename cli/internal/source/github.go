@@ -26,6 +26,7 @@ type GitHubTask struct {
 // GitHub scans GitHub issues and produces vessels.
 type GitHub struct {
 	Repo      string
+	StateDir  string
 	Tasks     map[string]GitHubTask
 	Exclude   []string
 	Queue     *queue.Queue
@@ -79,9 +80,17 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					continue
 				}
 				fingerprint := githubSourceFingerprint(issue.Title, issue.Body, issueLabelNames(issue.Labels))
+				prior, err := g.latestVesselForRef(issue.URL)
+				if err != nil {
+					return vessels, err
+				}
+				decision, err := g.reenqueueDecision(prior, fingerprint)
+				if err != nil {
+					return vessels, err
+				}
 				if g.hasExcludedLabel(issue, excludeSet) ||
 					g.Queue.HasRef(issue.URL) ||
-					g.hasMatchingFailedFingerprint(issue.URL, fingerprint) ||
+					decision.Block ||
 					g.hasBranch(ctx, issue.Number) ||
 					g.hasOpenPR(ctx, issue.Number) ||
 					g.hasMergedPR(ctx, issue.Number) {
@@ -103,6 +112,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					// consistent with its workflow state.
 					"trigger_label": label,
 				}
+				applyRecoveryMeta(meta, decision)
 				sl := task.StatusLabels
 				if sl != nil {
 					meta["status_label_queued"] = sl.Queued
@@ -116,14 +126,21 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					meta["label_gate_label_waiting"] = lgl.Waiting
 					meta["label_gate_label_ready"] = lgl.Ready
 				}
+				vesselID := fmt.Sprintf("issue-%d", issue.Number)
+				retryOf := ""
+				if decision.Parent != nil {
+					vesselID = decision.NextID
+					retryOf = decision.Parent.ID
+				}
 				vessels = append(vessels, queue.Vessel{
-					ID:        fmt.Sprintf("issue-%d", issue.Number),
+					ID:        vesselID,
 					Source:    "github-issue",
 					Ref:       issue.URL,
 					Workflow:  task.Workflow,
 					Meta:      meta,
 					State:     queue.StatePending,
 					CreatedAt: sourceNow(),
+					RetryOf:   retryOf,
 				})
 			}
 		}
@@ -251,13 +268,15 @@ func sourceNow() time.Time {
 	return now.UTC()
 }
 
-func (g *GitHub) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
+func (g *GitHub) latestVesselForRef(ref string) (*queue.Vessel, error) {
 	latest, err := g.Queue.FindLatestByRef(ref)
-	if err != nil || latest == nil {
-		return false
+	if err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("find latest vessel for ref %s: %w", ref, err)
 	}
-	isTerminalFailure := latest.State == queue.StateFailed || latest.State == queue.StateTimedOut
-	return isTerminalFailure && latest.Meta["source_input_fingerprint"] == fingerprint
+	return latest, nil
 }
 
 func issueLabelNames(labels []struct {

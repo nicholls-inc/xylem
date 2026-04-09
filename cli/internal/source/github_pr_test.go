@@ -402,7 +402,12 @@ func TestPriorVesselBlocksReenqueue(t *testing.T) {
 		},
 		{name: "completed", vessel: &queue.Vessel{State: queue.StateCompleted}, fingerprint: fingerprint, want: false},
 		{name: "cancelled", vessel: &queue.Vessel{State: queue.StateCancelled}, fingerprint: fingerprint, want: false},
-		{name: "timed out", vessel: &queue.Vessel{State: queue.StateTimedOut}, fingerprint: fingerprint, want: false},
+		{
+			name:        "timed out fingerprint match",
+			vessel:      &queue.Vessel{State: queue.StateTimedOut, Meta: map[string]string{"source_input_fingerprint": fingerprint}},
+			fingerprint: fingerprint,
+			want:        true,
+		},
 	}
 
 	for _, tt := range tests {
