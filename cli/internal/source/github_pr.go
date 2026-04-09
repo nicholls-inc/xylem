@@ -19,12 +19,30 @@ type GitHubPR struct {
 	CmdRunner CommandRunner
 }
 
+// resolveConflictsWorkflow is the de facto workflow identifier whose task
+// labels are only meaningful when a PR is actually in a CONFLICTING merge
+// state. When a PR bearing one of this workflow's labels reports any other
+// mergeable state, the source skips it and proactively removes the label
+// so the loop does not re-enqueue the same no-op work every scan.
+const resolveConflictsWorkflow = "resolve-conflicts"
+
+// ghMergeableConflicting / ghMergeableMergeable mirror the string values
+// returned by `gh pr list --json mergeable`. UNKNOWN (empty or literal) is
+// treated as "not definitively mergeable" — the source skips the vessel
+// but does NOT strip labels, so a subsequent scan can re-evaluate once
+// GitHub finishes computing the merge state.
+const (
+	ghMergeableConflicting = "CONFLICTING"
+	ghMergeableMergeable   = "MERGEABLE"
+)
+
 type ghPR struct {
 	Number      int    `json:"number"`
 	Title       string `json:"title"`
 	Body        string `json:"body"`
 	URL         string `json:"url"`
 	HeadRefName string `json:"headRefName"`
+	Mergeable   string `json:"mergeable"`
 	Labels      []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
@@ -66,7 +84,7 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				"--repo", g.Repo,
 				"--state", "open",
 				"--label", label,
-				"--json", "number,title,body,url,labels,headRefName",
+				"--json", "number,title,body,url,labels,headRefName,mergeable",
 				"--limit", "20",
 			}
 
@@ -89,6 +107,21 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				if g.hasExcludedLabel(pr, excludeSet) ||
 					g.isBlockedByPriorVessel(pr.URL, fingerprint, task.Workflow) ||
 					g.hasBranch(ctx, pr.Number) {
+					continue
+				}
+				// resolve-conflicts workflow is only meaningful for PRs in a
+				// CONFLICTING merge state. When GitHub reports MERGEABLE, the
+				// label is stale (conflicts were resolved outside this
+				// workflow, e.g., via manual push or rebase) — strip it so
+				// the next scan does not re-match, breaking what would
+				// otherwise be an infinite enqueue loop. When GitHub reports
+				// UNKNOWN (empty or literal), skip the vessel but preserve
+				// the label so a subsequent scan can re-evaluate once the
+				// merge state has been computed.
+				if task.Workflow == resolveConflictsWorkflow && pr.Mergeable != ghMergeableConflicting {
+					if pr.Mergeable == ghMergeableMergeable {
+						g.stripTaskLabels(ctx, pr.Number, task.Labels)
+					}
 					continue
 				}
 				seen[key] = true
@@ -164,6 +197,24 @@ func (g *GitHubPR) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
 func (g *GitHubPR) RemoveRunningLabel(ctx context.Context, vessel queue.Vessel) error {
 	g.applyPRLabel(ctx, vessel.Meta["pr_num"], "", ResolveRunningLabel(vessel))
 	return nil
+}
+
+// stripTaskLabels removes the given task-selector labels from a PR. Used
+// to break the resolve-conflicts enqueue loop when a PR carries a
+// needs-conflict-resolution-style label but is no longer in a CONFLICTING
+// merge state. Each label is removed via its own gh pr edit call so a
+// single failure does not cascade across the remaining labels.
+func (g *GitHubPR) stripTaskLabels(ctx context.Context, prNum int, labels []string) {
+	if g.CmdRunner == nil || prNum == 0 {
+		return
+	}
+	num := strconv.Itoa(prNum)
+	for _, label := range labels {
+		if label == "" {
+			continue
+		}
+		g.applyPRLabel(ctx, num, "", label)
+	}
 }
 
 // applyPRLabel runs gh pr edit to add and/or remove a label on the PR.

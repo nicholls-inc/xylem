@@ -16,7 +16,7 @@ Sources              xylem CLI              Execution
 │ Manual     │       │ (JSONL)  │           │  analyze → plan →        │
 └────────────┘       └──────────┘           │  implement → pr          │
                                             │     |            |       │
-                                            │  label gate  cmd gate    │
+                                            │ label/cmd/live gates     │
                                             └──────────────────────────┘
 ```
 
@@ -126,6 +126,24 @@ phases:
 |------|-------------|
 | `command` | Runs a shell command; phase retries if it fails |
 | `label` | Polls a GitHub issue for a label; blocks until found (human-in-the-loop approval) |
+| `live` | Verifies the running system via HTTP, browser, or command+assert checks and saves evidence artifacts |
+
+```yaml
+gate:
+  type: live
+  retries: 1
+  live:
+    mode: http
+    http:
+      base_url: "http://127.0.0.1:3000"
+      steps:
+        - name: health
+          url: /health
+          expect_status: 200
+          expect_json:
+            - path: $.status
+              equals: ok
+```
 
 Use `noop.match` on a phase to let that phase complete the workflow early when its output contains a configured marker such as `XYLEM_NOOP`.
 

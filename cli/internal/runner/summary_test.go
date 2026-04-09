@@ -870,6 +870,31 @@ func TestSmoke_S16_BuildGateClaimWithoutEvidenceMetadataProducesAnUntypedClaim(t
 	assert.True(t, claim.Timestamp.Equal(recordedAt))
 }
 
+func TestBuildGateClaimDefaultsLiveGatesToObservedInSitu(t *testing.T) {
+	recordedAt := time.Date(2026, time.April, 2, 8, 30, 0, 0, time.UTC)
+	artifactPath := "phases/vessel-1/evidence/implement/live-gate.json"
+	claim := buildGateClaim(workflow.Phase{
+		Name: "implement",
+		Gate: &workflow.Gate{
+			Type: "live",
+			Live: &workflow.LiveGate{Mode: "http"},
+		},
+	}, true, artifactPath, recordedAt)
+
+	if claim.Level != evidence.ObservedInSitu {
+		t.Fatalf("Level = %q, want %q", claim.Level, evidence.ObservedInSitu)
+	}
+	if claim.Checker != "live/http" {
+		t.Fatalf("Checker = %q, want %q", claim.Checker, "live/http")
+	}
+	if claim.TrustBoundary != "Running system observation" {
+		t.Fatalf("TrustBoundary = %q, want %q", claim.TrustBoundary, "Running system observation")
+	}
+	if claim.ArtifactPath != artifactPath {
+		t.Fatalf("ArtifactPath = %q, want %q", claim.ArtifactPath, artifactPath)
+	}
+}
+
 func TestSmoke_S17_BuildGateClaimSetsCheckerFromGateRunCommandWhenNoEvidence(t *testing.T) {
 	claim := buildGateClaim(workflow.Phase{
 		Name: "implement",

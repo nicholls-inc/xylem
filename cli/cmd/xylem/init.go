@@ -234,6 +234,17 @@ phases:
       type: command
       run: "make test"
       retries: 2
+      # Optional live smoke test example:
+      # type: live
+      # retries: 1
+      # live:
+      #   mode: http
+      #   http:
+      #     base_url: "http://127.0.0.1:3000"
+      #     steps:
+      #       - name: health
+      #         url: /health
+      #         expect_status: 200
   - name: pr
     prompt_file: .xylem/prompts/fix-bug/pr.md
     max_turns: 3
@@ -262,6 +273,13 @@ phases:
       type: command
       run: "make test"
       retries: 2
+      # Swap to a live gate when you need running-system verification:
+      # type: live
+      # live:
+      #   mode: command+assert
+      #   command_assert:
+      #     run: "./scripts/check-ready.sh"
+      #     expect_stdout_regex: "READY"
   - name: pr
     prompt_file: .xylem/prompts/implement-feature/pr.md
     max_turns: 3

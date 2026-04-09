@@ -25,7 +25,7 @@ Workflow (YAML definition)
   +-- Phase 4: pr         -->  prompt template  -->  LLM session
 ```
 
-Each phase produces output that subsequent phases can reference. Gates act as checkpoints -- if a gate fails and retries are exhausted, the vessel is marked as failed. If a gate is a label gate, the vessel enters a `waiting` state until a human applies the required label on GitHub.
+Each phase produces output that subsequent phases can reference. Gates act as checkpoints -- if a gate fails and retries are exhausted, the vessel is marked as failed. If a gate is a label gate, the vessel enters a `waiting` state until a human applies the required label on GitHub. Live gates also persist step evidence under `.xylem/phases/<vessel-id>/evidence/`.
 
 The built-in workflows scaffolded by `xylem init` use prompt phases. Note: `xylem init` only scaffolds the repository-agnostic workflows `fix-bug` and `implement-feature`; repository-specific workflows such as `implement-harness` are not created by `xylem init` and must be added to your repo's `.xylem/workflows/` tree manually. The workflow format also supports `type: command` phases for deterministic shell steps inside the same execution pipeline.
 
@@ -66,7 +66,7 @@ phases:
     max_turns: 15
     allowed_tools: "Bash, Read, Edit, Write, Grep, Glob"  # Optional tool restriction
     gate:                                          # Optional quality gate
-      type: command                                # "command" or "label"
+      type: command                                # "command", "label", or "live"
       run: "make test"                             # Shell command to execute
       retries: 2                                   # Retry count on failure (default: 0)
       retry_delay: "10s"                           # Delay between retries (default: "10s")
@@ -132,6 +132,56 @@ phases:
 | `timeout` | No | `"24h"` | Maximum time to wait for the label. |
 | `poll_interval` | No | `"60s"` | How often to check for the label. |
 
+**Gate fields (when `type: live`):**
+
+| Field | Required | Default | Description |
+|-------|----------|---------|-------------|
+| `type` | Yes | -- | Must be `"live"`. |
+| `retries` | No | `0` | Number of times to retry the phase if the live verification fails. |
+| `retry_delay` | No | `"10s"` | Go duration string for delay between retries. |
+| `live.mode` | Yes | -- | Verification mode: `http`, `browser`, or `command+assert`. |
+| `live.timeout` | No | inherited per mode | Overall timeout applied to the live verification. |
+
+**Live HTTP fields (`live.mode: http`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `live.http.base_url` | No | Base URL used to resolve relative `steps[].url` values. |
+| `live.http.steps` | Yes | Ordered HTTP verification steps. |
+| `live.http.steps[].name` | No | Human-readable step name. Defaults to `method url`. |
+| `live.http.steps[].method` | No | HTTP method. Defaults to `GET`. |
+| `live.http.steps[].url` | Yes | Absolute URL or path relative to `base_url`. |
+| `live.http.steps[].headers` | No | Request headers to send. |
+| `live.http.steps[].body` | No | Request body. |
+| `live.http.steps[].timeout` | No | Per-step timeout. |
+| `live.http.steps[].expect_status` | No | Expected HTTP status code. |
+| `live.http.steps[].expect_headers` | No | Response header assertions with `name` plus `equals` or `regex`. |
+| `live.http.steps[].expect_json` | No | JSONPath assertions with `path` plus `equals`, `regex`, or `exists`. |
+| `live.http.steps[].expect_body_regex` | No | Regular expression that must match the response body. |
+
+**Live browser fields (`live.mode: browser`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `live.browser.base_url` | No | Base URL used to resolve `navigate` step URLs. |
+| `live.browser.headless` | No | Run Chromium headless. Defaults to true. |
+| `live.browser.steps` | Yes | Ordered browser actions/assertions. |
+| `live.browser.steps[].action` | Yes | One of `navigate`, `click`, `type`, `wait_visible`, `assert_visible`, `assert_text`. |
+| `live.browser.steps[].url` | For `navigate` | Absolute URL or path relative to `base_url`. |
+| `live.browser.steps[].selector` | For selector-based actions | CSS selector to target. |
+| `live.browser.steps[].value` | For `type` | Text to enter. |
+| `live.browser.steps[].text` | For `assert_text` | Substring that must appear in the matched element. |
+| `live.browser.steps[].timeout` | No | Per-step timeout. |
+
+**Live command+assert fields (`live.mode: command+assert`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `live.command_assert.run` | Yes | Shell command to execute in the worktree. |
+| `live.command_assert.timeout` | No | Command timeout. |
+| `live.command_assert.expect_stdout_regex` | No | Regular expression that must match stdout. |
+| `live.command_assert.expect_json` | No | JSONPath assertions evaluated against stdout interpreted as JSON. |
+
 **Gate evidence fields (optional metadata):**
 
 Gates can optionally carry verification evidence metadata describing the assurance level of the gate check.
@@ -154,6 +204,69 @@ gate:
     checker: "go test"
     trust_boundary: "code correctness"
 ```
+
+Live gates default their evidence level to `observed_in_situ`, checker to `live/<mode>`, and trust boundary to `Running system observation` unless you override those fields explicitly.
+
+```yaml
+gate:
+  type: live
+  retries: 1
+  live:
+    mode: http
+    http:
+      base_url: "http://127.0.0.1:3000"
+      steps:
+        - name: readiness
+          url: /readyz
+          expect_status: 200
+        - name: health-json
+          url: /health
+          expect_status: 200
+          expect_json:
+            - path: $.status
+              equals: ok
+```
+
+```yaml
+gate:
+  type: live
+  live:
+    mode: command+assert
+    command_assert:
+      run: "sqlite3 app.db 'select json_object(\"pending\", count(*)) from jobs where status = \"pending\";'"
+      expect_json:
+        - path: $.pending
+          regex: "^[0-9]+$"
+```
+
+```yaml
+gate:
+  type: live
+  live:
+    mode: browser
+    browser:
+      base_url: "http://127.0.0.1:3000"
+      steps:
+        - action: navigate
+          url: /login
+        - action: type
+          selector: 'input[name="email"]'
+          value: test@example.com
+        - action: type
+          selector: 'input[name="password"]'
+          value: secret
+        - action: click
+          selector: 'button[type="submit"]'
+        - action: assert_text
+          selector: "[data-test=dashboard]"
+          text: Welcome
+```
+
+Live gate runs persist a machine-readable summary in `.xylem/phases/<vessel-id>/evidence/<phase-name>/live-gate.json`. Each step also saves evidence artifacts alongside that report under `.xylem/phases/<vessel-id>/evidence/<phase-name>/`, including:
+
+- HTTP traces for HTTP steps
+- stdout captures for command+assert steps
+- DOM snapshots and screenshots for browser steps
 
 ## Phases
 
