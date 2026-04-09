@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -16,6 +17,20 @@ func adaptRepoSearchCall(repo string) string {
 
 func adaptRepoCreateCall(repo string) string {
 	return "gh issue create --repo " + repo + " --title " + adaptRepoIssueTitle + " --body " + adaptRepoIssueBody + " --label " + adaptRepoSeedLabel + " --label " + adaptRepoReadyLabel
+}
+
+type seedRunnerStub struct {
+	calls   [][]string
+	outputs map[string][]byte
+}
+
+func (s *seedRunnerStub) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	call := append([]string{name}, args...)
+	s.calls = append(s.calls, call)
+	if s.outputs == nil {
+		return nil, nil
+	}
+	return s.outputs[strings.Join(call, " ")], nil
 }
 
 func TestSmoke_S3_DaemonSeedingCreatesIssueAndMarkerOnFreshRepo(t *testing.T) {
