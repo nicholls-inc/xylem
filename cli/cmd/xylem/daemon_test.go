@@ -239,25 +239,50 @@ func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, exporter.shutdownCalled)
 }
-func TestDaemonLoopPeriodicUpgradeFiresAfterInterval(t *testing.T) {
+func TestDaemonLoopPeriodicUpgradeFiresAtDrainEnd(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
 	var upgradeCalls atomic.Int32
 	upgrade := func() { upgradeCalls.Add(1) }
 
-	// Tick fast (1ms), upgrade every 10ms. Within 100ms we expect at least 3
-	// upgrade calls, proving the periodic check fires.
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	// drainInterval=2ms so drains fire rapidly; upgradeInterval=1ms so every
+	// drain end should trigger an upgrade. Over 200ms we expect at least 5
+	// upgrade calls, proving the drain-end check fires on every cycle.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, upgrade, time.Millisecond, time.Hour, 10*time.Millisecond)
+	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
 
-	if got := upgradeCalls.Load(); got < 3 {
-		t.Errorf("upgrade called %d times, want at least 3", got)
+	if got := upgradeCalls.Load(); got < 5 {
+		t.Errorf("upgrade called %d times, want at least 5", got)
+	}
+}
+
+func TestDaemonLoopPeriodicUpgradeRespectsInterval(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var upgradeCalls atomic.Int32
+	upgrade := func() { upgradeCalls.Add(1) }
+
+	// drainInterval=2ms → drains fire rapidly (~50 drains in 100ms), but
+	// upgradeInterval=10s → upgrade fires at most ONCE in that window.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, 10*time.Second)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+
+	// With lastUpgrade initialised to daemonNow() at startup and a 10s
+	// interval, no upgrade should fire within 100ms.
+	if got := upgradeCalls.Load(); got != 0 {
+		t.Errorf("upgrade called %d times, want 0 (interval not elapsed)", got)
 	}
 }
 
@@ -269,9 +294,55 @@ func TestDaemonLoopPeriodicUpgradeNilDisables(t *testing.T) {
 	defer cancel()
 
 	// Passing nil upgrade should not panic even with a non-zero interval.
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, nil, time.Hour, time.Hour, 10*time.Millisecond)
+	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, nil, time.Hour, 2*time.Millisecond, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
+	}
+}
+
+// TestDaemonLoopUpgradeWaitsForDrainCompletion verifies the upgrade callback
+// only fires AFTER the drain function returns — i.e., in a guaranteed idle
+// window where no vessel subprocesses are alive.
+func TestDaemonLoopUpgradeWaitsForDrainCompletion(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var (
+		drainActive atomic.Int32
+		drainSeen   atomic.Int32
+		upgradeSaw  atomic.Int32
+	)
+	slowDrain := func(_ context.Context) (runner.DrainResult, error) {
+		drainActive.Store(1)
+		drainSeen.Add(1)
+		defer drainActive.Store(0)
+		// Hold drain long enough for the tick loop to observe it.
+		time.Sleep(20 * time.Millisecond)
+		return runner.DrainResult{}, nil
+	}
+	upgrade := func() {
+		// If the drain goroutine were still running when upgrade fires,
+		// drainActive would be 1. Option A guarantees it's 0 (drain has
+		// returned, but the defer clearing `draining` hasn't run yet).
+		if drainActive.Load() != 0 {
+			t.Errorf("upgrade fired while drain active")
+		}
+		upgradeSaw.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, noopScan, slowDrain, nil, upgrade, time.Hour, time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+
+	if drainSeen.Load() < 2 {
+		t.Errorf("expected at least 2 drain invocations, got %d", drainSeen.Load())
+	}
+	if upgradeSaw.Load() < 2 {
+		t.Errorf("expected at least 2 upgrade invocations, got %d", upgradeSaw.Load())
 	}
 }
 

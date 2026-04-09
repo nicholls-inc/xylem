@@ -165,9 +165,12 @@ const defaultUpgradeInterval = 5 * time.Minute
 // externally-controlled context so tests can cancel it without signals,
 // and injectable scan/drain/check functions so tests can use stubs.
 //
-// If upgrade is non-nil, it is called periodically (every upgradeInterval)
-// while no drain goroutine is in-flight, so that newly-merged binary fixes
-// activate without manual restart. Pass nil/zero to disable.
+// If upgrade is non-nil, it is called at the END of each drain cycle — when
+// every vessel processed in that cycle has reached a terminal state and no
+// subprocesses are alive — provided at least upgradeInterval has elapsed
+// since the last attempt. This gives the daemon a guaranteed-idle window to
+// exec() into a newer binary without killing in-flight vessel work. Pass
+// nil/zero upgrade/upgradeInterval to disable.
 func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
@@ -219,20 +222,6 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 			check(ctx)
 		}
 
-		// Periodic self-upgrade: check for a newer binary on main and
-		// exec() into it if the hash changed. Only runs when no drain is
-		// in-flight, to avoid killing a running vessel mid-execution.
-		// selfUpgrade handles the exec() internally; if it returns, either
-		// nothing changed or the attempt failed and we keep running.
-		if upgrade != nil && upgradeInterval > 0 && now.Sub(lastUpgrade) >= upgradeInterval {
-			if atomic.LoadInt32(&draining) == 0 {
-				lastUpgrade = now
-				upgrade()
-			} else {
-				log.Printf("daemon: periodic upgrade deferred — drain in-flight")
-			}
-		}
-
 		if now.Sub(lastDrain) >= drainInterval {
 			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
@@ -243,10 +232,26 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 					drainResult, err := drain(ctx)
 					if err != nil {
 						log.Printf("daemon: drain error: %v", err)
-						return
+					} else {
+						log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
+							drainResult.Completed, drainResult.Failed, drainResult.Skipped)
 					}
-					log.Printf("daemon: drain complete — completed=%d failed=%d skipped=%d",
-						drainResult.Completed, drainResult.Failed, drainResult.Skipped)
+
+					// Drain-end self-upgrade: every vessel processed in this
+					// cycle has reached a terminal state (completed, failed,
+					// or timed_out) — there are no subprocesses alive right
+					// now, so exec() is safe. Runs regardless of drain
+					// success/failure, since vessels are in persistent state
+					// either way. lastUpgrade is only written from within
+					// this goroutine (and the CAS guard ensures one drain
+					// runs at a time), so no synchronisation is required.
+					if upgrade != nil && upgradeInterval > 0 {
+						drainEnd := daemonNow()
+						if drainEnd.Sub(lastUpgrade) >= upgradeInterval {
+							lastUpgrade = drainEnd
+							upgrade()
+						}
+					}
 				}()
 			}
 		}
