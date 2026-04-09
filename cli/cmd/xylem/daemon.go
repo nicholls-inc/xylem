@@ -60,6 +60,11 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	// Auto-upgrade: pull latest main, rebuild, exec() if binary changed.
 	// Runs after PID lock (prevents concurrent upgrades) and before any vessel
 	// processing. If exec() fires, the new process re-acquires the lock.
+	//
+	// Captures the executable path and repo dir once so the same closure can
+	// also be used for periodic upgrades inside the daemon loop.
+	var upgrade upgradeFunc
+	upgradeInterval := time.Duration(0)
 	if cfg.Daemon.AutoUpgrade {
 		execPath, execErr := os.Executable()
 		if execErr != nil {
@@ -67,6 +72,9 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		} else {
 			repoDir := filepath.Dir(filepath.Dir(execPath))
 			selfUpgrade(repoDir, execPath)
+
+			upgrade = func() { selfUpgrade(repoDir, execPath) }
+			upgradeInterval = parseUpgradeInterval(cfg.Daemon)
 		}
 	}
 
@@ -97,7 +105,22 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		}
 	}
 
-	return daemonLoop(ctx, q, scan, drain, check, scanInterval, drainInterval)
+	return daemonLoop(ctx, q, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+}
+
+// parseUpgradeInterval returns the effective periodic upgrade interval. If
+// the config provides an explicit value, it is parsed; otherwise the default
+// is returned.
+func parseUpgradeInterval(dc config.DaemonConfig) time.Duration {
+	if dc.UpgradeInterval == "" {
+		return defaultUpgradeInterval
+	}
+	d, err := time.ParseDuration(dc.UpgradeInterval)
+	if err != nil || d <= 0 {
+		log.Printf("daemon: invalid upgrade_interval %q, using default %s", dc.UpgradeInterval, defaultUpgradeInterval)
+		return defaultUpgradeInterval
+	}
+	return d
 }
 
 func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
@@ -125,20 +148,41 @@ type drainFunc func(ctx context.Context) (runner.DrainResult, error)
 // hung vessel timeouts). May be nil if no checks are needed.
 type checkFunc func(ctx context.Context)
 
+// upgradeFunc runs a self-upgrade attempt. If it succeeds with a binary
+// change, it calls exec() and never returns. If it returns, either the
+// binary was unchanged or the upgrade failed; the daemon continues normally.
+// May be nil to disable periodic upgrades.
+type upgradeFunc func()
+
+// defaultUpgradeInterval is how often the daemon checks for a new binary.
+// Five minutes balances fast activation of newly-merged fixes against
+// excessive git fetches and rebuilds.
+const defaultUpgradeInterval = 5 * time.Minute
+
 // daemonLoop is the core loop extracted for testability. It accepts an
 // externally-controlled context so tests can cancel it without signals,
 // and injectable scan/drain/check functions so tests can use stubs.
-func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, check checkFunc, scanInterval, drainInterval time.Duration) error {
+//
+// If upgrade is non-nil, it is called periodically (every upgradeInterval)
+// while no drain goroutine is in-flight, so that newly-merged binary fixes
+// activate without manual restart. Pass nil/zero to disable.
+func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
 	}
 
-	var lastScan, lastDrain time.Time
+	var lastScan, lastDrain, lastUpgrade time.Time
 	var draining int32 // 0=idle, 1=running
 	var drainWg sync.WaitGroup
 
-	log.Printf("daemon started: scan_interval=%s drain_interval=%s", scanInterval, drainInterval)
+	// Initialise lastUpgrade to now so the first upgrade check happens after
+	// upgradeInterval — not immediately, since cmdDaemon already ran the
+	// startup upgrade.
+	lastUpgrade = daemonNow()
+
+	log.Printf("daemon started: scan_interval=%s drain_interval=%s upgrade_interval=%s",
+		scanInterval, drainInterval, upgradeInterval)
 
 	for {
 		select {
@@ -171,6 +215,20 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 		// Run vessel health checks (waiting label gates, hung vessel timeouts)
 		if check != nil {
 			check(ctx)
+		}
+
+		// Periodic self-upgrade: check for a newer binary on main and
+		// exec() into it if the hash changed. Only runs when no drain is
+		// in-flight, to avoid killing a running vessel mid-execution.
+		// selfUpgrade handles the exec() internally; if it returns, either
+		// nothing changed or the attempt failed and we keep running.
+		if upgrade != nil && upgradeInterval > 0 && now.Sub(lastUpgrade) >= upgradeInterval {
+			if atomic.LoadInt32(&draining) == 0 {
+				lastUpgrade = now
+				upgrade()
+			} else {
+				log.Printf("daemon: periodic upgrade deferred — drain in-flight")
+			}
 		}
 
 		if now.Sub(lastDrain) >= drainInterval {

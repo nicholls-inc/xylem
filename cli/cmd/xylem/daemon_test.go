@@ -186,7 +186,7 @@ func TestDaemonShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, time.Hour, time.Hour)
+	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, nil, time.Hour, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("expected nil error on shutdown, got: %v", err)
 	}
@@ -203,6 +203,65 @@ func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
 	}
 	if result != (runner.DrainResult{}) {
 		t.Fatalf("DrainResult = %+v, want zero value", result)
+	}
+}
+
+func TestDaemonLoopPeriodicUpgradeFiresAfterInterval(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var upgradeCalls atomic.Int32
+	upgrade := func() { upgradeCalls.Add(1) }
+
+	// Tick fast (1ms), upgrade every 10ms. Within 100ms we expect at least 3
+	// upgrade calls, proving the periodic check fires.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, upgrade, time.Millisecond, time.Hour, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+
+	if got := upgradeCalls.Load(); got < 3 {
+		t.Errorf("upgrade called %d times, want at least 3", got)
+	}
+}
+
+func TestDaemonLoopPeriodicUpgradeNilDisables(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// Passing nil upgrade should not panic even with a non-zero interval.
+	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, nil, time.Hour, time.Hour, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+}
+
+func TestParseUpgradeInterval(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  time.Duration
+	}{
+		{"empty uses default", "", defaultUpgradeInterval},
+		{"valid 10m", "10m", 10 * time.Minute},
+		{"valid 30s", "30s", 30 * time.Second},
+		{"invalid falls back to default", "not-a-duration", defaultUpgradeInterval},
+		{"zero falls back to default", "0s", defaultUpgradeInterval},
+		{"negative falls back to default", "-5m", defaultUpgradeInterval},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseUpgradeInterval(config.DaemonConfig{UpgradeInterval: tt.input})
+			if got != tt.want {
+				t.Errorf("parseUpgradeInterval(%q) = %s, want %s", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -262,7 +321,7 @@ func TestDaemonNonBlockingDrain(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := daemonLoop(ctx, q, noopScan, slowDrain, nil, time.Hour, time.Millisecond)
+	err := daemonLoop(ctx, q, noopScan, slowDrain, nil, nil, time.Hour, time.Millisecond, 0)
 	elapsed := time.Since(start)
 
 	if err != nil {
