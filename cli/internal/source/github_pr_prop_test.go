@@ -40,7 +40,7 @@ func TestPropPriorVesselBlocksReenqueueMatchesStateMachine(t *testing.T) {
 		switch state {
 		case queue.StatePending, queue.StateRunning, queue.StateWaiting:
 			want = true
-		case queue.StateFailed:
+		case queue.StateFailed, queue.StateTimedOut:
 			want = match
 		}
 
