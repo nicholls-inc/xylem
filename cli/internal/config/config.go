@@ -17,12 +17,42 @@ const minTimeout = 30 * time.Second
 
 const DefaultAuditLogPath = "audit.jsonl"
 
-var DefaultProtectedSurfaces = []string{
-	".xylem/HARNESS.md",
-	".xylem.yml",
-	".xylem/workflows/*.yaml",
-	".xylem/prompts/*/*.md",
-}
+// DefaultProtectedSurfaces is the default list of paths that xylem's
+// runtime verifier treats as off-limits to vessel modifications.
+//
+// Historical context: earlier versions of xylem seeded this with control-
+// plane paths (.xylem/HARNESS.md, .xylem.yml, .xylem/workflows/*.yaml,
+// .xylem/prompts/*/*.md) so that a rogue vessel in a guest repository
+// couldn't silently rewrite xylem's own behaviour while running under an
+// arbitrary issue. That default made sense when xylem was being used
+// against external repositories where the control plane was managed by a
+// separate authority.
+//
+// For xylem's primary use case — the nicholls-inc/xylem repo itself, where
+// xylem is continuously self-improving — that default is self-defeating.
+// Every vessel that implements a bug fix in .xylem/workflows/*.yaml or
+// .xylem/prompts/*/*.md hits the runtime verifier, fails, and the only
+// recovery path is a manual PR shipped by a human or rescue loop. Issues
+// #188 (resolve-conflicts gate bypass) and #190 (merge-pr --auto flag)
+// both failed at implement phase this way, despite the vessels correctly
+// identifying the files to edit.
+//
+// The protected-surface chain (pre-verify restore in PR #180, alignment
+// filter in PR #187, additive allow-list in PR #186) handled several
+// adjacent cases but never the vessel-authored canonical-changing
+// modification case — because by design, the policy prevented vessels
+// from changing canonical state at all.
+//
+// The new default is EMPTY: protection is off by default, matching the
+// self-improving use case. Deployments that want strict enforcement can
+// still opt in via harness.protected_surfaces.paths in .xylem.yml.
+// Human PR review remains the security gate: vessels propose changes
+// via PRs, humans merge them. The runtime verifier was a belt-and-
+// suspenders layer on top of that gate; removing the belt keeps the
+// suspenders in place.
+//
+// See issue #194 for the design discussion.
+var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
 	Repo          string                  `yaml:"repo,omitempty"`
