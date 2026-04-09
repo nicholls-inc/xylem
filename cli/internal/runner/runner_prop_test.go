@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -17,6 +18,42 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"pgregory.net/rapid"
 )
+
+func TestProp_FilterAdditiveProtectedSurfaceViolationsDropsOnlyAdditions(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		allowAdditive := rapid.Bool().Draw(t, "allowAdditive")
+		count := rapid.IntRange(0, 12).Draw(t, "count")
+
+		violations := make([]surface.Violation, 0, count)
+		want := make([]surface.Violation, 0, count)
+		for i := range count {
+			before := rapid.SampledFrom([]string{
+				"absent",
+				"deleted",
+				"aaaaaaaaaaaaaaaa",
+				"bbbbbbbbbbbbbbbb",
+			}).Draw(t, fmt.Sprintf("before-%d", i))
+			violation := surface.Violation{
+				Path:   fmt.Sprintf(".xylem/generated/%d.yaml", i),
+				Before: before,
+				After: rapid.SampledFrom([]string{
+					"deleted",
+					"1111111111111111",
+					"2222222222222222",
+				}).Draw(t, fmt.Sprintf("after-%d", i)),
+			}
+			violations = append(violations, violation)
+			if !allowAdditive || violation.Before != "absent" {
+				want = append(want, violation)
+			}
+		}
+
+		got := filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("filterAdditiveProtectedSurfaceViolations() = %#v, want %#v", got, want)
+		}
+	})
+}
 
 func TestProp_BudgetEnforcementNeverLeaksAcrossVessels(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
