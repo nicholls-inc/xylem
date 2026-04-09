@@ -7,9 +7,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cadence"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
-	"github.com/robfig/cron/v3"
 	"gopkg.in/yaml.v3"
 )
 
@@ -48,13 +48,13 @@ type Config struct {
 type SourceConfig struct {
 	Type     string          `yaml:"type"`
 	Repo     string          `yaml:"repo,omitempty"`
+	Cadence  string          `yaml:"cadence,omitempty"`
+	Workflow string          `yaml:"workflow,omitempty"`
 	LLM      string          `yaml:"llm,omitempty"`
 	Model    string          `yaml:"model,omitempty"`
 	Timeout  string          `yaml:"timeout,omitempty"`
 	Exclude  []string        `yaml:"exclude,omitempty"`
 	Tasks    map[string]Task `yaml:"tasks,omitempty"`
-	Cadence  string          `yaml:"cadence,omitempty"`
-	Workflow string          `yaml:"workflow,omitempty"`
 }
 
 type StatusLabels struct {
@@ -693,24 +693,13 @@ func validateGitHubMergeSource(name string, src SourceConfig) error {
 }
 
 func validateScheduleSource(name string, src SourceConfig) error {
-	cadence := strings.TrimSpace(src.Cadence)
-	if cadence == "" {
-		return fmt.Errorf("source %q (schedule): cadence is required", name)
-	}
 	if strings.TrimSpace(src.Workflow) == "" {
 		return fmt.Errorf("source %q (schedule): workflow is required", name)
 	}
 	if len(src.Tasks) > 0 {
-		return fmt.Errorf("source %q (schedule): tasks are not supported; use workflow at the source level", name)
+		return fmt.Errorf("source %q (schedule): tasks are not supported; configure workflow at the source level", name)
 	}
-	if d, err := time.ParseDuration(cadence); err == nil {
-		if d <= 0 {
-			return fmt.Errorf("source %q (schedule): cadence duration must be greater than 0", name)
-		}
-		return nil
-	}
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	if _, err := parser.Parse(cadence); err != nil {
+	if _, err := cadence.Parse(src.Cadence); err != nil {
 		return fmt.Errorf("source %q (schedule): cadence is invalid: %w", name, err)
 	}
 	return nil

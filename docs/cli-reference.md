@@ -211,7 +211,7 @@ xylem scan [flags]
 - `github-pr` scans open pull requests matching task labels.
 - `github-pr-events` scans open pull requests for configured `on` triggers such as labels, submitted reviews, failed checks, and comments.
 - `github-merge` scans merged pull requests and dedupes by merge commit SHA.
-- `schedule` enqueues a single synthetic vessel when its cadence has elapsed since the last recorded firing in `<state_dir>/schedule-state.json`.
+- `schedule` emits a synthetic vessel when its configured cadence elapses and persists the last-fired timestamp under `<state_dir>/state/schedule.json`.
 - If scanning is paused (via `xylem pause`), prints a message and exits without scanning.
 - Deduplication is handled automatically. Depending on the source, xylem skips refs that are already present in the queue, already present in any vessel state, or already have xylem-owned branches/open PRs.
 

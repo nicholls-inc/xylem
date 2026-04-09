@@ -6,18 +6,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"time"
 
 	"github.com/gofrs/flock"
+	"github.com/nicholls-inc/xylem/cli/internal/cadence"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
-	"github.com/robfig/cron/v3"
 )
 
-const scheduleStateFileName = "schedule-state.json"
-
-var scheduleBranchSafe = regexp.MustCompile(`[^a-z0-9]+`)
+// Schedule emits recurring synthetic vessels based on a configured cadence.
+const legacyScheduleStateFileName = "schedule-state.json"
 
 type Schedule struct {
 	ConfigName string
@@ -25,13 +23,19 @@ type Schedule struct {
 	Workflow   string
 	StateDir   string
 	Queue      *queue.Queue
+	Now        func() time.Time
 }
 
-type scheduleStateEntry struct {
-	Cadence     string     `json:"cadence"`
+type scheduleStateRecord struct {
+	LastFiredAt string `json:"last_fired_at"`
+}
+
+type scheduleStateFile struct {
+	Sources map[string]scheduleStateRecord `json:"sources"`
+}
+
+type legacyScheduleStateEntry struct {
 	LastFiredAt *time.Time `json:"last_fired_at,omitempty"`
-	NextDueAt   *time.Time `json:"next_due_at,omitempty"`
-	LastVessel  string     `json:"last_vessel,omitempty"`
 }
 
 func (s *Schedule) Name() string { return "schedule" }
@@ -40,68 +44,50 @@ func (s *Schedule) Scan(_ context.Context) ([]queue.Vessel, error) {
 	if strings.TrimSpace(s.ConfigName) == "" {
 		return nil, fmt.Errorf("schedule source: config name is required")
 	}
-	sched, err := parseScheduleCadence(s.Cadence)
+	spec, err := cadence.Parse(s.Cadence)
 	if err != nil {
-		return nil, fmt.Errorf("schedule source %q: parse cadence: %w", s.ConfigName, err)
+		return nil, fmt.Errorf("schedule source %q: %w", s.ConfigName, err)
 	}
 
-	now := sourceNow().UTC()
-	state, err := s.loadState()
+	lastFiredAt, err := s.loadLastFiredAt()
 	if err != nil {
-		return nil, fmt.Errorf("schedule source %q: load state: %w", s.ConfigName, err)
+		return nil, fmt.Errorf("schedule source %q: load last fired state: %w", s.ConfigName, err)
 	}
-	entry := state[s.ConfigName]
-	due, firedAt, nextDue := scheduledTick(sched, s.Cadence, entry, now)
+
+	firedAt, due := spec.FireTime(lastFiredAt, s.now())
 	if !due {
 		return nil, nil
 	}
 
-	ref := scheduleRef(s.ConfigName, firedAt)
-	if s.Queue != nil && s.Queue.HasRefAny(ref) {
+	active, err := s.hasActiveVessel()
+	if err != nil {
+		return nil, fmt.Errorf("schedule source %q: inspect active vessels: %w", s.ConfigName, err)
+	}
+	if active {
 		return nil, nil
 	}
 
-	return []queue.Vessel{{
-		ID:       scheduleVesselID(s.ConfigName, firedAt),
-		Source:   "schedule",
-		Ref:      ref,
-		Workflow: s.Workflow,
-		Meta: map[string]string{
-			"schedule_name":        s.ConfigName,
-			"schedule_cadence":     s.Cadence,
-			"schedule_fired_at":    firedAt.Format(time.RFC3339),
-			"schedule_next_due_at": nextDue.Format(time.RFC3339),
-		},
-		State:     queue.StatePending,
-		CreatedAt: now,
-	}}, nil
+	vessel := s.buildVessel(firedAt, spec.Raw())
+	if s.Queue != nil && s.Queue.HasRefAny(vessel.Ref) {
+		return nil, nil
+	}
+	return []queue.Vessel{vessel}, nil
 }
 
 func (s *Schedule) OnEnqueue(_ context.Context, vessel queue.Vessel) error {
-	state, err := s.loadState()
+	firedAtRaw := vessel.Meta["schedule.fired_at"]
+	if firedAtRaw == "" {
+		firedAtRaw = vessel.Meta["schedule_fired_at"]
+	}
+	if firedAtRaw == "" {
+		return nil
+	}
+	firedAt, err := time.Parse(time.RFC3339, firedAtRaw)
 	if err != nil {
-		return fmt.Errorf("schedule source %q: load state: %w", s.ConfigName, err)
+		return fmt.Errorf("parse schedule fired_at for %s: %w", vessel.ID, err)
 	}
-
-	firedAt, err := time.Parse(time.RFC3339, vessel.Meta["schedule_fired_at"])
-	if err != nil {
-		return fmt.Errorf("schedule source %q: parse fired_at: %w", s.ConfigName, err)
-	}
-	nextDue, err := time.Parse(time.RFC3339, vessel.Meta["schedule_next_due_at"])
-	if err != nil {
-		return fmt.Errorf("schedule source %q: parse next_due_at: %w", s.ConfigName, err)
-	}
-	firedAt = firedAt.UTC()
-	nextDue = nextDue.UTC()
-
-	state[s.ConfigName] = scheduleStateEntry{
-		Cadence:     s.Cadence,
-		LastFiredAt: &firedAt,
-		NextDueAt:   &nextDue,
-		LastVessel:  vessel.ID,
-	}
-	if err := s.saveState(state); err != nil {
-		return fmt.Errorf("schedule source %q: save state: %w", s.ConfigName, err)
+	if err := s.storeLastFiredAt(firedAt); err != nil {
+		return fmt.Errorf("persist schedule fired_at for %s: %w", vessel.ID, err)
 	}
 	return nil
 }
@@ -113,143 +99,205 @@ func (s *Schedule) OnTimedOut(_ context.Context, _ queue.Vessel) error         {
 func (s *Schedule) RemoveRunningLabel(_ context.Context, _ queue.Vessel) error { return nil }
 
 func (s *Schedule) BranchName(vessel queue.Vessel) string {
-	name := scheduleBranchComponent(vessel.Meta["schedule_name"])
-	if name == "" {
-		name = "schedule"
+	sourceName := scheduleSlug(s.ConfigName)
+	if raw := vessel.Meta["schedule.source_name"]; strings.TrimSpace(raw) != "" {
+		sourceName = scheduleSlug(raw)
+	} else if raw := vessel.Meta["schedule_name"]; strings.TrimSpace(raw) != "" {
+		sourceName = scheduleSlug(raw)
 	}
-	stamp := scheduleStamp(vessel.Meta["schedule_fired_at"])
-	if stamp == "" {
-		stamp = "tick"
-	}
-	return fmt.Sprintf("chore/%s-%s", name, stamp)
+	firedAt := scheduleFiredAtKey(scheduleFiredAtMeta(vessel))
+	return fmt.Sprintf("chore/schedule-%s-%s", sourceName, firedAt)
 }
 
 func ValidateCadence(expr string) error {
-	_, err := parseScheduleCadence(expr)
+	_, err := cadence.Parse(expr)
 	return err
 }
 
-func parseScheduleCadence(expr string) (cron.Schedule, error) {
-	trimmed := strings.TrimSpace(expr)
-	if trimmed == "" {
-		return nil, fmt.Errorf("cadence must not be empty")
+func (s *Schedule) buildVessel(firedAt time.Time, rawCadence string) queue.Vessel {
+	firedAt = firedAt.UTC().Truncate(time.Second)
+	idTime := firedAt.Format("20060102t150405z")
+	refTime := firedAt.Format(time.RFC3339)
+	configName := s.ConfigName
+	if configName == "" {
+		configName = "schedule"
 	}
-	if d, err := time.ParseDuration(trimmed); err == nil {
-		if d <= 0 {
-			return nil, fmt.Errorf("cadence duration must be greater than 0")
-		}
-		return everyDuration(d), nil
+	return queue.Vessel{
+		ID:       fmt.Sprintf("schedule-%s-%s", scheduleSlug(configName), idTime),
+		Source:   s.Name(),
+		Ref:      fmt.Sprintf("schedule://%s/%s", configName, refTime),
+		Workflow: s.Workflow,
+		Meta: map[string]string{
+			"schedule.cadence":     rawCadence,
+			"schedule.fired_at":    refTime,
+			"schedule.source_name": configName,
+			"schedule_cadence":     rawCadence,
+			"schedule_fired_at":    refTime,
+			"schedule_name":        configName,
+		},
+		State:     queue.StatePending,
+		CreatedAt: firedAt,
 	}
+}
 
-	parser := cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow | cron.Descriptor)
-	sched, err := parser.Parse(trimmed)
+func (s *Schedule) loadLastFiredAt() (*time.Time, error) {
+	state, err := s.readState()
 	if err != nil {
-		return nil, fmt.Errorf("invalid cadence %q: %w", trimmed, err)
+		return nil, err
 	}
-	return sched, nil
+	record, ok := state.Sources[s.ConfigName]
+	if !ok || strings.TrimSpace(record.LastFiredAt) == "" {
+		return s.loadLegacyLastFiredAt()
+	}
+	ts, err := time.Parse(time.RFC3339, record.LastFiredAt)
+	if err != nil {
+		return nil, fmt.Errorf("parse last_fired_at %q: %w", record.LastFiredAt, err)
+	}
+	ts = ts.UTC()
+	return &ts, nil
 }
 
-func scheduledTick(sched cron.Schedule, cadence string, entry scheduleStateEntry, now time.Time) (bool, time.Time, time.Time) {
-	now = now.UTC()
-	cadence = strings.TrimSpace(cadence)
-	if entry.Cadence != cadence || entry.NextDueAt == nil {
-		nextDue := sched.Next(now)
-		return true, now, nextDue.UTC()
-	}
-	if now.Before(entry.NextDueAt.UTC()) {
-		return false, time.Time{}, time.Time{}
-	}
-
-	firedAt := entry.NextDueAt.UTC()
-	nextDue := sched.Next(firedAt)
-	for !nextDue.After(now) {
-		nextDue = sched.Next(nextDue)
-	}
-	return true, firedAt, nextDue.UTC()
-}
-
-func (s *Schedule) statePath() string {
-	return filepath.Join(s.StateDir, scheduleStateFileName)
-}
-
-func (s *Schedule) withStateLock(fn func() error) error {
+func (s *Schedule) storeLastFiredAt(firedAt time.Time) error {
 	if err := os.MkdirAll(filepath.Dir(s.statePath()), 0o755); err != nil {
-		return err
+		return fmt.Errorf("create schedule state directory: %w", err)
 	}
 	lock := flock.New(s.statePath() + ".lock")
 	if err := lock.Lock(); err != nil {
+		return fmt.Errorf("lock schedule state: %w", err)
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+
+	state, err := s.readStateUnlocked()
+	if err != nil {
 		return err
 	}
-	defer lock.Unlock() //nolint:errcheck
-	return fn()
+	if state.Sources == nil {
+		state.Sources = make(map[string]scheduleStateRecord)
+	}
+	state.Sources[s.ConfigName] = scheduleStateRecord{
+		LastFiredAt: firedAt.UTC().Truncate(time.Second).Format(time.RFC3339),
+	}
+
+	data, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal schedule state: %w", err)
+	}
+	if err := os.WriteFile(s.statePath(), data, 0o644); err != nil {
+		return fmt.Errorf("write schedule state: %w", err)
+	}
+	return nil
 }
 
-func (s *Schedule) loadState() (map[string]scheduleStateEntry, error) {
-	state := make(map[string]scheduleStateEntry)
-	err := s.withStateLock(func() error {
-		data, err := os.ReadFile(s.statePath())
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if len(data) == 0 {
-			return nil
-		}
-		if err := json.Unmarshal(data, &state); err != nil {
-			return fmt.Errorf("unmarshal state: %w", err)
-		}
-		return nil
-	})
-	return state, err
+func (s *Schedule) readState() (scheduleStateFile, error) {
+	if err := os.MkdirAll(filepath.Dir(s.statePath()), 0o755); err != nil {
+		return scheduleStateFile{}, fmt.Errorf("create schedule state directory: %w", err)
+	}
+	lock := flock.New(s.statePath() + ".lock")
+	if err := lock.RLock(); err != nil {
+		return scheduleStateFile{}, fmt.Errorf("lock schedule state for read: %w", err)
+	}
+	defer func() {
+		_ = lock.Unlock()
+	}()
+	return s.readStateUnlocked()
 }
 
-func (s *Schedule) saveState(state map[string]scheduleStateEntry) error {
-	return s.withStateLock(func() error {
-		if err := os.MkdirAll(filepath.Dir(s.statePath()), 0o755); err != nil {
-			return err
+func (s *Schedule) readStateUnlocked() (scheduleStateFile, error) {
+	data, err := os.ReadFile(s.statePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return scheduleStateFile{Sources: map[string]scheduleStateRecord{}}, nil
 		}
-		data, err := json.MarshalIndent(state, "", "  ")
-		if err != nil {
-			return err
+		return scheduleStateFile{}, fmt.Errorf("read schedule state: %w", err)
+	}
+	var state scheduleStateFile
+	if err := json.Unmarshal(data, &state); err != nil {
+		return scheduleStateFile{}, fmt.Errorf("parse schedule state: %w", err)
+	}
+	if state.Sources == nil {
+		state.Sources = map[string]scheduleStateRecord{}
+	}
+	return state, nil
+}
+
+func (s *Schedule) statePath() string {
+	return filepath.Join(s.StateDir, "state", "schedule.json")
+}
+
+func (s *Schedule) legacyStatePath() string {
+	return filepath.Join(s.StateDir, legacyScheduleStateFileName)
+}
+
+func (s *Schedule) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return sourceNow()
+}
+
+func (s *Schedule) hasActiveVessel() (bool, error) {
+	if s.Queue == nil {
+		return false, nil
+	}
+
+	vessels, err := s.Queue.List()
+	if err != nil {
+		return false, fmt.Errorf("list queue: %w", err)
+	}
+	for _, vessel := range vessels {
+		if vessel.State.IsTerminal() {
+			continue
 		}
-		return os.WriteFile(s.statePath(), data, 0o644)
-	})
+		if vessel.Meta["schedule.source_name"] == s.ConfigName || vessel.Meta["schedule_name"] == s.ConfigName {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-func scheduleRef(name string, firedAt time.Time) string {
-	return fmt.Sprintf("schedule://%s/%s", name, firedAt.UTC().Format("20060102T150405Z"))
+func (s *Schedule) loadLegacyLastFiredAt() (*time.Time, error) {
+	data, err := os.ReadFile(s.legacyStatePath())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read legacy schedule state: %w", err)
+	}
+
+	var state map[string]legacyScheduleStateEntry
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, fmt.Errorf("parse legacy schedule state: %w", err)
+	}
+	record, ok := state[s.ConfigName]
+	if !ok || record.LastFiredAt == nil {
+		return nil, nil
+	}
+	firedAt := record.LastFiredAt.UTC().Truncate(time.Second)
+	return &firedAt, nil
 }
 
-func scheduleVesselID(name string, firedAt time.Time) string {
-	return fmt.Sprintf("schedule-%s-%s", scheduleBranchComponent(name), firedAt.UTC().Format("20060102t150405z"))
+func scheduleFiredAtMeta(vessel queue.Vessel) string {
+	if raw := vessel.Meta["schedule.fired_at"]; raw != "" {
+		return raw
+	}
+	return vessel.Meta["schedule_fired_at"]
 }
 
-func scheduleBranchComponent(name string) string {
-	clean := scheduleBranchSafe.ReplaceAllString(strings.ToLower(name), "-")
-	clean = strings.Trim(clean, "-")
-	if clean == "" {
+func scheduleSlug(name string) string {
+	slug := nonAlphaNum.ReplaceAllString(strings.ToLower(name), "-")
+	slug = strings.Trim(slug, "-")
+	if slug == "" {
 		return "schedule"
 	}
-	return clean
+	return slug
 }
 
-func scheduleStamp(value string) string {
-	parsed, err := time.Parse(time.RFC3339, value)
+func scheduleFiredAtKey(raw string) string {
+	firedAt, err := time.Parse(time.RFC3339, raw)
 	if err != nil {
-		return ""
+		return "tick"
 	}
-	return parsed.UTC().Format("20060102t150405z")
-}
-
-type durationSchedule time.Duration
-
-func everyDuration(d time.Duration) cron.Schedule {
-	return durationSchedule(d)
-}
-
-func (d durationSchedule) Next(t time.Time) time.Time {
-	next := t.Add(time.Duration(d))
-	return next.UTC()
+	return firedAt.UTC().Format("20060102t150405z")
 }
