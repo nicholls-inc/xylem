@@ -4,7 +4,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,16 +16,16 @@ import (
 // return — the process image is replaced. On failure or no-change, it returns
 // normally so the daemon continues with the current binary.
 func selfUpgrade(repoDir, executablePath string) {
-	log.Println("daemon: auto-upgrade: pulling latest main")
+	slog.Info("daemon auto-upgrade pulling latest main")
 
 	if err := gitPull(repoDir); err != nil {
-		log.Printf("daemon: auto-upgrade: git pull failed: %v (continuing with current binary)", err)
+		slog.Warn("daemon auto-upgrade git pull failed", "error", err)
 		return
 	}
 
 	oldHash, err := hashFile(executablePath)
 	if err != nil {
-		log.Printf("daemon: auto-upgrade: hash current binary: %v (continuing with current binary)", err)
+		slog.Warn("daemon auto-upgrade failed to hash current binary", "error", err)
 		return
 	}
 
@@ -33,35 +33,35 @@ func selfUpgrade(repoDir, executablePath string) {
 	cliDir := filepath.Join(repoDir, "cli")
 	tmpBin := executablePath + ".upgrade"
 	if err := goBuild(cliDir, tmpBin); err != nil {
-		log.Printf("daemon: auto-upgrade: go build failed: %v (continuing with current binary)", err)
+		slog.Warn("daemon auto-upgrade go build failed", "error", err)
 		os.Remove(tmpBin) //nolint:errcheck
 		return
 	}
 
 	newHash, err := hashFile(tmpBin)
 	if err != nil {
-		log.Printf("daemon: auto-upgrade: hash new binary: %v (continuing with current binary)", err)
+		slog.Warn("daemon auto-upgrade failed to hash rebuilt binary", "error", err)
 		os.Remove(tmpBin) //nolint:errcheck
 		return
 	}
 
 	if oldHash == newHash {
-		log.Println("daemon: auto-upgrade: binary unchanged after rebuild")
+		slog.Info("daemon auto-upgrade binary unchanged after rebuild")
 		os.Remove(tmpBin) //nolint:errcheck
 		return
 	}
 
 	// Atomic rename new binary over old (same filesystem).
 	if err := os.Rename(tmpBin, executablePath); err != nil {
-		log.Printf("daemon: auto-upgrade: rename failed: %v (continuing with current binary)", err)
+		slog.Warn("daemon auto-upgrade rename failed", "error", err)
 		os.Remove(tmpBin) //nolint:errcheck
 		return
 	}
 
-	log.Printf("daemon: auto-upgrade: binary changed (%s -> %s), exec()ing new binary", oldHash[:12], newHash[:12])
+	slog.Info("daemon auto-upgrade execing rebuilt binary", "old_hash", oldHash[:12], "new_hash", newHash[:12])
 	execErr := syscall.Exec(executablePath, os.Args, os.Environ())
 	// If we reach here, exec() failed.
-	log.Printf("daemon: auto-upgrade: exec() failed: %v (continuing with current binary)", execErr)
+	slog.Warn("daemon auto-upgrade exec failed", "error", execErr)
 }
 
 func gitPull(repoDir string) error {

@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -142,7 +142,7 @@ func allChecksGreen(pr prSummary) bool {
 func autoMergeXylemPRs(ctx context.Context, repo string) {
 	prs, err := listOpenPRs(ctx, repo)
 	if err != nil {
-		log.Printf("daemon: auto-merge: list PRs: %v", err)
+		slog.Error("daemon auto-merge failed to list PRs", "repo", repo, "error", err)
 		return
 	}
 
@@ -153,24 +153,24 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 			continue
 		case actionRequestReview:
 			if err := requestCopilotReview(ctx, repo, pr.Number); err != nil {
-				log.Printf("daemon: auto-merge: PR #%d request review failed: %v", pr.Number, err)
+				slog.Error("daemon auto-merge failed to request review", "repo", repo, "pr", pr.Number, "error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: requested copilot review on PR #%d (%s)", pr.Number, pr.HeadRefName)
+			slog.Info("daemon auto-merge requested copilot review", "repo", repo, "pr", pr.Number, "head_ref", pr.HeadRefName)
 		case actionWaitForReview:
-			log.Printf("daemon: auto-merge: PR #%d waiting for copilot review to complete", pr.Number)
+			slog.Info("daemon auto-merge waiting for copilot review", "repo", repo, "pr", pr.Number)
 		case actionWaitForChecks:
-			log.Printf("daemon: auto-merge: PR #%d waiting for CI checks", pr.Number)
+			slog.Info("daemon auto-merge waiting for CI checks", "repo", repo, "pr", pr.Number)
 		case actionWaitForMergeable:
-			log.Printf("daemon: auto-merge: PR #%d waiting for mergeable state (conflicts or computing)", pr.Number)
+			slog.Info("daemon auto-merge waiting for mergeable state", "repo", repo, "pr", pr.Number)
 		case actionAddressReview:
-			log.Printf("daemon: auto-merge: PR #%d has changes requested, respond-to-pr-review workflow will handle", pr.Number)
+			slog.Info("daemon auto-merge waiting for review follow-up", "repo", repo, "pr", pr.Number)
 		case actionMerge:
 			if err := mergePR(ctx, repo, pr.Number); err != nil {
-				log.Printf("daemon: auto-merge: PR #%d merge failed: %v", pr.Number, err)
+				slog.Error("daemon auto-merge failed to merge PR", "repo", repo, "pr", pr.Number, "error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: merged PR #%d (%s)", pr.Number, pr.HeadRefName)
+			slog.Info("daemon auto-merge merged PR", "repo", repo, "pr", pr.Number, "head_ref", pr.HeadRefName)
 		}
 	}
 }

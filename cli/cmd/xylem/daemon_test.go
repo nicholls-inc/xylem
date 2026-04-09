@@ -17,11 +17,14 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/dtushim"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type daemonDTUCmdRunner struct {
@@ -192,17 +195,32 @@ func TestDaemonShutdown(t *testing.T) {
 	}
 }
 
-func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
+func TestSmoke_S31_TracerWiredInDaemonGoRunDrain(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
+	var exporters []*recordingSpanExporter
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, exporter := newRecordingTracer()
+		exporters = append(exporters, exporter)
+		return tracer, nil
+	})
+
 	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
-	if err != nil {
-		t.Fatalf("runDrain() error = %v", err)
-	}
-	if result != (runner.DrainResult{}) {
-		t.Fatalf("DrainResult = %+v, want zero value", result)
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, result)
+
+	secondResult, secondErr := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
+	require.NoError(t, secondErr)
+	assert.Equal(t, runner.DrainResult{}, secondResult)
+
+	require.Len(t, exporters, 2)
+	for _, exporter := range exporters {
+		requireSpanNamed(t, exporter.snapshots(), "drain_run")
+		assert.Equal(t, 1, exporter.shutdownCount())
 	}
 }
 

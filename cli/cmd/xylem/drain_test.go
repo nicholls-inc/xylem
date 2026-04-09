@@ -1,11 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,6 +18,9 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -38,8 +44,15 @@ func makeDrainConfig(dir string) *config.Config {
 	}
 }
 
-type recordingExporter struct {
-	shutdownCalled bool
+type exportedSpanSnapshot struct {
+	Name       string
+	Attributes map[string]string
+}
+
+type recordingSpanExporter struct {
+	mu            sync.Mutex
+	spans         []exportedSpanSnapshot
+	shutdownCalls int
 }
 
 type configurableWorktreeStub struct {
@@ -54,13 +67,113 @@ func (w *configurableWorktreeStub) SetProtectedSurfaces(patterns []string) {
 	w.patterns = append([]string(nil), patterns...)
 }
 
-func (e *recordingExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+func (e *recordingSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, span := range spans {
+		attrs := make(map[string]string, len(span.Attributes()))
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = attrValueString(attr.Value)
+		}
+		e.spans = append(e.spans, exportedSpanSnapshot{
+			Name:       span.Name(),
+			Attributes: attrs,
+		})
+	}
 	return nil
 }
 
-func (e *recordingExporter) Shutdown(context.Context) error {
-	e.shutdownCalled = true
+func (e *recordingSpanExporter) Shutdown(context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.shutdownCalls++
 	return nil
+}
+
+func (e *recordingSpanExporter) snapshots() []exportedSpanSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	out := make([]exportedSpanSnapshot, len(e.spans))
+	for i, span := range e.spans {
+		attrs := make(map[string]string, len(span.Attributes))
+		for key, value := range span.Attributes {
+			attrs[key] = value
+		}
+		out[i] = exportedSpanSnapshot{
+			Name:       span.Name,
+			Attributes: attrs,
+		}
+	}
+	return out
+}
+
+func (e *recordingSpanExporter) shutdownCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.shutdownCalls
+}
+
+func attrValueString(value attribute.Value) string {
+	switch value.Type() {
+	case attribute.BOOL:
+		if value.AsBool() {
+			return "true"
+		}
+		return "false"
+	case attribute.INT64:
+		return value.Emit()
+	case attribute.FLOAT64:
+		return value.Emit()
+	case attribute.STRING:
+		return value.AsString()
+	default:
+		return value.Emit()
+	}
+}
+
+func newRecordingTracer() (*observability.Tracer, *recordingSpanExporter) {
+	exporter := &recordingSpanExporter{}
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	return observability.NewTracerFromProvider(provider), exporter
+}
+
+func stubConfiguredTracerFactory(t *testing.T, fn func(observability.TracerConfig) (*observability.Tracer, error)) {
+	t.Helper()
+
+	prev := newConfiguredTracer
+	newConfiguredTracer = fn
+	t.Cleanup(func() {
+		newConfiguredTracer = prev
+	})
+}
+
+func withBufferedDefaultLogger(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(newTextLogger(&buf))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+	})
+	return &buf
+}
+
+func requireSpanNamed(t *testing.T, spans []exportedSpanSnapshot, want string) exportedSpanSnapshot {
+	t.Helper()
+
+	for _, span := range spans {
+		if span.Name == want {
+			return span
+		}
+	}
+	t.Fatalf("span %q not found in %#v", want, spans)
+	return exportedSpanSnapshot{}
 }
 
 func TestDrainDryRun(t *testing.T) {
@@ -232,26 +345,63 @@ func TestBuildDrainRunnerPropagatesProtectedSurfaces(t *testing.T) {
 	}
 }
 
-func TestSmoke_S8_TracerInitFailureRunnerContinues(t *testing.T) {
+func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTracing(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "collector:4317"
+	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
+	logs := withBufferedDefaultLogger(t)
+
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		return nil, errors.New("bridge down")
+	})
 
 	runnerInstance, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
 	defer cleanup()
-	runnerInstance.Tracer = nil
 
 	result, err := runnerInstance.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result != (runner.DrainResult{}) {
-		t.Fatalf("DrainResult = %+v, want zero value", result)
-	}
+	require.NoError(t, err)
+	require.Nil(t, runnerInstance.Tracer)
+	assert.Equal(t, runner.DrainResult{}, result)
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.Contains(t, logs.String(), "msg=\"initialize tracer\"")
+	assert.Contains(t, logs.String(), "error=\"bridge down\"")
 }
 
-func TestSmoke_S30_TracerWiredWhenEndpointConfigured(t *testing.T) {
+func TestSmoke_S30_TracerWiredInDrainGoAfterConfigLoad(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	cmdRunner := newCmdRunner(cfg)
+	tracer, exporter := newRecordingTracer()
+
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		return tracer, nil
+	})
+
+	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	require.NotNil(t, r.Tracer)
+	require.Zero(t, exporter.shutdownCount())
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, result)
+
+	spans := exporter.snapshots()
+	drainSpan := requireSpanNamed(t, spans, "drain_run")
+	assert.Equal(t, "2", drainSpan.Attributes["xylem.drain.concurrency"])
+	assert.Equal(t, "30m", drainSpan.Attributes["xylem.drain.timeout"])
+
+	assert.Zero(t, exporter.shutdownCount())
+	cleanup()
+	assert.Equal(t, 1, exporter.shutdownCount())
+}
+
+func TestSmoke_S32_TracerShutdownDeferredInBothDrainAndDaemonPaths(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
 	cfg.Observability.Endpoint = "localhost:4317"
@@ -259,22 +409,32 @@ func TestSmoke_S30_TracerWiredWhenEndpointConfigured(t *testing.T) {
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
 
-	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
-	defer cleanup()
+	var exporters []*recordingSpanExporter
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, exporter := newRecordingTracer()
+		exporters = append(exporters, exporter)
+		return tracer, nil
+	})
 
-	if r.Tracer == nil {
-		t.Fatal("r.Tracer = nil, want tracer when endpoint configured")
-	}
-}
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
 
-func TestSmoke_S32_TracerShutdownDeferred(t *testing.T) {
-	exporter := &recordingExporter{}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	tracer := observability.NewTracerFromProvider(tp)
+	drainRunner, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	require.NotNil(t, drainRunner.Tracer)
+	result, err := drainRunner.Drain(cancelledCtx)
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, result)
+	require.Len(t, exporters, 1)
+	assert.Zero(t, exporters[0].shutdownCount())
+	requireSpanNamed(t, exporters[0].snapshots(), "drain_run")
 
-	shutdownConfiguredTracer(tracer)
+	cleanup()
+	assert.Equal(t, 1, exporters[0].shutdownCount())
 
-	if !exporter.shutdownCalled {
-		t.Fatal("exporter shutdown was not called")
-	}
+	daemonResult, err := runDrain(cancelledCtx, cfg, q, worktree.New(dir, cmdRunner))
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, daemonResult)
+	require.Len(t, exporters, 2)
+	requireSpanNamed(t, exporters[1].snapshots(), "drain_run")
+	assert.Equal(t, 1, exporters[1].shutdownCount())
 }
