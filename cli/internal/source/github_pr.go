@@ -46,6 +46,7 @@ type ghPR struct {
 	Body        string `json:"body"`
 	URL         string `json:"url"`
 	HeadRefName string `json:"headRefName"`
+	HeadOID     string `json:"headRefOid"`
 	Mergeable   string `json:"mergeable"`
 	Labels      []struct {
 		Name string `json:"name"`

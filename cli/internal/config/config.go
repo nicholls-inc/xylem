@@ -133,6 +133,8 @@ type PREventsConfig struct {
 	ReviewSubmitted bool     `yaml:"review_submitted,omitempty"`
 	ChecksFailed    bool     `yaml:"checks_failed,omitempty"`
 	Commented       bool     `yaml:"commented,omitempty"`
+	PROpened        bool     `yaml:"pr_opened,omitempty"`
+	PRHeadUpdated   bool     `yaml:"pr_head_updated,omitempty"`
 	// AuthorAllow is an allowlist of GitHub logins whose reviews/comments
 	// create vessels. If non-empty, events from any other login are skipped.
 	// YAML footgun: bot logins like "copilot-pull-request-reviewer[bot]"
@@ -141,6 +143,7 @@ type PREventsConfig struct {
 	// AuthorDeny is a denylist of GitHub logins whose reviews/comments
 	// never create vessels. AuthorDeny takes precedence over AuthorAllow.
 	AuthorDeny []string `yaml:"author_deny,omitempty"`
+	Debounce   string   `yaml:"debounce,omitempty"`
 }
 
 type Task struct {
@@ -866,14 +869,28 @@ func validateGitHubPREventsSource(name string, src SourceConfig) error {
 		if task.On == nil {
 			return fmt.Errorf("source %q task %q: must include an 'on' block with at least one trigger", name, tname)
 		}
-		if len(task.On.Labels) == 0 && !task.On.ReviewSubmitted && !task.On.ChecksFailed && !task.On.Commented {
-			return fmt.Errorf("source %q task %q: 'on' block must specify at least one trigger (labels, review_submitted, checks_failed, or commented)", name, tname)
+		if len(task.On.Labels) == 0 &&
+			!task.On.ReviewSubmitted &&
+			!task.On.ChecksFailed &&
+			!task.On.Commented &&
+			!task.On.PROpened &&
+			!task.On.PRHeadUpdated {
+			return fmt.Errorf("source %q task %q: 'on' block must specify at least one trigger (labels, review_submitted, checks_failed, commented, pr_opened, or pr_head_updated)", name, tname)
 		}
 		// Authored-event triggers must specify an author filter to prevent
 		// self-trigger loops (e.g. xylem responds to its own review as hnipps,
 		// that review triggers another vessel, ad infinitum).
 		if (task.On.ReviewSubmitted || task.On.Commented) && len(task.On.AuthorAllow) == 0 && len(task.On.AuthorDeny) == 0 {
 			return fmt.Errorf("source %q task %q: tasks with review_submitted or commented must specify author_allow or author_deny to prevent self-trigger loops", name, tname)
+		}
+		if strings.TrimSpace(task.On.Debounce) != "" {
+			debounce, err := time.ParseDuration(task.On.Debounce)
+			if err != nil {
+				return fmt.Errorf("source %q task %q: parse debounce %q: %w", name, tname, task.On.Debounce, err)
+			}
+			if debounce < 0 {
+				return fmt.Errorf("source %q task %q: debounce must be non-negative", name, tname)
+			}
 		}
 	}
 	return nil
