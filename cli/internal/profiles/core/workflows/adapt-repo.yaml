@@ -1,0 +1,33 @@
+name: adapt-repo
+class: harness-maintenance
+description: "Analyze the target repo and propose a reviewable harness update PR."
+phases:
+  - name: analyze
+    type: command
+    run: xylem bootstrap analyze-repo --output .xylem/state/bootstrap/repo-analysis.json
+    noop:
+      match: XYLEM_NOOP
+  - name: legibility
+    type: command
+    run: xylem bootstrap audit-legibility --output .xylem/state/bootstrap/legibility-report.json
+  - name: plan
+    prompt_file: .xylem/prompts/adapt-repo/plan.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: validate
+    type: command
+    run: |
+      set -euo pipefail
+      xylem config validate --proposed .xylem/state/bootstrap/adapt-plan.json
+      xylem workflow validate --proposed .xylem/state/bootstrap/adapt-plan.json
+  - name: apply
+    prompt_file: .xylem/prompts/adapt-repo/apply.md
+    max_turns: 30
+    allowed_tools: Edit
+  - name: verify
+    type: command
+    run: xylem validation run --from-config
+  - name: pr
+    prompt_file: .xylem/prompts/adapt-repo/pr.md
+    max_turns: 20

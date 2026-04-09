@@ -80,6 +80,7 @@ type Trigger struct {
 // Workflow is a flattened view of workflow.Workflow.
 type Workflow struct {
 	Name        string  `json:"name"`
+	Class       string  `json:"class,omitempty"`
 	Description string  `json:"description,omitempty"`
 	LLM         string  `json:"llm,omitempty"`
 	Model       string  `json:"model,omitempty"`

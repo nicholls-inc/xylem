@@ -185,3 +185,8 @@ func mergeSources(profileName, filePath string, data []byte, dest map[string][]b
 func cloneBytes(data []byte) []byte {
 	return append([]byte(nil), data...)
 }
+
+func Version(name string) (int, bool) {
+	version, ok := profileVersions[name]
+	return version, ok
+}

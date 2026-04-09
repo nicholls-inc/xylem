@@ -36,6 +36,7 @@ type Workflow struct {
 
 type workflowYAML struct {
 	Name                          string  `yaml:"name"`
+	Class                         Class   `yaml:"class,omitempty"`
 	Description                   string  `yaml:"description,omitempty"`
 	Class                         *string `yaml:"class,omitempty"`
 	LLM                           *string `yaml:"llm,omitempty"`
@@ -44,6 +45,15 @@ type workflowYAML struct {
 	AllowCanonicalProtectedWrites *bool   `yaml:"allow_canonical_protected_writes,omitempty"`
 	Phases                        []Phase `yaml:"phases"`
 }
+
+// Class identifies the policy class a workflow belongs to.
+type Class string
+
+const (
+	ClassDelivery           Class = "delivery"
+	ClassHarnessMaintenance Class = "harness-maintenance"
+	ClassOps                Class = "ops"
+)
 
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
@@ -209,6 +219,10 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 
 	if len(s.Phases) == 0 {
 		return fmt.Errorf(`"phases" is required`)
+	}
+
+	if err := validateClass(s.Class); err != nil {
+		return err
 	}
 
 	if err := validateLLM(s.LLM, "workflow"); err != nil {
@@ -433,6 +447,15 @@ func validateNoOp(phaseName string, n *NoOp) error {
 		return fmt.Errorf("phase %q: noop: match is required", phaseName)
 	}
 	return nil
+}
+
+func validateClass(class Class) error {
+	switch class {
+	case "", ClassDelivery, ClassHarnessMaintenance, ClassOps:
+		return nil
+	default:
+		return fmt.Errorf("workflow class %q is invalid; must be delivery, harness-maintenance, or ops", class)
+	}
 }
 
 func validateGate(phaseName string, g *Gate) error {

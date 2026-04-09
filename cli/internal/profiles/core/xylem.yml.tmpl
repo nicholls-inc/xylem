@@ -10,6 +10,14 @@ sources:
       fix-bugs:
         labels: [bug, ready-for-work]
         workflow: fix-bug
+  adapt-repo:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      adapt-repo:
+        labels: [xylem-adapt-repo, ready-for-work]
+        workflow: adapt-repo
   # features:
   #   type: github
   #   repo: "{{ .Repo }}"

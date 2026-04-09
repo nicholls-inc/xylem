@@ -28,6 +28,25 @@ func genInvalidGateEvidenceLevel() *rapid.Generator[string] {
 	})
 }
 
+func genRecognizedWorkflowClass() *rapid.Generator[string] {
+	return rapid.SampledFrom([]string{
+		string(ClassDelivery),
+		string(ClassHarnessMaintenance),
+		string(ClassOps),
+	})
+}
+
+func genInvalidWorkflowClass() *rapid.Generator[string] {
+	return rapid.Custom(func(t *rapid.T) string {
+		for {
+			class := rapid.StringMatching(`[a-z][a-z-]{0,31}`).Draw(t, "class")
+			if err := validateClass(Class(class)); err != nil {
+				return class
+			}
+		}
+	})
+}
+
 func TestPropValidateGateAcceptsRecognizedEvidenceLevels(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		level := genRecognizedGateEvidenceLevel().Draw(t, "level")
@@ -76,6 +95,28 @@ func TestPropValidateGateAllowsEmptyEvidenceLevel(t *testing.T) {
 		})
 		if err != nil {
 			t.Fatalf("validateGate() error = %v for empty level", err)
+		}
+	})
+}
+
+func TestPropValidateClassAcceptsRecognizedClasses(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		class := genRecognizedWorkflowClass().Draw(t, "class")
+		if err := validateClass(Class(class)); err != nil {
+			t.Fatalf("validateClass(%q) error = %v", class, err)
+		}
+	})
+}
+
+func TestPropValidateClassRejectsUnknownClasses(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		class := genInvalidWorkflowClass().Draw(t, "class")
+		err := validateClass(Class(class))
+		if err == nil {
+			t.Fatalf("validateClass(%q) error = nil", class)
+		}
+		if !strings.Contains(err.Error(), class) {
+			t.Fatalf("validateClass(%q) error = %q, want mention of class", class, err.Error())
 		}
 	})
 }

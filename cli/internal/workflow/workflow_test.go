@@ -561,6 +561,24 @@ phases:
 	}
 }
 
+func TestLoadWorkflowClassParsesHarnessMaintenance(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/plan.md")
+
+	path := writeWorkflowFile(t, dir, "adapt-repo", `name: adapt-repo
+class: harness-maintenance
+phases:
+  - name: plan
+    prompt_file: prompts/plan.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, ClassHarnessMaintenance, got.Class)
+}
+
 func TestLoadWorkflowLiveHTTPGateParsesAndValidates(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
@@ -1206,6 +1224,19 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
+		},
+		{
+			name:             "invalid workflow class",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name:  "test",
+				Class: Class("wildcard"),
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `workflow class "wildcard" is invalid`,
 		},
 		{
 			name:             "empty name",

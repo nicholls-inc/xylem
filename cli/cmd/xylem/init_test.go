@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -257,8 +258,12 @@ func TestInitCreatesV2Files(t *testing.T) {
 
 	expectedFiles := []string{
 		".xylem/HARNESS.md",
+		".xylem/workflows/adapt-repo.yaml",
 		".xylem/workflows/fix-bug.yaml",
 		".xylem/workflows/implement-feature.yaml",
+		".xylem/prompts/adapt-repo/apply.md",
+		".xylem/prompts/adapt-repo/plan.md",
+		".xylem/prompts/adapt-repo/pr.md",
 		".xylem/prompts/fix-bug/analyze.md",
 		".xylem/prompts/fix-bug/plan.md",
 		".xylem/prompts/fix-bug/implement.md",
@@ -279,6 +284,36 @@ func TestInitCreatesV2Files(t *testing.T) {
 			t.Errorf("expected file %s to be non-empty", f)
 		}
 	}
+}
+
+func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	runner := &seedRunnerStub{
+		outputs: map[string][]byte{
+			adaptRepoSearchCall("owner/name"): []byte("[]"),
+			adaptRepoCreateCall("owner/name"): []byte("https://github.com/owner/name/issues/12\n"),
+		},
+	}
+
+	captureStdout(func() {
+		err := cmdInitWithOptions(configPath, false, true, runner)
+		require.NoError(t, err)
+	})
+
+	markerPath := filepath.Join(dir, ".xylem", "state", "bootstrap", "adapt-repo-seeded.json")
+	marker, err := readAdaptRepoSeedMarker(markerPath)
+	require.NoError(t, err)
+	assert.Equal(t, 12, marker.IssueNumber)
+	assert.Equal(t, "https://github.com/owner/name/issues/12", marker.IssueURL)
+	assert.Equal(t, adaptRepoSeededByInit, marker.SeededBy)
+	assert.Equal(t, 1, marker.ProfileVersion)
+	assert.Len(t, runner.calls, 2)
 }
 
 func TestInitSkipsExistingV2Files(t *testing.T) {
@@ -427,6 +462,20 @@ type smokeTaskFile struct {
 			Canary     string   `toml:"canary"`
 		} `toml:"metadata"`
 	} `toml:"task"`
+}
+
+type seedRunnerStub struct {
+	calls   [][]string
+	outputs map[string][]byte
+}
+
+func (s *seedRunnerStub) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	call := append([]string{name}, args...)
+	s.calls = append(s.calls, call)
+	if s.outputs == nil {
+		return nil, nil
+	}
+	return s.outputs[strings.Join(call, " ")], nil
 }
 
 type smokeRubricFile struct {
