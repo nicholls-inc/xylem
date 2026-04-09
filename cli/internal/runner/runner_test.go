@@ -2570,6 +2570,139 @@ func TestDrainCommandGateFailsWithRetries(t *testing.T) {
 	}
 }
 
+func TestSmoke_S31_ResolveConflictsGateFailsBeforePushWhenOriginMainIsNotAncestor(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(164, "resolve-conflicts")
+	vessel.Meta["issue_title"] = "Resolve PR conflicts"
+	vessel.Meta["issue_body"] = "Merge origin/main into the PR branch."
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "resolve-conflicts", []testPhase{
+		{name: "analyze", promptContent: "Analyze conflicts", maxTurns: 5},
+		{
+			name:          "resolve",
+			promptContent: "Resolve conflicts\n{{.GateResult}}",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"git fetch origin main && test \\\"$(git branch --show-current)\\\" = \\\"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\\\" && git merge-base --is-ancestor origin/main HEAD && cd cli && go test ./...\"\n      retries: 0",
+		},
+		{name: "push", promptContent: "Push branch", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("origin/main is not an ancestor of HEAD"),
+		gateErr:    &mockExitError{code: 1},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	require.Len(t, cmdRunner.phaseCalls, 2)
+	assert.Contains(t, cmdRunner.phaseCalls[0].prompt, "Analyze conflicts")
+	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Resolve conflicts")
+
+	stored := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, stored.State)
+	assert.Equal(t, "resolve", stored.FailedPhase)
+	assert.Contains(t, stored.GateOutput, "origin/main is not an ancestor")
+}
+
+func TestDrainCommandGateRendersTemplateData(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(42, "fix-bug")
+	vessel.Meta["issue_title"] = "Template gate"
+	vessel.Meta["issue_body"] = "Ensure gate commands render template data."
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name:          "implement",
+			promptContent: "Implement fix",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"echo {{.Issue.Number}} {{.Vessel.ID}} {{.Phase.Name}}\"\n      retries: 0",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	var gateCommand string
+	for _, args := range cmdRunner.outputArgs {
+		if len(args) == 3 && args[0] == "sh" && args[1] == "-c" && strings.Contains(args[2], "echo 42 issue-42 implement") {
+			gateCommand = args[2]
+			break
+		}
+	}
+	require.NotEmpty(t, gateCommand)
+	assert.NotContains(t, gateCommand, "{{")
+}
+
+func TestSmoke_S32_ResolveConflictsGateRendersPRHeadAndAncestorChecks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(42, "resolve-conflicts")
+	vessel.Meta["issue_title"] = "Resolve PR conflicts"
+	vessel.Meta["issue_body"] = "Merge origin/main into the PR branch."
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "resolve-conflicts", []testPhase{
+		{name: "analyze", promptContent: "Analyze conflicts", maxTurns: 5},
+		{
+			name:          "resolve",
+			promptContent: "Resolve conflicts",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"git fetch origin main && test \\\"$(git branch --show-current)\\\" = \\\"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\\\" && git merge-base --is-ancestor origin/main HEAD && cd cli && go test ./...\"\n      retries: 0",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	var gateCommand string
+	for _, args := range cmdRunner.outputArgs {
+		if len(args) == 3 && args[0] == "sh" && args[1] == "-c" && strings.Contains(args[2], "gh pr view 42 --json headRefName --jq '.headRefName'") {
+			gateCommand = args[2]
+			break
+		}
+	}
+	require.NotEmpty(t, gateCommand)
+	assert.Contains(t, gateCommand, "git fetch origin main")
+	assert.Contains(t, gateCommand, "git branch --show-current")
+	assert.Contains(t, gateCommand, "gh pr view 42 --json headRefName --jq '.headRefName'")
+	assert.NotContains(t, gateCommand, "{{")
+}
+
 func TestDrainLabelGateTransitionsToWaiting(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
@@ -6232,6 +6365,55 @@ func TestValidateIssueDataForWorkflow_CommandPhaseValidNumber(t *testing.T) {
 	if err := validateIssueDataForWorkflow(vessel, data, wf); err != nil {
 		t.Fatalf("unexpected error for valid issue number: %v", err)
 	}
+}
+
+func TestValidateIssueDataForWorkflow_CommandGateZeroNumber(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 0}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{
+				Name:       "resolve",
+				PromptFile: ".xylem/prompts/resolve-conflicts/resolve.md",
+				MaxTurns:   10,
+				Gate: &workflow.Gate{
+					Type: "command",
+					Run:  "gh pr view {{.Issue.Number}} --json mergeable",
+				},
+			},
+		},
+	}
+
+	err := validateIssueDataForWorkflow(vessel, data, wf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "command gate for phase resolve references .Issue")
+	assert.Contains(t, err.Error(), "Number is 0")
+}
+
+func TestValidateIssueDataForWorkflow_CommandGateValidNumber(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 42}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{
+				Name:       "resolve",
+				PromptFile: ".xylem/prompts/resolve-conflicts/resolve.md",
+				MaxTurns:   10,
+				Gate: &workflow.Gate{
+					Type: "command",
+					Run:  "gh pr view {{.Issue.Number}} --json mergeable",
+				},
+			},
+		},
+	}
+
+	require.NoError(t, validateIssueDataForWorkflow(vessel, data, wf))
 }
 
 func TestValidateIssueDataForWorkflow_NonCommandPhase(t *testing.T) {

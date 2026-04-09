@@ -58,7 +58,7 @@ type GateEvidence struct {
 // Gate defines an inter-phase quality gate that must pass before the next phase begins.
 type Gate struct {
 	Type         string        `yaml:"type"`                    // "command" or "label"
-	Run          string        `yaml:"run,omitempty"`           // shell command (type=command)
+	Run          string        `yaml:"run,omitempty"`           // shell command (type=command), supports template variables
 	Retries      int           `yaml:"retries,omitempty"`       // default 0
 	RetryDelay   string        `yaml:"retry_delay,omitempty"`   // default "10s"
 	WaitFor      string        `yaml:"wait_for,omitempty"`      // label name (type=label)

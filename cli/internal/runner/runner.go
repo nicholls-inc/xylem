@@ -609,16 +609,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			if p.Type == "command" {
 				// Command phase: render and execute shell command
-				rendered, err := phase.RenderPrompt(p.Run, td)
+				rendered, err := renderCommandTemplate(p.Name, "command", p.Run, td)
 				if err != nil {
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, fmt.Sprintf("render command for phase %s: %v", p.Name, err))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					return "failed"
-				}
-				if err := validateCommandRender(p.Name, rendered); err != nil {
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, err.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
@@ -839,7 +831,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			switch p.Gate.Type {
 			case "command", "live":
-				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, td, worktreePath, retryAttempt)
 				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 				if gateErr != nil {
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
@@ -1431,16 +1423,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 
 		if p.Type == "command" {
-			rendered, err := phase.RenderPrompt(p.Run, td)
+			rendered, err := renderCommandTemplate(p.Name, "command", p.Run, td)
 			if err != nil {
-				finishCurrentPhaseSpan(err)
-				r.failVessel(vessel.ID, fmt.Sprintf("render command for phase %s: %v", p.Name, err))
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
-			}
-			if err := validateCommandRender(p.Name, rendered); err != nil {
 				finishCurrentPhaseSpan(err)
 				r.failVessel(vessel.ID, err.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -1660,7 +1644,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		switch p.Gate.Type {
 		case "command", "live":
-			gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+			gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, td, worktreePath, retryAttempt)
 			gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 			if gateErr != nil {
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
@@ -1847,15 +1831,19 @@ func finishGateStepSpan(tracer *observability.Tracer, span observability.SpanCon
 	span.End()
 }
 
-func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observability.SpanContext, vessel queue.Vessel, p workflow.Phase, worktreePath string, retryAttempt int) gateExecutionResult {
+func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observability.SpanContext, vessel queue.Vessel, p workflow.Phase, td phase.TemplateData, worktreePath string, retryAttempt int) gateExecutionResult {
 	if p.Gate == nil {
 		return gateExecutionResult{passed: true}
 	}
 
 	switch p.Gate.Type {
 	case "command":
+		rendered, err := renderCommandTemplate(p.Name, "gate command", p.Gate.Run, td)
+		if err != nil {
+			return gateExecutionResult{err: err}
+		}
 		gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-		gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
+		gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, rendered)
 		finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
 			Type:         p.Gate.Type,
 			Passed:       passed,
@@ -2882,30 +2870,41 @@ func vesselLabel(v queue.Vessel) string {
 	return fmt.Sprintf("[%s] ", v.ID)
 }
 
+func renderCommandTemplate(phaseName, kind, command string, td phase.TemplateData) (string, error) {
+	rendered, err := phase.RenderPrompt(command, td)
+	if err != nil {
+		return "", fmt.Errorf("render %s for phase %s: %w", kind, phaseName, err)
+	}
+	if err := validateCommandRender(fmt.Sprintf("%s for phase %s", kind, phaseName), rendered); err != nil {
+		return "", err
+	}
+	return rendered, nil
+}
+
 // validateCommandRender checks the rendered command string for unresolved
 // template variables (leftover "{{" sequences). This catches cases where
 // template data has zero values that cause confusing downstream failures.
-func validateCommandRender(phaseName, rendered string) error {
+func validateCommandRender(subject, rendered string) error {
 	if strings.Contains(rendered, "{{") {
-		return fmt.Errorf("command phase %s: unresolved template variable in: %s", phaseName, rendered)
+		return fmt.Errorf("%s: unresolved template variable in: %s", subject, rendered)
 	}
 	return nil
 }
 
 // validateIssueDataForWorkflow returns an error when the workflow contains
-// command phases that reference .Issue template variables but the issue data
-// has a zero Number. This prevents commands like `gh pr merge 0` from
-// executing with confusing results.
+// command phases or command gates that reference .Issue template variables but
+// the issue data has a zero Number. This prevents commands like
+// `gh pr merge 0` from executing with confusing results.
 func validateIssueDataForWorkflow(vessel queue.Vessel, data phase.IssueData, wf *workflow.Workflow) error {
 	if wf == nil {
 		return nil
 	}
 	for _, p := range wf.Phases {
-		if p.Type != "command" {
-			continue
-		}
-		if strings.Contains(p.Run, ".Issue.") && data.Number == 0 {
+		if p.Type == "command" && strings.Contains(p.Run, ".Issue.") && data.Number == 0 {
 			return fmt.Errorf("command phase %s references .Issue but issue data is unavailable for vessel %s (Number is 0)", p.Name, vessel.ID)
+		}
+		if p.Gate != nil && p.Gate.Type == "command" && strings.Contains(p.Gate.Run, ".Issue.") && data.Number == 0 {
+			return fmt.Errorf("command gate for phase %s references .Issue but issue data is unavailable for vessel %s (Number is 0)", p.Name, vessel.ID)
 		}
 	}
 	return nil
