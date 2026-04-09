@@ -78,6 +78,7 @@ type Config struct {
 type SourceConfig struct {
 	Type     string          `yaml:"type"`
 	Repo     string          `yaml:"repo,omitempty"`
+	Schedule string          `yaml:"schedule,omitempty"`
 	Cadence  string          `yaml:"cadence,omitempty"`
 	Workflow string          `yaml:"workflow,omitempty"`
 	LLM      string          `yaml:"llm,omitempty"`
@@ -353,6 +354,10 @@ func (c *Config) Validate() error {
 			}
 		case "github-merge":
 			if err := validateGitHubMergeSource(name, src); err != nil {
+				return err
+			}
+		case "scheduled":
+			if err := validateScheduledSource(name, src); err != nil {
 				return err
 			}
 		case "schedule":
@@ -722,6 +727,36 @@ func validateGitHubMergeSource(name string, src SourceConfig) error {
 	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (github-merge): at least one task is required", name)
+	}
+	for tname, task := range src.Tasks {
+		if strings.TrimSpace(task.Workflow) == "" {
+			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
+		}
+	}
+	return nil
+}
+
+func validateScheduledSource(name string, src SourceConfig) error {
+	repo := strings.TrimSpace(src.Repo)
+	if repo == "" {
+		return fmt.Errorf("source %q (scheduled): repo is required", name)
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("source %q (scheduled): repo must be in owner/name format", name)
+	}
+	if strings.TrimSpace(src.Schedule) == "" {
+		return fmt.Errorf("source %q (scheduled): schedule is required", name)
+	}
+	dur, err := time.ParseDuration(src.Schedule)
+	if err != nil {
+		return fmt.Errorf("source %q (scheduled): schedule must be a valid duration: %w", name, err)
+	}
+	if dur <= 0 {
+		return fmt.Errorf("source %q (scheduled): schedule must be greater than 0", name)
+	}
+	if len(src.Tasks) == 0 {
+		return fmt.Errorf("source %q (scheduled): at least one task is required", name)
 	}
 	for tname, task := range src.Tasks {
 		if strings.TrimSpace(task.Workflow) == "" {

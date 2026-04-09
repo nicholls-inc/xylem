@@ -202,6 +202,8 @@ type runFixture struct {
 	startedAt    time.Time
 	endedAt      time.Time
 	phases       []runner.PhaseSummary
+	totalInput   int
+	totalOutput  int
 	totalCost    float64
 	manifest     *evidence.Manifest
 	costReport   *cost.CostReport
@@ -211,17 +213,28 @@ type runFixture struct {
 
 func writeRunArtifacts(t *testing.T, stateDir string, fixture runFixture) {
 	t.Helper()
+	totalInput := fixture.totalInput
+	totalOutput := fixture.totalOutput
+	if totalInput == 0 && totalOutput == 0 {
+		for _, phase := range fixture.phases {
+			totalInput += phase.InputTokensEst
+			totalOutput += phase.OutputTokensEst
+		}
+	}
 	summary := runner.VesselSummary{
-		VesselID:        fixture.vesselID,
-		Source:          fixture.source,
-		Workflow:        fixture.workflow,
-		State:           fixture.state,
-		StartedAt:       fixture.startedAt,
-		EndedAt:         fixture.endedAt,
-		DurationMS:      fixture.endedAt.Sub(fixture.startedAt).Milliseconds(),
-		Phases:          fixture.phases,
-		TotalCostUSDEst: fixture.totalCost,
-		Note:            "fixture",
+		VesselID:             fixture.vesselID,
+		Source:               fixture.source,
+		Workflow:             fixture.workflow,
+		State:                fixture.state,
+		StartedAt:            fixture.startedAt,
+		EndedAt:              fixture.endedAt,
+		DurationMS:           fixture.endedAt.Sub(fixture.startedAt).Milliseconds(),
+		Phases:               fixture.phases,
+		TotalInputTokensEst:  totalInput,
+		TotalOutputTokensEst: totalOutput,
+		TotalTokensEst:       totalInput + totalOutput,
+		TotalCostUSDEst:      fixture.totalCost,
+		Note:                 "fixture",
 	}
 	artifacts := &runner.ReviewArtifacts{}
 	if fixture.manifest != nil {

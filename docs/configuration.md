@@ -133,14 +133,15 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`. |
-| `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`, `"scheduled"`. |
+| `repo` | string | -- | Yes (GitHub sources and `scheduled`) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `schedule` | string | -- | Required for `scheduled` | Positive Go duration string (for example `1h`, `24h`) that controls how often xylem enqueues the source's task map. |
 | `cadence` | string | -- | Yes (`schedule`) | Recurrence for scheduled sources. Accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions. |
 | `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue each time a scheduled source fires. Scheduled sources define the workflow directly and do not use `tasks`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
-| `tasks` | map | -- | Yes (GitHub sources) | Map of task names to task configurations. Required for GitHub-based sources; not used by `schedule`. |
+| `tasks` | map | -- | Yes (GitHub sources and `scheduled`) | Map of task names to task configurations. Required for GitHub-based sources and `scheduled`; not used by `schedule`. |
 
 ### Tasks
 
@@ -162,6 +163,7 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
 - `schedule`: does not use `tasks`; configure `cadence` and `workflow` directly on the source
+- `scheduled`: uses `tasks` plus `schedule`; optimized for recurring task-backed hygiene workflows such as `context-weight-audit`
 
 ### `schedule`
 
@@ -185,6 +187,23 @@ Behavior:
 - The first scan fires immediately.
 - Later scans enqueue only when the cadence boundary has elapsed since the last successful enqueue.
 - Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
+
+### `scheduled`
+
+`scheduled` sources create recurring task-backed vessels on a fixed Go-duration cadence. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work.
+
+```yaml
+sources:
+  context-weight-audit:
+    type: scheduled
+    repo: owner/repo
+    schedule: 24h
+    tasks:
+      audit:
+        workflow: context-weight-audit
+```
+
+The built-in `context-weight-audit` workflow reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
 
 ### `status_labels`
 
@@ -396,7 +415,7 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs.
 
 ### Observability settings
 

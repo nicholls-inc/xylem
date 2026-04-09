@@ -103,7 +103,8 @@ func newRootCmd() *cobra.Command {
 
 func hasGitHubSource(cfg *config.Config) bool {
 	for _, src := range cfg.Sources {
-		if src.Type == "github" {
+		switch src.Type {
+		case "github", "github-pr", "github-pr-events", "github-merge", "scheduled":
 			return true
 		}
 	}
