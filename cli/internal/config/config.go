@@ -489,12 +489,14 @@ func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 }
 
 // DefaultPolicy returns the default intermediary policy. Protected control
-// surfaces are denied, and all other actions — including git_push and
-// pr_create — are allowed by default so the daemon can operate autonomously.
+// surfaces are denied, and all currently classified execution actions —
+// including git_commit, git_push, and pr_create — are allowed so the daemon can
+// operate autonomously.
 //
-// Operators who want approval gates on destructive actions can override this
-// by configuring `harness.policy.rules` in `.xylem.yml`; those rules take
-// precedence over the default policy.
+// Destructive git operations and deploy-class actions are not yet emitted as
+// separate intents at the runner/intermediary boundary; they currently inherit
+// the enclosing phase action. Operators who want human gates on those surfaces
+// can override the defaults with `harness.policy.rules` or workflow gates.
 func DefaultPolicy() intermediary.Policy {
 	return intermediary.Policy{
 		Name: "default",
@@ -504,9 +506,10 @@ func DefaultPolicy() intermediary.Policy {
 			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
-			// All other actions — including git_push and pr_create — are
-			// allowed. Autonomous operation requires these to succeed without
-			// manual approval. Override via harness.policy for stricter rules.
+			// All other actions — including git_commit, git_push, and pr_create
+			// — are allowed. Autonomous operation requires publication steps to
+			// complete without a built-in approval pause. Override via
+			// harness.policy for stricter rules.
 			{Action: "*", Resource: "*", Effect: intermediary.Allow},
 		},
 	}

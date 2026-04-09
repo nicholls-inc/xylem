@@ -131,10 +131,10 @@ max_turns: 50
 timeout: "30m"
 state_dir: ".xylem"
 
-# Default harness policy denies writes to xylem control files and requires
-# approval for git_push and pr_create. Keep the scaffolded PR phase behind an
-# approval step in your workflow, or replace it with a deterministic command
-# phase after review.
+# Default harness policy denies writes to xylem control files and allows
+# git_push/pr_create so autonomous drains can finish. If you want a strategic
+# human gate before publication, add workflow review steps or
+# harness.policy.rules that require approval for those actions.
 
 # llm selects the global default LLM provider: "claude" (default) or "copilot"
 llm: claude
@@ -248,7 +248,9 @@ phases:
   - name: pr
     prompt_file: .xylem/prompts/fix-bug/pr.md
     max_turns: 3
-    # High-risk phase: default harness policy requires approval for git_push and pr_create.
+    # Publication phase: git_push/pr_create are allowed by default so autonomous
+    # drains can finish. Add a review gate or restrictive harness.policy.rules
+    # if you want a human checkpoint here.
 `
 
 const implementFeatureWorkflowContent = `name: implement-feature
@@ -283,7 +285,9 @@ phases:
   - name: pr
     prompt_file: .xylem/prompts/implement-feature/pr.md
     max_turns: 3
-    # High-risk phase: default harness policy requires approval for git_push and pr_create.
+    # Publication phase: git_push/pr_create are allowed by default so autonomous
+    # drains can finish. Add a review gate or restrictive harness.policy.rules
+    # if you want a human checkpoint here.
 `
 
 const analyzePrompt = `Analyze the following GitHub issue and identify the relevant code.
@@ -341,8 +345,10 @@ Implement the changes now. Follow the plan precisely.
 
 const prPrompt = `Create a pull request for the changes.
 
-This phase is high-risk. Under the default harness policy, actions that push a
-branch or create a pull request require approval. Do not work around that
+This phase crosses the highest-blast-radius publication boundary the runner
+currently classifies. By default xylem allows ` + "`git_push`" + ` and ` + "`pr_create`" + `
+so autonomous drains can finish, but repositories may add a workflow gate or
+` + "`harness.policy.rules`" + ` that requires approval. Do not work around any configured
 policy boundary.
 
 Issue: {{.Issue.Title}}
@@ -355,7 +361,7 @@ URL: {{.Issue.URL}}
 {{.PreviousOutputs.plan}}
 
 Commit all changes with a clear commit message. Push the branch and create a PR
-only when the repository policy or workflow has explicitly approved ` + "`git_push`" + ` and ` + "`pr_create`" + `. Use:
+only when the repository policy and workflow allow ` + "`git_push`" + ` and ` + "`pr_create`" + `. Use:
 gh pr create --title "<descriptive title>" --body "<summary of changes, linking to {{.Issue.URL}}>"
 `
 
