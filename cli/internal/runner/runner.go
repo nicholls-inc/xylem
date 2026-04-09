@@ -395,15 +395,22 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 			}
 			waited := r.runtimeSince(*vessel.WaitingSince)
 			if waited > timeoutDur {
+				timeoutSpan := r.startWaitTransitionSpan(ctx, vessel, "timed_out", waited)
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
+					r.finishWaitTransitionSpan(timeoutSpan, updateErr)
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
+					continue
 				}
 				src := r.resolveSourceForVessel(vessel)
 				if err := src.OnTimedOut(ctx, vessel); err != nil {
 					log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
 				}
+				vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
+				vrs.setTraceContext(observability.TraceContextFromContext(timeoutSpan.Context()))
+				r.persistRunArtifacts(vessel, string(queue.StateTimedOut), vrs, nil, r.runtimeNow())
+				r.finishWaitTransitionSpan(timeoutSpan, nil)
 				// Clean up worktree (best-effort)
-				r.removeWorktree(vessel.WorktreePath, vessel.ID)
+				r.removeWorktree(ctx, vessel.WorktreePath, vessel.ID)
 				// Post timeout comment
 				issueNum := r.parseIssueNum(vessel)
 				if issueNum > 0 && r.Reporter != nil {
@@ -428,16 +435,19 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 			continue
 		}
 		if found {
+			resumeSpan := r.startWaitTransitionSpan(ctx, vessel, "resumed", waitedDuration(vessel.WaitingSince, r.runtimeNow()))
 			// Advance past the gated phase — CurrentPhase was already incremented
 			// when the vessel entered waiting state. Resume via pending so Drain can
 			// pick the vessel back up through the normal dequeue flow.
 			if err := r.Queue.Update(vessel.ID, queue.StatePending, ""); err != nil {
+				r.finishWaitTransitionSpan(resumeSpan, err)
 				log.Printf("warn: failed to resume vessel %s: %v", vessel.ID, err)
 				continue
 			}
 			if err := src.OnResume(ctx, vessel); err != nil {
 				log.Printf("warn: OnResume hook for vessel %s: %v", vessel.ID, err)
 			}
+			r.finishWaitTransitionSpan(resumeSpan, nil)
 		}
 	}
 }
@@ -465,6 +475,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 	}()
 
 	vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
+	vrs.setTraceContext(observability.TraceContextFromContext(ctx))
 	var claims []evidence.Claim
 	defer func() {
 		if outcome != "failed" {
@@ -584,17 +595,22 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 				retryAttempt = providerAttempt(&p, vessel.GateRetries)
 			}
-			phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, sk, p, i)
+			phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, sk, p, i, retryAttempt)
 			phaseSpanEnded := false
 			var phaseDuration time.Duration
+			phaseSpanStatus := "running"
+			phaseOutputArtifactPath := ""
 			finishCurrentPhaseSpan := func(err error) {
 				if phaseSpanEnded {
 					return
 				}
+				if err != nil && phaseSpanStatus == "running" {
+					phaseSpanStatus = "failed"
+				}
 				if phaseDuration == 0 {
 					phaseDuration = r.runtimeSince(phaseStart)
 				}
-				finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, srcCfg, sk, p, promptForCost, string(output), phaseDuration), err)
+				finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, srcCfg, sk, p, promptForCost, string(output), phaseDuration, phaseSpanStatus, phaseOutputArtifactPath), err)
 				phaseSpanEnded = true
 			}
 
@@ -731,6 +747,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			// Shared: Write phase output
 			outputPath := filepath.Join(phasesDir, p.Name+".output")
+			phaseOutputArtifactPath = phaseArtifactRelativePath(vessel.ID, p.Name)
 			if wErr := os.WriteFile(outputPath, output, 0o644); wErr != nil {
 				log.Printf("warn: write output file %s: %v", outputPath, wErr)
 			}
@@ -738,6 +755,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			phaseDuration = r.runtimeSince(phaseStart)
 
 			if runErr != nil {
+				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(runErr)
 				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
@@ -756,6 +774,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			if checkProtectedSurfaces {
 				if err := r.verifyProtectedSurfaces(vessel, p, worktreePath, beforeSnapshot); err != nil {
+					phaseSpanStatus = "failed"
 					finishCurrentPhaseSpan(err)
 					log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
@@ -789,6 +808,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					r.logReporterError("post vessel-failed comment", vessel.ID,
 						r.Reporter.VesselFailed(ctx, issueNum, p.Name, errMsg, ""))
 				}
+				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(fmt.Errorf("%s", errMsg))
 				return "failed"
 			}
@@ -818,6 +838,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			if phaseMatchedNoOp(&p, string(output)) {
 				phaseStatus = "no-op"
 			}
+			phaseSpanStatus = phaseStatus
 
 			// Report phase completion (non-fatal)
 			phaseResults = append(phaseResults, reporter.PhaseResult{Name: p.Name, Duration: phaseDuration, Status: phaseStatus})
@@ -852,6 +873,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				}
 				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 				if gateErr != nil {
+					phaseSpanStatus = "failed"
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
 					finishCurrentPhaseSpan(nil)
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
@@ -862,6 +884,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				}
 				if passed {
 					log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
+					phaseSpanStatus = phaseStatus
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, gatePassedPointer(true), ""))
 					if gateResultExec.evidenceClaim != nil {
 						claims = append(claims, *gateResultExec.evidenceClaim)
@@ -880,6 +903,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 				if vessel.GateRetries <= 0 {
 					log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
+					phaseSpanStatus = "failed"
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted"))
 					finishCurrentPhaseSpan(nil)
 					vessel.FailedPhase = p.Name
@@ -914,6 +938,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 						return r.cancelVessel(vessel, worktreePath, vrs, claims)
 					}
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error()))
+					phaseSpanStatus = "failed"
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
 					if failErr := src.OnFail(ctx, vessel); failErr != nil {
@@ -921,6 +946,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
+				phaseSpanStatus = "retrying"
 				finishCurrentPhaseSpan(nil)
 				continue // re-run same phase
 
@@ -951,6 +977,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if err := src.OnWait(ctx, vessel); err != nil {
 					log.Printf("warn: OnWait hook for vessel %s: %v", vessel.ID, err)
 				}
+				waitSpan := r.startWaitTransitionSpan(ctx, vessel, "waiting", 0)
+				r.finishWaitTransitionSpan(waitSpan, nil)
+				phaseSpanStatus = "waiting"
 				finishCurrentPhaseSpan(nil)
 				return "waiting"
 			}
@@ -1181,13 +1210,51 @@ func buildCommand(cfg *config.Config, vessel *queue.Vessel) (string, []string, e
 	return cmd, args, nil
 }
 
-func (r *Runner) removeWorktree(worktreePath, vesselID string) {
+func (r *Runner) removeWorktree(ctx context.Context, worktreePath, vesselID string) {
 	if worktreePath == "" {
 		return
 	}
-	if removeErr := r.Worktree.Remove(context.Background(), worktreePath); removeErr != nil {
+	if removeErr := r.Worktree.Remove(ctx, worktreePath); removeErr != nil {
 		log.Printf("warn: failed to remove worktree for %s: %v", vesselID, removeErr)
 	}
+}
+
+func (r *Runner) startWaitTransitionSpan(ctx context.Context, vessel queue.Vessel, transition string, waited time.Duration) observability.SpanContext {
+	if r.Tracer == nil {
+		return observability.SpanContext{}
+	}
+	attrs := append(
+		observability.VesselSpanAttributes(observability.VesselSpanData{
+			ID:       vessel.ID,
+			Source:   vessel.Source,
+			Workflow: vessel.Workflow,
+			Ref:      vessel.Ref,
+		}),
+		observability.WaitSpanAttributes(observability.WaitSpanData{
+			Transition: transition,
+			PhaseName:  vessel.FailedPhase,
+			Label:      vessel.WaitingFor,
+			WaitedMS:   waited.Milliseconds(),
+		})...,
+	)
+	return r.Tracer.StartSpan(ctx, "wait_transition:"+transition, attrs)
+}
+
+func (r *Runner) finishWaitTransitionSpan(span observability.SpanContext, err error) {
+	if r.Tracer == nil {
+		return
+	}
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.End()
+}
+
+func waitedDuration(since *time.Time, now time.Time) time.Duration {
+	if since == nil {
+		return 0
+	}
+	return now.Sub(*since)
 }
 
 func (r *Runner) watchVesselCancellation(parent context.Context, vesselID string) (context.Context, context.CancelCauseFunc) {
@@ -1255,7 +1322,7 @@ func (r *Runner) cancelVessel(vessel queue.Vessel, worktreePath string, vrs *ves
 	}
 	log.Printf("%svessel cancelled; stopping execution", vesselLabel(current))
 	r.persistRunArtifacts(current, string(queue.StateCancelled), vrs, claims, r.runtimeNow())
-	r.removeWorktree(worktreePath, vessel.ID)
+	r.removeWorktree(context.Background(), worktreePath, vessel.ID)
 	return "cancelled"
 }
 
@@ -1296,7 +1363,7 @@ func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktr
 	manifest := r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, claims, r.runtimeNow())
 
 	// Clean up worktree (best-effort)
-	r.removeWorktree(worktreePath, vessel.ID)
+	r.removeWorktree(ctx, worktreePath, vessel.ID)
 
 	// Report completion
 	issueNum := r.parseIssueNum(vessel)
@@ -1641,17 +1708,22 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 			retryAttempt = providerAttempt(&p, gateRetries)
 		}
-		phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, wf, p, phaseIdx)
+		phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, wf, p, phaseIdx, retryAttempt)
 		phaseSpanEnded := false
 		var phaseDuration time.Duration
+		phaseSpanStatus := "running"
+		phaseOutputArtifactPath := ""
 		finishCurrentPhaseSpan := func(err error) {
 			if phaseSpanEnded {
 				return
 			}
+			if err != nil && phaseSpanStatus == "running" {
+				phaseSpanStatus = "failed"
+			}
 			if phaseDuration == 0 {
 				phaseDuration = r.runtimeSince(phaseStart)
 			}
-			finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, srcCfg, wf, p, promptForCost, string(output), phaseDuration), err)
+			finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, srcCfg, wf, p, promptForCost, string(output), phaseDuration, phaseSpanStatus, phaseOutputArtifactPath), err)
 			phaseSpanEnded = true
 		}
 
@@ -1785,6 +1857,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		// Write output file.
 		outputPath := filepath.Join(phasesDir, p.Name+".output")
+		phaseOutputArtifactPath = phaseArtifactRelativePath(vessel.ID, p.Name)
 		if wErr := os.WriteFile(outputPath, output, 0o644); wErr != nil {
 			log.Printf("warn: write output file %s: %v", outputPath, wErr)
 		}
@@ -1792,6 +1865,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		phaseDuration = r.runtimeSince(phaseStart)
 
 		if runErr != nil {
+			phaseSpanStatus = "failed"
 			finishCurrentPhaseSpan(runErr)
 			log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 			vessel.FailedPhase = p.Name
@@ -1813,6 +1887,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		if checkProtectedSurfaces {
 			if err := r.verifyProtectedSurfaces(vessel, p, worktreePath, beforeSnapshot); err != nil {
+				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(err)
 				log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
 				vessel.FailedPhase = p.Name
@@ -1848,6 +1923,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				r.logReporterError("post vessel-failed comment", vessel.ID,
 					r.Reporter.VesselFailed(ctx, issueNum, p.Name, errMsg, ""))
 			}
+			phaseSpanStatus = "failed"
 			finishCurrentPhaseSpan(fmt.Errorf("%s", errMsg))
 			return singlePhaseResult{
 				status:       "failed",
@@ -1863,6 +1939,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				r.logReporterError("post phase-complete comment", vessel.ID,
 					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
 			}
+			phaseSpanStatus = "no-op"
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{
 				output:        string(output),
@@ -1880,6 +1957,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		// Handle gate.
 		if p.Gate == nil {
+			phaseSpanStatus = "completed"
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{
 				output:        string(output),
@@ -1903,6 +1981,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
+				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
 					status:       "failed",
@@ -1913,6 +1992,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			if passed {
 				log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
+				phaseSpanStatus = "completed"
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
 					output:        string(output),
@@ -1942,6 +2022,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					r.logReporterError("post vessel-failed comment", vessel.ID,
 						r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut))
 				}
+				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
 					status:       "failed",
@@ -1962,6 +2043,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				if failErr := src.OnFail(ctx, vessel); failErr != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
 				}
+				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(err)
 				return singlePhaseResult{
 					status:       "failed",
@@ -1970,6 +2052,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error()),
 				}
 			}
+			phaseSpanStatus = "retrying"
 			finishCurrentPhaseSpan(nil)
 			continue // re-run phase
 
@@ -1999,11 +2082,15 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if err := src.OnWait(ctx, vessel); err != nil {
 				log.Printf("warn: OnWait hook for vessel %s: %v", vessel.ID, err)
 			}
+			waitSpan := r.startWaitTransitionSpan(ctx, vessel, "waiting", 0)
+			r.finishWaitTransitionSpan(waitSpan, nil)
+			phaseSpanStatus = "waiting"
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{output: string(output), status: "waiting", duration: r.runtimeSince(phaseStart)}
 		}
 
 		// Unknown gate type: treat as passed.
+		phaseSpanStatus = "completed"
 		finishCurrentPhaseSpan(nil)
 		return singlePhaseResult{
 			output:        string(output),
@@ -2015,7 +2102,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 	}
 }
 
-func startPhaseSpan(tracer *observability.Tracer, ctx context.Context, cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, phaseIdx int) observability.SpanContext {
+func startPhaseSpan(tracer *observability.Tracer, ctx context.Context, cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, phaseIdx int, retryAttempt int) observability.SpanContext {
 	if tracer == nil {
 		return observability.SpanContext{}
 	}
@@ -2024,11 +2111,14 @@ func startPhaseSpan(tracer *observability.Tracer, ctx context.Context, cfg *conf
 	model := resolveModel(cfg, srcCfg, wf, &p, provider)
 
 	return tracer.StartSpan(ctx, "phase:"+p.Name, observability.PhaseSpanAttributes(observability.PhaseSpanData{
-		Name:     p.Name,
-		Index:    phaseIdx,
-		Type:     phaseTypeLabel(p),
-		Provider: provider,
-		Model:    model,
+		Name:         p.Name,
+		Index:        phaseIdx,
+		Type:         phaseTypeLabel(p),
+		Workflow:     workflowName(wf),
+		Provider:     provider,
+		Model:        model,
+		RetryAttempt: retryAttempt,
+		SandboxMode:  sandboxModeFromFlags(cfg),
 	}))
 }
 
@@ -2174,9 +2264,11 @@ func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observab
 	}
 }
 
-func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, renderedPrompt, output string, duration time.Duration) observability.PhaseResultData {
+func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, renderedPrompt, output string, duration time.Duration, status string, outputArtifactPath string) observability.PhaseResultData {
 	data := observability.PhaseResultData{
-		DurationMS: duration.Milliseconds(),
+		DurationMS:         duration.Milliseconds(),
+		Status:             status,
+		OutputArtifactPath: outputArtifactPath,
 	}
 	if phaseTypeLabel(p) != "prompt" {
 		return data
@@ -2188,6 +2280,35 @@ func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *w
 	data.OutputTokensEst = cost.EstimateTokens(output)
 	data.CostUSDEst = cost.EstimateCost(data.InputTokensEst, data.OutputTokensEst, cost.LookupPricing(model))
 	return data
+}
+
+func workflowName(wf *workflow.Workflow) string {
+	if wf == nil {
+		return ""
+	}
+	return wf.Name
+}
+
+func sandboxModeFromFlags(cfg *config.Config) string {
+	if cfg == nil {
+		return "default"
+	}
+	fields := strings.Fields(cfg.Claude.Flags)
+	for i, field := range fields {
+		switch {
+		case field == "--dangerously-skip-permissions":
+			return "dangerously-skip-permissions"
+		case field == "--permission-mode" || field == "--sandbox":
+			if i+1 < len(fields) && strings.TrimSpace(fields[i+1]) != "" {
+				return fields[i+1]
+			}
+		case strings.HasPrefix(field, "--permission-mode="):
+			return strings.TrimPrefix(field, "--permission-mode=")
+		case strings.HasPrefix(field, "--sandbox="):
+			return strings.TrimPrefix(field, "--sandbox=")
+		}
+	}
+	return "default"
 }
 
 func phaseMatchedNoOp(p *workflow.Phase, output string) bool {
@@ -3273,8 +3394,14 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 			continue
 		}
 
+		timeoutSpan := r.startWaitTransitionSpan(ctx, vessel, "timed_out", elapsed)
+		vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
+		vrs.setTraceContext(observability.TraceContextFromContext(timeoutSpan.Context()))
+		r.persistRunArtifacts(vessel, string(queue.StateTimedOut), vrs, nil, r.runtimeNow())
+		r.finishWaitTransitionSpan(timeoutSpan, nil)
+
 		// Clean up worktree (best-effort)
-		r.removeWorktree(vessel.WorktreePath, vessel.ID)
+		r.removeWorktree(ctx, vessel.WorktreePath, vessel.ID)
 	}
 }
 

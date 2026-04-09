@@ -217,6 +217,42 @@ func TestDrainDryRun(t *testing.T) {
 	}
 }
 
+func TestDrainDryRunStartsCommandSpan(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	wt := worktree.New(dir, newCmdRunner(cfg))
+
+	now := time.Now().UTC()
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "issue-1",
+		Source:    "github-issue",
+		Ref:       "https://github.com/owner/repo/issues/1",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	require.NoError(t, err)
+
+	tracer, exporter := newRecordingTracer()
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		return tracer, nil
+	})
+
+	out := captureStdout(func() {
+		require.NoError(t, cmdDrain(cfg, q, wt, true))
+	})
+
+	assert.Contains(t, out, "dry-run")
+	span := requireSpanNamed(t, exporter.snapshots(), "command:drain")
+	assert.Equal(t, "drain", span.Attributes["xylem.command.name"])
+	assert.Equal(t, "true", span.Attributes["xylem.command.dry_run"])
+	assert.Equal(t, dir, span.Attributes["xylem.command.state_dir"])
+	assert.Equal(t, 1, exporter.shutdownCount())
+}
+
 func TestDrainDryRunCommandFormat(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)

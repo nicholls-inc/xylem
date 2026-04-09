@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 type mockRunner struct {
@@ -40,6 +43,18 @@ func renderVesselCompletedBody(t *testing.T, phases []PhaseResult, manifest *evi
 	return mock.lastBody
 }
 
+func newReporterTracer(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	_ = observability.NewTracerFromProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+	})
+	return rec
+}
+
 func TestPhaseComplete(t *testing.T) {
 	mock := &mockRunner{}
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
@@ -61,6 +76,31 @@ func TestPhaseComplete(t *testing.T) {
 	if !strings.Contains(mock.lastBody, "<details>") {
 		t.Errorf("expected details block in comment, got: %s", mock.lastBody)
 	}
+}
+
+func TestPhaseCompleteEmitsReporterSpan(t *testing.T) {
+	rec := newReporterTracer(t)
+	mock := &mockRunner{}
+	r := &Reporter{Runner: mock, Repo: "owner/repo"}
+
+	require.NoError(t, r.PhaseComplete(context.Background(), 42, "analyze", time.Second, "ok"))
+
+	var found bool
+	for _, span := range rec.Ended() {
+		if span.Name() != "reporter:phase_complete" {
+			continue
+		}
+		found = true
+		attrs := make(map[string]string, len(span.Attributes()))
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = attr.Value.AsString()
+		}
+		assert.Equal(t, "phase_complete", attrs["xylem.reporter.action"])
+		assert.Equal(t, "owner/repo", attrs["xylem.reporter.repo"])
+		assert.Equal(t, "42", attrs["xylem.reporter.issue_number"])
+		assert.Equal(t, "analyze", attrs["xylem.reporter.phase"])
+	}
+	require.True(t, found, "expected reporter:phase_complete span")
 }
 
 func TestPhaseCompleteGhArgs(t *testing.T) {

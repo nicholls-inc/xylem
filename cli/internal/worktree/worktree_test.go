@@ -9,6 +9,12 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
 
 // mockRunner captures calls for verification.
@@ -23,6 +29,18 @@ func newMock() *mockRunner {
 		outputs: make(map[string][]byte),
 		errs:    make(map[string]error),
 	}
+}
+
+func newWorktreeTracer(t *testing.T) *tracetest.SpanRecorder {
+	t.Helper()
+
+	rec := tracetest.NewSpanRecorder()
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec))
+	_ = observability.NewTracerFromProvider(tp)
+	t.Cleanup(func() {
+		_ = tp.Shutdown(context.Background())
+	})
+	return rec
 }
 
 func (m *mockRunner) setOutput(key string, out []byte) { m.outputs[key] = out }
@@ -105,6 +123,32 @@ func TestCreateIssuesCorrectCommands(t *testing.T) {
 	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/issue-42-null-response", "-B", "fix/issue-42-null-response", "origin/main") {
 		t.Errorf("expected 'git worktree add' to be called, calls were: %v", r.calls)
 	}
+}
+
+func TestCreateEmitsWorktreeSpan(t *testing.T) {
+	rec := newWorktreeTracer(t)
+	r := newMock()
+	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
+
+	m := New("/repo", r)
+	_, err := m.Create(context.Background(), "fix/issue-42-null-response")
+	require.NoError(t, err)
+
+	var found bool
+	for _, span := range rec.Ended() {
+		if span.Name() != "worktree:create" {
+			continue
+		}
+		found = true
+		attrs := make(map[string]string, len(span.Attributes()))
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = attr.Value.AsString()
+		}
+		assert.Equal(t, "create", attrs["xylem.worktree.action"])
+		assert.Equal(t, "fix/issue-42-null-response", attrs["xylem.worktree.branch"])
+		assert.Equal(t, ".claude/worktrees/fix/issue-42-null-response", attrs["xylem.worktree.path"])
+	}
+	require.True(t, found, "expected worktree:create span")
 }
 
 func TestCreateFetchFailure(t *testing.T) {

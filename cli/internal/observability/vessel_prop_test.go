@@ -33,17 +33,22 @@ func combinedAttrs() []SpanAttribute {
 		Ref:      "refs/pull/1/head",
 	})...)
 	attrs = append(attrs, PhaseSpanAttributes(PhaseSpanData{
-		Name:     "analyse",
-		Index:    1,
-		Type:     "prompt",
-		Provider: "anthropic",
-		Model:    "claude-sonnet",
+		Name:         "analyse",
+		Index:        1,
+		Type:         "prompt",
+		Workflow:     "fix-bug",
+		Provider:     "anthropic",
+		Model:        "claude-sonnet",
+		RetryAttempt: 1,
+		SandboxMode:  "default",
 	})...)
 	attrs = append(attrs, PhaseResultAttributes(PhaseResultData{
-		InputTokensEst:  10,
-		OutputTokensEst: 20,
-		CostUSDEst:      1.25,
-		DurationMS:      30,
+		InputTokensEst:     10,
+		OutputTokensEst:    20,
+		CostUSDEst:         1.25,
+		DurationMS:         30,
+		Status:             "completed",
+		OutputArtifactPath: "phases/vessel-1/analyse.output",
 	})...)
 	attrs = append(attrs, GateSpanAttributes(GateSpanData{
 		Type:         "command",
@@ -126,17 +131,20 @@ func TestPropVesselAttrsKeysNamespaced(t *testing.T) {
 	})
 }
 
-func TestPropPhaseAttrsAlwaysFive(t *testing.T) {
+func TestPropPhaseAttrsAlwaysEight(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		attrs := PhaseSpanAttributes(PhaseSpanData{
-			Name:     genVesselString().Draw(t, "name"),
-			Index:    rapid.IntRange(0, 100).Draw(t, "index"),
-			Type:     genPhaseType().Draw(t, "phase_type"),
-			Provider: genVesselString().Draw(t, "provider"),
-			Model:    genVesselString().Draw(t, "model"),
+			Name:         genVesselString().Draw(t, "name"),
+			Index:        rapid.IntRange(0, 100).Draw(t, "index"),
+			Type:         genPhaseType().Draw(t, "phase_type"),
+			Workflow:     genVesselString().Draw(t, "workflow"),
+			Provider:     genVesselString().Draw(t, "provider"),
+			Model:        genVesselString().Draw(t, "model"),
+			RetryAttempt: rapid.IntRange(0, 10).Draw(t, "retry_attempt"),
+			SandboxMode:  genVesselString().Draw(t, "sandbox_mode"),
 		})
-		if len(attrs) != 5 {
-			t.Fatalf("expected 5 attributes, got %d", len(attrs))
+		if len(attrs) != 8 {
+			t.Fatalf("expected 8 attributes, got %d", len(attrs))
 		}
 	})
 }
@@ -145,11 +153,14 @@ func TestPropPhaseAttrsIndexStringified(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		index := rapid.IntRange(0, 10000).Draw(t, "index")
 		attrs := PhaseSpanAttributes(PhaseSpanData{
-			Name:     "phase",
-			Index:    index,
-			Type:     "prompt",
-			Provider: "provider",
-			Model:    "model",
+			Name:         "phase",
+			Index:        index,
+			Type:         "prompt",
+			Workflow:     "workflow",
+			Provider:     "provider",
+			Model:        "model",
+			RetryAttempt: 1,
+			SandboxMode:  "default",
 		})
 		got, ok := attrMap(attrs)["xylem.phase.index"]
 		if !ok {
@@ -165,16 +176,18 @@ func TestPropPhaseAttrsIndexStringified(t *testing.T) {
 	})
 }
 
-func TestPropPhaseResultAttrsAlwaysFour(t *testing.T) {
+func TestPropPhaseResultAttrsAlwaysSix(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		attrs := PhaseResultAttributes(PhaseResultData{
-			InputTokensEst:  rapid.IntRange(0, 1000000).Draw(t, "input_tokens"),
-			OutputTokensEst: rapid.IntRange(0, 1000000).Draw(t, "output_tokens"),
-			CostUSDEst:      rapid.Float64Range(0.0, 100.0).Draw(t, "cost"),
-			DurationMS:      int64(rapid.Int64Range(0, 600000).Draw(t, "duration_ms")),
+			InputTokensEst:     rapid.IntRange(0, 1000000).Draw(t, "input_tokens"),
+			OutputTokensEst:    rapid.IntRange(0, 1000000).Draw(t, "output_tokens"),
+			CostUSDEst:         rapid.Float64Range(0.0, 100.0).Draw(t, "cost"),
+			DurationMS:         int64(rapid.Int64Range(0, 600000).Draw(t, "duration_ms")),
+			Status:             genVesselString().Draw(t, "status"),
+			OutputArtifactPath: genVesselString().Draw(t, "output_artifact_path"),
 		})
-		if len(attrs) != 4 {
-			t.Fatalf("expected 4 attributes, got %d", len(attrs))
+		if len(attrs) != 6 {
+			t.Fatalf("expected 6 attributes, got %d", len(attrs))
 		}
 	})
 }

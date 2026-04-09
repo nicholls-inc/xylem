@@ -3182,6 +3182,84 @@ func TestCheckWaitingVesselsTimeoutAppliesTimedOutLabels(t *testing.T) {
 	}
 }
 
+func TestCheckWaitingVesselsResumeEmitsTraceSpan(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{{
+		name: "plan", promptContent: "Create plan", maxTurns: 5,
+		gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+	}, {
+		name: "implement", promptContent: "Implement after approval", maxTurns: 10,
+	}})
+	withTestWorkingDir(t, dir)
+
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Tracer = tracer
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	first, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, first.Waiting)
+
+	cmdRunner.outputData = []byte(`{"labels":[{"name":"plan-approved"}]}`)
+	r.CheckWaitingVessels(context.Background())
+
+	waitSpan := endedSpanByName(t, rec, "wait_transition:waiting")
+	waitAttrs := spanAttrMap(waitSpan)
+	assert.Equal(t, "waiting", waitAttrs["xylem.wait.transition"])
+	assert.Equal(t, "plan-approved", waitAttrs["xylem.wait.label"])
+	assert.Equal(t, "plan", waitAttrs["xylem.wait.phase"])
+
+	resumeSpan := endedSpanByName(t, rec, "wait_transition:resumed")
+	resumeAttrs := spanAttrMap(resumeSpan)
+	assert.Equal(t, "resumed", resumeAttrs["xylem.wait.transition"])
+	assert.Equal(t, "plan-approved", resumeAttrs["xylem.wait.label"])
+	assert.Equal(t, "plan", resumeAttrs["xylem.wait.phase"])
+}
+
+func TestCheckWaitingVesselsTimeoutWritesTraceableSummary(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	waitingSince := time.Now().UTC().Add(-48 * time.Hour)
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:           "issue-1",
+		Source:       "github-issue",
+		Ref:          "https://github.com/owner/repo/issues/1",
+		Workflow:     "fix-bug",
+		Meta:         map[string]string{"issue_num": "1"},
+		State:        queue.StateWaiting,
+		CreatedAt:    time.Now().UTC(),
+		FailedPhase:  "plan",
+		WaitingFor:   "plan-approved",
+		WaitingSince: &waitingSince,
+	})
+	withTestWorkingDir(t, dir)
+
+	tracer, rec := newTestTracer(t)
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.Tracer = tracer
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	r.CheckWaitingVessels(context.Background())
+
+	summary, err := LoadVesselSummary(cfg.StateDir, "issue-1")
+	require.NoError(t, err)
+	require.NotNil(t, summary.Trace)
+	assert.Equal(t, "timed_out", summary.State)
+
+	timeoutSpan := endedSpanByName(t, rec, "wait_transition:timed_out")
+	assert.Equal(t, timeoutSpan.SpanContext().TraceID().String(), summary.Trace.TraceID)
+	assert.Equal(t, timeoutSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
+}
+
 func TestDrainVesselFails(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
@@ -7089,6 +7167,43 @@ func TestCheckHungVessels_CleansUpWorktree(t *testing.T) {
 	}
 }
 
+func TestCheckHungVesselsWritesTraceableSummary(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Timeout = "1s"
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "hung-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	old := now.Add(-5 * time.Minute)
+	vessel.StartedAt = &old
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	tracer, rec := newTestTracer(t)
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.Tracer = tracer
+
+	r.CheckHungVessels(context.Background())
+
+	summary, err := LoadVesselSummary(cfg.StateDir, "hung-1")
+	require.NoError(t, err)
+	require.NotNil(t, summary.Trace)
+	assert.Equal(t, "timed_out", summary.State)
+
+	timeoutSpan := endedSpanByName(t, rec, "wait_transition:timed_out")
+	assert.Equal(t, timeoutSpan.SpanContext().TraceID().String(), summary.Trace.TraceID)
+	assert.Equal(t, timeoutSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
+}
+
 func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -7284,6 +7399,70 @@ func TestSmoke_S16_PhaseSpanAlwaysEndsEvenWhenPhaseFails(t *testing.T) {
 		require.Len(t, spans, 1)
 		assert.False(t, spans[0].EndTime().IsZero())
 	}
+}
+
+func TestSmoke_S16b_PhaseSpanStatusIsFailedForEarlyPhaseErrors(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{}
+	r := newWorkflowRunner(t, "trace-early-fail", []testPhase{
+		{name: "analyze", promptContent: "{{", maxTurns: 5},
+	}, cmdRunner, tracer)
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
+	attrs := spanAttrMap(phaseSpan)
+	assert.Equal(t, "failed", attrs["xylem.phase.status"])
+	assert.Equal(t, codes.Error, phaseSpan.Status().Code)
+}
+
+func TestSmoke_VesselSummaryLinksToTraceOnCompletion(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("analysis complete"),
+		},
+	}
+	r := newWorkflowRunner(t, "trace-basic", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
+	}, cmdRunner, tracer)
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+
+	summary, err := LoadVesselSummary(r.Config.StateDir, "issue-1")
+	require.NoError(t, err)
+	require.NotNil(t, summary.Trace)
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	assert.Equal(t, vesselSpan.SpanContext().TraceID().String(), summary.Trace.TraceID)
+	assert.Equal(t, vesselSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
+}
+
+func TestSmoke_VesselSummaryLinksToTraceOnFailure(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseErr: errors.New("provider crashed"),
+	}
+	r := newWorkflowRunner(t, "trace-fail", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
+	}, cmdRunner, tracer)
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Failed)
+
+	summary, err := LoadVesselSummary(r.Config.StateDir, "issue-1")
+	require.NoError(t, err)
+	require.NotNil(t, summary.Trace)
+	assert.Equal(t, "failed", summary.State)
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	assert.Equal(t, vesselSpan.SpanContext().TraceID().String(), summary.Trace.TraceID)
+	assert.Equal(t, vesselSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
 }
 
 func TestSmoke_S10_PhaseSpanIsAlwaysEndedEvenOnFailureDuringOrchestratedExecution(t *testing.T) {
