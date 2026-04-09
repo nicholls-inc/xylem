@@ -15,12 +15,14 @@ import (
 
 // GitHubPR scans GitHub pull requests and produces vessels.
 type GitHubPR struct {
-	Repo      string
-	Tasks     map[string]GitHubTask
-	Exclude   []string
-	StateDir  string
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
+	Repo                   string
+	Tasks                  map[string]GitHubTask
+	Exclude                []string
+	StateDir               string
+	Queue                  *queue.Queue
+	CmdRunner              CommandRunner
+	HarnessDigestResolver  func() string
+	WorkflowDigestResolver func(string) string
 }
 
 // resolveConflictsWorkflow is the de facto workflow identifier whose task
@@ -124,6 +126,7 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					State:     queue.StatePending,
 					CreatedAt: sourceNow(),
 				}
+				baseVessel.Meta = applyCurrentRemediationMeta(baseVessel.Meta, nil, g.currentHarnessDigest(), g.currentWorkflowDigest(task.Workflow))
 				sl := task.StatusLabels
 				if sl != nil {
 					baseVessel.Meta["status_label_queued"] = sl.Queued
@@ -334,17 +337,22 @@ func (g *GitHubPR) retryCandidate(base queue.Vessel, prURL, fingerprint, workflo
 	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
 		return nil, true, nil
 	case queue.StateFailed, queue.StateTimedOut:
-		if latest.Meta["source_input_fingerprint"] != fingerprint {
-			return nil, false, nil
-		}
-		artifact, eligible, loadErr := g.loadRetryArtifact(*latest)
+		artifact, found, loadErr := g.loadRetryArtifact(*latest)
 		if loadErr != nil {
 			return nil, false, loadErr
 		}
-		if !eligible {
+		if !found {
+			if latest.Meta["source_input_fingerprint"] != fingerprint {
+				return nil, false, nil
+			}
 			return nil, true, nil
 		}
-		retry := recovery.NextRetryVessel(base, *latest, artifact, g.Queue, sourceNow(), "cooldown")
+		base.Meta = applyCurrentRemediationMeta(base.Meta, artifact, g.currentHarnessDigest(), g.currentWorkflowDigest(base.Workflow))
+		decision := retryDecision(artifact, latest.Meta, base.Meta, sourceNow())
+		if !decision.Eligible {
+			return nil, true, nil
+		}
+		retry := recovery.NextRetryVessel(base, *latest, artifact, g.Queue, sourceNow(), decision.UnlockDimension)
 		return &retry, false, nil
 	default:
 		return nil, false, nil
@@ -362,6 +370,19 @@ func (g *GitHubPR) loadRetryArtifact(vessel queue.Vessel) (*recovery.Artifact, b
 		}
 		return nil, false, fmt.Errorf("load recovery artifact for %s: %w", vessel.ID, err)
 	}
-	decision := recovery.RetryReady(artifact, sourceNow())
-	return artifact, decision.Eligible, nil
+	return recovery.HydrateArtifact(artifact, vessel.Meta), true, nil
+}
+
+func (g *GitHubPR) currentHarnessDigest() string {
+	if g != nil && g.HarnessDigestResolver != nil {
+		return strings.TrimSpace(g.HarnessDigestResolver())
+	}
+	return defaultHarnessDigest()
+}
+
+func (g *GitHubPR) currentWorkflowDigest(workflow string) string {
+	if g != nil && g.WorkflowDigestResolver != nil {
+		return strings.TrimSpace(g.WorkflowDigestResolver(workflow))
+	}
+	return defaultWorkflowDigest(workflow)
 }

@@ -28,12 +28,14 @@ type GitHubTask struct {
 
 // GitHub scans GitHub issues and produces vessels.
 type GitHub struct {
-	Repo      string
-	Tasks     map[string]GitHubTask
-	Exclude   []string
-	StateDir  string
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
+	Repo                   string
+	Tasks                  map[string]GitHubTask
+	Exclude                []string
+	StateDir               string
+	Queue                  *queue.Queue
+	CmdRunner              CommandRunner
+	HarnessDigestResolver  func() string
+	WorkflowDigestResolver func(string) string
 }
 
 type ghIssue struct {
@@ -98,6 +100,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					// consistent with its workflow state.
 					"trigger_label": label,
 				}
+				baseMeta = applyCurrentRemediationMeta(baseMeta, nil, g.currentHarnessDigest(), g.currentWorkflowDigest(task.Workflow))
 				sl := task.StatusLabels
 				if sl != nil {
 					baseMeta["status_label_queued"] = sl.Queued
@@ -296,17 +299,22 @@ func (g *GitHub) retryCandidate(base queue.Vessel) (*queue.Vessel, bool, error) 
 	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
 		return nil, true, nil
 	case queue.StateFailed, queue.StateTimedOut:
-		if latest.Meta["source_input_fingerprint"] != base.Meta["source_input_fingerprint"] {
-			return nil, false, nil
-		}
-		artifact, eligible, loadErr := g.loadRetryArtifact(*latest)
+		artifact, found, loadErr := g.loadRetryArtifact(*latest)
 		if loadErr != nil {
 			return nil, false, loadErr
 		}
-		if !eligible {
+		if !found {
+			if latest.Meta["source_input_fingerprint"] != base.Meta["source_input_fingerprint"] {
+				return nil, false, nil
+			}
 			return nil, true, nil
 		}
-		retry := recovery.NextRetryVessel(base, *latest, artifact, g.Queue, sourceNow(), "cooldown")
+		base.Meta = applyCurrentRemediationMeta(base.Meta, artifact, g.currentHarnessDigest(), g.currentWorkflowDigest(base.Workflow))
+		decision := retryDecision(artifact, latest.Meta, base.Meta, sourceNow())
+		if !decision.Eligible {
+			return nil, true, nil
+		}
+		retry := recovery.NextRetryVessel(base, *latest, artifact, g.Queue, sourceNow(), decision.UnlockDimension)
 		return &retry, false, nil
 	default:
 		return nil, false, nil
@@ -324,8 +332,7 @@ func (g *GitHub) loadRetryArtifact(vessel queue.Vessel) (*recovery.Artifact, boo
 		}
 		return nil, false, fmt.Errorf("load recovery artifact for %s: %w", vessel.ID, err)
 	}
-	decision := recovery.RetryReady(artifact, sourceNow())
-	return artifact, decision.Eligible, nil
+	return recovery.HydrateArtifact(artifact, vessel.Meta), true, nil
 }
 
 func (g *GitHub) recoveryAwareVessel(vessel queue.Vessel) queue.Vessel {
@@ -346,6 +353,20 @@ func shouldRouteToRefinement(vessel queue.Vessel) bool {
 		action == string(recovery.ActionSplitTask) ||
 		class == string(recovery.ClassSpecGap) ||
 		class == string(recovery.ClassScopeGap)
+}
+
+func (g *GitHub) currentHarnessDigest() string {
+	if g != nil && g.HarnessDigestResolver != nil {
+		return strings.TrimSpace(g.HarnessDigestResolver())
+	}
+	return defaultHarnessDigest()
+}
+
+func (g *GitHub) currentWorkflowDigest(workflow string) string {
+	if g != nil && g.WorkflowDigestResolver != nil {
+		return strings.TrimSpace(g.WorkflowDigestResolver(workflow))
+	}
+	return defaultWorkflowDigest(workflow)
 }
 
 func issueLabelNames(labels []struct {

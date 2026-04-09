@@ -33,6 +33,10 @@ const (
 	MetaRetryAfter             = "recovery_retry_after"
 	MetaFailureFingerprint     = "failure_fingerprint"
 	MetaRemediationFingerprint = "remediation_fingerprint"
+	MetaHarnessDigest          = "harness_digest"
+	MetaWorkflowDigest         = "workflow_digest"
+	MetaDecisionDigest         = "decision_digest"
+	MetaRemediationEpoch       = "remediation_epoch"
 	MetaUnlockedBy             = "recovery_unlocked_by"
 	MetaUnlockDimension        = "recovery_unlock_dimension"
 )
@@ -70,6 +74,12 @@ type Artifact struct {
 	Error              string                          `json:"error,omitempty"`
 	GateOutput         string                          `json:"gate_output,omitempty"`
 	FailureFingerprint string                          `json:"failure_fingerprint,omitempty"`
+	SourceInputFP      string                          `json:"source_input_fingerprint,omitempty"`
+	HarnessDigest      string                          `json:"harness_digest,omitempty"`
+	WorkflowDigest     string                          `json:"workflow_digest,omitempty"`
+	DecisionDigest     string                          `json:"decision_digest,omitempty"`
+	RemediationEpoch   string                          `json:"remediation_epoch,omitempty"`
+	RemediationFP      string                          `json:"remediation_fingerprint,omitempty"`
 	RecoveryClass      Class                           `json:"recovery_class"`
 	RecoveryAction     Action                          `json:"recovery_action"`
 	Rationale          string                          `json:"rationale"`
@@ -86,18 +96,33 @@ type Artifact struct {
 }
 
 type Input struct {
-	VesselID    string
-	Source      string
-	Workflow    string
-	Ref         string
-	State       queue.VesselState
-	FailedPhase string
-	Error       string
-	GateOutput  string
-	RetryOf     string
-	Meta        map[string]string
-	Trace       *observability.TraceContextData
-	CreatedAt   time.Time
+	VesselID         string
+	Source           string
+	Workflow         string
+	Ref              string
+	State            queue.VesselState
+	FailedPhase      string
+	Error            string
+	GateOutput       string
+	RetryOf          string
+	SourceInputFP    string
+	HarnessDigest    string
+	WorkflowDigest   string
+	DecisionDigest   string
+	RemediationEpoch string
+	RemediationFP    string
+	Meta             map[string]string
+	Trace            *observability.TraceContextData
+	CreatedAt        time.Time
+}
+
+type RemediationState struct {
+	SourceInputFP    string
+	HarnessDigest    string
+	WorkflowDigest   string
+	DecisionDigest   string
+	RemediationEpoch string
+	RemediationFP    string
 }
 
 func Build(input Input) *Artifact {
@@ -140,6 +165,19 @@ func Build(input Input) *Artifact {
 	if trace != nil && trace.TraceID == "" && trace.SpanID == "" {
 		trace = nil
 	}
+	remediation := remediationStateFromInput(input)
+	remediation.DecisionDigest = firstNonEmpty(remediation.DecisionDigest, decisionDigestFor(
+		class,
+		action,
+		rationale,
+		followUpRoute,
+		retrySuppressed,
+		retryCap,
+	))
+	if remediation.RemediationEpoch == "" {
+		remediation.RemediationEpoch = strconv.Itoa(max(retryCount, 0))
+	}
+	remediation.RemediationFP = ComputeRemediationFingerprint(remediation)
 
 	return &Artifact{
 		SchemaVersion:      schemaVersion,
@@ -152,6 +190,12 @@ func Build(input Input) *Artifact {
 		Error:              input.Error,
 		GateOutput:         input.GateOutput,
 		FailureFingerprint: failureFingerprint,
+		SourceInputFP:      remediation.SourceInputFP,
+		HarnessDigest:      remediation.HarnessDigest,
+		WorkflowDigest:     remediation.WorkflowDigest,
+		DecisionDigest:     remediation.DecisionDigest,
+		RemediationEpoch:   remediation.RemediationEpoch,
+		RemediationFP:      remediation.RemediationFP,
 		RecoveryClass:      class,
 		RecoveryAction:     action,
 		Rationale:          rationale,
@@ -172,9 +216,14 @@ func ApplyToMeta(meta map[string]string, artifact *Artifact) map[string]string {
 	if artifact == nil {
 		return meta
 	}
-	if meta == nil {
-		meta = make(map[string]string)
-	}
+	meta = ApplyRemediationState(meta, RemediationState{
+		SourceInputFP:    artifact.SourceInputFP,
+		HarnessDigest:    artifact.HarnessDigest,
+		WorkflowDigest:   artifact.WorkflowDigest,
+		DecisionDigest:   artifact.DecisionDigest,
+		RemediationEpoch: artifact.RemediationEpoch,
+		RemediationFP:    artifact.RemediationFP,
+	})
 	meta[MetaClass] = string(artifact.RecoveryClass)
 	meta[MetaAction] = string(artifact.RecoveryAction)
 	meta[MetaRationale] = artifact.Rationale
@@ -257,6 +306,10 @@ type RetryDecision struct {
 }
 
 func RetryReady(artifact *Artifact, now time.Time) RetryDecision {
+	return RetryReadyWithRemediation(artifact, RemediationState{}, now)
+}
+
+func RetryReadyWithRemediation(artifact *Artifact, current RemediationState, now time.Time) RetryDecision {
 	if artifact == nil || artifact.RecoveryAction != ActionRetry {
 		return RetryDecision{}
 	}
@@ -266,9 +319,36 @@ func RetryReady(artifact *Artifact, now time.Time) RetryDecision {
 	if artifact.RetryAfter != nil && now.UTC().Before(artifact.RetryAfter.UTC()) {
 		return RetryDecision{}
 	}
+	stored := normalizeRemediationState(RemediationState{
+		SourceInputFP:    artifact.SourceInputFP,
+		HarnessDigest:    artifact.HarnessDigest,
+		WorkflowDigest:   artifact.WorkflowDigest,
+		DecisionDigest:   firstNonEmpty(artifact.DecisionDigest, DecisionDigest(artifact)),
+		RemediationEpoch: firstNonEmpty(artifact.RemediationEpoch, strconv.Itoa(max(artifact.RetryCount, 0))),
+		RemediationFP:    artifact.RemediationFP,
+	})
+	current = normalizeRemediationState(current)
+	if current.DecisionDigest == "" {
+		current.DecisionDigest = DecisionDigest(artifact)
+	}
+	if current.RemediationEpoch == "" {
+		current.RemediationEpoch = NextRemediationEpoch(artifact)
+	}
+	if current.RemediationFP == "" {
+		current.RemediationFP = ComputeRemediationFingerprint(current)
+	}
+	if stored.RemediationFP == "" {
+		if current.SourceInputFP == "" || stored.SourceInputFP == "" || current.SourceInputFP == stored.SourceInputFP {
+			return RetryDecision{Eligible: true, UnlockDimension: "cooldown"}
+		}
+		return RetryDecision{Eligible: true, UnlockDimension: "source"}
+	}
+	if current.RemediationFP == stored.RemediationFP {
+		return RetryDecision{}
+	}
 	return RetryDecision{
 		Eligible:        true,
-		UnlockDimension: "cooldown",
+		UnlockDimension: remediationUnlockDimension(stored, current),
 	}
 }
 
@@ -299,6 +379,14 @@ func NextRetryVessel(base, parent queue.Vessel, artifact *Artifact, q *queue.Que
 	if artifact != nil {
 		retryCount = artifact.RetryCount + 1
 		meta = ApplyToMeta(meta, artifact)
+		meta = ApplyRemediationState(meta, RemediationState{
+			SourceInputFP:    base.Meta["source_input_fingerprint"],
+			HarnessDigest:    base.Meta[MetaHarnessDigest],
+			WorkflowDigest:   base.Meta[MetaWorkflowDigest],
+			DecisionDigest:   base.Meta[MetaDecisionDigest],
+			RemediationEpoch: base.Meta[MetaRemediationEpoch],
+			RemediationFP:    base.Meta[MetaRemediationFingerprint],
+		})
 		meta[MetaRetryOutcome] = "enqueued"
 		if artifact.FollowUpRoute == "" {
 			delete(meta, MetaFollowUpRoute)
@@ -321,9 +409,10 @@ func NextRetryVessel(base, parent queue.Vessel, artifact *Artifact, q *queue.Que
 	if failureFingerprint != "" {
 		meta[MetaFailureFingerprint] = failureFingerprint
 	}
-	if sourceFingerprint := strings.TrimSpace(meta["source_input_fingerprint"]); sourceFingerprint != "" {
-		meta[MetaRemediationFingerprint] = remediationFingerprint(sourceFingerprint, unlockDimension, retryCount)
+	if meta[MetaRemediationEpoch] == "" {
+		meta[MetaRemediationEpoch] = strconv.Itoa(retryCount)
 	}
+	meta = ApplyRemediationState(meta, RemediationStateFromMeta(meta))
 
 	retry := queue.Vessel{
 		ID:        RetryID(parent.ID, q),
@@ -458,13 +547,105 @@ func normalizeFailureText(text string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(strings.ToLower(text))), " ")
 }
 
-func remediationFingerprint(sourceFingerprint, unlockDimension string, retryCount int) string {
+func DecisionDigest(artifact *Artifact) string {
+	if artifact == nil {
+		return ""
+	}
+	return decisionDigestFor(
+		artifact.RecoveryClass,
+		artifact.RecoveryAction,
+		artifact.Rationale,
+		artifact.FollowUpRoute,
+		artifact.RetrySuppressed,
+		artifact.RetryCap,
+	)
+}
+
+func NextRemediationEpoch(artifact *Artifact) string {
+	if artifact == nil {
+		return "0"
+	}
+	return strconv.Itoa(max(artifact.RetryCount, 0) + 1)
+}
+
+func ComputeRemediationFingerprint(state RemediationState) string {
+	state = normalizeRemediationState(state)
 	sum := sha256.Sum256([]byte(strings.Join([]string{
-		sourceFingerprint,
-		unlockDimension,
-		strconv.Itoa(retryCount),
+		state.SourceInputFP,
+		state.HarnessDigest,
+		state.WorkflowDigest,
+		state.DecisionDigest,
+		state.RemediationEpoch,
 	}, "\n")))
 	return fmt.Sprintf("rem-%x", sum)
+}
+
+func remediationFingerprint(sourceFingerprint, unlockDimension string, retryCount int) string {
+	return ComputeRemediationFingerprint(RemediationState{
+		SourceInputFP:    sourceFingerprint,
+		DecisionDigest:   unlockDimension,
+		RemediationEpoch: strconv.Itoa(retryCount),
+	})
+}
+
+func ApplyRemediationState(meta map[string]string, state RemediationState) map[string]string {
+	if meta == nil {
+		meta = make(map[string]string)
+	}
+	state = normalizeRemediationState(state)
+	if state.SourceInputFP != "" {
+		meta["source_input_fingerprint"] = state.SourceInputFP
+	}
+	setOrDelete(meta, MetaHarnessDigest, state.HarnessDigest)
+	setOrDelete(meta, MetaWorkflowDigest, state.WorkflowDigest)
+	setOrDelete(meta, MetaDecisionDigest, state.DecisionDigest)
+	setOrDelete(meta, MetaRemediationEpoch, state.RemediationEpoch)
+	if state.RemediationFP == "" {
+		state.RemediationFP = ComputeRemediationFingerprint(state)
+	}
+	setOrDelete(meta, MetaRemediationFingerprint, state.RemediationFP)
+	return meta
+}
+
+func RemediationStateFromMeta(meta map[string]string) RemediationState {
+	return normalizeRemediationState(RemediationState{
+		SourceInputFP:    metaValue(meta, "source_input_fingerprint"),
+		HarnessDigest:    metaValue(meta, MetaHarnessDigest),
+		WorkflowDigest:   metaValue(meta, MetaWorkflowDigest),
+		DecisionDigest:   metaValue(meta, MetaDecisionDigest),
+		RemediationEpoch: metaValue(meta, MetaRemediationEpoch),
+		RemediationFP:    metaValue(meta, MetaRemediationFingerprint),
+	})
+}
+
+func DigestFile(path, prefix string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%s-%x", prefix, sum)
+}
+
+func HydrateArtifact(artifact *Artifact, meta map[string]string) *Artifact {
+	if artifact == nil {
+		return nil
+	}
+	hydrated := *artifact
+	state := normalizeRemediationState(RemediationState{
+		SourceInputFP:    firstNonEmpty(hydrated.SourceInputFP, metaValue(meta, "source_input_fingerprint")),
+		HarnessDigest:    firstNonEmpty(hydrated.HarnessDigest, metaValue(meta, MetaHarnessDigest)),
+		WorkflowDigest:   firstNonEmpty(hydrated.WorkflowDigest, metaValue(meta, MetaWorkflowDigest)),
+		DecisionDigest:   firstNonEmpty(hydrated.DecisionDigest, metaValue(meta, MetaDecisionDigest), DecisionDigest(&hydrated)),
+		RemediationEpoch: firstNonEmpty(hydrated.RemediationEpoch, metaValue(meta, MetaRemediationEpoch), strconv.Itoa(max(hydrated.RetryCount, 0))),
+	})
+	hydrated.SourceInputFP = state.SourceInputFP
+	hydrated.HarnessDigest = state.HarnessDigest
+	hydrated.WorkflowDigest = state.WorkflowDigest
+	hydrated.DecisionDigest = state.DecisionDigest
+	hydrated.RemediationEpoch = state.RemediationEpoch
+	hydrated.RemediationFP = ComputeRemediationFingerprint(state)
+	return &hydrated
 }
 
 func copyMeta(meta map[string]string) map[string]string {
@@ -498,4 +679,62 @@ func validatePathComponent(component string) error {
 		return fmt.Errorf("path component %q contains invalid characters (allowed: a-zA-Z0-9._-)", component)
 	}
 	return nil
+}
+
+func remediationStateFromInput(input Input) RemediationState {
+	return normalizeRemediationState(RemediationState{
+		SourceInputFP:    firstNonEmpty(input.SourceInputFP, metaValue(input.Meta, "source_input_fingerprint")),
+		HarnessDigest:    firstNonEmpty(input.HarnessDigest, metaValue(input.Meta, MetaHarnessDigest)),
+		WorkflowDigest:   firstNonEmpty(input.WorkflowDigest, metaValue(input.Meta, MetaWorkflowDigest)),
+		DecisionDigest:   firstNonEmpty(input.DecisionDigest, metaValue(input.Meta, MetaDecisionDigest)),
+		RemediationEpoch: firstNonEmpty(input.RemediationEpoch, metaValue(input.Meta, MetaRemediationEpoch)),
+		RemediationFP:    firstNonEmpty(input.RemediationFP, metaValue(input.Meta, MetaRemediationFingerprint)),
+	})
+}
+
+func normalizeRemediationState(state RemediationState) RemediationState {
+	state.SourceInputFP = strings.TrimSpace(state.SourceInputFP)
+	state.HarnessDigest = strings.TrimSpace(state.HarnessDigest)
+	state.WorkflowDigest = strings.TrimSpace(state.WorkflowDigest)
+	state.DecisionDigest = strings.TrimSpace(state.DecisionDigest)
+	state.RemediationEpoch = strings.TrimSpace(state.RemediationEpoch)
+	state.RemediationFP = strings.TrimSpace(state.RemediationFP)
+	return state
+}
+
+func remediationUnlockDimension(stored, current RemediationState) string {
+	switch {
+	case current.SourceInputFP != stored.SourceInputFP:
+		return "source"
+	case current.HarnessDigest != stored.HarnessDigest:
+		return "harness"
+	case current.WorkflowDigest != stored.WorkflowDigest:
+		return "workflow"
+	case current.DecisionDigest != stored.DecisionDigest:
+		return "decision"
+	case current.RemediationEpoch != stored.RemediationEpoch:
+		return "cooldown"
+	default:
+		return "cooldown"
+	}
+}
+
+func decisionDigestFor(class Class, action Action, rationale, followUpRoute string, retrySuppressed bool, retryCap int) string {
+	sum := sha256.Sum256([]byte(strings.Join([]string{
+		string(class),
+		string(action),
+		normalizeFailureText(rationale),
+		strings.TrimSpace(followUpRoute),
+		strconv.FormatBool(retrySuppressed),
+		strconv.Itoa(retryCap),
+	}, "\n")))
+	return fmt.Sprintf("dec-%x", sum)
+}
+
+func setOrDelete(meta map[string]string, key, value string) {
+	if strings.TrimSpace(value) == "" {
+		delete(meta, key)
+		return
+	}
+	meta[key] = value
 }

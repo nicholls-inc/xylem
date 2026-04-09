@@ -251,6 +251,103 @@ func TestRetryReadyRequiresCooldownAndCap(t *testing.T) {
 	}
 }
 
+func TestRetryReadyWithRemediationUnlocksByDimension(t *testing.T) {
+	now := time.Date(2026, time.April, 9, 18, 10, 0, 0, time.UTC)
+	retryAfter := now.Add(-time.Minute)
+	artifact := &Artifact{
+		RecoveryAction:   ActionRetry,
+		RetryCount:       0,
+		RetryCap:         2,
+		RetryAfter:       &retryAfter,
+		RecoveryClass:    ClassTransient,
+		Rationale:        "retry after transient failure",
+		SourceInputFP:    "src-old",
+		HarnessDigest:    "har-old",
+		WorkflowDigest:   "wf-old",
+		RemediationEpoch: "0",
+	}
+	artifact.DecisionDigest = DecisionDigest(artifact)
+	artifact.RemediationFP = ComputeRemediationFingerprint(RemediationState{
+		SourceInputFP:    artifact.SourceInputFP,
+		HarnessDigest:    artifact.HarnessDigest,
+		WorkflowDigest:   artifact.WorkflowDigest,
+		DecisionDigest:   artifact.DecisionDigest,
+		RemediationEpoch: artifact.RemediationEpoch,
+	})
+
+	tests := []struct {
+		name   string
+		state  RemediationState
+		unlock string
+	}{
+		{
+			name: "source",
+			state: RemediationState{
+				SourceInputFP:    "src-new",
+				HarnessDigest:    artifact.HarnessDigest,
+				WorkflowDigest:   artifact.WorkflowDigest,
+				DecisionDigest:   artifact.DecisionDigest,
+				RemediationEpoch: NextRemediationEpoch(artifact),
+			},
+			unlock: "source",
+		},
+		{
+			name: "harness",
+			state: RemediationState{
+				SourceInputFP:    artifact.SourceInputFP,
+				HarnessDigest:    "har-new",
+				WorkflowDigest:   artifact.WorkflowDigest,
+				DecisionDigest:   artifact.DecisionDigest,
+				RemediationEpoch: NextRemediationEpoch(artifact),
+			},
+			unlock: "harness",
+		},
+		{
+			name: "workflow",
+			state: RemediationState{
+				SourceInputFP:    artifact.SourceInputFP,
+				HarnessDigest:    artifact.HarnessDigest,
+				WorkflowDigest:   "wf-new",
+				DecisionDigest:   artifact.DecisionDigest,
+				RemediationEpoch: NextRemediationEpoch(artifact),
+			},
+			unlock: "workflow",
+		},
+		{
+			name: "decision",
+			state: RemediationState{
+				SourceInputFP:    artifact.SourceInputFP,
+				HarnessDigest:    artifact.HarnessDigest,
+				WorkflowDigest:   artifact.WorkflowDigest,
+				DecisionDigest:   "dec-new",
+				RemediationEpoch: NextRemediationEpoch(artifact),
+			},
+			unlock: "decision",
+		},
+		{
+			name: "cooldown",
+			state: RemediationState{
+				SourceInputFP:    artifact.SourceInputFP,
+				HarnessDigest:    artifact.HarnessDigest,
+				WorkflowDigest:   artifact.WorkflowDigest,
+				DecisionDigest:   artifact.DecisionDigest,
+				RemediationEpoch: NextRemediationEpoch(artifact),
+			},
+			unlock: "cooldown",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decision := RetryReadyWithRemediation(artifact, tt.state, now)
+			assert.Equal(t, RetryDecision{
+				Eligible:        true,
+				UnlockDimension: tt.unlock,
+			}, decision)
+		})
+	}
+}
+
 func TestBuildRecomputesRetryAfterForRetryFailures(t *testing.T) {
 	createdAt := time.Date(2026, time.April, 9, 18, 20, 0, 0, time.UTC)
 	staleRetryAfter := createdAt.Add(-time.Hour)
