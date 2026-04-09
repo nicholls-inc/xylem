@@ -5495,6 +5495,103 @@ phases:
 	assert.Empty(t, entries)
 }
 
+func setupCanonicalProtectedWriteSmokeTest(t *testing.T) (*Runner, *intermediary.AuditLog, string, string, surface.Snapshot) {
+	t.Helper()
+
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "prompts", "doctor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "prompts", "doctor", "analyze.md"), []byte("analyze"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "doctor.yaml"), []byte(`name: doctor
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doctor/analyze.md
+    max_turns: 1
+`), 0o644))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	protectedRelPath := ".xylem/workflows/doctor.yaml"
+	protectedPath := filepath.Join(worktreeDir, filepath.FromSlash(protectedRelPath))
+	require.NoError(t, os.MkdirAll(filepath.Dir(protectedPath), 0o755))
+	require.NoError(t, os.WriteFile(protectedPath, []byte("name: doctor\nphases: []\n"), 0o644))
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	return r, auditLog, worktreeDir, protectedPath, before
+}
+
+func TestSmoke_S21_SurfacePostVerificationAllowsReferencedCanonicalProtectedWrite(t *testing.T) {
+	r, auditLog, worktreeDir, protectedPath, before := setupCanonicalProtectedWriteSmokeTest(t)
+
+	modifiedContents := "name: doctor\nupdated: true\n"
+	require.NoError(t, os.WriteFile(protectedPath, []byte(modifiedContents), 0o644))
+
+	err := r.verifyProtectedSurfaces(
+		queue.Vessel{
+			ID:       "issue-canonical-allowed",
+			Source:   "github-issue",
+			Workflow: "doctor",
+			Meta: map[string]string{
+				"issue_body": "Please fix `.xylem/workflows/doctor.yaml` so the harness workflow stops failing.",
+			},
+		},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.NoError(t, err)
+
+	data, readErr := os.ReadFile(protectedPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, modifiedContents, string(data))
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestSmoke_S23_AuditLogRecordsDeniedCanonicalProtectedWriteWithoutIssuePathReference(t *testing.T) {
+	r, auditLog, worktreeDir, protectedPath, before := setupCanonicalProtectedWriteSmokeTest(t)
+
+	modifiedContents := "name: doctor\nupdated: true\n"
+	require.NoError(t, os.WriteFile(protectedPath, []byte(modifiedContents), 0o644))
+
+	err := r.verifyProtectedSurfaces(
+		queue.Vessel{
+			ID:       "issue-canonical-denied",
+			Source:   "github-issue",
+			Workflow: "doctor",
+			Meta: map[string]string{
+				"issue_body": "Please fix the harness workflow bug.",
+			},
+		},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "violated protected surfaces")
+	assert.Contains(t, err.Error(), ".xylem/workflows/doctor.yaml")
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "file_write", entries[0].Intent.Action)
+	assert.Equal(t, ".xylem/workflows/doctor.yaml", entries[0].Intent.Resource)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+}
+
 func TestSmoke_S23_AuditLogRecordsDeniedAdditiveProtectedWriteWithoutWorkflowOptIn(t *testing.T) {
 	repoRoot := t.TempDir()
 	withTestWorkingDir(t, repoRoot)

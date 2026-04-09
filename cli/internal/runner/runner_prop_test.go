@@ -55,6 +55,25 @@ func TestProp_FilterAdditiveProtectedSurfaceViolationsDropsOnlyAdditions(t *test
 	})
 }
 
+func TestProp_IssueBodyMentionsProtectedPathHonorsTokenBoundaries(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		pathSuffix := rapid.StringMatching(`[a-z0-9._/-]{1,24}`).Draw(t, "pathSuffix")
+		path := ".xylem/" + pathSuffix
+		validBoundary := rapid.SampledFrom([]string{"", " ", "\n", "`", "(", "[", ":", "="}).Draw(t, "validBoundary")
+		invalidBoundary := rapid.SampledFrom([]string{"a", "0", ".", "/", "_", "-"}).Draw(t, "invalidBoundary")
+
+		if !issueBodyMentionsProtectedPath(validBoundary+path+validBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = false, want true for bounded path %q", path)
+		}
+		if issueBodyMentionsProtectedPath(invalidBoundary+path+validBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = true, want false for prefixed path %q", path)
+		}
+		if issueBodyMentionsProtectedPath(validBoundary+path+invalidBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = true, want false for suffixed path %q", path)
+		}
+	})
+}
+
 func TestProp_BudgetEnforcementNeverLeaksAcrossVessels(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		outputLen := rapid.IntRange(20, 800).Draw(t, "outputLen")
