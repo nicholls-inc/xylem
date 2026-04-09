@@ -298,7 +298,8 @@ func TestScenarioIssueCommandGateRetryPassesOnRetry(t *testing.T) {
 	if vessel.GateRetries != 0 {
 		t.Fatalf("vessel.GateRetries = %d, want 0", vessel.GateRetries)
 	}
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"bug", "done"})
+	// Trigger label "bug" removed by OnComplete; only terminal status remains.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"done"})
 
 	phasesDir := filepath.Join(env.stateDir, "phases", "issue-7")
 	promptPath := filepath.Join(phasesDir, "implement.prompt")
