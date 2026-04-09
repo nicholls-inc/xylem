@@ -29,7 +29,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.CommandPath() == "xylem dtu" || strings.HasPrefix(cmd.CommandPath(), "xylem dtu ") {
+			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || cmd.CommandPath() == "xylem dtu" || strings.HasPrefix(cmd.CommandPath(), "xylem dtu ") {
 				return nil
 			}
 
@@ -90,6 +90,7 @@ func newRootCmd() *cobra.Command {
 		newDaemonCmd(),
 		newRetryCmd(),
 		newVisualizeCmd(),
+		newVersionCmd(),
 	)
 
 	return cmd

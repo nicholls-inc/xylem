@@ -292,11 +292,21 @@ func validateGate(phaseName string, g *Gate) error {
 		}
 	}
 
-	if g.Evidence != nil && g.Evidence.Level != "" {
-		level := evidence.Level(g.Evidence.Level)
-		if !level.Valid() || level == evidence.Untyped {
-			return fmt.Errorf("phase %q: gate evidence level %q is not valid (must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ)", phaseName, g.Evidence.Level)
-		}
+	if err := validateGateEvidence(phaseName, g.Evidence); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func validateGateEvidence(phaseName string, e *GateEvidence) error {
+	if e == nil || e.Level == "" {
+		return nil
+	}
+
+	level := evidence.Level(e.Level)
+	if !level.Valid() || level == evidence.Untyped {
+		return fmt.Errorf("phase %q: gate evidence level %q is not valid (must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ)", phaseName, e.Level)
 	}
 
 	return nil

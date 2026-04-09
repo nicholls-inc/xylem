@@ -2,12 +2,13 @@ package observability
 
 import (
 	"context"
-	"fmt"
+	"os"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
+	"go.opentelemetry.io/otel/exporters/stdout/stdouttrace"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -47,7 +48,7 @@ type SpanContext struct {
 }
 
 // DefaultTracerConfig returns a TracerConfig with service "xylem" and 100%
-// sampling. An Endpoint must be set before calling NewTracer.
+// sampling. An empty Endpoint uses the stdout exporter for local development.
 func DefaultTracerConfig() TracerConfig {
 	return TracerConfig{
 		ServiceName: "xylem",
@@ -55,21 +56,12 @@ func DefaultTracerConfig() TracerConfig {
 	}
 }
 
-// NewTracer creates and registers a global TracerProvider. config.Endpoint
-// must be set to an OTLP gRPC collector address (e.g. "localhost:4317").
+// NewTracer creates and registers a global TracerProvider. When
+// config.Endpoint is empty it uses the stdout exporter; otherwise it uses an
+// OTLP gRPC exporter pointed at config.Endpoint.
 // INV: Returned Tracer is non-nil when err is nil.
 func NewTracer(config TracerConfig) (*Tracer, error) {
-	if config.Endpoint == "" {
-		return nil, fmt.Errorf("OTLP endpoint is required")
-	}
-
-	opts := []otlptracegrpc.Option{
-		otlptracegrpc.WithEndpoint(config.Endpoint),
-	}
-	if config.Insecure {
-		opts = append(opts, otlptracegrpc.WithInsecure())
-	}
-	exporter, err := otlptracegrpc.New(context.Background(), opts...)
+	exporter, err := newExporter(config)
 	if err != nil {
 		return nil, err
 	}
@@ -89,6 +81,22 @@ func NewTracer(config TracerConfig) (*Tracer, error) {
 		provider: provider,
 		tracer:   t,
 	}, nil
+}
+
+func newExporter(config TracerConfig) (sdktrace.SpanExporter, error) {
+	if config.Endpoint == "" {
+		return stdouttrace.New(
+			stdouttrace.WithWriter(os.Stdout),
+		)
+	}
+
+	opts := []otlptracegrpc.Option{
+		otlptracegrpc.WithEndpoint(config.Endpoint),
+	}
+	if config.Insecure {
+		opts = append(opts, otlptracegrpc.WithInsecure())
+	}
+	return otlptracegrpc.New(context.Background(), opts...)
 }
 
 // NewTracerFromProvider wraps an existing TracerProvider. Used in tests.

@@ -470,17 +470,22 @@ func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
 }
 
 func spanHasExceptionEvent(span sdktrace.ReadOnlySpan, message string) bool {
+	_, ok := spanExceptionEvent(span, message)
+	return ok
+}
+
+func spanExceptionEvent(span sdktrace.ReadOnlySpan, message string) (sdktrace.Event, bool) {
 	for _, event := range span.Events() {
 		if event.Name != "exception" {
 			continue
 		}
 		for _, attr := range event.Attributes {
 			if attr.Key == attribute.Key("exception.message") && attr.Value.AsString() == message {
-				return true
+				return event, true
 			}
 		}
 	}
-	return false
+	return sdktrace.Event{}, false
 }
 
 func newWorkflowRunner(t *testing.T, workflowName string, phases []testPhase, cmdRunner *mockCmdRunner, tracer *observability.Tracer) *Runner {
@@ -5379,7 +5384,7 @@ func TestCheckHungVessels_CleansUpWorktree(t *testing.T) {
 	}
 }
 
-func TestSmoke_S9_NilTracerNoPanic(t *testing.T) {
+func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
 			"Analyze": []byte("analysis complete"),
@@ -5390,15 +5395,20 @@ func TestSmoke_S9_NilTracerNoPanic(t *testing.T) {
 	}, cmdRunner, nil)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vessel, findErr := r.Queue.FindByID("issue-1")
+	require.NoError(t, findErr)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+
+	outputPath := filepath.Join(r.Config.StateDir, "phases", "issue-1", "analyze.output")
+	output, readErr := os.ReadFile(outputPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "analysis complete", string(output))
 }
 
-func TestSmoke_S10_DrainRunSpanCreated(t *testing.T) {
+func TestSmoke_S10_DrainRunSpanWrapsEntireDrainCall(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -5410,72 +5420,71 @@ func TestSmoke_S10_DrainRunSpanCreated(t *testing.T) {
 	}, cmdRunner, tracer)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
-
-	_ = endedSpanByName(t, rec, "drain_run")
-}
-
-func TestSmoke_S11_VesselSpanChildOfDrainRun(t *testing.T) {
-	tracer, rec := newTestTracer(t)
-	cmdRunner := &mockCmdRunner{
-		phaseOutputs: map[string][]byte{
-			"Analyze": []byte("analysis complete"),
-		},
-	}
-	r := newWorkflowRunner(t, "trace-basic", []testPhase{
-		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
-	}, cmdRunner, tracer)
-
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	drainSpan := endedSpanByName(t, rec, "drain_run")
-	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
-	if vesselSpan.Parent().TraceID() != drainSpan.SpanContext().TraceID() {
-		t.Fatalf("vessel trace ID = %s, want %s", vesselSpan.Parent().TraceID(), drainSpan.SpanContext().TraceID())
-	}
-	if vesselSpan.Parent().SpanID() != drainSpan.SpanContext().SpanID() {
-		t.Fatalf("vessel parent span ID = %s, want %s", vesselSpan.Parent().SpanID(), drainSpan.SpanContext().SpanID())
-	}
-}
-
-func TestSmoke_S12_PhaseSpanChildOfVessel(t *testing.T) {
-	tracer, rec := newTestTracer(t)
-	cmdRunner := &mockCmdRunner{
-		phaseOutputs: map[string][]byte{
-			"Analyze": []byte("analysis complete"),
-		},
-	}
-	r := newWorkflowRunner(t, "trace-basic", []testPhase{
-		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
-	}, cmdRunner, tracer)
-
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	drainAttrs := spanAttrMap(drainSpan)
+	assert.Equal(t, strconv.Itoa(r.Config.Concurrency), drainAttrs["xylem.drain.concurrency"])
+	assert.Equal(t, r.Config.Timeout, drainAttrs["xylem.drain.timeout"])
 
 	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
-	if phaseSpan.Parent().SpanID() != vesselSpan.SpanContext().SpanID() {
-		t.Fatalf("phase parent span ID = %s, want %s", phaseSpan.Parent().SpanID(), vesselSpan.SpanContext().SpanID())
-	}
+	assert.False(t, drainSpan.StartTime().After(vesselSpan.StartTime()))
+	assert.False(t, drainSpan.StartTime().After(phaseSpan.StartTime()))
+	assert.False(t, drainSpan.EndTime().Before(vesselSpan.EndTime()))
+	assert.False(t, drainSpan.EndTime().Before(phaseSpan.EndTime()))
 }
 
-func TestSmoke_S13_GateSpanChildOfPhase(t *testing.T) {
+func TestSmoke_S11_VesselSpanIsChildOfDrainRunSpan(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("analysis complete"),
+		},
+	}
+	r := newWorkflowRunner(t, "trace-basic", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
+	}, cmdRunner, tracer)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	drainSpan := endedSpanByName(t, rec, "drain_run")
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	assert.Equal(t, drainSpan.SpanContext().TraceID(), vesselSpan.Parent().TraceID())
+	assert.Equal(t, drainSpan.SpanContext().SpanID(), vesselSpan.Parent().SpanID())
+
+	vesselAttrs := spanAttrMap(vesselSpan)
+	assert.Equal(t, "issue-1", vesselAttrs["xylem.vessel.id"])
+	assert.Equal(t, "github-issue", vesselAttrs["xylem.vessel.source"])
+	assert.Equal(t, "trace-basic", vesselAttrs["xylem.vessel.workflow"])
+	assert.Equal(t, "https://github.com/owner/repo/issues/1", vesselAttrs["xylem.vessel.ref"])
+}
+
+func TestSmoke_S12_PhaseSpanIsChildOfVesselSpan(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("analysis complete"),
+		},
+	}
+	r := newWorkflowRunner(t, "trace-basic", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
+	}, cmdRunner, tracer)
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
+	assert.Equal(t, vesselSpan.SpanContext().TraceID(), phaseSpan.Parent().TraceID())
+	assert.Equal(t, vesselSpan.SpanContext().SpanID(), phaseSpan.Parent().SpanID())
+}
+
+func TestSmoke_S13_GateSpanIsChildOfPhaseSpan(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -5493,21 +5502,21 @@ func TestSmoke_S13_GateSpanChildOfPhase(t *testing.T) {
 	}, cmdRunner, tracer)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
 	gateSpan := endedSpanByName(t, rec, "gate:command")
-	if gateSpan.Parent().SpanID() != phaseSpan.SpanContext().SpanID() {
-		t.Fatalf("gate parent span ID = %s, want %s", gateSpan.Parent().SpanID(), phaseSpan.SpanContext().SpanID())
-	}
+	assert.Equal(t, phaseSpan.SpanContext().TraceID(), gateSpan.Parent().TraceID())
+	assert.Equal(t, phaseSpan.SpanContext().SpanID(), gateSpan.Parent().SpanID())
+
+	gateAttrs := spanAttrMap(gateSpan)
+	assert.Equal(t, "command", gateAttrs["xylem.gate.type"])
+	assert.Equal(t, "true", gateAttrs["xylem.gate.passed"])
+	assert.Equal(t, "1", gateAttrs["xylem.gate.retry_attempt"])
 }
 
-func TestSmoke_S14_PhaseResultAttributesPresent(t *testing.T) {
+func TestSmoke_S14_PhaseSpanGetsResultAttributesAddedAfterExecution(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -5519,23 +5528,21 @@ func TestSmoke_S14_PhaseResultAttributesPresent(t *testing.T) {
 	}, cmdRunner, tracer)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	attrs := spanAttrMap(endedSpanByName(t, rec, "phase:analyze"))
-	if attrs["xylem.phase.input_tokens_est"] == "" {
-		t.Fatal("xylem.phase.input_tokens_est missing")
-	}
-	if attrs["xylem.phase.duration_ms"] == "" {
-		t.Fatal("xylem.phase.duration_ms missing")
-	}
+	require.NotEmpty(t, attrs["xylem.phase.input_tokens_est"])
+	require.NotEmpty(t, attrs["xylem.phase.output_tokens_est"])
+	require.NotEmpty(t, attrs["xylem.phase.cost_usd_est"])
+	require.NotEmpty(t, attrs["xylem.phase.duration_ms"])
+
+	costParts := strings.Split(attrs["xylem.phase.cost_usd_est"], ".")
+	require.Len(t, costParts, 2)
+	assert.Len(t, costParts[1], 6)
 }
 
-func TestSmoke_S15_PhaseErrorRecordedOnSpan(t *testing.T) {
+func TestSmoke_S15_PhaseSpanRecordsErrorOnPhaseFailure(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	runErr := errors.New("provider crashed")
 	cmdRunner := &mockCmdRunner{
@@ -5546,23 +5553,15 @@ func TestSmoke_S15_PhaseErrorRecordedOnSpan(t *testing.T) {
 	}, cmdRunner, tracer)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
 
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
-	if !spanHasExceptionEvent(phaseSpan, runErr.Error()) {
-		t.Fatalf("phase span missing exception event for %q", runErr.Error())
-	}
-	if phaseSpan.Status().Code != codes.Error {
-		t.Fatalf("phase span status code = %v, want %v", phaseSpan.Status().Code, codes.Error)
-	}
+	assert.True(t, spanHasExceptionEvent(phaseSpan, runErr.Error()))
+	assert.Equal(t, codes.Error, phaseSpan.Status().Code)
 }
 
-func TestSmoke_S16_PhaseSpanAlwaysEnds(t *testing.T) {
+func TestSmoke_S16_PhaseSpanAlwaysEndsEvenWhenPhaseFails(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseErr: errors.New("provider crashed"),
@@ -5572,18 +5571,17 @@ func TestSmoke_S16_PhaseSpanAlwaysEnds(t *testing.T) {
 	}, cmdRunner, tracer)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
-	if len(endedSpansByName(rec, "phase:analyze")) == 0 {
-		t.Fatal("phase span did not end")
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	for _, spanName := range []string{"drain_run", "vessel:issue-1", "phase:analyze"} {
+		spans := endedSpansByName(rec, spanName)
+		require.Len(t, spans, 1)
+		assert.False(t, spans[0].EndTime().IsZero())
 	}
 }
 
-func TestSmoke_WS6S10_PhaseSpanAlwaysEndedOnFailure(t *testing.T) {
+func TestSmoke_S10_PhaseSpanIsAlwaysEndedEvenOnFailureDuringOrchestratedExecution(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseErr: errors.New("orchestrated crash"),
@@ -5594,21 +5592,16 @@ func TestSmoke_WS6S10_PhaseSpanAlwaysEndedOnFailure(t *testing.T) {
 	}, cmdRunner, tracer)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
-	if len(cmdRunner.phaseCalls) != 1 {
-		t.Fatalf("phaseCalls = %d, want 1", len(cmdRunner.phaseCalls))
-	}
-	if len(endedSpansByName(rec, "phase:analyze")) == 0 {
-		t.Fatal("orchestrated phase span did not end")
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Len(t, cmdRunner.phaseCalls, 1)
+
+	spans := endedSpansByName(rec, "phase:analyze")
+	require.Len(t, spans, 1)
+	assert.False(t, spans[0].EndTime().IsZero())
 }
 
-func TestSmoke_WS6S11_ErrorRecordedBeforeEnd(t *testing.T) {
+func TestSmoke_S11_ErrorIsRecordedOnSpanBeforeEndDuringOrchestratedExecution(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	runErr := errors.New("orchestrated crash")
 	cmdRunner := &mockCmdRunner{
@@ -5620,20 +5613,14 @@ func TestSmoke_WS6S11_ErrorRecordedBeforeEnd(t *testing.T) {
 	}, cmdRunner, tracer)
 
 	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
 
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
-	if !spanHasExceptionEvent(phaseSpan, runErr.Error()) {
-		t.Fatalf("phase span missing exception event for %q", runErr.Error())
-	}
-	if phaseSpan.EndTime().IsZero() {
-		t.Fatal("phase span end time not set")
-	}
+	event, ok := spanExceptionEvent(phaseSpan, runErr.Error())
+	require.True(t, ok)
+	require.False(t, phaseSpan.EndTime().IsZero())
+	assert.False(t, event.Time.After(phaseSpan.EndTime()))
 }
 
 func TestIsRateLimitError(t *testing.T) {

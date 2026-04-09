@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,8 +15,9 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
-	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -43,12 +46,16 @@ type recordingExporter struct {
 }
 
 type configurableWorktreeStub struct {
-	patterns []string
+	patterns     []string
+	removedPaths []string
 }
 
 func (w *configurableWorktreeStub) Create(context.Context, string) (string, error) { return "", nil }
 
-func (w *configurableWorktreeStub) Remove(context.Context, string) error { return nil }
+func (w *configurableWorktreeStub) Remove(_ context.Context, worktreePath string) error {
+	w.removedPaths = append(w.removedPaths, worktreePath)
+	return nil
+}
 
 func (w *configurableWorktreeStub) SetProtectedSurfaces(patterns []string) {
 	w.patterns = append([]string(nil), patterns...)
@@ -182,9 +189,8 @@ func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
 	if r.AuditLog == nil {
 		t.Fatal("r.AuditLog = nil, want audit log")
 	}
-	// Tracer is nil when no OTLP endpoint is configured.
-	if r.Tracer != nil {
-		t.Fatal("r.Tracer != nil, want nil when no OTLP endpoint configured")
+	if r.Tracer == nil {
+		t.Fatal("r.Tracer = nil, want stdout tracer when observability is enabled")
 	}
 
 	result := r.Intermediary.Evaluate(intermediary.Intent{
@@ -232,49 +238,88 @@ func TestBuildDrainRunnerPropagatesProtectedSurfaces(t *testing.T) {
 	}
 }
 
-func TestSmoke_S8_TracerInitFailureRunnerContinues(t *testing.T) {
+func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTracing(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Claude.Command = "true"
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
+	wt := &configurableWorktreeStub{}
+	worktreePath := filepath.Join(dir, "prompt-worktree")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", worktreePath, err)
+	}
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:           "prompt-1",
+		Source:       "manual",
+		Prompt:       "print hello",
+		WorktreePath: worktreePath,
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
 
-	runnerInstance, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	oldNewTracer := newTracer
+	defer func() { newTracer = oldNewTracer }()
+	newTracer = func(observability.TracerConfig) (*observability.Tracer, error) {
+		return nil, errors.New("boom")
+	}
+
+	var logBuf bytes.Buffer
+	oldLogWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldLogWriter)
+
+	runnerInstance, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
-	runnerInstance.Tracer = nil
+
+	assert.Nil(t, runnerInstance.Tracer)
 
 	result, err := runnerInstance.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result != (runner.DrainResult{}) {
-		t.Fatalf("DrainResult = %+v, want zero value", result)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	assert.Zero(t, result.Failed)
+	assert.Zero(t, result.Skipped)
+	assert.Zero(t, result.Waiting)
+	assert.Contains(t, logBuf.String(), "warn: failed to initialize tracer: boom")
+
+	vessel, findErr := q.FindByID("prompt-1")
+	require.NoError(t, findErr)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+	require.Len(t, wt.removedPaths, 1)
+	assert.Equal(t, worktreePath, wt.removedPaths[0])
 }
 
-func TestSmoke_S30_TracerWiredWhenEndpointConfigured(t *testing.T) {
+func TestSmoke_S30_TracerWiredInDrainAfterConfigLoad(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
-	cfg.Observability.Endpoint = "localhost:4317"
-	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
 
 	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
 	defer cleanup()
 
-	if r.Tracer == nil {
-		t.Fatal("r.Tracer = nil, want tracer when endpoint configured")
-	}
+	assert.NotNil(t, r.Tracer)
 }
 
-func TestSmoke_S32_TracerShutdownDeferred(t *testing.T) {
+func TestSmoke_S32_TracerShutdownDeferredInDrainPath(t *testing.T) {
+	oldNewTracer := newTracer
+	defer func() { newTracer = oldNewTracer }()
+
 	exporter := &recordingExporter{}
 	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	tracer := observability.NewTracerFromProvider(tp)
-
-	shutdownConfiguredTracer(tracer)
-
-	if !exporter.shutdownCalled {
-		t.Fatal("exporter shutdown was not called")
+	newTracer = func(observability.TracerConfig) (*observability.Tracer, error) {
+		return observability.NewTracerFromProvider(tp), nil
 	}
+
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	cmdRunner := newCmdRunner(cfg)
+
+	_, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	cleanup()
+
+	assert.True(t, exporter.shutdownCalled)
 }

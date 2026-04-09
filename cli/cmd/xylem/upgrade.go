@@ -81,12 +81,48 @@ func gitPull(repoDir string) error {
 }
 
 func goBuild(cliDir, outPath string) error {
-	cmd := exec.Command("go", "build", "-o", outPath, "./cmd/xylem")
+	// Resolve current HEAD commit so the new binary can report its version
+	// via `xylem version`. Best-effort — if git rev-parse fails, fall back
+	// to an unflagged build and let commitHash default to "unknown".
+	commit := resolveHEADCommit(cliDir)
+	args := []string{"build"}
+	if commit != "" {
+		args = append(args, "-ldflags", "-X main.commitHash="+commit)
+	}
+	args = append(args, "-o", outPath, "./cmd/xylem")
+
+	cmd := exec.Command("go", args...)
 	cmd.Dir = cliDir
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("go build: %w\n%s", err, out)
 	}
 	return nil
+}
+
+// resolveHEADCommit returns the current git HEAD commit from the given
+// directory, or empty string if not available.
+func resolveHEADCommit(dir string) string {
+	cmd := exec.Command("git", "rev-parse", "HEAD")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		return ""
+	}
+	return string(bytesTrimSpace(out))
+}
+
+// bytesTrimSpace trims leading/trailing ASCII whitespace without importing
+// strings. Keeps the upgrade module's dependency surface minimal.
+func bytesTrimSpace(b []byte) []byte {
+	start := 0
+	for start < len(b) && (b[start] == ' ' || b[start] == '\n' || b[start] == '\r' || b[start] == '\t') {
+		start++
+	}
+	end := len(b)
+	for end > start && (b[end-1] == ' ' || b[end-1] == '\n' || b[end-1] == '\r' || b[end-1] == '\t') {
+		end--
+	}
+	return b[start:end]
 }
 
 func hashFile(path string) (string, error) {
