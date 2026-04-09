@@ -256,6 +256,18 @@ func TestSmoke_S1_OnFailRoutesSpecGapToNeedsRefinement(t *testing.T) {
 	assert.Contains(t, refine, "--remove-label ready-for-work")
 }
 
+func TestShouldRouteToRefinementIncludesDiagnosisFollowUps(t *testing.T) {
+	assert.True(t, shouldRouteToRefinement(queue.Vessel{
+		Meta: map[string]string{recovery.MetaAction: string(recovery.ActionRequestInfo)},
+	}))
+	assert.True(t, shouldRouteToRefinement(queue.Vessel{
+		Meta: map[string]string{recovery.MetaAction: string(recovery.ActionSplitIssue)},
+	}))
+	assert.False(t, shouldRouteToRefinement(queue.Vessel{
+		Meta: map[string]string{recovery.MetaAction: string(recovery.ActionHarnessPatch)},
+	}))
+}
+
 func TestOnFailNoLabelsConfigured(t *testing.T) {
 	// When no status labels are configured, OnFail still removes the
 	// backward-compat "in-progress" label that OnStart would have added.

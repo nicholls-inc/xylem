@@ -2,6 +2,7 @@ package recovery
 
 import (
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,6 +53,27 @@ func TestPropApplyToMetaPreservesRecoveryFields(t *testing.T) {
 		}
 		if meta[MetaUnlockDimension] != unlockDimension {
 			t.Fatalf("MetaUnlockDimension = %q, want %q", meta[MetaUnlockDimension], unlockDimension)
+		}
+	})
+}
+
+func TestPropFailureFingerprintNormalizesWhitespaceAndCase(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		message := rapid.StringMatching(`[A-Za-z0-9 ]{1,48}`).Draw(t, "message")
+		base := Input{
+			Workflow:    "fix-bug",
+			State:       queue.StateFailed,
+			FailedPhase: "implement",
+			Error:       message,
+			GateOutput:  "gate output",
+		}
+		variant := base
+		variant.Error = "  " + strings.ToUpper(message) + "   "
+
+		got := failureFingerprint(base)
+		want := failureFingerprint(variant)
+		if got != want {
+			t.Fatalf("failureFingerprint() = %q, want %q", got, want)
 		}
 	})
 }
