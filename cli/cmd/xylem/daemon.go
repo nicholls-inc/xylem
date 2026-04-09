@@ -40,6 +40,8 @@ func newDaemonCmd() *cobra.Command {
 }
 
 func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
+	log.Printf("daemon: starting, binary built from commit %s", buildInfo())
+
 	// Isolation check: refuse to run in the main git worktree because vessel
 	// subprocesses may switch branches or modify the working tree, which
 	// would corrupt the user's primary checkout.
