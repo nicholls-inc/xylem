@@ -2150,6 +2150,11 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	}
 
 	violations := surface.Compare(before, after)
+	allowAdditive, err := r.workflowAllowsAdditiveProtectedWrites(vessel, violations)
+	if err != nil {
+		return fmt.Errorf("resolve protected surface policy: %w", err)
+	}
+	violations = filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
 	if len(violations) == 0 {
 		return nil
 	}
@@ -2162,6 +2167,45 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 		log.Printf("%sphase %q protected surface self-heal failed: %v", vesselLabel(vessel), p.Name, err)
 	}
 	return fmt.Errorf("%s", errMsg)
+}
+
+func (r *Runner) workflowAllowsAdditiveProtectedWrites(vessel queue.Vessel, violations []surface.Violation) (bool, error) {
+	if !containsAdditiveProtectedSurfaceViolation(violations) {
+		return false, nil
+	}
+	if strings.TrimSpace(vessel.Workflow) == "" {
+		return false, nil
+	}
+
+	sk, err := r.loadWorkflow(vessel.Workflow)
+	if err != nil {
+		return false, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
+	}
+	return sk.AllowAdditiveProtectedWrites, nil
+}
+
+func containsAdditiveProtectedSurfaceViolation(violations []surface.Violation) bool {
+	for _, violation := range violations {
+		if violation.Before == "absent" {
+			return true
+		}
+	}
+	return false
+}
+
+func filterAdditiveProtectedSurfaceViolations(violations []surface.Violation, allowAdditive bool) []surface.Violation {
+	if !allowAdditive || len(violations) == 0 {
+		return violations
+	}
+
+	filtered := make([]surface.Violation, 0, len(violations))
+	for _, violation := range violations {
+		if violation.Before == "absent" {
+			continue
+		}
+		filtered = append(filtered, violation)
+	}
+	return filtered
 }
 
 func (r *Runner) protectedSurfaceSourceRoot(ctx context.Context, worktreePath string) (string, error) {

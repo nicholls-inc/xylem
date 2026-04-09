@@ -19,11 +19,12 @@ var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // Workflow defines a multi-phase execution plan loaded from a YAML file.
 type Workflow struct {
-	Name        string  `yaml:"name"`
-	Description string  `yaml:"description,omitempty"`
-	LLM         *string `yaml:"llm,omitempty"`
-	Model       *string `yaml:"model,omitempty"`
-	Phases      []Phase `yaml:"phases"`
+	Name                         string  `yaml:"name"`
+	Description                  string  `yaml:"description,omitempty"`
+	LLM                          *string `yaml:"llm,omitempty"`
+	Model                        *string `yaml:"model,omitempty"`
+	AllowAdditiveProtectedWrites bool    `yaml:"allow_additive_protected_writes,omitempty"`
+	Phases                       []Phase `yaml:"phases"`
 }
 
 // Phase represents a single step in a workflow's execution pipeline.
