@@ -78,6 +78,9 @@ func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeMana
 	r := runner.New(cfg, q, wt, cmdRunner)
 	r.Sources = buildSourceMap(cfg, q, cmdRunner)
 	r.BuiltinWorkflows = buildBuiltinWorkflowHandlers(cfg, wt, cmdRunner)
+	if tracker, ok := interface{}(cmdRunner).(runner.ProcessTracker); ok {
+		r.ProcessTracker = tracker
+	}
 	wireRunnerScaffolding(cfg, r, tracer)
 
 	return r, func() {

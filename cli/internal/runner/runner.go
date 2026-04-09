@@ -76,6 +76,7 @@ type Runner struct {
 	// instead of loading .xylem/workflows/<name>.yaml.
 	BuiltinWorkflows map[string]BuiltinWorkflowHandler
 	Reporter         *reporter.Reporter // may be nil for non-github vessels
+	ProcessTracker   ProcessTracker
 	// Shared harness scaffolding for phase policy enforcement, audit logging,
 	// protected-surface verification, and tracing.
 	Intermediary *intermediary.Intermediary // nil = no policy enforcement
@@ -653,7 +654,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-				cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
+				phaseCtx := WithPhaseExecutionMetadata(ctx, PhaseExecutionMetadata{VesselID: vessel.ID, PhaseName: p.Name})
+				cmdOut, cmdErr := gate.RunCommand(phaseCtx, r.Runner, worktreePath, rendered)
 				output = []byte(cmdOut)
 				runErr = cmdErr
 			} else {
@@ -721,7 +723,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if phaseStdin != nil {
 					stdinContent = rendered
 				}
-				output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+				phaseCtx := WithPhaseExecutionMetadata(ctx, PhaseExecutionMetadata{VesselID: vessel.ID, PhaseName: p.Name})
+				output, runErr = r.runPhaseWithRateLimitRetry(phaseCtx, worktreePath, stdinContent, cmd, args)
 			}
 
 			if r.vesselCancelled(ctx, vessel.ID) {
@@ -1015,7 +1018,8 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		return "failed"
 	}
 
-	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
+	phaseCtx := WithPhaseExecutionMetadata(ctx, PhaseExecutionMetadata{VesselID: vessel.ID, PhaseName: "prompt-only"})
+	output, runErr := r.runPhaseWithRateLimitRetry(phaseCtx, worktreePath, prompt, cmd, args)
 	if r.vesselCancelled(ctx, vessel.ID) {
 		return r.cancelVessel(vessel, worktreePath, vrs, nil)
 	}
@@ -1708,7 +1712,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
+			phaseCtx := WithPhaseExecutionMetadata(ctx, PhaseExecutionMetadata{VesselID: vessel.ID, PhaseName: p.Name})
+			cmdOut, cmdErr := gate.RunCommand(phaseCtx, r.Runner, worktreePath, rendered)
 			output = []byte(cmdOut)
 			runErr = cmdErr
 		} else {
@@ -1775,7 +1780,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if phaseStdin != nil {
 				stdinContent = rendered
 			}
-			output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+			phaseCtx := WithPhaseExecutionMetadata(ctx, PhaseExecutionMetadata{VesselID: vessel.ID, PhaseName: p.Name})
+			output, runErr = r.runPhaseWithRateLimitRetry(phaseCtx, worktreePath, stdinContent, cmd, args)
 		}
 
 		if r.vesselCancelled(ctx, vessel.ID) {
@@ -3268,13 +3274,7 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 		errMsg := fmt.Sprintf("vessel timed out after %s", elapsed.Truncate(time.Second))
 		log.Printf("warn: %s for vessel %s", errMsg, vessel.ID)
 
-		if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, errMsg); updateErr != nil {
-			log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
-			continue
-		}
-
-		// Clean up worktree (best-effort)
-		r.removeWorktree(vessel.WorktreePath, vessel.ID)
+		r.timeoutRunningVessel(ctx, vessel, errMsg)
 	}
 }
 

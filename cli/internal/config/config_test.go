@@ -497,6 +497,77 @@ func TestValidateDaemonDrainIntervalInvalid(t *testing.T) {
 	requireErrorContains(t, err, "daemon.drain_interval must be a valid duration")
 }
 
+func TestValidateDaemonStallMonitorInvalid(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  func(*Config)
+		wantErr string
+	}{
+		{
+			name: "phase stall threshold",
+			config: func(cfg *Config) {
+				cfg.Daemon.StallMonitor.PhaseStallThreshold = "bad"
+			},
+			wantErr: "daemon.stall_monitor.phase_stall_threshold must be a valid duration",
+		},
+		{
+			name: "scanner idle threshold",
+			config: func(cfg *Config) {
+				cfg.Daemon.StallMonitor.ScannerIdleThreshold = "bad"
+			},
+			wantErr: "daemon.stall_monitor.scanner_idle_threshold must be a valid duration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			tt.config(cfg)
+
+			err := cfg.Validate()
+			requireErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
+func TestLoadDaemonStallMonitorConfig(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+daemon:
+  stall_monitor:
+    phase_stall_threshold: "11m"
+    scanner_idle_threshold: "7m"
+    orphan_check_enabled: false
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Daemon.StallMonitor.PhaseStallThreshold != "11m" {
+		t.Fatalf("Daemon.StallMonitor.PhaseStallThreshold = %q, want 11m", cfg.Daemon.StallMonitor.PhaseStallThreshold)
+	}
+	if cfg.Daemon.StallMonitor.ScannerIdleThreshold != "7m" {
+		t.Fatalf("Daemon.StallMonitor.ScannerIdleThreshold = %q, want 7m", cfg.Daemon.StallMonitor.ScannerIdleThreshold)
+	}
+	if cfg.Daemon.StallMonitor.OrphanCheckEnabled {
+		t.Fatal("Daemon.StallMonitor.OrphanCheckEnabled = true, want false")
+	}
+}
+
 func TestLoadWithFlagsAndEnv(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:

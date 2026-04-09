@@ -3,13 +3,17 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	xrunner "github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
 // maxStderrBytes is the maximum amount of stderr captured from a phase subprocess.
@@ -73,6 +77,14 @@ type realCmdRunner struct {
 	// extraEnv holds additional KEY=VALUE pairs merged into the subprocess
 	// environment. Populated from claude.env and copilot.env in config.
 	extraEnv []string
+	mu       sync.Mutex
+	tracked  map[string]*trackedProcess
+}
+
+type trackedProcess struct {
+	cmd       *exec.Cmd
+	phase     string
+	startedAt time.Time
 }
 
 // newCmdRunner creates a realCmdRunner with extra env vars merged from
@@ -113,7 +125,7 @@ func newCmdRunner(cfg *config.Config) *realCmdRunner {
 	for k, v := range cfg.Copilot.Env {
 		addEnv(k, v)
 	}
-	return &realCmdRunner{extraEnv: env}
+	return &realCmdRunner{extraEnv: env, tracked: make(map[string]*trackedProcess)}
 }
 
 // cmdEnv returns the environment to use for a subprocess: the daemon's
@@ -140,7 +152,11 @@ func (r *realCmdRunner) Run(ctx context.Context, name string, args ...string) ([
 func (r *realCmdRunner) RunOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = r.cmdEnv()
-	return cmd.CombinedOutput()
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stdout
+	err := r.runTrackedCommand(ctx, cmd)
+	return stdout.Bytes(), err
 }
 
 func (r *realCmdRunner) RunProcess(ctx context.Context, dir string, name string, args ...string) error {
@@ -175,9 +191,96 @@ func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reade
 	cmd.Stdout = &stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	err := r.runTrackedCommand(ctx, cmd)
 	if err != nil && stderr.Len() > 0 {
 		return stdout.Bytes(), fmt.Errorf("%w\nstderr: %s", err, stderr.String())
 	}
 	return stdout.Bytes(), err
+}
+
+func (r *realCmdRunner) ProcessInfo(vesselID string) (xrunner.ProcessInfo, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	proc, ok := r.tracked[vesselID]
+	if !ok || proc.cmd == nil || proc.cmd.Process == nil {
+		return xrunner.ProcessInfo{}, false
+	}
+	return xrunner.ProcessInfo{
+		PID:       proc.cmd.Process.Pid,
+		Phase:     proc.phase,
+		StartedAt: proc.startedAt,
+		Live:      true,
+	}, true
+}
+
+func (r *realCmdRunner) TerminateProcess(vesselID string, gracePeriod time.Duration) error {
+	info, ok := r.ProcessInfo(vesselID)
+	if !ok {
+		return fmt.Errorf("terminate process for vessel %s: not tracked", vesselID)
+	}
+
+	r.mu.Lock()
+	proc := r.tracked[vesselID]
+	r.mu.Unlock()
+	if proc == nil || proc.cmd == nil || proc.cmd.Process == nil {
+		return fmt.Errorf("terminate process for vessel %s: no process", vesselID)
+	}
+
+	if err := proc.cmd.Process.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("sigterm pid %d: %w", info.PID, err)
+	}
+	if r.waitForExit(vesselID, gracePeriod) {
+		return nil
+	}
+	if err := proc.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("sigkill pid %d: %w", info.PID, err)
+	}
+	r.waitForExit(vesselID, time.Second)
+	return nil
+}
+
+func (r *realCmdRunner) waitForExit(vesselID string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, ok := r.ProcessInfo(vesselID); !ok {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func (r *realCmdRunner) runTrackedCommand(ctx context.Context, cmd *exec.Cmd) error {
+	meta, ok := xrunner.PhaseExecutionMetadataFromContext(ctx)
+	if !ok || meta.VesselID == "" {
+		return cmd.Run()
+	}
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	r.trackProcess(meta, cmd)
+	defer r.untrackProcess(meta.VesselID)
+	return cmd.Wait()
+}
+
+func (r *realCmdRunner) trackProcess(meta xrunner.PhaseExecutionMetadata, cmd *exec.Cmd) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.tracked == nil {
+		r.tracked = make(map[string]*trackedProcess)
+	}
+	r.tracked[meta.VesselID] = &trackedProcess{
+		cmd:       cmd,
+		phase:     meta.PhaseName,
+		startedAt: time.Now().UTC(),
+	}
+}
+
+func (r *realCmdRunner) untrackProcess(vesselID string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.tracked, vesselID)
 }

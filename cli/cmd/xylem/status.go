@@ -78,8 +78,14 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 		return nil
 	}
 
+	var daemonStatus *daemonStatusSnapshot
+	if cfg != nil && cfg.StateDir != "" {
+		daemonStatus, _ = loadDaemonStatusSnapshot(daemonHealthPath(cfg))
+	}
+
 	if len(vessels) == 0 {
 		fmt.Println("No vessels in queue.")
+		printDaemonHealth(cfg, daemonStatus)
 		return nil
 	}
 
@@ -120,6 +126,7 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 	if len(fleet.Patterns) > 0 {
 		fmt.Printf("Patterns: %s\n", runner.FormatFleetPatterns(fleet.Patterns))
 	}
+	printDaemonHealth(cfg, daemonStatus)
 	return nil
 }
 
@@ -149,4 +156,28 @@ func pauseMarkerPath(cfg *config.Config) string {
 func isPaused(cfg *config.Config) bool {
 	_, err := os.Stat(pauseMarkerPath(cfg))
 	return err == nil
+}
+
+func printDaemonHealth(cfg *config.Config, snapshot *daemonStatusSnapshot) {
+	if cfg == nil || snapshot == nil {
+		return
+	}
+
+	fmt.Println("Daemon health:")
+	now := time.Now().UTC()
+	if now.Sub(snapshot.HeartbeatAt) <= daemonHeartbeatFreshness(cfg) {
+		fmt.Printf("  OK Daemon alive (pid=%d, uptime=%s)\n", snapshot.PID, now.Sub(snapshot.StartedAt).Round(time.Second))
+	} else {
+		fmt.Printf("  WARN Daemon heartbeat stale (pid=%d, last=%s)\n", snapshot.PID, snapshot.HeartbeatAt.UTC().Format(time.RFC3339))
+	}
+	if snapshot.AutoUpgrade && snapshot.LastUpgradeAt != nil {
+		fmt.Printf("  OK Auto-upgrade current (binary=%s, last=%s)\n", snapshot.Build, snapshot.LastUpgradeAt.UTC().Format("15:04:05"))
+	}
+	for _, alert := range snapshot.Alerts {
+		prefix := "  WARN"
+		if alert.Severity == "critical" {
+			prefix = "  FAIL"
+		}
+		fmt.Printf("%s %s\n", prefix, alert.Message)
+	}
 }

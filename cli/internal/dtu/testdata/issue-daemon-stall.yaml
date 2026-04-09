@@ -1,0 +1,24 @@
+metadata:
+  name: issue-daemon-stall
+  scenario: daemon stall monitor recovers stalled running vessel
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: bug
+      - name: queued
+      - name: in-progress
+      - name: timed-out
+    issues:
+      - number: 4
+        title: stalled vessel
+        body: phase output stopped changing
+        labels: [bug]
+providers:
+  scripts:
+    - name: implement
+      provider: claude
+      match:
+        phase: implement
+      stdout: implementation complete

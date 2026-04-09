@@ -103,6 +103,10 @@ copilot:
 daemon:
   scan_interval: "60s"   # how often the daemon scans for new work
   drain_interval: "30s"  # how often the daemon drains pending vessels
+  stall_monitor:
+    phase_stall_threshold: "10m"   # max age of the newest phase artifact before a running vessel is declared stalled
+    scanner_idle_threshold: "5m"   # idle time before xylem checks GitHub for backlog the scanner missed
+    orphan_check_enabled: true      # mark running vessels timed_out when no subprocess is tracked
 ```
 
 ## Field reference
@@ -126,6 +130,26 @@ daemon:
 | `harness` | object | see below | No | Agent safety guardrails: protected file surfaces, policy rules, and audit logging. |
 | `observability` | object | see below | No | OpenTelemetry instrumentation settings. |
 | `cost` | object | see below | No | Token budget enforcement settings. |
+
+### `daemon`
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `scan_interval` | string | `"60s"` | No | How often the daemon scans configured sources for new work. Must be a valid Go duration string. |
+| `drain_interval` | string | `"30s"` | No | How often the daemon starts a drain tick. Must be a valid Go duration string. |
+| `stall_monitor` | object | see below | No | Deterministic self-monitoring for stalled vessels and idle-with-backlog detection. |
+| `auto_upgrade` | boolean | `false` | No | Rebuild and exec a fresh daemon binary when `main` advances. |
+| `upgrade_interval` | string | `"5m"` | No | How often the daemon re-checks whether auto-upgrade should run while the loop is active. |
+| `auto_merge` | boolean | `false` | No | Enable automatic review and GitHub auto-merge for ready harness PRs. |
+| `auto_merge_repo` | string | current repo | No | Explicit `owner/name` target for daemon auto-merge operations. |
+
+### `daemon.stall_monitor`
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `phase_stall_threshold` | string | `"10m"` | No | If the newest artifact under `<state_dir>/phases/<vessel>/` is older than this threshold for a running vessel, the daemon terminates the subprocess and marks the vessel `timed_out`. |
+| `scanner_idle_threshold` | string | `"5m"` | No | If the daemon stays idle after a zero-add scan for this long, it queries GitHub for eligible backlog and records a warning when matches exist. |
+| `orphan_check_enabled` | boolean | `true` | No | When enabled, running vessels with no tracked subprocess are marked `timed_out` immediately instead of waiting for a daemon restart. |
 
 ### Sources
 

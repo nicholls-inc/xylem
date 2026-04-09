@@ -87,19 +87,25 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	scan := func(ctx context.Context) (scanner.ScanResult, error) {
-		return runScan(ctx, cfg, q)
-	}
 	cmdRunner := newCmdRunner(cfg)
 	drainRunner, cleanupDrainRunner := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanupDrainRunner()
 	drainRunner.Reporter = buildReporter(cfg, cmdRunner)
 	drainRunner.DrainBudget = drainInterval
+	backlogMonitor := newDaemonBacklogMonitor(cfg, cmdRunner)
+	scan := func(ctx context.Context) (scanner.ScanResult, error) {
+		result, err := runScan(ctx, cfg, q)
+		if err == nil {
+			backlogMonitor.ObserveScan(ctx, daemonNow(), result, drainRunner, q)
+		}
+		return result, err
+	}
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
 		return drainRunner.Drain(ctx)
 	}
-	check := func(ctx context.Context) {
+	check := func(ctx context.Context) []daemonStatusAlert {
 		drainRunner.CheckWaitingVessels(ctx)
+		stallAlerts := drainRunner.CheckStalledVessels(ctx)
 		drainRunner.CheckHungVessels(ctx)
 		// Auto-merge: best-effort request copilot review on merge-ready
 		// harness PRs, then enable GitHub auto-merge once checks are green
@@ -107,9 +113,20 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		if cfg.Daemon.AutoMerge {
 			autoMergeXylemPRs(ctx, cfg.Daemon.AutoMergeRepo)
 		}
+		alerts := make([]daemonStatusAlert, 0, len(stallAlerts)+len(backlogMonitor.CurrentAlerts(drainRunner, q)))
+		for _, alert := range stallAlerts {
+			alerts = append(alerts, daemonStatusAlert{
+				Code:     alert.Code,
+				Severity: alert.Severity,
+				Message:  alert.Message,
+			})
+		}
+		alerts = append(alerts, backlogMonitor.CurrentAlerts(drainRunner, q)...)
+		return alerts
 	}
 
-	return daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+	health := newDaemonHealthRecorder(cfg, daemonNow(), upgrade != nil)
+	return daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, health, scanInterval, drainInterval, upgradeInterval)
 }
 
 // parseUpgradeInterval returns the effective periodic upgrade interval. If
@@ -155,8 +172,9 @@ type inFlightTracker interface {
 }
 
 // checkFunc runs periodic vessel health checks (waiting vessel label checks,
-// hung vessel timeouts). May be nil if no checks are needed.
-type checkFunc func(ctx context.Context)
+// hung vessel timeouts) and returns daemon health alerts for status reporting.
+// May be nil if no checks are needed.
+type checkFunc func(ctx context.Context) []daemonStatusAlert
 
 // upgradeFunc runs a self-upgrade attempt. If it succeeds with a binary
 // change, it calls exec() and never returns. If it returns, either the
@@ -203,7 +221,7 @@ const upgradeOverdueMultiplier = 3
 //     Once in_flight reaches zero, the normal path fires.
 //
 // Pass nil/zero upgrade/upgradeInterval to disable.
-func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
+func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, health *daemonHealthRecorder, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
@@ -217,6 +235,9 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 	// upgradeInterval — not immediately, since cmdDaemon already ran the
 	// startup upgrade.
 	lastUpgrade = daemonNow()
+	if health != nil {
+		health.Update(lastUpgrade, nil, lastUpgrade)
+	}
 
 	slog.Info("daemon started",
 		"scan_interval", scanInterval,
@@ -258,8 +279,9 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 		}
 
 		// Run vessel health checks (waiting label gates, hung vessel timeouts)
+		var healthAlerts []daemonStatusAlert
 		if check != nil {
-			check(ctx)
+			healthAlerts = check(ctx)
 		}
 
 		// Compute upgrade state once per tick so both the upgrade check and
@@ -314,6 +336,9 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 			}
 		}
 
+		if health != nil {
+			health.Update(now, healthAlerts, lastUpgrade)
+		}
 		logTickSummary(q)
 
 		select {
