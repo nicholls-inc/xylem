@@ -1,6 +1,50 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"testing"
+)
+
+func TestIsBenignGhWarning(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil is not benign", nil, false},
+		{"plain error is not benign", errors.New("exit status 1"), false},
+		{"projects classic deprecation is benign",
+			errors.New("exit status 1: GraphQL: Projects (classic) is being deprecated in favor of the new Projects experience"), true},
+		{"projectCards reference is benign",
+			errors.New("exit status 1: error in projectCards query"), true},
+		{"unrelated graphql error is not benign",
+			errors.New("exit status 1: GraphQL: not found"), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isBenignGhWarning(tt.err); got != tt.want {
+				t.Errorf("isBenignGhWarning(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPRSummary_HasLabel(t *testing.T) {
+	pr := prSummary{
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "needs-conflict-resolution"}, {Name: "harness-impl"}},
+	}
+	if !pr.hasLabel("needs-conflict-resolution") {
+		t.Error("hasLabel('needs-conflict-resolution') = false, want true")
+	}
+	if !pr.hasLabel("harness-impl") {
+		t.Error("hasLabel('harness-impl') = false, want true")
+	}
+	if pr.hasLabel("nonexistent") {
+		t.Error("hasLabel('nonexistent') = true, want false")
+	}
+}
 
 func TestXylemBranchPattern(t *testing.T) {
 	tests := []struct {
@@ -90,8 +134,18 @@ func TestDecideAutoMergeAction(t *testing.T) {
 			want: actionSkip,
 		},
 		{
-			name: "xylem PR with conflicts waits",
+			name: "xylem PR with conflicts and no labels is routed to resolve-conflicts",
 			pr:   prSummary{HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "CONFLICTING"},
+			want: actionRouteConflict,
+		},
+		{
+			name: "xylem PR with conflicts and resolve-conflicts labels waits",
+			pr: prSummary{
+				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "CONFLICTING",
+				Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "needs-conflict-resolution"}, {Name: "harness-impl"}},
+			},
 			want: actionWaitForMergeable,
 		},
 		{

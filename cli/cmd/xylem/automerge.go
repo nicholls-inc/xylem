@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // xylemBranchPattern matches branch names created by xylem vessels.
@@ -16,6 +17,33 @@ var xylemBranchPattern = regexp.MustCompile(`^(feat|fix|chore)/issue-\d+`)
 
 // copilotReviewerLogin is the GitHub bot that performs automated code review.
 const copilotReviewerLogin = "copilot-pull-request-reviewer"
+
+// conflictResolutionLabels are the labels that trigger the resolve-conflicts
+// workflow via the conflict-resolution github-pr source. Auto-merge adds
+// these to any CONFLICTING xylem PR so the workflow picks it up.
+var conflictResolutionLabels = []string{"needs-conflict-resolution", "harness-impl"}
+
+// isBenignGhWarning reports whether a gh CLI error is a non-fatal warning
+// that should not block the intended operation. The most common case is the
+// "Projects (classic) is being deprecated" GraphQL warning, which gh prints
+// alongside an exit code of 1 even though the underlying operation (edit,
+// add-label, etc.) actually succeeded.
+func isBenignGhWarning(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	benignFragments := []string{
+		"Projects (classic) is being deprecated",
+		"projectCards",
+	}
+	for _, f := range benignFragments {
+		if strings.Contains(msg, f) {
+			return true
+		}
+	}
+	return false
+}
 
 // prSummary is a minimal projection of `gh pr list` / `gh pr view` output.
 type prSummary struct {
@@ -37,6 +65,19 @@ type prSummary struct {
 		} `json:"author"`
 		State string `json:"state"`
 	} `json:"latestReviews"`
+	Labels []struct {
+		Name string `json:"name"`
+	} `json:"labels"`
+}
+
+// hasLabel reports whether the PR already carries the given label.
+func (p prSummary) hasLabel(name string) bool {
+	for _, l := range p.Labels {
+		if l.Name == name {
+			return true
+		}
+	}
+	return false
 }
 
 // autoMergeAction describes what the daemon should do with a PR this cycle.
@@ -47,7 +88,8 @@ const (
 	actionRequestReview                           // no reviewer assigned; request copilot review
 	actionWaitForReview                           // review requested but not yet complete
 	actionWaitForChecks                           // CI still running
-	actionWaitForMergeable                        // conflicts or unknown mergeable state
+	actionWaitForMergeable                        // unknown mergeable state (github computing)
+	actionRouteConflict                           // conflicts — add labels so resolve-conflicts workflow picks it up
 	actionAddressReview                           // changes requested; another workflow handles
 	actionMerge                                   // approved + green + mergeable
 )
@@ -59,12 +101,14 @@ const (
 // Decision order:
 // 1. Non-xylem branch → skip
 // 2. Closed/merged → skip
-// 3. Mergeable conflicts → wait (resolve-conflicts workflow handles)
-// 4. CI failing/running → wait (fix-pr-checks handles failures)
-// 5. Changes requested → wait (respond-to-pr-review handles)
-// 6. No copilot review requested or submitted → request review
-// 7. Review pending → wait
-// 8. Approved + mergeable + green → merge
+// 3. Conflicts + missing resolve-conflicts labels → add labels (routeConflict)
+// 4. Conflicts + labels already present → wait (workflow handles)
+// 5. Unknown mergeable state → wait (github computing)
+// 6. CI failing/running → wait (fix-pr-checks handles failures)
+// 7. Changes requested → wait (respond-to-pr-review handles)
+// 8. No copilot review requested or submitted → request review
+// 9. Review pending → wait
+// 10. Approved + mergeable + green → merge
 func decideAutoMergeAction(pr prSummary) autoMergeAction {
 	if !xylemBranchPattern.MatchString(pr.HeadRefName) {
 		return actionSkip
@@ -74,7 +118,13 @@ func decideAutoMergeAction(pr prSummary) autoMergeAction {
 	}
 	// Mergeable state: MERGEABLE / CONFLICTING / UNKNOWN
 	if pr.Mergeable == "CONFLICTING" {
-		return actionWaitForMergeable
+		// If the PR already has the labels that trigger resolve-conflicts
+		// workflow, just wait — the workflow is (or will be) processing it.
+		// Otherwise, add the labels so the workflow picks it up.
+		if pr.hasLabel("needs-conflict-resolution") && pr.hasLabel("harness-impl") {
+			return actionWaitForMergeable
+		}
+		return actionRouteConflict
 	}
 	if pr.Mergeable != "MERGEABLE" {
 		// UNKNOWN: GitHub hasn't computed yet — wait.
@@ -153,16 +203,30 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 			continue
 		case actionRequestReview:
 			if err := requestCopilotReview(ctx, repo, pr.Number); err != nil {
+				if isBenignGhWarning(err) {
+					log.Printf("daemon: auto-merge: requested copilot review on PR #%d (gh warning ignored): %s", pr.Number, pr.HeadRefName)
+					continue
+				}
 				log.Printf("daemon: auto-merge: PR #%d request review failed: %v", pr.Number, err)
 				continue
 			}
 			log.Printf("daemon: auto-merge: requested copilot review on PR #%d (%s)", pr.Number, pr.HeadRefName)
+		case actionRouteConflict:
+			if err := addPRLabels(ctx, repo, pr.Number, conflictResolutionLabels); err != nil {
+				if isBenignGhWarning(err) {
+					log.Printf("daemon: auto-merge: routed PR #%d to resolve-conflicts workflow (gh warning ignored)", pr.Number)
+					continue
+				}
+				log.Printf("daemon: auto-merge: PR #%d add conflict labels failed: %v", pr.Number, err)
+				continue
+			}
+			log.Printf("daemon: auto-merge: routed PR #%d to resolve-conflicts workflow (%s)", pr.Number, pr.HeadRefName)
 		case actionWaitForReview:
 			log.Printf("daemon: auto-merge: PR #%d waiting for copilot review to complete", pr.Number)
 		case actionWaitForChecks:
 			log.Printf("daemon: auto-merge: PR #%d waiting for CI checks", pr.Number)
 		case actionWaitForMergeable:
-			log.Printf("daemon: auto-merge: PR #%d waiting for mergeable state (conflicts or computing)", pr.Number)
+			log.Printf("daemon: auto-merge: PR #%d waiting for mergeable state (conflicts being resolved or computing)", pr.Number)
 		case actionAddressReview:
 			log.Printf("daemon: auto-merge: PR #%d has changes requested, respond-to-pr-review workflow will handle", pr.Number)
 		case actionMerge:
@@ -177,7 +241,7 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 
 func listOpenPRs(ctx context.Context, repo string) ([]prSummary, error) {
 	args := []string{"pr", "list", "--state", "open", "--json",
-		"number,headRefName,mergeable,state,reviewDecision,statusCheckRollup,reviewRequests,latestReviews",
+		"number,headRefName,mergeable,state,reviewDecision,statusCheckRollup,reviewRequests,latestReviews,labels",
 		"--limit", "50"}
 	if repo != "" {
 		args = append(args, "--repo", repo)
@@ -194,15 +258,56 @@ func listOpenPRs(ctx context.Context, repo string) ([]prSummary, error) {
 	return prs, nil
 }
 
-// requestCopilotReview adds copilot-pull-request-reviewer as a reviewer on
-// the given PR. Uses the gh api to POST to the requested_reviewers endpoint.
-func requestCopilotReview(ctx context.Context, repo string, number int) error {
-	// gh pr edit --add-reviewer copilot-pull-request-reviewer
-	args := []string{"pr", "edit", strconv.Itoa(number), "--add-reviewer", copilotReviewerLogin}
-	if repo != "" {
-		args = append(args, "--repo", repo)
+// addPRLabels adds the given labels to a PR via the GitHub REST API.
+// Uses `gh api` directly (not `gh pr edit`) to avoid the GraphQL Projects
+// deprecation warning that `gh pr edit` emits with a non-zero exit code.
+func addPRLabels(ctx context.Context, repo string, number int, labels []string) error {
+	if len(labels) == 0 {
+		return nil
+	}
+	slug := repo
+	if slug == "" {
+		return fmt.Errorf("addPRLabels: repo slug required")
+	}
+	body, err := json.Marshal(map[string][]string{"labels": labels})
+	if err != nil {
+		return fmt.Errorf("marshal label payload: %w", err)
+	}
+	args := []string{
+		"api",
+		"--method", "POST",
+		fmt.Sprintf("repos/%s/issues/%d/labels", slug, number),
+		"--input", "-",
 	}
 	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Stdin = strings.NewReader(string(body))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%w: %s", err, out)
+	}
+	return nil
+}
+
+// requestCopilotReview adds copilot-pull-request-reviewer as a reviewer on
+// the given PR. Uses the GitHub REST API directly (not `gh pr edit`) so we
+// avoid the GraphQL Projects-deprecation warning that `gh pr edit` emits
+// alongside a non-zero exit code even when the underlying operation succeeds.
+func requestCopilotReview(ctx context.Context, repo string, number int) error {
+	if repo == "" {
+		return fmt.Errorf("requestCopilotReview: repo slug required")
+	}
+	body, err := json.Marshal(map[string][]string{"reviewers": {copilotReviewerLogin}})
+	if err != nil {
+		return fmt.Errorf("marshal reviewer payload: %w", err)
+	}
+	args := []string{
+		"api",
+		"--method", "POST",
+		fmt.Sprintf("repos/%s/pulls/%d/requested_reviewers", repo, number),
+		"--input", "-",
+	}
+	cmd := exec.CommandContext(ctx, "gh", args...)
+	cmd.Stdin = strings.NewReader(string(body))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, out)
