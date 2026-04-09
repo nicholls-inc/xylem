@@ -4850,7 +4850,7 @@ func TestVerifyProtectedSurfacesSkipsWhenWorktreeMissing(t *testing.T) {
 	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
 	r.AuditLog = auditLog
 
-	before, ok, err := r.takeProtectedSurfaceSnapshot(worktreeDir)
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
 	if err != nil {
 		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
 	}
@@ -4920,7 +4920,7 @@ func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *t
 	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
 	r.AuditLog = auditLog
 
-	before, ok, err := r.takeProtectedSurfaceSnapshot(worktreeDir)
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
 	if err != nil {
 		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
 	}
@@ -4972,6 +4972,136 @@ func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *t
 	}
 	if !found {
 		t.Fatalf("no file_write audit entry recorded; entries = %+v", entries)
+	}
+}
+
+func TestTakeProtectedSurfaceSnapshotRestoresMissingProtectedFilesFromSourceRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-1")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(workflows) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.xylem.yml) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "fix-bug.yaml"), []byte("name: fix-bug\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(workflow) = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "git" {
+				return nil, nil, false
+			}
+			if len(args) == 5 &&
+				args[0] == "-C" &&
+				args[1] == worktreeDir &&
+				args[2] == "rev-parse" &&
+				args[3] == "--path-format=absolute" &&
+				args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	snapshot, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil {
+		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot() checkProtectedSurfaces = false, want true")
+	}
+
+	restoredConfig := filepath.Join(worktreeDir, ".xylem.yml")
+	if _, err := os.Stat(restoredConfig); err != nil {
+		t.Fatalf("restored .xylem.yml missing: %v", err)
+	}
+	restoredWorkflow := filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml")
+	if _, err := os.Stat(restoredWorkflow); err != nil {
+		t.Fatalf("restored workflow missing: %v", err)
+	}
+	if len(snapshot.Files) != 2 {
+		t.Fatalf("len(snapshot.Files) = %d, want 2", len(snapshot.Files))
+	}
+}
+
+func TestVerifyProtectedSurfacesSelfHealsDeletedFileFromDefaultBranch(t *testing.T) {
+	worktreeDir := t.TempDir()
+	protectedFile := filepath.Join(worktreeDir, ".xylem.yml")
+	if err := os.WriteFile(protectedFile, []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.xylem.yml) = %v", err)
+	}
+
+	before, err := surface.TakeSnapshot(worktreeDir, []string{".xylem.yml"})
+	if err != nil {
+		t.Fatalf("TakeSnapshot(before) = %v", err)
+	}
+	if err := os.Remove(protectedFile); err != nil {
+		t.Fatalf("Remove(.xylem.yml) = %v", err)
+	}
+
+	cfg := makeTestConfig(t.TempDir(), 1)
+	cfg.StateDir = t.TempDir()
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "git" {
+				return nil, nil, false
+			}
+			command := strings.Join(append([]string{name}, args...), " ")
+			switch command {
+			case "git -C " + worktreeDir + " checkout -- .xylem.yml":
+				return nil, errors.New("path missing from HEAD"), true
+			case "git -C " + worktreeDir + " symbolic-ref refs/remotes/origin/HEAD":
+				return []byte("refs/remotes/origin/main\n"), nil, true
+			case "git -C " + worktreeDir + " checkout origin/main -- .xylem.yml":
+				if err := os.WriteFile(protectedFile, []byte("repo: owner/repo\n"), 0o644); err != nil {
+					return nil, err, true
+				}
+				return []byte{}, nil, true
+			default:
+				return nil, nil, false
+			}
+		},
+	}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(cfg.StateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-self-heal", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "analyze"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() returned nil, want violation error")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("verifyProtectedSurfaces() error = %q, want violation", err)
+	}
+	data, readErr := os.ReadFile(protectedFile)
+	if readErr != nil {
+		t.Fatalf("ReadFile(restored .xylem.yml) = %v", readErr)
+	}
+	if string(data) != "repo: owner/repo\n" {
+		t.Fatalf("restored .xylem.yml = %q, want canonical contents", string(data))
+	}
+	info, statErr := os.Stat(protectedFile)
+	if statErr != nil {
+		t.Fatalf("Stat(restored .xylem.yml) = %v", statErr)
+	}
+	if info.Mode().Perm() != 0o444 {
+		t.Fatalf("restored .xylem.yml perms = %#o, want 0444", info.Mode().Perm())
 	}
 }
 

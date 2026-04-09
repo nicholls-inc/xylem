@@ -19,6 +19,8 @@ Resolve each conflict using these strategies:
 - **Overlapping**: both sides modified the same code. Combine the intent of both changes.
 - **Structural**: one side refactored while the other made localized edits. Apply the localized edits to the new structure.
 
+Do not modify, stage, or delete anything under `.xylem/`. The xylem control plane is out of scope for conflict resolution.
+
 For every conflicting file:
 
 1. Remove all conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`)
