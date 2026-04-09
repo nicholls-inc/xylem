@@ -272,6 +272,24 @@ func RetryReady(artifact *Artifact, now time.Time) RetryDecision {
 	}
 }
 
+func RetryReadyForWorkflow(artifact *Artifact, currentWorkflow string, now time.Time) RetryDecision {
+	if artifact == nil {
+		return RetryDecision{}
+	}
+	currentWorkflow = strings.TrimSpace(currentWorkflow)
+	artifactWorkflow := strings.TrimSpace(artifact.Workflow)
+	if artifactWorkflow == "" {
+		artifactWorkflow = currentWorkflow
+	}
+	if currentWorkflow != "" && artifactWorkflow != "" && artifactWorkflow != currentWorkflow {
+		return RetryDecision{
+			Eligible:        true,
+			UnlockDimension: "workflow",
+		}
+	}
+	return RetryReady(artifact, now)
+}
+
 func LoadForVessel(stateDir, vesselID string) (*Artifact, error) {
 	if err := validatePathComponent(vesselID); err != nil {
 		return nil, fmt.Errorf("load recovery artifact: invalid vessel ID: %w", err)
@@ -322,7 +340,12 @@ func NextRetryVessel(base, parent queue.Vessel, artifact *Artifact, q *queue.Que
 		meta[MetaFailureFingerprint] = failureFingerprint
 	}
 	if sourceFingerprint := strings.TrimSpace(meta["source_input_fingerprint"]); sourceFingerprint != "" {
-		meta[MetaRemediationFingerprint] = remediationFingerprint(sourceFingerprint, unlockDimension, retryCount)
+		meta[MetaRemediationFingerprint] = remediationFingerprint(
+			sourceFingerprint,
+			firstNonEmpty(base.Workflow, parent.Workflow, artifactWorkflow(artifact)),
+			unlockDimension,
+			retryCount,
+		)
 	}
 
 	retry := queue.Vessel{
@@ -458,9 +481,17 @@ func normalizeFailureText(text string) string {
 	return strings.Join(strings.Fields(strings.TrimSpace(strings.ToLower(text))), " ")
 }
 
-func remediationFingerprint(sourceFingerprint, unlockDimension string, retryCount int) string {
+func artifactWorkflow(artifact *Artifact) string {
+	if artifact == nil {
+		return ""
+	}
+	return artifact.Workflow
+}
+
+func remediationFingerprint(sourceFingerprint, workflow, unlockDimension string, retryCount int) string {
 	sum := sha256.Sum256([]byte(strings.Join([]string{
 		sourceFingerprint,
+		workflow,
 		unlockDimension,
 		strconv.Itoa(retryCount),
 	}, "\n")))
