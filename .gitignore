@@ -3,7 +3,16 @@ cli/claude
 cli/copilot
 cli/gh
 cli/xylem
-.xylem/
+
+# Ignore everything under .xylem/ except control-plane definitions. The
+# control surfaces (workflows, prompts, HARNESS.md) must be tracked so
+# fresh worktrees — including .claude/worktrees/.daemon-root where the
+# daemon runs — can load them. Only operational state (phases/, audit
+# logs, queue files, daemon.pid, dtu/, eval/) stays ignored.
+.xylem/*
+!.xylem/HARNESS.md
+!.xylem/workflows/
+!.xylem/prompts/
 
 # DTU checked-in fixtures intentionally seed .xylem scaffolding.
 !cli/internal/dtu/testdata/**/.xylem/

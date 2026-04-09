@@ -65,7 +65,7 @@ func ws1Drain(t *testing.T, env *dtuScenarioEnv, cfg *config.Config) (scanner.Sc
 
 	src := &source.GitHub{Repo: "acme/widget", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -74,6 +74,7 @@ func ws1Drain(t *testing.T, env *dtuScenarioEnv, cfg *config.Config) (scanner.Sc
 
 // DrainResult is imported from runner; alias here for the helper signature.
 type DrainResult = struct {
+	Launched  int
 	Completed int
 	Failed    int
 	Skipped   int
@@ -138,7 +139,10 @@ func TestWS1PolicyAllowHappyPath(t *testing.T) {
 	}
 
 	// Verify issue labels transitioned through the status label lifecycle.
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 10), []string{"bug", "done"})
+	// Note: the trigger label "bug" is removed by OnComplete so the scanner
+	// does not re-enqueue the same vessel on the next tick. Only the
+	// terminal status label "done" should remain.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 10), []string{"done"})
 }
 
 // TestWS1PolicyAllowHappyPathAuditLog verifies that when the runner appends
@@ -583,8 +587,10 @@ func TestWS1ConfigDefaultsOnlyCompletesNormally(t *testing.T) {
 		t.Fatalf("claude phase = %q, want %q", claudeInvocations[0].Shim.Phase, "fix")
 	}
 
-	// Verify status labels applied.
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 50), []string{"bug", "done"})
+	// Verify status labels applied. The trigger label "bug" is removed by
+	// OnComplete to prevent duplicate-enqueue on the next scan; only the
+	// terminal status label "done" should remain.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 50), []string{"done"})
 }
 
 func TestWS1CheckedInSmokeFixtureConfigsLoad(t *testing.T) {
@@ -675,7 +681,9 @@ func TestWS1CheckedInSmokeFixtureHappyPath(t *testing.T) {
 		t.Fatalf("second claude phase = %q, want %q", claudeInvocations[1].Shim.Phase, "implement")
 	}
 
-	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 10), []string{"bug", "done"})
+	// Trigger label "bug" is removed on completion to prevent
+	// duplicate-enqueue; only the terminal status label "done" remains.
+	assertStringSliceEqual(t, readIssueLabels(t, env.store, "acme/widget", 10), []string{"done"})
 }
 
 // TestWS1ConfigDefaultsIntermediaryWiring verifies that when no harness config

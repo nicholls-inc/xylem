@@ -93,6 +93,14 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					"issue_body":               issue.Body,
 					"issue_labels":             strings.Join(issueLabelNames(issue.Labels), ","),
 					"source_input_fingerprint": fingerprint,
+					// trigger_label records which of this task's configured
+					// labels matched on the source issue during scan. On
+					// vessel completion this label is removed so the issue
+					// no longer appears in the scanner's candidate set,
+					// preventing duplicate enqueue after PR lifecycle events
+					// (close/merge) and keeping the issue's UI state
+					// consistent with its workflow state.
+					"trigger_label": label,
 				}
 				sl := task.StatusLabels
 				if sl != nil {
@@ -136,9 +144,21 @@ func (g *GitHub) OnStart(ctx context.Context, vessel queue.Vessel) error {
 }
 
 func (g *GitHub) OnComplete(ctx context.Context, vessel queue.Vessel) error {
-	g.applyIssueLabel(ctx, vessel.Meta["issue_num"],
+	issueNum := vessel.Meta["issue_num"]
+	g.applyIssueLabel(ctx, issueNum,
 		vessel.Meta["status_label_completed"],
 		ResolveRunningLabel(vessel))
+	// Remove the label that triggered this vessel's enqueue. Without this,
+	// completed vessels leave their trigger label (e.g. "ready-for-work")
+	// on the source issue, which is a cosmetic state bug *and* a latent
+	// duplicate-enqueue hazard once the PR is closed/merged and branch
+	// dedup checks fall through. Done as a separate applyIssueLabel call
+	// so it doesn't interfere with the status_label_* transition above.
+	// Backward-compat: vessels queued before this field was introduced
+	// have an empty trigger_label and skip this step.
+	if trig := vessel.Meta["trigger_label"]; trig != "" {
+		g.applyIssueLabel(ctx, issueNum, "", trig)
+	}
 	return nil
 }
 

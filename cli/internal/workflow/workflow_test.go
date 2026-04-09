@@ -188,6 +188,41 @@ phases:
 	assert.Equal(t, "", e.TrustBoundary)
 }
 
+func TestLoadWorkflowAllowAdditiveProtectedWritesDefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.False(t, got.AllowAdditiveProtectedWrites)
+}
+
+func TestLoadWorkflowAllowAdditiveProtectedWritesParsesTrue(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, got.AllowAdditiveProtectedWrites)
+}
+
 func TestLoadWorkflowGateWithEvidenceAndEmptyLevel(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
@@ -354,6 +389,7 @@ phases:
 			workflowName: "deploy",
 			yaml: `name: deploy
 description: Deploy with gates
+allow_additive_protected_writes: true
 phases:
   - name: build
     prompt_file: prompts/build.md
@@ -378,6 +414,9 @@ phases:
 				t.Helper()
 				if s.Phases[0].Gate.Type != "command" {
 					t.Fatalf("gate type = %q, want command", s.Phases[0].Gate.Type)
+				}
+				if !s.AllowAdditiveProtectedWrites {
+					t.Fatal("AllowAdditiveProtectedWrites = false, want true")
 				}
 				if s.Phases[0].Gate.Retries != 2 {
 					t.Fatalf("gate retries = %d, want 2", s.Phases[0].Gate.Retries)
