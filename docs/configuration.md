@@ -103,6 +103,10 @@ copilot:
 daemon:
   scan_interval: "60s"   # how often the daemon scans for new work
   drain_interval: "30s"  # how often the daemon drains pending vessels
+  stall_monitor:
+    phase_stall_threshold: "10m"   # mark running vessels timed_out after no phase output activity
+    scanner_idle_threshold: "5m"   # warn when queue stays idle while GitHub backlog exists
+    orphan_check_enabled: true      # repair running vessels with no live tracked subprocess
 ```
 
 ## Field reference
@@ -126,6 +130,26 @@ daemon:
 | `harness` | object | see below | No | Agent safety guardrails: protected file surfaces, policy rules, and audit logging. |
 | `observability` | object | see below | No | OpenTelemetry instrumentation settings. |
 | `cost` | object | see below | No | Token budget enforcement settings. |
+
+### `daemon`
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `scan_interval` | string | `"60s"` | No | How often the daemon scans configured sources for new work. Must be a valid Go duration string. |
+| `drain_interval` | string | `"30s"` | No | How often the daemon dequeues pending vessels. Must be a valid Go duration string. |
+| `stall_monitor` | object | see below | No | Deterministic self-monitoring thresholds for phase stalls, idle-with-backlog detection, and orphan repair. |
+| `auto_upgrade` | boolean | `false` | No | Enables periodic self-upgrade checks for the daemon binary. |
+| `upgrade_interval` | string | `"5m"` | No | How often the daemon re-runs auto-upgrade checks while the loop is running. Must be a valid Go duration string. |
+| `auto_merge` | boolean | `false` | No | Enables the merge-ready Copilot review + auto-merge cycle for xylem-authored PRs. |
+| `auto_merge_repo` | string | current repo remote | No | Optional `owner/name` override for auto-merge GitHub operations. |
+
+### `daemon.stall_monitor`
+
+| Field | Type | Default | Required | Description |
+|-------|------|---------|----------|-------------|
+| `phase_stall_threshold` | string | `"10m"` | No | Maximum time since the most recent `*.output` activity for a running vessel before it is marked `timed_out`. Must be a valid Go duration string. |
+| `scanner_idle_threshold` | string | `"5m"` | No | How long the queue may remain idle before xylem warns that GitHub backlog still exists. Must be a valid Go duration string. |
+| `orphan_check_enabled` | boolean | `true` | No | When enabled, the daemon repairs running vessels that have no live tracked subprocess by transitioning them to `timed_out`. |
 
 ### Sources
 

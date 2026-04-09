@@ -80,6 +80,23 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 	return result, nil
 }
 
+// BacklogCount reports how many items currently match backlog-aware sources.
+func (s *Scanner) BacklogCount(ctx context.Context) (int, error) {
+	total := 0
+	for _, entry := range s.buildSources() {
+		backlogSource, ok := entry.src.(source.BacklogSource)
+		if !ok {
+			continue
+		}
+		count, err := backlogSource.BacklogCount(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += count
+	}
+	return total, nil
+}
+
 type sourceEntry struct {
 	src        source.Source
 	configName string

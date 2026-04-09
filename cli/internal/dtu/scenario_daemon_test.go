@@ -2,11 +2,15 @@ package dtu_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	dtu "github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 )
@@ -188,5 +192,71 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 	events := readEvents(t, env.store)
 	if len(events) == 0 {
 		t.Fatal("no DTU events recorded")
+	}
+}
+
+func TestScenarioDaemonPhaseStallRecovery(t *testing.T) {
+	env := newScenarioEnv(t, "issue-daemon-recovery.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = false
+
+	now, err := dtu.RuntimeNow()
+	if err != nil {
+		t.Fatalf("RuntimeNow() error = %v", err)
+	}
+	enqueued, err := env.queue.Enqueue(queue.Vessel{
+		ID:        "stall-1",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	if err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	if !enqueued {
+		t.Fatal("Enqueue() = false, want true")
+	}
+	vessel, err := env.queue.Dequeue()
+	if err != nil {
+		t.Fatalf("Dequeue() error = %v", err)
+	}
+	if vessel == nil {
+		t.Fatal("Dequeue() = nil")
+	}
+
+	outputPath := filepath.Join(env.stateDir, "phases", vessel.ID, "analyze.output")
+	if err := os.MkdirAll(filepath.Dir(outputPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(outputPath), err)
+	}
+	if err := os.WriteFile(outputPath, []byte(""), 0o644); err != nil {
+		t.Fatalf("WriteFile(%q): %v", outputPath, err)
+	}
+	old := now.Add(-11 * time.Minute)
+	if err := os.Chtimes(outputPath, old, old); err != nil {
+		t.Fatalf("Chtimes(%q): %v", outputPath, err)
+	}
+	if err := env.queue.UpdateVessel(*vessel); err != nil {
+		t.Fatalf("UpdateVessel() error = %v", err)
+	}
+
+	r := runner.New(cfg, env.queue, nil, env.cmdRunner)
+	findings := r.CheckStalledVessels(context.Background())
+	if len(findings) != 1 {
+		t.Fatalf("len(findings) = %d, want 1", len(findings))
+	}
+	if findings[0].Code != "phase_stalled" {
+		t.Fatalf("findings[0].Code = %q, want %q", findings[0].Code, "phase_stalled")
+	}
+
+	updated, err := env.queue.FindByID(vessel.ID)
+	if err != nil {
+		t.Fatalf("FindByID(%q) error = %v", vessel.ID, err)
+	}
+	if updated.State != queue.StateTimedOut {
+		t.Fatalf("updated.State = %q, want %q", updated.State, queue.StateTimedOut)
 	}
 }

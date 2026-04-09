@@ -179,6 +179,15 @@ claude:
 	if cfg.Daemon.DrainInterval != "30s" {
 		t.Fatalf("Daemon.DrainInterval = %q, want 30s", cfg.Daemon.DrainInterval)
 	}
+	if cfg.Daemon.StallMonitor.PhaseStallThreshold != "10m" {
+		t.Fatalf("Daemon.StallMonitor.PhaseStallThreshold = %q, want 10m", cfg.Daemon.StallMonitor.PhaseStallThreshold)
+	}
+	if cfg.Daemon.StallMonitor.ScannerIdleThreshold != "5m" {
+		t.Fatalf("Daemon.StallMonitor.ScannerIdleThreshold = %q, want 5m", cfg.Daemon.StallMonitor.ScannerIdleThreshold)
+	}
+	if !cfg.Daemon.StallMonitor.OrphanCheckEnabled {
+		t.Fatal("Daemon.StallMonitor.OrphanCheckEnabled = false, want true")
+	}
 
 	// Legacy config should be normalized into Sources
 	if len(cfg.Sources) != 1 {
@@ -240,6 +249,12 @@ func TestValidateScheduleSource(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error = %v", err)
 	}
+}
+
+func TestValidateRejectsInvalidPhaseStallThreshold(t *testing.T) {
+	cfg := validConfig()
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "not-a-duration"
+	requireErrorContains(t, cfg.Validate(), "daemon.stall_monitor.phase_stall_threshold")
 }
 
 func TestValidateScheduleSourceRejectsMalformedCadence(t *testing.T) {

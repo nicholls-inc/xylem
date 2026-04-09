@@ -140,6 +140,12 @@ type Source interface {
 	BranchName(vessel queue.Vessel) string
 }
 
+// BacklogSource reports how many items currently match this source's scan
+// criteria without enqueueing them.
+type BacklogSource interface {
+	BacklogCount(ctx context.Context) (int, error)
+}
+
 // CommandRunner abstracts subprocess execution for testing.
 type CommandRunner interface {
 	Run(ctx context.Context, name string, args ...string) ([]byte, error)

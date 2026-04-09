@@ -150,6 +150,35 @@ func TestScanFindsIssues(t *testing.T) {
 	}
 }
 
+func TestBacklogCountFindsEligibleGitHubIssues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 1, Title: "fix null response", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+		{Number: 2, Title: "fix panic on empty", URL: "https://github.com/owner/repo/issues/2", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+		{Number: 3, Title: "fix stale cache", URL: "https://github.com/owner/repo/issues/3", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+
+	s := New(cfg, q, r)
+	count, err := s.BacklogCount(context.Background())
+	if err != nil {
+		t.Fatalf("BacklogCount() error = %v", err)
+	}
+	if count != 3 {
+		t.Fatalf("BacklogCount() = %d, want 3", count)
+	}
+}
+
 func TestScanExcludedLabel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeConfig(dir)

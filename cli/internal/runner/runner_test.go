@@ -7204,6 +7204,108 @@ func TestCheckHungVesselsWritesTraceableSummary(t *testing.T) {
 	assert.Equal(t, timeoutSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
 }
 
+func TestCheckStalledVesselsTimesOutStalePhase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = false
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "stall-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "analyze.output")
+	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+	require.NoError(t, os.WriteFile(outputPath, []byte(""), 0o644))
+	old := now.Add(-11 * time.Minute)
+	require.NoError(t, os.Chtimes(outputPath, old, old))
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	findings := r.CheckStalledVessels(context.Background())
+	require.Len(t, findings, 1)
+	assert.Equal(t, "phase_stalled", findings[0].Code)
+	assert.Equal(t, "analyze", findings[0].Phase)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Contains(t, updated.Error, "phase stalled: no output for")
+}
+
+func TestCheckStalledVesselsTimesOutOrphanedProcess(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "orphan-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.markProcessStarted(vessel.ID, "analyze", os.Getpid())
+	r.markProcessExited(vessel.ID, os.Getpid())
+	findings := r.CheckStalledVessels(context.Background())
+	require.Len(t, findings, 1)
+	assert.Equal(t, "orphaned_subprocess", findings[0].Code)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Equal(t, "vessel orphaned (no live subprocess)", updated.Error)
+}
+
+func TestCheckStalledVesselsDoesNotTimeoutUntrackedRecentPhase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "command-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "analyze.output")
+	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+	require.NoError(t, os.WriteFile(outputPath, []byte("still running"), 0o644))
+	require.NoError(t, os.Chtimes(outputPath, now, now))
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	findings := r.CheckStalledVessels(context.Background())
+	require.Empty(t, findings)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateRunning, updated.State)
+}
+
 func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{

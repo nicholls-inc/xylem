@@ -46,12 +46,69 @@ type ghIssue struct {
 func (g *GitHub) Name() string { return "github-issue" }
 
 func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
+	issues, err := g.eligibleIssues(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	vessels := make([]queue.Vessel, 0, len(issues))
+	for _, issue := range issues {
+		meta := map[string]string{
+			"issue_num":                strconv.Itoa(issue.Number),
+			"issue_title":              issue.Title,
+			"issue_body":               issue.Body,
+			"issue_labels":             strings.Join(issueLabelNames(issue.Labels), ","),
+			"source_input_fingerprint": issue.fingerprint,
+			"trigger_label":            issue.triggerLabel,
+		}
+		sl := issue.task.StatusLabels
+		if sl != nil {
+			meta["status_label_queued"] = sl.Queued
+			meta["status_label_running"] = sl.Running
+			meta["status_label_completed"] = sl.Completed
+			meta["status_label_failed"] = sl.Failed
+			meta["status_label_timed_out"] = sl.TimedOut
+		}
+		lgl := issue.task.LabelGateLabels
+		if lgl != nil {
+			meta["label_gate_label_waiting"] = lgl.Waiting
+			meta["label_gate_label_ready"] = lgl.Ready
+		}
+		vessels = append(vessels, queue.Vessel{
+			ID:        fmt.Sprintf("issue-%d", issue.Number),
+			Source:    "github-issue",
+			Ref:       issue.URL,
+			Workflow:  issue.task.Workflow,
+			Meta:      meta,
+			State:     queue.StatePending,
+			CreatedAt: sourceNow(),
+		})
+	}
+	return vessels, nil
+}
+
+func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
+	issues, err := g.eligibleIssues(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(issues), nil
+}
+
+type eligibleIssue struct {
+	ghIssue
+	task         GitHubTask
+	triggerLabel string
+	fingerprint  string
+}
+
+func (g *GitHub) eligibleIssues(ctx context.Context) ([]eligibleIssue, error) {
 	excludeSet := make(map[string]bool, len(g.Exclude))
 	for _, ex := range g.Exclude {
 		excludeSet[ex] = true
 	}
 
-	var vessels []queue.Vessel
+	var issues []eligibleIssue
 	seen := make(map[int]bool)
 
 	for _, task := range g.Tasks {
@@ -67,15 +124,15 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 
 			out, err := g.CmdRunner.Run(ctx, "gh", args...)
 			if err != nil {
-				return vessels, fmt.Errorf("gh search issues: %w", err)
+				return issues, fmt.Errorf("gh search issues: %w", err)
 			}
 
-			var issues []ghIssue
-			if err := json.Unmarshal(out, &issues); err != nil {
-				return vessels, fmt.Errorf("parse gh search output: %w", err)
+			var scanIssues []ghIssue
+			if err := json.Unmarshal(out, &scanIssues); err != nil {
+				return issues, fmt.Errorf("parse gh search output: %w", err)
 			}
 
-			for _, issue := range issues {
+			for _, issue := range scanIssues {
 				if seen[issue.Number] {
 					continue
 				}
@@ -89,47 +146,16 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					continue
 				}
 				seen[issue.Number] = true
-				meta := map[string]string{
-					"issue_num":                strconv.Itoa(issue.Number),
-					"issue_title":              issue.Title,
-					"issue_body":               issue.Body,
-					"issue_labels":             strings.Join(issueLabelNames(issue.Labels), ","),
-					"source_input_fingerprint": fingerprint,
-					// trigger_label records which of this task's configured
-					// labels matched on the source issue during scan. On
-					// vessel completion this label is removed so the issue
-					// no longer appears in the scanner's candidate set,
-					// preventing duplicate enqueue after PR lifecycle events
-					// (close/merge) and keeping the issue's UI state
-					// consistent with its workflow state.
-					"trigger_label": label,
-				}
-				sl := task.StatusLabels
-				if sl != nil {
-					meta["status_label_queued"] = sl.Queued
-					meta["status_label_running"] = sl.Running
-					meta["status_label_completed"] = sl.Completed
-					meta["status_label_failed"] = sl.Failed
-					meta["status_label_timed_out"] = sl.TimedOut
-				}
-				lgl := task.LabelGateLabels
-				if lgl != nil {
-					meta["label_gate_label_waiting"] = lgl.Waiting
-					meta["label_gate_label_ready"] = lgl.Ready
-				}
-				vessels = append(vessels, queue.Vessel{
-					ID:        fmt.Sprintf("issue-%d", issue.Number),
-					Source:    "github-issue",
-					Ref:       issue.URL,
-					Workflow:  task.Workflow,
-					Meta:      meta,
-					State:     queue.StatePending,
-					CreatedAt: sourceNow(),
+				issues = append(issues, eligibleIssue{
+					ghIssue:      issue,
+					task:         task,
+					triggerLabel: label,
+					fingerprint:  fingerprint,
 				})
 			}
 		}
 	}
-	return vessels, nil
+	return issues, nil
 }
 
 func (g *GitHub) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {

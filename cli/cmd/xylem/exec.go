@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
 // maxStderrBytes is the maximum amount of stderr captured from a phase subprocess.
@@ -165,6 +166,14 @@ func (r *realCmdRunner) RunProcessWithEnv(ctx context.Context, dir string, extra
 }
 
 func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return r.runPhaseInternal(ctx, dir, stdin, nil, name, args...)
+}
+
+func (r *realCmdRunner) RunPhaseObserved(ctx context.Context, dir string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
+	return r.runPhaseInternal(ctx, dir, stdin, observer, name, args...)
+}
+
+func (r *realCmdRunner) runPhaseInternal(ctx context.Context, dir string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = stdin
@@ -175,7 +184,14 @@ func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reade
 	cmd.Stdout = &stdout
 	cmd.Stderr = stderr
 
-	err := cmd.Run()
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	if observer != nil && cmd.Process != nil {
+		observer.ProcessStarted(cmd.Process.Pid)
+		defer observer.ProcessExited(cmd.Process.Pid)
+	}
+	err := cmd.Wait()
 	if err != nil && stderr.Len() > 0 {
 		return stdout.Bytes(), fmt.Errorf("%w\nstderr: %s", err, stderr.String())
 	}

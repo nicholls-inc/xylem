@@ -69,12 +69,67 @@ func prWorkflowRef(prURL, workflow string) string {
 }
 
 func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
+	prs, err := g.eligiblePRs(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	vessels := make([]queue.Vessel, 0, len(prs))
+	for _, pr := range prs {
+		meta := map[string]string{
+			"pr_num":                   strconv.Itoa(pr.Number),
+			"pr_title":                 pr.Title,
+			"pr_body":                  pr.Body,
+			"pr_labels":                strings.Join(issueLabelNames(pr.Labels), ","),
+			"source_input_fingerprint": pr.fingerprint,
+		}
+		sl := pr.task.StatusLabels
+		if sl != nil {
+			meta["status_label_queued"] = sl.Queued
+			meta["status_label_running"] = sl.Running
+			meta["status_label_completed"] = sl.Completed
+			meta["status_label_failed"] = sl.Failed
+			meta["status_label_timed_out"] = sl.TimedOut
+		}
+		lgl := pr.task.LabelGateLabels
+		if lgl != nil {
+			meta["label_gate_label_waiting"] = lgl.Waiting
+			meta["label_gate_label_ready"] = lgl.Ready
+		}
+		vessels = append(vessels, queue.Vessel{
+			ID:        fmt.Sprintf("pr-%d-%s", pr.Number, pr.task.Workflow),
+			Source:    "github-pr",
+			Ref:       prWorkflowRef(pr.URL, pr.task.Workflow),
+			Workflow:  pr.task.Workflow,
+			Meta:      meta,
+			State:     queue.StatePending,
+			CreatedAt: sourceNow(),
+		})
+	}
+	return vessels, nil
+}
+
+func (g *GitHubPR) BacklogCount(ctx context.Context) (int, error) {
+	prs, err := g.eligiblePRs(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return len(prs), nil
+}
+
+type eligiblePR struct {
+	ghPR
+	task        GitHubTask
+	fingerprint string
+}
+
+func (g *GitHubPR) eligiblePRs(ctx context.Context) ([]eligiblePR, error) {
 	excludeSet := make(map[string]bool, len(g.Exclude))
 	for _, ex := range g.Exclude {
 		excludeSet[ex] = true
 	}
 
-	var vessels []queue.Vessel
+	var eligible []eligiblePR
 	seen := make(map[prWorkflowSeenKey]bool)
 
 	for _, task := range g.Tasks {
@@ -90,12 +145,12 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 
 			out, err := g.CmdRunner.Run(ctx, "gh", args...)
 			if err != nil {
-				return vessels, fmt.Errorf("gh pr list: %w", err)
+				return eligible, fmt.Errorf("gh pr list: %w", err)
 			}
 
 			var prs []ghPR
 			if err := json.Unmarshal(out, &prs); err != nil {
-				return vessels, fmt.Errorf("parse gh pr list output: %w", err)
+				return eligible, fmt.Errorf("parse gh pr list output: %w", err)
 			}
 
 			for _, pr := range prs {
@@ -125,39 +180,15 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					continue
 				}
 				seen[key] = true
-				meta := map[string]string{
-					"pr_num":                   strconv.Itoa(pr.Number),
-					"pr_title":                 pr.Title,
-					"pr_body":                  pr.Body,
-					"pr_labels":                strings.Join(issueLabelNames(pr.Labels), ","),
-					"source_input_fingerprint": fingerprint,
-				}
-				sl := task.StatusLabels
-				if sl != nil {
-					meta["status_label_queued"] = sl.Queued
-					meta["status_label_running"] = sl.Running
-					meta["status_label_completed"] = sl.Completed
-					meta["status_label_failed"] = sl.Failed
-					meta["status_label_timed_out"] = sl.TimedOut
-				}
-				lgl := task.LabelGateLabels
-				if lgl != nil {
-					meta["label_gate_label_waiting"] = lgl.Waiting
-					meta["label_gate_label_ready"] = lgl.Ready
-				}
-				vessels = append(vessels, queue.Vessel{
-					ID:        fmt.Sprintf("pr-%d-%s", pr.Number, task.Workflow),
-					Source:    "github-pr",
-					Ref:       prWorkflowRef(pr.URL, task.Workflow),
-					Workflow:  task.Workflow,
-					Meta:      meta,
-					State:     queue.StatePending,
-					CreatedAt: sourceNow(),
+				eligible = append(eligible, eligiblePR{
+					ghPR:        pr,
+					task:        task,
+					fingerprint: fingerprint,
 				})
 			}
 		}
 	}
-	return vessels, nil
+	return eligible, nil
 }
 
 func (g *GitHubPR) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {

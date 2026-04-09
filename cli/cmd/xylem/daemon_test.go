@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -189,6 +190,14 @@ func (daemonNoopRunner) Run(_ context.Context, _ string, _ ...string) ([]byte, e
 	return []byte("[]"), nil
 }
 
+type daemonBacklogRunner struct {
+	output []byte
+}
+
+func (r daemonBacklogRunner) Run(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return r.output, nil
+}
+
 func TestDaemonLoopScheduledSourceRunsSingleTick(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
@@ -229,7 +238,7 @@ func TestDaemonLoopScheduledSourceRunsSingleTick(t *testing.T) {
 		return runner.DrainResult{Launched: 1, Completed: 1}, nil
 	}
 
-	if err := daemonLoop(ctx, q, tracker, scan, drain, nil, nil, 10*time.Millisecond, 10*time.Millisecond, 0); err != nil {
+	if err := daemonLoop(ctx, q, tracker, scan, drain, nil, nil, nil, 10*time.Millisecond, 10*time.Millisecond, 0); err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
 
@@ -240,6 +249,43 @@ func TestDaemonLoopScheduledSourceRunsSingleTick(t *testing.T) {
 	if len(completed) != 1 {
 		t.Fatalf("len(completed) = %d, want 1", len(completed))
 	}
+}
+
+func TestDaemonIdleBacklogHealthCheck(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"issues": {
+				Type:    "github",
+				Repo:    "owner/repo",
+				Exclude: []string{"wontfix"},
+				Tasks: map[string]config.Task{
+					"bugs": {
+						Labels:   []string{"bug"},
+						Workflow: "fix-bug",
+					},
+				},
+			},
+		},
+	}
+	issues := []map[string]any{
+		{"number": 1, "title": "one", "body": "", "url": "https://github.com/owner/repo/issues/1", "labels": []map[string]string{{"name": "bug"}}},
+		{"number": 2, "title": "two", "body": "", "url": "https://github.com/owner/repo/issues/2", "labels": []map[string]string{{"name": "bug"}}},
+		{"number": 3, "title": "three", "body": "", "url": "https://github.com/owner/repo/issues/3", "labels": []map[string]string{{"name": "bug"}}},
+	}
+	output, err := json.Marshal(issues)
+	require.NoError(t, err)
+
+	s := scanner.New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), daemonBacklogRunner{output: output})
+	count, err := s.BacklogCount(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 3, count)
+
+	check := daemonBacklogHealthCheck(time.Now().UTC(), time.Now().UTC().Add(-10*time.Minute), 5*time.Minute, count, daemonQueueSnapshot{})
+	require.NotNil(t, check)
+	assert.Equal(t, "idle_with_backlog", check.Code)
+	assert.Equal(t, "Daemon idle with 3 backlog items on GitHub", check.Message)
 }
 
 type trackerStub struct {
@@ -307,7 +353,7 @@ func TestDaemonShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, time.Hour, time.Hour, 0)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, nil, time.Hour, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("expected nil error on shutdown, got: %v", err)
 	}
@@ -354,7 +400,7 @@ func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
 
 	err := daemonLoop(ctx, q, nil, func(ctx context.Context) (scanner.ScanResult, error) {
 		return runScan(ctx, cfg, q)
-	}, drain, nil, nil, time.Millisecond, time.Millisecond, 0)
+	}, drain, nil, nil, nil, time.Millisecond, time.Millisecond, 0)
 	require.NoError(t, err)
 
 	vessels, err := q.List()
@@ -428,7 +474,7 @@ func TestDaemonLoopPeriodicUpgradeFiresAtDrainEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, time.Millisecond)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, nil, time.Hour, 2*time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -450,7 +496,7 @@ func TestDaemonLoopPeriodicUpgradeRespectsInterval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, 10*time.Second)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, nil, time.Hour, 2*time.Millisecond, 10*time.Second)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -470,7 +516,7 @@ func TestDaemonLoopPeriodicUpgradeNilDisables(t *testing.T) {
 	defer cancel()
 
 	// Passing nil upgrade should not panic even with a non-zero interval.
-	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, time.Hour, 2*time.Millisecond, 10*time.Millisecond)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, nil, time.Hour, 2*time.Millisecond, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -509,7 +555,7 @@ func TestDaemonLoopUpgradeWaitsForDrainCompletion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, upgrade, time.Hour, time.Millisecond, time.Millisecond)
+	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, upgrade, nil, time.Hour, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -537,7 +583,7 @@ func TestSmoke_S35_DaemonLoopAllowsNewDrainTicksWhileVesselsRemainInFlight(t *te
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, nil, time.Hour, 10*time.Millisecond, 0)
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, nil, nil, time.Hour, 10*time.Millisecond, 0)
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, drainCalls.Load(), int32(2))
@@ -571,7 +617,7 @@ func TestSmoke_S36_DaemonLoopUpgradeWaitsForTrackerIdle(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 10*time.Millisecond, time.Millisecond)
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, nil, time.Hour, 10*time.Millisecond, time.Millisecond)
 	require.NoError(t, err)
 
 	assert.NotZero(t, upgradeSeen.Load())
@@ -613,7 +659,7 @@ func TestSmoke_S39_DaemonAutoUpgradeProceedsAfterCancelledVesselDropsInFlight(t 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 10*time.Millisecond, time.Millisecond)
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, nil, time.Hour, 10*time.Millisecond, time.Millisecond)
 	require.NoError(t, err)
 
 	select {
@@ -671,7 +717,7 @@ func TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 5*time.Millisecond, 5*time.Millisecond)
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, nil, time.Hour, 5*time.Millisecond, 5*time.Millisecond)
 	require.NoError(t, err)
 
 	// Upgrade MUST have fired at least once despite the continuously saturating drain.
@@ -708,7 +754,7 @@ func TestDaemonLoopUpgradeOverdueDoesNotFireUnderNormalConditions(t *testing.T) 
 	defer cancel()
 
 	// upgradeInterval=2ms; over 100ms, normal path should fire many times.
-	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 2*time.Millisecond, 2*time.Millisecond)
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, nil, time.Hour, 2*time.Millisecond, 2*time.Millisecond)
 	require.NoError(t, err)
 
 	assert.GreaterOrEqual(t, upgradeSeen.Load(), int32(5),
@@ -794,7 +840,7 @@ func TestDaemonNonBlockingDrain(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, nil, time.Hour, time.Millisecond, 0)
+	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, nil, nil, time.Hour, time.Millisecond, 0)
 	elapsed := time.Since(start)
 
 	if err != nil {
