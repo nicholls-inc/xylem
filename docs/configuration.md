@@ -354,6 +354,10 @@ The `daemon` section controls polling intervals when running `xylem daemon`.
 |-------|------|---------|----------|-------------|
 | `daemon.scan_interval` | string | `"60s"` | No | How often the daemon scans sources for new work. Must be a valid Go duration string. |
 | `daemon.drain_interval` | string | `"30s"` | No | How often the daemon drains pending vessels from the queue. Must be a valid Go duration string. |
+| `daemon.auto_upgrade` | bool | `false` | No | When true, periodically syncs the daemon's current worktree to `origin/main`, rebuilds the binary, and `exec()`s into the new binary if it changed. |
+| `daemon.upgrade_interval` | string | `"5m"` | No | How often to rerun the auto-upgrade check while the daemon is running. Must be a valid Go duration string. |
+
+When `daemon.auto_upgrade` is enabled, start the daemon from the **root of a dedicated git worktree on branch `main`**. Xylem upgrades the current working tree in place before rebuilding, so the worktree's `.xylem/workflows/` and prompt files become the authoritative control-plane inputs for the upgraded daemon.
 
 ### Harness settings
 

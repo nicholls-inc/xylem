@@ -299,6 +299,8 @@ daemon:
   drain_interval: "30s"
 ```
 
+Start the daemon from the **root of a dedicated git worktree on branch `main`**. When `daemon.auto_upgrade` is enabled, xylem syncs the daemon's current working tree before rebuilding the binary, so the checked-out `.xylem/workflows/` and prompt files in that worktree stay aligned with the upgraded executable.
+
 ## Check status
 
 View the current state of the queue:

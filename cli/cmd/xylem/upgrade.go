@@ -11,6 +11,45 @@ import (
 	"syscall"
 )
 
+var (
+	daemonGitPull  = gitPull
+	daemonGoBuild  = goBuild
+	daemonHashFile = hashFile
+	daemonExec     = func(path string, args []string, env []string) error {
+		return syscall.Exec(path, args, env)
+	}
+)
+
+type daemonUpgradeTarget struct {
+	repoDir        string
+	executablePath string
+}
+
+func resolveDaemonUpgradeTarget(getwd func() (string, error), executable func() (string, error)) (daemonUpgradeTarget, error) {
+	executablePath, err := executable()
+	if err != nil {
+		return daemonUpgradeTarget{}, fmt.Errorf("resolve executable path: %w", err)
+	}
+
+	workingDir, err := getwd()
+	if err != nil {
+		return daemonUpgradeTarget{}, fmt.Errorf("resolve working directory: %w", err)
+	}
+
+	return daemonUpgradeTargetFromPaths(workingDir, executablePath)
+}
+
+func daemonUpgradeTargetFromPaths(workingDir, executablePath string) (daemonUpgradeTarget, error) {
+	repoDir, err := filepath.Abs(workingDir)
+	if err != nil {
+		return daemonUpgradeTarget{}, fmt.Errorf("absolute working directory: %w", err)
+	}
+	return daemonUpgradeTarget{
+		repoDir:        repoDir,
+		executablePath: executablePath,
+	}, nil
+}
+
 // selfUpgrade pulls latest main, rebuilds the binary, and exec()s the new
 // binary if it changed. On success (binary changed), this function does not
 // return — the process image is replaced. On failure or no-change, it returns
@@ -18,12 +57,12 @@ import (
 func selfUpgrade(repoDir, executablePath string) {
 	slog.Info("daemon auto-upgrade pulling latest main")
 
-	if err := gitPull(repoDir); err != nil {
+	if err := daemonGitPull(repoDir); err != nil {
 		slog.Warn("daemon auto-upgrade git pull failed", "error", err)
 		return
 	}
 
-	oldHash, err := hashFile(executablePath)
+	oldHash, err := daemonHashFile(executablePath)
 	if err != nil {
 		slog.Warn("daemon auto-upgrade failed to hash current binary", "error", err)
 		return
@@ -32,13 +71,13 @@ func selfUpgrade(repoDir, executablePath string) {
 	// Build to a temp file to avoid corrupting the running binary on failure.
 	cliDir := filepath.Join(repoDir, "cli")
 	tmpBin := executablePath + ".upgrade"
-	if err := goBuild(cliDir, tmpBin); err != nil {
+	if err := daemonGoBuild(cliDir, tmpBin); err != nil {
 		slog.Warn("daemon auto-upgrade go build failed", "error", err)
 		os.Remove(tmpBin) //nolint:errcheck
 		return
 	}
 
-	newHash, err := hashFile(tmpBin)
+	newHash, err := daemonHashFile(tmpBin)
 	if err != nil {
 		slog.Warn("daemon auto-upgrade failed to hash rebuilt binary", "error", err)
 		os.Remove(tmpBin) //nolint:errcheck
@@ -59,7 +98,7 @@ func selfUpgrade(repoDir, executablePath string) {
 	}
 
 	slog.Info("daemon auto-upgrade execing rebuilt binary", "old_hash", oldHash[:12], "new_hash", newHash[:12])
-	execErr := syscall.Exec(executablePath, os.Args, os.Environ())
+	execErr := daemonExec(executablePath, os.Args, os.Environ())
 	// If we reach here, exec() failed.
 	slog.Warn("daemon auto-upgrade exec failed", "error", execErr)
 }

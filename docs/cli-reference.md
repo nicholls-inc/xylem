@@ -426,8 +426,12 @@ None. Intervals are configured in `.xylem.yml` under the `daemon` key.
 |--------------|---------|-------------|
 | `daemon.scan_interval` | `"60s"` | How often the daemon scans for new work. |
 | `daemon.drain_interval` | `"30s"` | How often the daemon drains pending vessels. |
+| `daemon.auto_upgrade` | `false` | Periodically `git fetch`/`reset` the daemon's current worktree to `origin/main`, rebuild the binary, and `exec()` into it when the binary changes. |
+| `daemon.upgrade_interval` | `"5m"` | How often the daemon re-checks `auto_upgrade` while it is running. |
 
 The daemon uses the shorter of the two intervals as its tick interval and checks whether enough time has elapsed for each operation on every tick.
+
+Run the daemon from the **root of a dedicated git worktree on branch `main`**. Auto-upgrade syncs the daemon's current working directory before rebuilding, so workflow YAML and prompt changes must be present in that worktree to take effect.
 
 ### Behavior
 
