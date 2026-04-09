@@ -103,6 +103,10 @@ func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string
 	return []byte{}, m.outputErr
 }
 
+func (m *mockCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return m.RunOutput(ctx, name, args...)
+}
+
 func (m *mockCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
 	atomic.AddInt32(&m.started, 1)
 	return m.processErr
@@ -308,6 +312,26 @@ func countRunOutputCalls(m *mockCmdRunner, name string) int {
 		}
 	}
 	return count
+}
+
+func hasRunOutputCallContaining(m *mockCmdRunner, fragments ...string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, args := range m.outputArgs {
+		joined := strings.Join(args, " ")
+		match := true
+		for _, fragment := range fragments {
+			if !strings.Contains(joined, fragment) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 func loadSingleVessel(t *testing.T, q *queue.Queue) queue.Vessel {
@@ -2422,6 +2446,134 @@ func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
 	}
 	if wt.removePath != waiting.WorktreePath {
 		t.Fatalf("removed worktree path = %q, want %q", wt.removePath, waiting.WorktreePath)
+	}
+}
+
+func TestDrainLabelGateAppliesWaitingLabels(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(1, "fix-bug")
+	vessel.Meta["status_label_running"] = "in-progress"
+	vessel.Meta["label_gate_label_waiting"] = "blocked"
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	result, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Waiting != 1 {
+		t.Fatalf("Drain().Waiting = %d, want 1", result.Waiting)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label blocked") {
+		t.Fatalf("expected waiting-label gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--remove-label in-progress") {
+		t.Fatalf("expected running-label cleanup gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+}
+
+func TestCheckWaitingVesselsAppliesReadyLabelsOnResume(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(1, "fix-bug")
+	vessel.Meta["label_gate_label_waiting"] = "blocked"
+	vessel.Meta["label_gate_label_ready"] = "ready-for-implementation"
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	first, err := r.Drain(context.Background())
+	if err != nil {
+		t.Fatalf("first Drain() error = %v", err)
+	}
+	if first.Waiting != 1 {
+		t.Fatalf("first Drain().Waiting = %d, want 1", first.Waiting)
+	}
+
+	cmdRunner.outputData = []byte(`{"labels":[{"name":"plan-approved"}]}`)
+	r.CheckWaitingVessels(context.Background())
+
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label ready-for-implementation", "--remove-label blocked") {
+		t.Fatalf("expected ready-label gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+}
+
+func TestCheckWaitingVesselsTimeoutAppliesTimedOutLabels(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	waitingSince := time.Now().UTC().Add(-48 * time.Hour)
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:           "issue-1",
+		Source:       "github-issue",
+		Ref:          "https://github.com/owner/repo/issues/1",
+		Workflow:     "fix-bug",
+		Meta:         map[string]string{"issue_num": "1", "status_label_timed_out": "timed-out", "label_gate_label_waiting": "blocked"},
+		State:        queue.StateWaiting,
+		CreatedAt:    time.Now().UTC(),
+		WaitingFor:   "plan-approved",
+		WaitingSince: &waitingSince,
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	r.CheckWaitingVessels(context.Background())
+
+	done, err := q.FindByID("issue-1")
+	if err != nil {
+		t.Fatalf("FindByID() error = %v", err)
+	}
+	if done.State != queue.StateTimedOut {
+		t.Fatalf("state after timeout = %s, want timed_out", done.State)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label timed-out", "--remove-label blocked") {
+		t.Fatalf("expected timed-out gh issue edit call, got %v", cmdRunner.outputArgs)
 	}
 }
 

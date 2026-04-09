@@ -314,6 +314,20 @@ When a label gate is evaluated:
 
 Label gates are useful when you want a human to review an intermediate artifact (like an implementation plan) before the agent proceeds with execution.
 
+For `github` and `github-pr` tasks, you can also set `label_gate_labels` in `.xylem.yml` so the runner applies deterministic `gh issue edit` / `gh pr edit` updates alongside the queue transition:
+
+```yaml
+tasks:
+  fix-bugs:
+    labels: [bug, ready-for-work]
+    workflow: fix-bug
+    label_gate_labels:
+      waiting: blocked
+      ready: ready-for-implementation
+```
+
+With that config, entering `waiting` adds `blocked`, resuming back to `pending` swaps `blocked` for `ready-for-implementation`, and terminal exits clean up any leftover label-gate labels so GitHub stays aligned with queue state.
+
 ## Prompt templates
 
 Prompt files are Go templates used by `prompt` phases. They live in `.xylem/prompts/<workflow-name>/` and are referenced by `prompt_file` in the workflow YAML. Command phases do not use `prompt_file`; instead, their `run` field is rendered as a Go template with the same template data.

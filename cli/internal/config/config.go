@@ -62,6 +62,11 @@ type StatusLabels struct {
 	TimedOut  string `yaml:"timed_out,omitempty"`
 }
 
+type LabelGateLabels struct {
+	Waiting string `yaml:"waiting,omitempty"`
+	Ready   string `yaml:"ready,omitempty"`
+}
+
 // PREventsConfig defines which PR events trigger a workflow.
 //
 // For authored events (review_submitted, commented), at least one of
@@ -83,10 +88,11 @@ type PREventsConfig struct {
 }
 
 type Task struct {
-	Labels       []string        `yaml:"labels,omitempty"`
-	Workflow     string          `yaml:"workflow"`
-	StatusLabels *StatusLabels   `yaml:"status_labels,omitempty"`
-	On           *PREventsConfig `yaml:"on,omitempty"`
+	Labels          []string         `yaml:"labels,omitempty"`
+	Workflow        string           `yaml:"workflow"`
+	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
+	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
+	On              *PREventsConfig  `yaml:"on,omitempty"`
 }
 
 type ClaudeConfig struct {

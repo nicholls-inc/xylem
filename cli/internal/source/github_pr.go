@@ -107,6 +107,11 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					meta["status_label_failed"] = sl.Failed
 					meta["status_label_timed_out"] = sl.TimedOut
 				}
+				lgl := task.LabelGateLabels
+				if lgl != nil {
+					meta["label_gate_label_waiting"] = lgl.Waiting
+					meta["label_gate_label_ready"] = lgl.Ready
+				}
 				vessels = append(vessels, queue.Vessel{
 					ID:        fmt.Sprintf("pr-%d-%s", pr.Number, task.Workflow),
 					Source:    "github-pr",
@@ -123,8 +128,8 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 }
 
 func (g *GitHubPR) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_queued"], "")
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_queued"]}, nil)
 	return nil
 }
 
@@ -136,51 +141,68 @@ func (g *GitHubPR) OnStart(ctx context.Context, vessel queue.Vessel) error {
 	if prNum == "" {
 		return nil
 	}
-	g.applyPRLabel(ctx, prNum, ResolveRunningLabel(vessel), vessel.Meta["status_label_queued"])
+	g.applyPRLabels(ctx, prNum,
+		[]string{ResolveRunningLabel(vessel)},
+		[]string{vessel.Meta["status_label_queued"], resolveReadyLabel(vessel)})
+	return nil
+}
+
+func (g *GitHubPR) OnWait(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{resolveWaitingLabel(vessel)},
+		[]string{resolveReadyLabel(vessel)})
+	return nil
+}
+
+func (g *GitHubPR) OnResume(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{resolveReadyLabel(vessel)},
+		[]string{resolveWaitingLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) OnComplete(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_completed"],
-		ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_completed"]},
+		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) OnFail(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_failed"],
-		ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_failed"]},
+		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_timed_out"],
-		ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_timed_out"]},
+		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) RemoveRunningLabel(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"], "", ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"], nil, []string{ResolveRunningLabel(vessel)})
 	return nil
 }
 
-// applyPRLabel runs gh pr edit to add and/or remove a label on the PR.
-// Both add and remove are optional — empty string means skip that operation.
-func (g *GitHubPR) applyPRLabel(ctx context.Context, prNum, add, remove string) {
+// applyPRLabels runs gh pr edit to add and/or remove labels on the PR.
+// Empty labels are ignored, and conflicting add/remove operations prefer add.
+func (g *GitHubPR) applyPRLabels(ctx context.Context, prNum string, add []string, remove []string) {
 	if g.CmdRunner == nil || prNum == "" {
 		return
 	}
-	if add == "" && remove == "" {
+	add, remove = normalizeLabelOps(add, remove)
+	if len(add) == 0 && len(remove) == 0 {
 		return
 	}
 	args := []string{"pr", "edit", prNum, "--repo", g.Repo}
-	if add != "" {
-		args = append(args, "--add-label", add)
+	for _, label := range add {
+		args = append(args, "--add-label", label)
 	}
-	if remove != "" {
-		args = append(args, "--remove-label", remove)
+	for _, label := range remove {
+		args = append(args, "--remove-label", label)
 	}
 	_, _ = g.CmdRunner.Run(ctx, "gh", args...)
 }

@@ -490,8 +490,13 @@ func TestGitHubPROnStartConfiguredLabel(t *testing.T) {
 	r := newMock()
 	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
 	vessel := queue.Vessel{
-		ID:   "pr-10",
-		Meta: map[string]string{"pr_num": "10", "status_label_running": "wip", "status_label_queued": "queued"},
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                 "10",
+			"status_label_running":   "wip",
+			"status_label_queued":    "queued",
+			"label_gate_label_ready": "ready-for-implementation",
+		},
 	}
 	if err := src.OnStart(context.Background(), vessel); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -506,14 +511,23 @@ func TestGitHubPROnStartConfiguredLabel(t *testing.T) {
 	if !strings.Contains(joined, "--remove-label queued") {
 		t.Errorf("expected --remove-label queued in call, got %q", joined)
 	}
+	if !strings.Contains(joined, "--remove-label ready-for-implementation") {
+		t.Errorf("expected --remove-label ready-for-implementation in call, got %q", joined)
+	}
 }
 
 func TestGitHubPROnComplete(t *testing.T) {
 	r := newMock()
 	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
 	vessel := queue.Vessel{
-		ID:   "pr-10",
-		Meta: map[string]string{"pr_num": "10", "status_label_completed": "done", "status_label_running": "wip"},
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"status_label_completed":   "done",
+			"status_label_running":     "wip",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
 	}
 	if err := src.OnComplete(context.Background(), vessel); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -527,6 +541,12 @@ func TestGitHubPROnComplete(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--remove-label wip") {
 		t.Errorf("expected --remove-label wip in call, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked in call, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label ready-for-implementation") {
+		t.Errorf("expected --remove-label ready-for-implementation in call, got %q", joined)
 	}
 }
 
@@ -556,8 +576,13 @@ func TestGitHubPROnTimedOut(t *testing.T) {
 	r := newMock()
 	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
 	vessel := queue.Vessel{
-		ID:   "pr-10",
-		Meta: map[string]string{"pr_num": "10", "status_label_timed_out": "timed-out", "status_label_running": "wip"},
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"status_label_timed_out":   "timed-out",
+			"status_label_running":     "wip",
+			"label_gate_label_waiting": "blocked",
+		},
 	}
 	if err := src.OnTimedOut(context.Background(), vessel); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -568,6 +593,61 @@ func TestGitHubPROnTimedOut(t *testing.T) {
 	joined := strings.Join(r.calls[0], " ")
 	if !strings.Contains(joined, "--add-label timed-out") {
 		t.Errorf("expected --add-label timed-out, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked, got %q", joined)
+	}
+}
+
+func TestGitHubPROnWait(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
+	}
+	if err := src.OnWait(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label blocked") {
+		t.Errorf("expected --add-label blocked, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label ready-for-implementation") {
+		t.Errorf("expected --remove-label ready-for-implementation, got %q", joined)
+	}
+}
+
+func TestGitHubPROnResume(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
+	}
+	if err := src.OnResume(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label ready-for-implementation") {
+		t.Errorf("expected --add-label ready-for-implementation, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked, got %q", joined)
 	}
 }
 

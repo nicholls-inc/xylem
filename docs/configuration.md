@@ -144,12 +144,14 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 | `labels` | list of strings | -- | Required for `github` and `github-pr` | Labels that trigger this task. The item must have all listed labels to match. |
 | `workflow` | string | -- | Yes | Name of the workflow to invoke (e.g., `fix-bug`, `implement-feature`). Must not be empty or whitespace-only. Corresponds to a YAML file in `<state_dir>/workflows/`. |
 | `status_labels` | object | omitted | No | Optional labels to apply as a vessel moves through queue states. Supported for `github` and `github-pr`. |
+| `label_gate_labels` | object | omitted | No | Optional labels to apply when a GitHub-backed vessel enters or exits a label-gate wait. Supported for `github` and `github-pr`. |
 | `on` | object | omitted | Required for `github-pr-events` | Event triggers for pull-request event scanning. Must include at least one trigger. |
 
 ### Task fields by source type
 
 - `github`: requires `labels`, supports `status_labels`
 - `github-pr`: requires `labels`, supports `status_labels`
+- `github` and `github-pr` also support `label_gate_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
 
@@ -176,6 +178,28 @@ Behavior:
 - `running` replaces `queued` when work starts
 - `completed`, `failed`, and `timed_out` replace `running` on terminal states
 - If `status_labels` is omitted entirely, `github` and `github-pr` keep the legacy fallback of adding `in-progress` on start
+- If the block is present and a field is empty, xylem skips that specific label operation
+
+### `label_gate_labels`
+
+When `label_gate_labels` is set, xylem records the configured labels in vessel metadata and applies them from deterministic runner code when a label gate blocks or resumes a GitHub-backed vessel.
+
+```yaml
+tasks:
+  fix-bugs:
+    labels: [bug, ready-for-work]
+    workflow: fix-bug
+    label_gate_labels:
+      waiting: blocked
+      ready: ready-for-implementation
+```
+
+Behavior:
+
+- `waiting` is added when the runner transitions a vessel into `waiting` for a label gate
+- `ready` replaces `waiting` when the gate passes and the vessel returns to `pending`
+- `ready` is removed again when the resumed vessel starts running, and both labels are cleaned up on terminal exits like `failed`, `timed_out`, and `completed`
+- If `label_gate_labels` is omitted entirely, the runner performs no extra label edits for label-gate waits
 - If the block is present and a field is empty, xylem skips that specific label operation
 
 ### `on`

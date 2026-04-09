@@ -385,6 +385,8 @@ func (g *GitHubPREvents) scanComments(ctx context.Context, pr ghPR, task PREvent
 
 func (g *GitHubPREvents) OnEnqueue(_ context.Context, _ queue.Vessel) error          { return nil }
 func (g *GitHubPREvents) OnStart(_ context.Context, _ queue.Vessel) error            { return nil }
+func (g *GitHubPREvents) OnWait(_ context.Context, _ queue.Vessel) error             { return nil }
+func (g *GitHubPREvents) OnResume(_ context.Context, _ queue.Vessel) error           { return nil }
 func (g *GitHubPREvents) OnComplete(_ context.Context, _ queue.Vessel) error         { return nil }
 func (g *GitHubPREvents) OnFail(_ context.Context, _ queue.Vessel) error             { return nil }
 func (g *GitHubPREvents) OnTimedOut(_ context.Context, _ queue.Vessel) error         { return nil }
