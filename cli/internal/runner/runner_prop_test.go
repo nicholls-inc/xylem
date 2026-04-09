@@ -116,6 +116,46 @@ func TestProp_BudgetEnforcementNeverLeaksAcrossVessels(t *testing.T) {
 	})
 }
 
+func TestProp_CancelledTransitionRequiresCancelledLatestState(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cancelled := rapid.Bool().Draw(t, "cancelled")
+		wrapErr := rapid.Bool().Draw(t, "wrapErr")
+
+		dir, err := os.MkdirTemp("", "runner-cancel-prop-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(dir)
+
+		cfg := makeTestConfig(dir, 1)
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		_, err = q.Enqueue(queue.Vessel{
+			ID:        "issue-1",
+			Source:    "manual",
+			State:     queue.StatePending,
+			CreatedAt: time.Now().UTC(),
+		})
+		if err != nil {
+			t.Fatalf("Enqueue() error = %v", err)
+		}
+		if cancelled {
+			if err := q.Cancel("issue-1"); err != nil {
+				t.Fatalf("Cancel() error = %v", err)
+			}
+		}
+
+		r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+		transitionErr := error(queue.ErrInvalidTransition)
+		if wrapErr {
+			transitionErr = fmt.Errorf("persist update: %w", transitionErr)
+		}
+
+		if got := r.cancelledTransition("issue-1", transitionErr); got != cancelled {
+			t.Fatalf("cancelledTransition() = %t, want %t", got, cancelled)
+		}
+	})
+}
+
 func TestProp_PromptOnlyUsageAccumulatesEstimatedTotals(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		prompt := rapid.StringMatching(`[a-zA-Z0-9 ]{0,120}`).Draw(t, "prompt")

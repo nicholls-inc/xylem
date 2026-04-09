@@ -1,0 +1,22 @@
+metadata:
+  name: issue-cancel-resolve
+  scenario: cancelling a running resolve-conflicts vessel stops the runner cleanly
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: needs-conflict-resolution
+      - name: in-progress
+    issues:
+      - number: 181
+        title: resolve conflicts for PR 181
+        body: cancel during resolve phase
+        labels: [needs-conflict-resolution]
+providers:
+  scripts:
+    - name: analyze
+      provider: claude
+      match:
+        phase: analyze
+      stdout: analysis complete
