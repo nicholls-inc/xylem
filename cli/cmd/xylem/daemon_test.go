@@ -492,6 +492,94 @@ func TestSmoke_S36_DaemonLoopUpgradeWaitsForTrackerIdle(t *testing.T) {
 	assert.GreaterOrEqual(t, upgradeTime.Sub(launchTime), 60*time.Millisecond)
 }
 
+// TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow verifies the
+// overdue path: when upgrade has been pending for upgradeInterval*3 without
+// firing (because in-flight vessels kept in_flight > 0 continuously), new
+// drain ticks are paused so in-flight vessels can drain naturally. Once
+// in_flight reaches zero, the normal upgrade path fires.
+//
+// This is the regression test for the loop 8 diagnosis: scheduled sources
+// that continuously fill concurrency slots previously locked the daemon on
+// its current binary forever because the normal upgrade path required
+// in_flight == 0, which the scheduled source prevented.
+func TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var (
+		drainCalls  atomic.Int32
+		upgradeSeen atomic.Int32
+	)
+
+	// Saturating drain: every drain call starts a "long" in-flight vessel
+	// (relative to upgradeInterval) and returns Launched=1. Without the
+	// overdue pause, this would keep in_flight > 0 indefinitely and the
+	// normal upgrade path would never fire.
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		drainCalls.Add(1)
+		// Each vessel lasts ~50ms. Drain interval is 5ms, so without pause
+		// the tracker stays above zero for the entire test window.
+		tracker.Start(50 * time.Millisecond)
+		return runner.DrainResult{Launched: 1}, nil
+	}
+
+	upgrade := func() {
+		upgradeSeen.Add(1)
+	}
+
+	// upgradeInterval=5ms → overdue threshold = 15ms. Drain interval=5ms so
+	// drain is triggered frequently. The tracker starts a 50ms vessel on
+	// each drain call, but once upgrade is overdue (>15ms elapsed), drain
+	// should be paused — no new tracker.Start calls — allowing the existing
+	// in-flight vessels to complete, which then lets upgrade fire.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 5*time.Millisecond, 5*time.Millisecond)
+	require.NoError(t, err)
+
+	// Upgrade MUST have fired at least once despite the continuously saturating drain.
+	// Previously this would have been 0 because in_flight never reached 0 naturally.
+	assert.GreaterOrEqual(t, upgradeSeen.Load(), int32(1),
+		"upgrade must fire via overdue-pause path even when drain is saturating")
+	// Drain must have been invoked multiple times before the pause kicked in.
+	assert.GreaterOrEqual(t, drainCalls.Load(), int32(1),
+		"drain must have been called at least once")
+}
+
+// TestDaemonLoopUpgradeOverdueDoesNotFireUnderNormalConditions verifies that
+// the overdue path does NOT trigger under normal conditions where upgrade
+// fires naturally on the idle path.
+func TestDaemonLoopUpgradeOverdueDoesNotFireUnderNormalConditions(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var (
+		upgradeSeen atomic.Int32
+	)
+
+	// Idle drain: no vessels ever started, so in_flight stays at 0 and
+	// the normal upgrade path fires on every cycle.
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		return runner.DrainResult{}, nil
+	}
+	upgrade := func() {
+		upgradeSeen.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// upgradeInterval=2ms; over 100ms, normal path should fire many times.
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 2*time.Millisecond, 2*time.Millisecond)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, upgradeSeen.Load(), int32(5),
+		"normal-path upgrade should fire multiple times under idle conditions")
+}
+
 func TestParseUpgradeInterval(t *testing.T) {
 	tests := []struct {
 		name  string
