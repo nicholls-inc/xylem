@@ -5580,13 +5580,14 @@ func TestVerifyProtectedSurfacesStillCatchesMutualDeletion(t *testing.T) {
 	}
 }
 
-func TestSmoke_WS6_S19_OrchestratedVesselRunStateNoRace(t *testing.T) {
+func TestSmoke_S19_VesselRunStateIsOwnedByRunVesselOrchestratedNotSharedAcrossGoroutines(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "race-diamond"))
+	_, err := q.Enqueue(makeVessel(1, "race-diamond"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "race-diamond", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -5611,15 +5612,11 @@ func TestSmoke_WS6_S19_OrchestratedVesselRunStateNoRace(t *testing.T) {
 	}
 
 	result, err := r.DrainAndWait(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 }
 
-func TestSmoke_WS6_S20_SinglePhaseResultHasPhaseSummary(t *testing.T) {
+func TestSmoke_S20_SinglePhaseResultIncludesAPhaseSummaryField(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -5653,7 +5650,7 @@ func TestSmoke_WS6_S20_SinglePhaseResultHasPhaseSummary(t *testing.T) {
 	assert.Greater(t, result.phaseSummary.DurationMS, int64(0))
 }
 
-func TestSmoke_WS6_S21_EvidenceClaimNilWhenNoGate(t *testing.T) {
+func TestSmoke_S21_SinglePhaseResultEvidenceClaimIsNilWhenNoGateIsPresent(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -5678,18 +5675,17 @@ func TestSmoke_WS6_S21_EvidenceClaimNilWhenNoGate(t *testing.T) {
 	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, cmdRunner)
 
 	result := r.runSinglePhase(context.Background(), vessel, wf, 0, map[string]string{}, phase.IssueData{}, "", dir, &source.Manual{}, vrs, true)
-	if result.evidenceClaim != nil {
-		t.Fatalf("result.evidenceClaim = %+v, want nil", result.evidenceClaim)
-	}
+	assert.Nil(t, result.evidenceClaim)
 }
 
-func TestSmoke_WS6_S22_WaveResultsMergedAfterWgWait(t *testing.T) {
+func TestSmoke_S22_WaveResultsAreMergedIntoVesselRunStateAfterWgWait(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "wave-merge"))
+	_, err := q.Enqueue(makeVessel(1, "wave-merge"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "wave-merge", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -5733,7 +5729,7 @@ func TestSmoke_WS6_S22_WaveResultsMergedAfterWgWait(t *testing.T) {
 	}
 }
 
-func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
+func TestSmoke_S23_CostTrackerConcurrentAccessFromMultipleGoroutinesIsSafe(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -5741,7 +5737,8 @@ func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
 	setBudget(cfg, 10.0, 10000)
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "wave-cost"))
+	_, err := q.Enqueue(makeVessel(1, "wave-cost"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "wave-cost", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -5773,34 +5770,27 @@ func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
 	}
 
 	result, err := r.DrainAndWait(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
+	require.Len(t, summary.Phases, 2)
 	sumPhaseTokens := 0
 	for _, phaseSummary := range summary.Phases {
 		sumPhaseTokens += phaseSummary.InputTokensEst + phaseSummary.OutputTokensEst
 	}
-	if summary.TotalTokensEst != sumPhaseTokens {
-		t.Fatalf("summary.TotalTokensEst = %d, want %d", summary.TotalTokensEst, sumPhaseTokens)
-	}
+	assert.Equal(t, sumPhaseTokens, summary.TotalTokensEst)
 }
 
-func TestSmoke_WS6_S24_VesselSpanContextPropagatedToGoroutines(t *testing.T) {
+func TestSmoke_S24_VesselSpanContextIsPropagatedToGoroutineChildPhaseSpans(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "trace-diamond"))
+	_, err := q.Enqueue(makeVessel(1, "trace-diamond"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "trace-diamond", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -5837,7 +5827,7 @@ func TestSmoke_WS6_S24_VesselSpanContextPropagatedToGoroutines(t *testing.T) {
 	}
 }
 
-func TestSmoke_WS6_S25_ConcurrentPhasesAllowOverspend(t *testing.T) {
+func TestSmoke_S25_ConcurrentPhasesMayCauseSlightOverspendWithoutRetroactiveFailure(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -5845,7 +5835,8 @@ func TestSmoke_WS6_S25_ConcurrentPhasesAllowOverspend(t *testing.T) {
 	setBudget(cfg, 10.0, 150)
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "concurrent-budget"))
+	_, err := q.Enqueue(makeVessel(1, "concurrent-budget"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "concurrent-budget", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
