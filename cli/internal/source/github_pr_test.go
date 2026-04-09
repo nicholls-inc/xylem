@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockCmdRunner struct {
@@ -372,6 +374,46 @@ func TestGitHubPRScanReenqueuesChangedFailedVessel(t *testing.T) {
 	}
 }
 
+func TestPriorVesselBlocksReenqueue(t *testing.T) {
+	t.Parallel()
+
+	fingerprint := "match"
+	tests := []struct {
+		name        string
+		vessel      *queue.Vessel
+		fingerprint string
+		want        bool
+	}{
+		{name: "nil", vessel: nil, fingerprint: fingerprint, want: false},
+		{name: "pending", vessel: &queue.Vessel{State: queue.StatePending}, fingerprint: fingerprint, want: true},
+		{name: "running", vessel: &queue.Vessel{State: queue.StateRunning}, fingerprint: fingerprint, want: true},
+		{name: "waiting", vessel: &queue.Vessel{State: queue.StateWaiting}, fingerprint: fingerprint, want: true},
+		{
+			name:        "failed fingerprint match",
+			vessel:      &queue.Vessel{State: queue.StateFailed, Meta: map[string]string{"source_input_fingerprint": fingerprint}},
+			fingerprint: fingerprint,
+			want:        true,
+		},
+		{
+			name:        "failed fingerprint mismatch",
+			vessel:      &queue.Vessel{State: queue.StateFailed, Meta: map[string]string{"source_input_fingerprint": "other"}},
+			fingerprint: fingerprint,
+			want:        false,
+		},
+		{name: "completed", vessel: &queue.Vessel{State: queue.StateCompleted}, fingerprint: fingerprint, want: false},
+		{name: "cancelled", vessel: &queue.Vessel{State: queue.StateCancelled}, fingerprint: fingerprint, want: false},
+		{name: "timed out", vessel: &queue.Vessel{State: queue.StateTimedOut}, fingerprint: fingerprint, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := priorVesselBlocksReenqueue(tt.vessel, tt.fingerprint); got != tt.want {
+				t.Fatalf("priorVesselBlocksReenqueue() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestGitHubPROnStart(t *testing.T) {
 	r := newMock()
 	src := &GitHubPR{
@@ -490,8 +532,13 @@ func TestGitHubPROnStartConfiguredLabel(t *testing.T) {
 	r := newMock()
 	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
 	vessel := queue.Vessel{
-		ID:   "pr-10",
-		Meta: map[string]string{"pr_num": "10", "status_label_running": "wip", "status_label_queued": "queued"},
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                 "10",
+			"status_label_running":   "wip",
+			"status_label_queued":    "queued",
+			"label_gate_label_ready": "ready-for-implementation",
+		},
 	}
 	if err := src.OnStart(context.Background(), vessel); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -506,14 +553,23 @@ func TestGitHubPROnStartConfiguredLabel(t *testing.T) {
 	if !strings.Contains(joined, "--remove-label queued") {
 		t.Errorf("expected --remove-label queued in call, got %q", joined)
 	}
+	if !strings.Contains(joined, "--remove-label ready-for-implementation") {
+		t.Errorf("expected --remove-label ready-for-implementation in call, got %q", joined)
+	}
 }
 
 func TestGitHubPROnComplete(t *testing.T) {
 	r := newMock()
 	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
 	vessel := queue.Vessel{
-		ID:   "pr-10",
-		Meta: map[string]string{"pr_num": "10", "status_label_completed": "done", "status_label_running": "wip"},
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"status_label_completed":   "done",
+			"status_label_running":     "wip",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
 	}
 	if err := src.OnComplete(context.Background(), vessel); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -527,6 +583,12 @@ func TestGitHubPROnComplete(t *testing.T) {
 	}
 	if !strings.Contains(joined, "--remove-label wip") {
 		t.Errorf("expected --remove-label wip in call, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked in call, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label ready-for-implementation") {
+		t.Errorf("expected --remove-label ready-for-implementation in call, got %q", joined)
 	}
 }
 
@@ -556,8 +618,13 @@ func TestGitHubPROnTimedOut(t *testing.T) {
 	r := newMock()
 	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
 	vessel := queue.Vessel{
-		ID:   "pr-10",
-		Meta: map[string]string{"pr_num": "10", "status_label_timed_out": "timed-out", "status_label_running": "wip"},
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"status_label_timed_out":   "timed-out",
+			"status_label_running":     "wip",
+			"label_gate_label_waiting": "blocked",
+		},
 	}
 	if err := src.OnTimedOut(context.Background(), vessel); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -568,6 +635,61 @@ func TestGitHubPROnTimedOut(t *testing.T) {
 	joined := strings.Join(r.calls[0], " ")
 	if !strings.Contains(joined, "--add-label timed-out") {
 		t.Errorf("expected --add-label timed-out, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked, got %q", joined)
+	}
+}
+
+func TestGitHubPROnWait(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
+	}
+	if err := src.OnWait(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label blocked") {
+		t.Errorf("expected --add-label blocked, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label ready-for-implementation") {
+		t.Errorf("expected --remove-label ready-for-implementation, got %q", joined)
+	}
+}
+
+func TestGitHubPROnResume(t *testing.T) {
+	r := newMock()
+	src := &GitHubPR{Repo: "owner/repo", CmdRunner: r}
+	vessel := queue.Vessel{
+		ID: "pr-10",
+		Meta: map[string]string{
+			"pr_num":                   "10",
+			"label_gate_label_waiting": "blocked",
+			"label_gate_label_ready":   "ready-for-implementation",
+		},
+	}
+	if err := src.OnResume(context.Background(), vessel); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(r.calls) != 1 {
+		t.Fatalf("expected 1 call, got %d: %v", len(r.calls), r.calls)
+	}
+	joined := strings.Join(r.calls[0], " ")
+	if !strings.Contains(joined, "--add-label ready-for-implementation") {
+		t.Errorf("expected --add-label ready-for-implementation, got %q", joined)
+	}
+	if !strings.Contains(joined, "--remove-label blocked") {
+		t.Errorf("expected --remove-label blocked, got %q", joined)
 	}
 }
 
@@ -922,6 +1044,115 @@ func TestGitHubPRScanLegacyFailedVesselStillBlocksSameWorkflow(t *testing.T) {
 	}
 }
 
+func TestSmoke_S1_CompletedQualifiedVesselDoesNotBlockResolveConflicts(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prURL := "https://github.com/owner/repo/pull/179"
+	fingerprint := githubSourceFingerprint("feat: scheduled lessons", "b", []string{"needs-conflict-resolution"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "pr-179-resolve-conflicts-old",
+		Source:    "github-pr",
+		Ref:       prWorkflowRef(prURL, "resolve-conflicts"),
+		Workflow:  "resolve-conflicts",
+		Meta:      map[string]string{"pr_num": "179", "source_input_fingerprint": fingerprint},
+		State:     queue.StateCompleted,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	prs := []ghPR{
+		{Number: 179, Title: "feat: scheduled lessons", Body: "b", URL: prURL, HeadRefName: "feat/issue-159-159",
+			Mergeable: "CONFLICTING",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "needs-conflict-resolution"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	src := &GitHubPR{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"conflict-resolution": {Labels: []string{"needs-conflict-resolution"}, Workflow: "resolve-conflicts"},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+
+	assert.Equal(t, "resolve-conflicts", vessels[0].Workflow)
+	assert.Equal(t, prWorkflowRef(prURL, "resolve-conflicts"), vessels[0].Ref)
+	assert.Equal(t, "179", vessels[0].Meta["pr_num"])
+	assert.Equal(t, fingerprint, vessels[0].Meta["source_input_fingerprint"])
+	for _, call := range r.calls {
+		assert.NotContains(t, strings.Join(call, " "), "--remove-label")
+	}
+}
+
+func TestSmoke_S2_QualifiedCompletedVesselOverridesOlderLegacyFailedVessel(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prURL := "https://github.com/owner/repo/pull/179"
+	fingerprint := githubSourceFingerprint("feat: scheduled lessons", "b", []string{"needs-conflict-resolution"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "pr-179-resolve-conflicts-legacy",
+		Source:    "github-pr",
+		Ref:       prURL,
+		Workflow:  "resolve-conflicts",
+		Meta:      map[string]string{"pr_num": "179", "source_input_fingerprint": fingerprint},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC().Add(-2 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("pr-179-resolve-conflicts-legacy", queue.StateFailed, "boom"))
+
+	_, err = q.Enqueue(queue.Vessel{
+		ID:        "pr-179-resolve-conflicts-qualified",
+		Source:    "github-pr",
+		Ref:       prWorkflowRef(prURL, "resolve-conflicts"),
+		Workflow:  "resolve-conflicts",
+		Meta:      map[string]string{"pr_num": "179", "source_input_fingerprint": fingerprint},
+		State:     queue.StateCompleted,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	prs := []ghPR{
+		{Number: 179, Title: "feat: scheduled lessons", Body: "b", URL: prURL, HeadRefName: "feat/issue-159-159",
+			Mergeable: "CONFLICTING",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "needs-conflict-resolution"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	src := &GitHubPR{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"conflict-resolution": {Labels: []string{"needs-conflict-resolution"}, Workflow: "resolve-conflicts"},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+
+	assert.Equal(t, "resolve-conflicts", vessels[0].Workflow)
+	assert.Equal(t, prWorkflowRef(prURL, "resolve-conflicts"), vessels[0].Ref)
+	assert.Equal(t, "179", vessels[0].Meta["pr_num"])
+	assert.Equal(t, fingerprint, vessels[0].Meta["source_input_fingerprint"])
+}
+
 func TestGitHubPRScanLegacyActiveVesselStillBlocksSameWorkflow(t *testing.T) {
 	// Backward-compat guard: a legacy bare-URL pending/running vessel
 	// must continue to block re-enqueue of the same workflow. This
@@ -967,6 +1198,52 @@ func TestGitHubPRScanLegacyActiveVesselStillBlocksSameWorkflow(t *testing.T) {
 	if len(vessels) != 0 {
 		t.Fatalf("expected legacy active vessel to block re-enqueue, got %d", len(vessels))
 	}
+}
+
+func TestSmoke_S3_LegacyCompletedVesselDoesNotBlockSameWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prURL := "https://github.com/owner/repo/pull/188"
+	fingerprint := githubSourceFingerprint("feat: x", "b", []string{"needs-conflict-resolution"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "pr-188-resolve-conflicts-old",
+		Source:    "github-pr",
+		Ref:       prURL,
+		Workflow:  "resolve-conflicts",
+		Meta:      map[string]string{"pr_num": "188", "source_input_fingerprint": fingerprint},
+		State:     queue.StateCompleted,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	prs := []ghPR{
+		{Number: 188, Title: "feat: x", Body: "b", URL: prURL, HeadRefName: "feat/x",
+			Mergeable: "CONFLICTING",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "needs-conflict-resolution"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	src := &GitHubPR{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"conflict-resolution": {Labels: []string{"needs-conflict-resolution"}, Workflow: "resolve-conflicts"},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+
+	assert.Equal(t, "resolve-conflicts", vessels[0].Workflow)
+	assert.Equal(t, prWorkflowRef(prURL, "resolve-conflicts"), vessels[0].Ref)
+	assert.Equal(t, "188", vessels[0].Meta["pr_num"])
+	assert.Equal(t, fingerprint, vessels[0].Meta["source_input_fingerprint"])
 }
 
 func TestGitHubPRScanResolveConflictsSkipsMergeablePRAndStripsLabel(t *testing.T) {

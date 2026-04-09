@@ -211,8 +211,8 @@ xylem scan [flags]
 - `github-pr` scans open pull requests matching task labels.
 - `github-pr-events` scans open pull requests for configured `on` triggers such as labels, submitted reviews, failed checks, and comments.
 - `github-merge` scans merged pull requests and dedupes by merge commit SHA.
-- `schedule` emits a synthetic vessel when its configured cadence elapses.
-- `scheduled` enqueues one vessel per task per schedule window (`@weekly`, `24h`, etc.) and dedupes by the computed slot ref.
+- `schedule` emits a synthetic vessel when its configured cadence elapses and persists the last-fired timestamp under `<state_dir>/state/schedule.json`.
+- `scheduled` enqueues one vessel per task per schedule window (`@weekly`, `24h`, etc.) and persists per-task buckets under `<state_dir>/schedules/` so repeated scans do not duplicate work.
 - If scanning is paused (via `xylem pause`), prints a message and exits without scanning.
 - Deduplication is handled automatically. Depending on the source, xylem skips refs that are already present in the queue, already present in any vessel state, or already have xylem-owned branches/open PRs.
 
@@ -278,8 +278,9 @@ xylem drain [flags]
    - Executes workflow phases sequentially in the worktree. Prompt phases use the resolved provider (`claude` or `copilot`), and command phases run shell commands directly.
    - Runs quality gates between phases (command gates with retries, label gates with polling).
 4. Marks vessels as `completed`, `failed`, `waiting`, or `timed_out` based on outcome.
-5. If `harness.review` is configured for automatic cadence, regenerates the latest harness review as a best-effort post-drain step.
-6. Prints a summary line and exits.
+5. Executes any built-in scheduled vessels already sitting in the queue (for example, `context-weight-audit`) without creating a worktree or launching an LLM session.
+6. If `harness.review` is configured for automatic cadence, regenerates the latest harness review as a best-effort post-drain step.
+7. Prints a summary line and exits.
 
 **Graceful shutdown**: `drain` handles `SIGINT` and `SIGTERM`. When a signal is received, running sessions are allowed to finish, but no new pending vessels are started.
 
@@ -356,6 +357,56 @@ xylem review
 
 ---
 
+## xylem lessons
+
+Synthesize recurring failed-run patterns into institutional-memory proposals for `.xylem/HARNESS.md`.
+
+### Usage
+
+```
+xylem lessons
+```
+
+### Flags
+
+None.
+
+### Behavior
+
+1. Scans historical vessel summaries under `<state_dir>/phases/`.
+2. Filters to failed and timed-out runs inside the last 30 days by default.
+3. Clusters recurring failures using structured artifacts first: evidence manifests, phase failures, and evaluator reports.
+4. Skips lessons already present in `.xylem/HARNESS.md` or already represented by an equivalent open PR.
+5. Writes:
+   - `<state_dir>/reviews/lessons.json`
+   - `<state_dir>/reviews/lessons.md`
+6. For each remaining proposal slice, creates a branch, commits the generated `.xylem/HARNESS.md` patch, pushes it, and opens a reviewable PR.
+7. Persists proposal records containing:
+    - a branch name
+    - a PR title/body
+    - the exact HARNESS.md markdown block to add
+    - evidence references back to failed runs
+    - PR creation status plus `pr_number` / `pr_url` when a PR was opened
+
+### Artifact contract
+
+`<state_dir>/reviews/lessons.json` contains:
+
+- `lessons[]`: evidence-backed negative constraints with `fingerprint`, `negative_constraint`, `rationale`, `example`, and `evidence[]`
+- `proposals[]`: narrow PR slices with `branch`, `title`, `body`, `harness_path`, `harness_patch`, `lesson_fingerprints`, `status`, and optional `pr_number` / `pr_url`
+- `skipped[]`: deduplicated lessons omitted because the harness or an open PR already covers them
+
+Future agents can consume this artifact directly to inspect what was synthesized, what was skipped, and which PRs were opened.
+
+### Examples
+
+```bash
+# Generate the current institutional-memory proposal set
+xylem lessons
+```
+
+---
+
 ## xylem gap-report
 
 Deterministic helpers used by recurring SoTA gap-analysis workflows.
@@ -405,7 +456,8 @@ The daemon uses the shorter of the two intervals as its tick interval and checks
 1. Parses scan and drain intervals from config (falling back to defaults).
 2. Enters a loop that alternates between scanning and draining based on elapsed time since each operation last ran.
 3. After each tick, logs a summary of the queue state (pending, running, completed, failed counts).
-4. Automatic harness review generation follows the same best-effort cadence as `xylem drain` because daemon draining uses the same post-drain hook.
+4. Daemon drains also execute built-in scheduled vessels such as `context-weight-audit` before launching normal workflow runs.
+5. Automatic harness review generation follows the same best-effort cadence as `xylem drain` because daemon draining uses the same post-drain hook.
 
 **Graceful shutdown**: Handles `SIGINT` and `SIGTERM`. On signal, the daemon logs a shutdown message and exits cleanly. Running sessions finish before the process terminates.
 

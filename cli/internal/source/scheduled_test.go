@@ -31,8 +31,8 @@ func TestScheduledScanEnqueuesOnePerWindow(t *testing.T) {
 	if vessels[0].Source != "scheduled" {
 		t.Fatalf("Source = %q, want scheduled", vessels[0].Source)
 	}
-	if !strings.HasPrefix(vessels[0].Ref, "schedule://owner-repo/sota/") {
-		t.Fatalf("Ref = %q, want schedule ref", vessels[0].Ref)
+	if !strings.HasPrefix(vessels[0].Ref, "scheduled://owner-repo/sota@") {
+		t.Fatalf("Ref = %q, want scheduled ref", vessels[0].Ref)
 	}
 	if _, err := q.Enqueue(vessels[0]); err != nil {
 		t.Fatalf("Enqueue() error = %v", err)

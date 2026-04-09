@@ -150,6 +150,7 @@ In addition to issue scanning, xylem supports these GitHub source types:
 - `github-pr-events` — scans open pull requests for event triggers
 - `github-merge` — scans merged pull requests
 - `schedule` — emits a recurring synthetic vessel on a configured cadence
+- `schedule` — emits a recurring synthetic vessel on a configured cadence such as `1h`, `24h`, `@daily`, or `0 6 * * 1`
 
 For `github-pr-events`, tasks use an `on` block instead of `labels`:
 
@@ -182,6 +183,18 @@ sources:
 ```
 
 `cadence` accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions.
+
+For recurring institutional-memory updates, point a scheduled source at the built-in `lessons` workflow:
+
+```yaml
+sources:
+  lessons:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
+```
+
+The built-in `lessons` workflow mines recent failed vessels, writes `<state_dir>/reviews/lessons.{json,md}`, and opens reviewable PRs with proposed `.xylem/HARNESS.md` institutional-memory updates.
 
 ## Write a HARNESS.md
 

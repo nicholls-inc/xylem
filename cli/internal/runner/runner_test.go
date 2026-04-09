@@ -107,6 +107,10 @@ func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string
 	return []byte{}, m.outputErr
 }
 
+func (m *mockCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return m.RunOutput(ctx, name, args...)
+}
+
 func (m *mockCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
 	atomic.AddInt32(&m.started, 1)
 	return m.processErr
@@ -326,6 +330,26 @@ func countRunOutputCalls(m *mockCmdRunner, name string) int {
 		}
 	}
 	return count
+}
+
+func hasRunOutputCallContaining(m *mockCmdRunner, fragments ...string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, args := range m.outputArgs {
+		joined := strings.Join(args, " ")
+		match := true
+		for _, fragment := range fragments {
+			if !strings.Contains(joined, fragment) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 func loadSingleVessel(t *testing.T, q *queue.Queue) queue.Vessel {
@@ -2277,6 +2301,51 @@ func TestSmoke_WS6_S14_PromptOnlyVesselGetsSurfaceVerification(t *testing.T) {
 	assert.Equal(t, originalContents, string(data))
 }
 
+func TestRunVessel_BuiltinWorkflowCompletesWithoutLoadingWorkflowFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "lessons-1",
+		Source:    "manual",
+		Workflow:  "lessons",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	wt := &mockWorktree{createErr: errors.New("worktree should not be created")}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+	called := false
+	r.BuiltinWorkflows = map[string]BuiltinWorkflowHandler{
+		"lessons": func(_ context.Context, got queue.Vessel) error {
+			called = true
+			assert.Equal(t, "lessons-1", got.ID)
+			return nil
+		},
+	}
+
+	outcome := r.runVessel(context.Background(), *vessel)
+	assert.Equal(t, "completed", outcome)
+	assert.True(t, called)
+
+	final := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateCompleted, final.State)
+	assert.Empty(t, final.WorktreePath)
+
+	summary := loadSummary(t, cfg.StateDir, "lessons-1")
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "lessons", summary.Phases[0].Name)
+	assert.Equal(t, "builtin", summary.Phases[0].Type)
+	assert.Equal(t, "completed", summary.Phases[0].Status)
+}
+
 func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
@@ -2850,6 +2919,134 @@ func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
 	}
 	if wt.removePath != waiting.WorktreePath {
 		t.Fatalf("removed worktree path = %q, want %q", wt.removePath, waiting.WorktreePath)
+	}
+}
+
+func TestDrainLabelGateAppliesWaitingLabels(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(1, "fix-bug")
+	vessel.Meta["status_label_running"] = "in-progress"
+	vessel.Meta["label_gate_label_waiting"] = "blocked"
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Waiting != 1 {
+		t.Fatalf("DrainAndWait().Waiting = %d, want 1", result.Waiting)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label blocked") {
+		t.Fatalf("expected waiting-label gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--remove-label in-progress") {
+		t.Fatalf("expected running-label cleanup gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+}
+
+func TestCheckWaitingVesselsAppliesReadyLabelsOnResume(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(1, "fix-bug")
+	vessel.Meta["label_gate_label_waiting"] = "blocked"
+	vessel.Meta["label_gate_label_ready"] = "ready-for-implementation"
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	first, err := r.DrainAndWait(context.Background())
+	if err != nil {
+		t.Fatalf("first Drain() error = %v", err)
+	}
+	if first.Waiting != 1 {
+		t.Fatalf("first DrainAndWait().Waiting = %d, want 1", first.Waiting)
+	}
+
+	cmdRunner.outputData = []byte(`{"labels":[{"name":"plan-approved"}]}`)
+	r.CheckWaitingVessels(context.Background())
+
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label ready-for-implementation", "--remove-label blocked") {
+		t.Fatalf("expected ready-label gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+}
+
+func TestCheckWaitingVesselsTimeoutAppliesTimedOutLabels(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	waitingSince := time.Now().UTC().Add(-48 * time.Hour)
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:           "issue-1",
+		Source:       "github-issue",
+		Ref:          "https://github.com/owner/repo/issues/1",
+		Workflow:     "fix-bug",
+		Meta:         map[string]string{"issue_num": "1", "status_label_timed_out": "timed-out", "label_gate_label_waiting": "blocked"},
+		State:        queue.StateWaiting,
+		CreatedAt:    time.Now().UTC(),
+		WaitingFor:   "plan-approved",
+		WaitingSince: &waitingSince,
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	r.CheckWaitingVessels(context.Background())
+
+	done, err := q.FindByID("issue-1")
+	if err != nil {
+		t.Fatalf("FindByID() error = %v", err)
+	}
+	if done.State != queue.StateTimedOut {
+		t.Fatalf("state after timeout = %s, want timed_out", done.State)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label timed-out", "--remove-label blocked") {
+		t.Fatalf("expected timed-out gh issue edit call, got %v", cmdRunner.outputArgs)
 	}
 }
 
@@ -4401,7 +4598,7 @@ func TestResolveSourcePrefersConfigSourceForScheduleVessel(t *testing.T) {
 		},
 	}
 
-	resolved, ok := r.resolveSource(queue.Vessel{
+	resolved, ok := r.resolveSourceForVessel(queue.Vessel{
 		Source: "schedule",
 		Meta: map[string]string{
 			"config_source":        "doctor",
@@ -4411,7 +4608,7 @@ func TestResolveSourcePrefersConfigSourceForScheduleVessel(t *testing.T) {
 		},
 	}).(*source.Schedule)
 	if !ok {
-		t.Fatalf("resolveSource() returned %T, want *source.Schedule", r.resolveSource(queue.Vessel{
+		t.Fatalf("resolveSourceForVessel() returned %T, want *source.Schedule", r.resolveSourceForVessel(queue.Vessel{
 			Source: "schedule",
 			Meta:   map[string]string{"config_source": "doctor"},
 		}))
@@ -4453,12 +4650,12 @@ func TestResolveSourcePrefersConfigSource(t *testing.T) {
 		},
 	}
 
-	got := r.resolveSource(queue.Vessel{
+	got := r.resolveSourceForVessel(queue.Vessel{
 		Source: "scheduled",
 		Meta:   map[string]string{"config_source": "sota-gap"},
 	})
 	if got != primary {
-		t.Fatalf("resolveSource() returned %T %p, want %T %p", got, got, primary, primary)
+		t.Fatalf("resolveSourceForVessel() returned %T %p, want %T %p", got, got, primary, primary)
 	}
 }
 

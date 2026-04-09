@@ -51,10 +51,16 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	// Check waiting vessels before draining pending ones
 	r.CheckWaitingVessels(ctx)
 
+	builtInResult, err := runBuiltInScheduledVessels(ctx, cfg, q, cmdRunner)
+	if err != nil {
+		return &exitError{code: 2, err: fmt.Errorf("drain built-in audit vessels: %w", err)}
+	}
+
 	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}
+	addDrainResults(&result, builtInResult)
 	maybeAutoGenerateHarnessReview(cfg, result)
 	fmt.Printf("Completed %d, failed %d, skipped %d, waiting %d\n", result.Completed, result.Failed, result.Skipped, result.Waiting)
 	if result.Failed > 0 {
@@ -71,6 +77,7 @@ func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeMana
 
 	r := runner.New(cfg, q, wt, cmdRunner)
 	r.Sources = buildSourceMap(cfg, q, cmdRunner)
+	r.BuiltinWorkflows = buildBuiltinWorkflowHandlers(cfg, wt, cmdRunner)
 	wireRunnerScaffolding(cfg, r, tracer)
 
 	return r, func() {
@@ -196,10 +203,12 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				}
 			}
 			scheduled := &source.Scheduled{
-				Repo:     srcCfg.Repo,
-				Schedule: srcCfg.Schedule,
-				Tasks:    scheduledTasks,
-				Queue:    q,
+				Repo:       srcCfg.Repo,
+				StateDir:   cfg.StateDir,
+				ConfigName: name,
+				Schedule:   srcCfg.Schedule,
+				Tasks:      scheduledTasks,
+				Queue:      q,
 			}
 			registerSource(sources, name, scheduled.Name(), scheduled)
 		case "schedule":

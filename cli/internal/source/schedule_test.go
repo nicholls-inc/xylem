@@ -370,3 +370,51 @@ func TestSmoke_S2_MalformedCadenceRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), `schedule source "broken"`)
 	assert.Contains(t, err.Error(), `parse cadence "not-a-cadence"`)
 }
+
+func TestScheduleOnEnqueueAcceptsLegacyMetadata(t *testing.T) {
+	stateDir := t.TempDir()
+	s := &Schedule{
+		ConfigName: "lessons",
+		Cadence:    "@daily",
+		Workflow:   "lessons",
+		StateDir:   stateDir,
+		Queue:      queue.New(filepath.Join(t.TempDir(), "queue.jsonl")),
+	}
+
+	err := s.OnEnqueue(context.Background(), queue.Vessel{
+		ID: "schedule-lessons-20260409t060000z",
+		Meta: map[string]string{
+			"schedule_fired_at": "2026-04-09T06:00:00Z",
+		},
+	})
+	require.NoError(t, err)
+
+	stateBytes, err := os.ReadFile(filepath.Join(stateDir, "state", "schedule.json"))
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"sources":{"lessons":{"last_fired_at":"2026-04-09T06:00:00Z"}}}`, string(stateBytes))
+}
+
+func TestScheduleScanReadsLegacyStateFile(t *testing.T) {
+	stateDir := t.TempDir()
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, legacyScheduleStateFileName),
+		[]byte(`{"lessons":{"cadence":"@daily","last_fired_at":"2026-04-09T06:00:00Z","next_due_at":"2026-04-10T00:00:00Z","last_vessel":"schedule-lessons-20260409t060000z"}}`),
+		0o644,
+	))
+
+	now := time.Date(2026, time.April, 9, 12, 0, 0, 0, time.UTC)
+	s := &Schedule{
+		ConfigName: "lessons",
+		Cadence:    "@daily",
+		Workflow:   "lessons",
+		StateDir:   stateDir,
+		Queue:      queue.New(filepath.Join(t.TempDir(), "queue.jsonl")),
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	vessels, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+}

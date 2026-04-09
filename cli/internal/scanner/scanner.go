@@ -21,6 +21,7 @@ type Scanner struct {
 	Config    *config.Config
 	Queue     *queue.Queue
 	CmdRunner CommandRunner
+	RunHooks  bool
 }
 
 // ScanResult summarises a scan run.
@@ -32,7 +33,7 @@ type ScanResult struct {
 
 // New creates a Scanner.
 func New(cfg *config.Config, q *queue.Queue, runner CommandRunner) *Scanner {
-	return &Scanner{Config: cfg, Queue: q, CmdRunner: runner}
+	return &Scanner{Config: cfg, Queue: q, CmdRunner: runner, RunHooks: true}
 }
 
 // Scan queries configured sources, filters candidates, and enqueues new vessels.
@@ -66,8 +67,10 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 			}
 			if enqueued {
 				result.Added++
-				if err := entry.src.OnEnqueue(ctx, vessel); err != nil {
-					log.Printf("warn: OnEnqueue hook for vessel %s failed: %v", vessel.ID, err)
+				if s.RunHooks {
+					if err := entry.src.OnEnqueue(ctx, vessel); err != nil {
+						log.Printf("warn: OnEnqueue hook for vessel %s failed: %v", vessel.ID, err)
+					}
 				}
 			} else {
 				result.Skipped++
@@ -138,10 +141,12 @@ func (s *Scanner) buildSources() []sourceEntry {
 			scheduledTasks := convertScheduledTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.Scheduled{
-					Repo:     srcCfg.Repo,
-					Schedule: srcCfg.Schedule,
-					Tasks:    scheduledTasks,
-					Queue:    s.Queue,
+					Repo:       srcCfg.Repo,
+					StateDir:   s.Config.StateDir,
+					ConfigName: name,
+					Schedule:   srcCfg.Schedule,
+					Tasks:      scheduledTasks,
+					Queue:      s.Queue,
 				},
 				configName: name,
 			})

@@ -96,6 +96,11 @@ type StatusLabels struct {
 	TimedOut  string `yaml:"timed_out,omitempty"`
 }
 
+type LabelGateLabels struct {
+	Waiting string `yaml:"waiting,omitempty"`
+	Ready   string `yaml:"ready,omitempty"`
+}
+
 // PREventsConfig defines which PR events trigger a workflow.
 //
 // For authored events (review_submitted, commented), at least one of
@@ -117,11 +122,12 @@ type PREventsConfig struct {
 }
 
 type Task struct {
-	Labels       []string        `yaml:"labels,omitempty"`
-	Workflow     string          `yaml:"workflow"`
-	Ref          string          `yaml:"ref,omitempty"`
-	StatusLabels *StatusLabels   `yaml:"status_labels,omitempty"`
-	On           *PREventsConfig `yaml:"on,omitempty"`
+	Labels          []string         `yaml:"labels,omitempty"`
+	Workflow        string           `yaml:"workflow"`
+	Ref             string           `yaml:"ref,omitempty"`
+	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
+	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
+	On              *PREventsConfig  `yaml:"on,omitempty"`
 }
 
 type ClaudeConfig struct {
@@ -753,9 +759,6 @@ func validateScheduledSource(name string, src SourceConfig) error {
 		if strings.TrimSpace(task.Workflow) == "" {
 			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
 		}
-		if strings.TrimSpace(task.Ref) == "" {
-			return fmt.Errorf("source %q task %q: ref is required for scheduled tasks", name, tname)
-		}
 	}
 	return nil
 }
@@ -778,7 +781,6 @@ func parseScheduleValue(value string) (time.Duration, error) {
 	}
 	return interval, nil
 }
-
 func validateScheduleSource(name string, src SourceConfig) error {
 	if strings.TrimSpace(src.Workflow) == "" {
 		return fmt.Errorf("source %q (schedule): workflow is required", name)
@@ -787,7 +789,7 @@ func validateScheduleSource(name string, src SourceConfig) error {
 		return fmt.Errorf("source %q (schedule): tasks are not supported; configure workflow at the source level", name)
 	}
 	if _, err := cadence.Parse(src.Cadence); err != nil {
-		return fmt.Errorf("source %q (schedule): %w", name, err)
+		return fmt.Errorf("source %q (schedule): cadence is invalid: %w", name, err)
 	}
 	return nil
 }

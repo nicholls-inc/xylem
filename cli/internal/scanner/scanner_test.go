@@ -15,6 +15,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/review"
 )
 
 type mockRunner struct {
@@ -1010,5 +1011,62 @@ func TestScanMerge(t *testing.T) {
 	}
 	if vessels[0].Workflow != "post-merge" {
 		t.Errorf("expected workflow post-merge, got %q", vessels[0].Workflow)
+	}
+}
+
+func TestScanScheduledSourceHonorsCadence(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]config.SourceConfig{
+			"audit": {
+				Type:     "scheduled",
+				Repo:     "owner/repo",
+				Schedule: "24h",
+				Tasks: map[string]config.Task{
+					"context": {Workflow: review.ContextWeightAuditWorkflow},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("first scan error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("first scan added = %d, want 1", result.Added)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("List() error = %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].Source != "scheduled" {
+		t.Fatalf("vessel.Source = %q, want %q", vessels[0].Source, "scheduled")
+	}
+	if vessels[0].Workflow != review.ContextWeightAuditWorkflow {
+		t.Fatalf("vessel.Workflow = %q, want %q", vessels[0].Workflow, review.ContextWeightAuditWorkflow)
+	}
+	if vessels[0].Meta["config_source"] != "audit" {
+		t.Fatalf("config_source = %q, want %q", vessels[0].Meta["config_source"], "audit")
+	}
+
+	result, err = s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("second scan error: %v", err)
+	}
+	if result.Added != 0 {
+		t.Fatalf("second scan added = %d, want 0", result.Added)
 	}
 }

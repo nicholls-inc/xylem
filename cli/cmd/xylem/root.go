@@ -87,6 +87,7 @@ func newRootCmd() *cobra.Command {
 		newDrainCmd(),
 		newReviewCmd(),
 		newGapReportCmd(),
+		newLessonsCmd(),
 		newEnqueueCmd(),
 		newStatusCmd(),
 		newPauseCmd(),
@@ -104,7 +105,8 @@ func newRootCmd() *cobra.Command {
 
 func hasGitHubSource(cfg *config.Config) bool {
 	for _, src := range cfg.Sources {
-		if src.Type == "github" || src.Type == "github-pr" || src.Type == "github-pr-events" || src.Type == "github-merge" || src.Type == "scheduled" {
+		switch src.Type {
+		case "github", "github-pr", "github-pr-events", "github-merge", "scheduled":
 			return true
 		}
 	}

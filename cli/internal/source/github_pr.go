@@ -140,6 +140,11 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					meta["status_label_failed"] = sl.Failed
 					meta["status_label_timed_out"] = sl.TimedOut
 				}
+				lgl := task.LabelGateLabels
+				if lgl != nil {
+					meta["label_gate_label_waiting"] = lgl.Waiting
+					meta["label_gate_label_ready"] = lgl.Ready
+				}
 				vessels = append(vessels, queue.Vessel{
 					ID:        fmt.Sprintf("pr-%d-%s", pr.Number, task.Workflow),
 					Source:    "github-pr",
@@ -156,8 +161,8 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 }
 
 func (g *GitHubPR) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_queued"], "")
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_queued"]}, nil)
 	return nil
 }
 
@@ -169,34 +174,70 @@ func (g *GitHubPR) OnStart(ctx context.Context, vessel queue.Vessel) error {
 	if prNum == "" {
 		return nil
 	}
-	g.applyPRLabel(ctx, prNum, ResolveRunningLabel(vessel), vessel.Meta["status_label_queued"])
+	g.applyPRLabels(ctx, prNum,
+		[]string{ResolveRunningLabel(vessel)},
+		[]string{vessel.Meta["status_label_queued"], resolveReadyLabel(vessel)})
+	return nil
+}
+
+func (g *GitHubPR) OnWait(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{resolveWaitingLabel(vessel)},
+		[]string{resolveReadyLabel(vessel)})
+	return nil
+}
+
+func (g *GitHubPR) OnResume(ctx context.Context, vessel queue.Vessel) error {
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{resolveReadyLabel(vessel)},
+		[]string{resolveWaitingLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) OnComplete(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_completed"],
-		ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_completed"]},
+		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) OnFail(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_failed"],
-		ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_failed"]},
+		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"],
-		vessel.Meta["status_label_timed_out"],
-		ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"],
+		[]string{vessel.Meta["status_label_timed_out"]},
+		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
 	return nil
 }
 
 func (g *GitHubPR) RemoveRunningLabel(ctx context.Context, vessel queue.Vessel) error {
-	g.applyPRLabel(ctx, vessel.Meta["pr_num"], "", ResolveRunningLabel(vessel))
+	g.applyPRLabels(ctx, vessel.Meta["pr_num"], nil, []string{ResolveRunningLabel(vessel)})
 	return nil
+}
+
+// applyPRLabels runs gh pr edit to add and/or remove labels on the PR.
+// Empty labels are ignored, and conflicting add/remove operations prefer add.
+func (g *GitHubPR) applyPRLabels(ctx context.Context, prNum string, add []string, remove []string) {
+	if g.CmdRunner == nil || prNum == "" {
+		return
+	}
+	add, remove = normalizeLabelOps(add, remove)
+	if len(add) == 0 && len(remove) == 0 {
+		return
+	}
+	args := []string{"pr", "edit", prNum, "--repo", g.Repo}
+	for _, label := range add {
+		args = append(args, "--add-label", label)
+	}
+	for _, label := range remove {
+		args = append(args, "--remove-label", label)
+	}
+	_, _ = g.CmdRunner.Run(ctx, "gh", args...)
 }
 
 // stripTaskLabels removes the given task-selector labels from a PR. Used
@@ -220,20 +261,7 @@ func (g *GitHubPR) stripTaskLabels(ctx context.Context, prNum int, labels []stri
 // applyPRLabel runs gh pr edit to add and/or remove a label on the PR.
 // Both add and remove are optional — empty string means skip that operation.
 func (g *GitHubPR) applyPRLabel(ctx context.Context, prNum, add, remove string) {
-	if g.CmdRunner == nil || prNum == "" {
-		return
-	}
-	if add == "" && remove == "" {
-		return
-	}
-	args := []string{"pr", "edit", prNum, "--repo", g.Repo}
-	if add != "" {
-		args = append(args, "--add-label", add)
-	}
-	if remove != "" {
-		args = append(args, "--remove-label", remove)
-	}
-	_, _ = g.CmdRunner.Run(ctx, "gh", args...)
+	g.applyPRLabels(ctx, prNum, []string{add}, []string{remove})
 }
 
 func (g *GitHubPR) BranchName(vessel queue.Vessel) string {
@@ -260,12 +288,18 @@ func (g *GitHubPR) hasBranch(ctx context.Context, prNum int) bool {
 	return false
 }
 
-func (g *GitHubPR) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
-	latest, err := g.Queue.FindLatestByRef(ref)
-	if err != nil || latest == nil {
+func priorVesselBlocksReenqueue(v *queue.Vessel, fingerprint string) bool {
+	if v == nil {
 		return false
 	}
-	return latest.State == queue.StateFailed && latest.Meta["source_input_fingerprint"] == fingerprint
+	switch v.State {
+	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
+		return true
+	case queue.StateFailed:
+		return v.Meta["source_input_fingerprint"] == fingerprint
+	default:
+		return false
+	}
 }
 
 // isBlockedByPriorVessel reports whether a prior vessel already occupies
@@ -277,26 +311,35 @@ func (g *GitHubPR) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
 // when it belongs to the SAME workflow as the current task.
 //
 // Blocking conditions:
-//   - A pending/running/waiting vessel at the qualified ref (via HasRef).
+//   - A pending/running/waiting vessel at the qualified ref.
 //   - A failed vessel at the qualified ref whose fingerprint equals the
-//     current PR input fingerprint (hasMatchingFailedFingerprint).
-//   - A legacy bare-URL vessel whose Workflow matches and is either
-//     active (pending/running/waiting) or terminally failed with a
-//     matching fingerprint.
+//     current PR input fingerprint.
+//   - If no qualified vessel exists yet, a legacy bare-URL vessel whose
+//     Workflow matches and is either active (pending/running/waiting)
+//     or terminally failed with a matching fingerprint.
 //
-// This preserves the dedup guarantees of the pre-qualification scheme
-// for in-flight workflows while allowing distinct workflows over the
-// same PR (e.g., merge-pr and resolve-conflicts) to coexist.
+// Completed/cancelled/timed_out vessels do not block. This is important
+// for resolve-conflicts retries: if a prior vessel completed without
+// actually changing the PR branch and GitHub still reports CONFLICTING,
+// the scanner must be able to enqueue a fresh vessel.
+//
+// Once a qualified-ref vessel exists, it is always newer than any
+// legacy bare-URL vessel for the same PR/workflow and therefore solely
+// determines whether the dedup slot is occupied. Falling back to an
+// older legacy vessel in that case would let stale pre-upgrade state
+// incorrectly block a newer completed/cancelled run.
+//
+// This preserves the dedup guarantees of the pre-qualification scheme for
+// in-flight workflows while allowing distinct workflows over the same PR
+// (e.g., merge-pr and resolve-conflicts) to coexist.
 func (g *GitHubPR) isBlockedByPriorVessel(prURL, fingerprint, workflow string) bool {
 	qualifiedRef := prWorkflowRef(prURL, workflow)
-	if g.Queue.HasRef(qualifiedRef) {
-		return true
-	}
-	if g.hasMatchingFailedFingerprint(qualifiedRef, fingerprint) {
-		return true
+	latest, err := g.Queue.FindLatestByRef(qualifiedRef)
+	if err == nil {
+		return priorVesselBlocksReenqueue(latest, fingerprint)
 	}
 	// Backward-compat: legacy queue entries were written with ref = prURL.
-	latest, err := g.Queue.FindLatestByRef(prURL)
+	latest, err = g.Queue.FindLatestByRef(prURL)
 	if err != nil || latest == nil {
 		return false
 	}
@@ -306,11 +349,5 @@ func (g *GitHubPR) isBlockedByPriorVessel(prURL, fingerprint, workflow string) b
 	if latest.Workflow != workflow {
 		return false
 	}
-	switch latest.State {
-	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
-		return true
-	case queue.StateFailed:
-		return latest.Meta["source_input_fingerprint"] == fingerprint
-	}
-	return false
+	return priorVesselBlocksReenqueue(latest, fingerprint)
 }

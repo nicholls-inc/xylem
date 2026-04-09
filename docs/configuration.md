@@ -134,14 +134,14 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
 | `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`, `"scheduled"`. |
-| `repo` | string | -- | Yes (GitHub and `scheduled` sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `repo` | string | -- | Yes (GitHub sources and `scheduled`) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
 | `schedule` | string | -- | Required for `scheduled` | Recurring cadence for per-task scheduled sources. Supports `@hourly`, `@daily`, `@weekly`, or any positive Go duration like `168h`. |
 | `cadence` | string | -- | Yes (`schedule`) | Recurrence for scheduled sources. Accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions. |
 | `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue each time a scheduled source fires. Scheduled sources define the workflow directly and do not use `tasks`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
-| `tasks` | map | -- | Yes (GitHub and `scheduled` sources) | Map of task names to task configurations. Required for GitHub-based and `scheduled` sources; not used by `schedule`. |
+| `tasks` | map | -- | Yes (GitHub sources and `scheduled`) | Map of task names to task configurations. Required for GitHub-based sources and `scheduled`; not used by `schedule`. |
 
 ### Tasks
 
@@ -151,18 +151,21 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 |-------|------|---------|----------|-------------|
 | `labels` | list of strings | -- | Required for `github` and `github-pr` | Labels that trigger this task. The item must have all listed labels to match. |
 | `workflow` | string | -- | Yes | Name of the workflow to invoke (e.g., `fix-bug`, `implement-feature`). Must not be empty or whitespace-only. Corresponds to a YAML file in `<state_dir>/workflows/`. |
-| `ref` | string | omitted | Required for `scheduled` | Stable task identifier stored in vessel metadata for recurring scheduled runs. |
+| `ref` | string | omitted | No | Optional stable task identifier stored in vessel metadata for recurring scheduled runs. Useful when downstream workflows want a task-level handle that remains stable across schedule windows. |
 | `status_labels` | object | omitted | No | Optional labels to apply as a vessel moves through queue states. Supported for `github` and `github-pr`. |
+| `label_gate_labels` | object | omitted | No | Optional labels to apply when a GitHub-backed vessel enters or exits a label-gate wait. Supported for `github` and `github-pr`. |
 | `on` | object | omitted | Required for `github-pr-events` | Event triggers for pull-request event scanning. Must include at least one trigger. |
 
 ### Task fields by source type
 
 - `github`: requires `labels`, supports `status_labels`
 - `github-pr`: requires `labels`, supports `status_labels`
+- `github` and `github-pr` also support `label_gate_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
-- `scheduled`: requires `workflow` and `ref`; the source also requires `schedule`
+- `scheduled`: requires `workflow`; `ref` is optional metadata, and the source also requires `schedule`
 - `schedule`: does not use `tasks`; configure `cadence` and `workflow` directly on the source
+- `scheduled`: uses `tasks` plus `schedule`; optimized for recurring task-backed hygiene workflows such as `context-weight-audit`
 
 ### `schedule`
 
@@ -179,17 +182,23 @@ sources:
     type: schedule
     cadence: "@daily"
     workflow: doc-garden
+
+  lessons:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
 ```
 
 Behavior:
 
 - The first scan fires immediately.
 - Later scans enqueue only when the cadence boundary has elapsed since the last successful enqueue.
+- Scheduled sources do not use `tasks`.
 - Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
 
 ### `scheduled`
 
-`scheduled` sources enqueue one vessel per task per schedule window. Repeated `scan` runs in the same window dedupe automatically by the computed schedule ref.
+`scheduled` sources create recurring task-backed vessels on a fixed cadence. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work, and the computed vessel ref also dedupes against already-queued work.
 
 ```yaml
 sources:
@@ -203,6 +212,7 @@ sources:
         ref: sota-gap-analysis
 ```
 
+The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
 ### `status_labels`
 
 When `status_labels` is set, xylem records the configured labels in vessel metadata and applies them during source lifecycle hooks.
@@ -226,6 +236,28 @@ Behavior:
 - `running` replaces `queued` when work starts
 - `completed`, `failed`, and `timed_out` replace `running` on terminal states
 - If `status_labels` is omitted entirely, `github` and `github-pr` keep the legacy fallback of adding `in-progress` on start
+- If the block is present and a field is empty, xylem skips that specific label operation
+
+### `label_gate_labels`
+
+When `label_gate_labels` is set, xylem records the configured labels in vessel metadata and applies them from deterministic runner code when a label gate blocks or resumes a GitHub-backed vessel.
+
+```yaml
+tasks:
+  fix-bugs:
+    labels: [bug, ready-for-work]
+    workflow: fix-bug
+    label_gate_labels:
+      waiting: blocked
+      ready: ready-for-implementation
+```
+
+Behavior:
+
+- `waiting` is added when the runner transitions a vessel into `waiting` for a label gate
+- `ready` replaces `waiting` when the gate passes and the vessel returns to `pending`
+- `ready` is removed again when the resumed vessel starts running, and both labels are cleaned up on terminal exits like `failed`, `timed_out`, and `completed`
+- If `label_gate_labels` is omitted entirely, the runner performs no extra label edits for label-gate waits
 - If the block is present and a field is empty, xylem skips that specific label operation
 
 ### `on`
@@ -391,7 +423,7 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs.
 
 ### Observability settings
 
@@ -585,6 +617,25 @@ sources:
       followup:
         workflow: post-merge-followup
 ```
+
+### Schedule recurring vessels
+
+```yaml
+sources:
+  lessons:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
+```
+
+`schedule` sources persist their last-fired state under `<state_dir>/schedule-state.json`. The generated vessel metadata includes:
+
+- `schedule_name`
+- `schedule_cadence`
+- `schedule_fired_at`
+- `schedule_next_due_at`
+
+The built-in `lessons` workflow is designed for this source type: it synthesizes recurring failures into `.xylem/HARNESS.md` proposals, records them under `<state_dir>/reviews/lessons.{json,md}`, and opens reviewable PRs instead of editing the default branch directly.
 
 ## Legacy config format
 

@@ -171,7 +171,8 @@ type Source interface {
 | `GitHubPR` | `github-pr` | `review/pr-<N>-<slug>` | Adds status label (default: `in-progress`) |
 | `GitHubPREvents` | `github-pr-events` | `event/pr-<N>-<eventType>-<slug>` | None |
 | `GitHubMerge` | `github-merge` | `merge/pr-<N>-<slug>` | None |
-| `Scheduled` | `scheduled` | `schedule/<task>` | None |
+| `Schedule` | `schedule` | `chore/<source-name>-<tick>` | Persists cadence state in `.xylem/schedule-state.json` |
+| `Scheduled` | `scheduled` | `scheduled/<task>-<vessel>` | Persists per-task schedule buckets in `.xylem/schedules/` |
 | `Manual` | `manual` | `task/<id>-<slug>` | None |
 
 GitHub-backed sources perform source-specific deduplication during scanning rather than one uniform set of checks. `GitHub` and `GitHubPR` check excluded labels, existing queue entries with the same ref, remote branches matching the issue/PR number, and open PRs with matching branch prefixes. `GitHubMerge` primarily deduplicates via merge commit OID. `GitHubPREvents` deduplicates via event-specific ref fragments (label, review ID, comment ID, or head SHA for check failures).
