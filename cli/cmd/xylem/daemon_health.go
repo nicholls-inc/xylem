@@ -248,15 +248,35 @@ func daemonHealthPath(cfg *config.Config) string {
 }
 
 func saveDaemonStatusSnapshot(path string, snapshot daemonStatusSnapshot) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create daemon health dir: %w", err)
 	}
 	data, err := json.MarshalIndent(snapshot, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal daemon health snapshot: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
-		return fmt.Errorf("write daemon health snapshot: %w", err)
+	tmp, err := os.CreateTemp(dir, daemonHealthFileName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp daemon health snapshot: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() {
+		_ = os.Remove(tmpPath)
+	}()
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp daemon health snapshot: %w", err)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp daemon health snapshot: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp daemon health snapshot: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("rename temp daemon health snapshot: %w", err)
 	}
 	return nil
 }

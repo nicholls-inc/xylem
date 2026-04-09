@@ -92,7 +92,7 @@ func TestSmoke_S3_OrphanedSubprocessTimesOutVessel(t *testing.T) {
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	now := time.Now().UTC()
-	started := now.Add(-2 * time.Minute)
+	started := now.Add(-11 * time.Minute)
 	vessel := queue.Vessel{
 		ID:           "issue-2",
 		Source:       "manual",
@@ -119,6 +119,37 @@ func TestSmoke_S3_OrphanedSubprocessTimesOutVessel(t *testing.T) {
 	assert.Equal(t, "vessel orphaned (no live subprocess)", updated.Error)
 	assert.True(t, wt.removeCalled)
 	assert.Equal(t, vessel.WorktreePath, wt.removePath)
+}
+
+func TestCheckStalledVesselsSkipsRecentOrphanActivity(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	started := now.Add(-2 * time.Minute)
+	vessel := queue.Vessel{
+		ID:        "issue-2b",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		State:     queue.StateRunning,
+		CreatedAt: now.Add(-3 * time.Minute),
+		StartedAt: &started,
+	}
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.ProcessTracker = &fakeProcessTracker{info: map[string]ProcessInfo{}}
+
+	alerts := r.CheckStalledVessels(context.Background())
+	require.Empty(t, alerts)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	require.Equal(t, queue.StateRunning, updated.State)
 }
 
 func TestCheckStalledVesselsSkipsRecentActivity(t *testing.T) {

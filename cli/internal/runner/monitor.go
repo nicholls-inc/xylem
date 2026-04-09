@@ -75,6 +75,14 @@ func (r *Runner) CheckStalledVessels(ctx context.Context) []StallAlert {
 			if !r.Config.Daemon.StallMonitor.OrphanCheckEnabled {
 				continue
 			}
+			activityAt, err := phaseActivityAt(r.Config.StateDir, vessel, time.Time{})
+			if err != nil {
+				log.Printf("warn: inspect phase activity for orphan check for %s: %v", vessel.ID, err)
+				continue
+			}
+			if activityAt.IsZero() || r.runtimeSince(activityAt) <= threshold {
+				continue
+			}
 			errMsg := "vessel orphaned (no live subprocess)"
 			log.Printf("warn: %s for vessel %s", errMsg, vessel.ID)
 			if r.timeoutRunningVessel(ctx, vessel, errMsg) {
@@ -88,17 +96,10 @@ func (r *Runner) CheckStalledVessels(ctx context.Context) []StallAlert {
 			continue
 		}
 
-		activityAt, err := latestPhaseActivityAt(r.Config.StateDir, vessel.ID)
+		activityAt, err := phaseActivityAt(r.Config.StateDir, vessel, info.StartedAt)
 		if err != nil {
-			if errors.Is(err, os.ErrNotExist) {
-				activityAt = info.StartedAt
-			} else {
-				log.Printf("warn: inspect phase activity for %s: %v", vessel.ID, err)
-				continue
-			}
-		}
-		if activityAt.IsZero() && vessel.StartedAt != nil {
-			activityAt = *vessel.StartedAt
+			log.Printf("warn: inspect phase activity for %s: %v", vessel.ID, err)
+			continue
 		}
 		if activityAt.IsZero() {
 			continue
@@ -139,6 +140,20 @@ func (r *Runner) timeoutRunningVessel(ctx context.Context, vessel queue.Vessel, 
 	}
 	r.removeWorktree(vessel.WorktreePath, vessel.ID)
 	return true
+}
+
+func phaseActivityAt(stateDir string, vessel queue.Vessel, fallback time.Time) (time.Time, error) {
+	activityAt, err := latestPhaseActivityAt(stateDir, vessel.ID)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return time.Time{}, err
+		}
+		activityAt = fallback
+	}
+	if activityAt.IsZero() && vessel.StartedAt != nil {
+		activityAt = *vessel.StartedAt
+	}
+	return activityAt, nil
 }
 
 func latestPhaseActivityAt(stateDir, vesselID string) (time.Time, error) {

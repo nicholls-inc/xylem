@@ -104,6 +104,30 @@ func TestSmoke_S5_StatusShowsDaemonHealthAlerts(t *testing.T) {
 	}
 }
 
+func TestSaveDaemonStatusSnapshotReplacesFileAtomically(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, daemonHealthFileName)
+	require.NoError(t, os.WriteFile(path, []byte(`{"pid":1,"heartbeat_at":"2026-01-01T00:00:00Z"}`), 0o644))
+
+	snapshot := daemonStatusSnapshot{
+		PID:         2,
+		StartedAt:   time.Date(2026, time.January, 2, 3, 4, 5, 0, time.UTC),
+		HeartbeatAt: time.Date(2026, time.January, 2, 3, 5, 5, 0, time.UTC),
+		Build:       "abcdef123456",
+	}
+	require.NoError(t, saveDaemonStatusSnapshot(path, snapshot))
+
+	got, err := loadDaemonStatusSnapshot(path)
+	require.NoError(t, err)
+	assert.Equal(t, snapshot.PID, got.PID)
+	assert.Equal(t, snapshot.StartedAt, got.StartedAt)
+	assert.Equal(t, snapshot.HeartbeatAt, got.HeartbeatAt)
+
+	matches, err := filepath.Glob(filepath.Join(dir, daemonHealthFileName+".*.tmp"))
+	require.NoError(t, err)
+	assert.Empty(t, matches)
+}
+
 func TestNewDaemonHealthRecorderOnlyMarksActiveAutoUpgradeWhenWired(t *testing.T) {
 	cfg := &config.Config{
 		Daemon: config.DaemonConfig{
