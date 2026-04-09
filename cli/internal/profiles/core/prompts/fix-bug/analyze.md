@@ -10,6 +10,6 @@ Read the codebase and identify:
 2. The root cause (for bugs) or the requirements (for features)
 3. Any dependencies or constraints
 
-If you determine the issue is already resolved in the default branch or no code changes are needed, include the exact standalone line "XYLEM_NOOP" in your final output and explain why no further phases should run.
+If you determine the issue is already resolved in the default branch or no code changes are needed, include the exact standalone line `XYLEM_NOOP` in your final output and explain why no further phases should run.
 
 Write your analysis clearly and concisely.

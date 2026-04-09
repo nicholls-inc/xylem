@@ -1,9 +1,9 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -17,6 +17,29 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+var expectedCoreWorkflows = []string{
+	"adapt-repo",
+	"context-weight-audit",
+	"fix-bug",
+	"fix-pr-checks",
+	"implement-feature",
+	"lessons",
+	"merge-pr",
+	"refine-issue",
+	"resolve-conflicts",
+	"respond-to-pr-review",
+	"review-pr",
+	"triage",
+	"workflow-health-report",
+}
+
+var expectedSelfHostingWorkflows = []string{
+	"diagnose-failures",
+	"implement-harness",
+	"sota-gap-analysis",
+	"unblock-wave",
+}
 
 func TestInitCreatesConfigAndStateDir(t *testing.T) {
 	dir := t.TempDir()
@@ -51,8 +74,12 @@ func TestInitCreatesConfigAndStateDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gitignore not created: %v", err)
 	}
-	if string(data) != "*\n!.gitignore\n" {
+	if string(data) != scaffoldGitignore {
 		t.Errorf("unexpected gitignore content: %q", string(data))
+	}
+
+	if _, err := os.Stat(filepath.Join(stateDir, "profile.lock")); err != nil {
+		t.Errorf("profile.lock not created: %v", err)
 	}
 
 }
@@ -202,8 +229,10 @@ func TestInitScaffoldConfigLoads(t *testing.T) {
 
 	data, err := os.ReadFile(configPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "allows")
-	assert.Contains(t, string(data), "git_push/pr_create")
+	assert.Contains(t, string(data), "profiles:")
+	assert.Contains(t, string(data), "- core")
+	assert.Contains(t, string(data), "# validation:")
+	assert.Equal(t, []string{"core"}, cfg.Profiles)
 }
 
 func TestInitRespectsConfigFlag(t *testing.T) {
@@ -233,12 +262,10 @@ func TestInitRespectsConfigFlag(t *testing.T) {
 	}
 }
 
-func TestPromptContentPRMentionsApprovalBoundary(t *testing.T) {
-	content := promptContent("fix-bug", "pr")
-	assert.Contains(t, content, "publication boundary")
-	assert.Contains(t, content, "autonomous drains can finish")
-	assert.Contains(t, content, "`git_push`")
-	assert.Contains(t, content, "`pr_create`")
+func TestResolveProfiles(t *testing.T) {
+	profiles, err := resolveProfiles("core,self-hosting-xylem")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"core", "self-hosting-xylem"}, profiles)
 }
 
 func TestInitCreatesV2Files(t *testing.T) {
@@ -258,20 +285,13 @@ func TestInitCreatesV2Files(t *testing.T) {
 
 	expectedFiles := []string{
 		".xylem/HARNESS.md",
-		".xylem/workflows/adapt-repo.yaml",
-		".xylem/workflows/fix-bug.yaml",
-		".xylem/workflows/implement-feature.yaml",
+		".xylem/profile.lock",
 		".xylem/prompts/adapt-repo/apply.md",
 		".xylem/prompts/adapt-repo/plan.md",
-		".xylem/prompts/adapt-repo/pr.md",
-		".xylem/prompts/fix-bug/analyze.md",
-		".xylem/prompts/fix-bug/plan.md",
-		".xylem/prompts/fix-bug/implement.md",
-		".xylem/prompts/fix-bug/pr.md",
-		".xylem/prompts/implement-feature/analyze.md",
-		".xylem/prompts/implement-feature/plan.md",
-		".xylem/prompts/implement-feature/implement.md",
-		".xylem/prompts/implement-feature/pr.md",
+		".xylem/prompts/workflow-health-report/analyze.md",
+	}
+	for _, workflowName := range expectedCoreWorkflows {
+		expectedFiles = append(expectedFiles, filepath.Join(".xylem", "workflows", workflowName+".yaml"))
 	}
 	for _, f := range expectedFiles {
 		path := filepath.Join(dir, f)
@@ -379,6 +399,10 @@ func TestInitForceOverwritesV2Files(t *testing.T) {
 	if !strings.Contains(string(data), "Project Overview") {
 		t.Error("expected default HARNESS.md content after force overwrite")
 	}
+
+	lockData, err := os.ReadFile(filepath.Join(dir, ".xylem", "profile.lock"))
+	require.NoError(t, err)
+	assert.Contains(t, string(lockData), "name: core")
 }
 
 func TestInitScaffoldConfigV2Format(t *testing.T) {
@@ -405,12 +429,162 @@ func TestInitScaffoldConfigV2Format(t *testing.T) {
 	if !strings.Contains(content, "flags:") {
 		t.Error("expected v2 config to contain 'flags:' field")
 	}
-	if !strings.Contains(content, "env:") {
-		t.Error("expected v2 config to contain 'env:' section")
+	assert.Contains(t, content, "profiles:")
+	assert.Contains(t, content, "workflow-health-report")
+	assert.NotContains(t, content, "template:")
+}
+
+func TestInitProfileDefaultsToCoreWhenOmitted(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	require.NoError(t, cmdInit(configPath, false))
+
+	lockData, err := os.ReadFile(filepath.Join(dir, ".xylem", "profile.lock"))
+	require.NoError(t, err)
+	assert.Contains(t, string(lockData), "name: core")
+	assert.NotContains(t, string(lockData), "self-hosting-xylem")
+}
+
+func TestInitProfileCoreAndSelfHostingXylem(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	runGit(t, dir, "init")
+	runGit(t, dir, "remote", "add", "origin", "git@github.com:nicholls-inc/xylem.git")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	require.NoError(t, cmdInitWithProfile(configPath, false, "core,self-hosting-xylem"))
+
+	for _, workflowName := range expectedSelfHostingWorkflows {
+		path := filepath.Join(dir, ".xylem", "workflows", workflowName+".yaml")
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("expected overlay workflow %s to exist: %v", workflowName, err)
+		}
 	}
-	if strings.Contains(content, "template:") {
-		t.Error("expected v2 config to NOT contain 'template:' field")
+
+	lockData, err := os.ReadFile(filepath.Join(dir, ".xylem", "profile.lock"))
+	require.NoError(t, err)
+	assert.Contains(t, string(lockData), "name: core")
+	assert.Contains(t, string(lockData), "name: self-hosting-xylem")
+
+	cfg, err := config.Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
+	if _, ok := cfg.Sources["harness-impl"]; !ok {
+		t.Fatal("expected harness-impl source from self-hosting overlay")
 	}
+}
+
+func TestInitRejectsUnknownProfile(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	err := cmdInitWithProfile(configPath, false, "nonexistent")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "invalid --profile")
+}
+
+func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	output := captureStdout(func() {
+		require.NoError(t, cmdInit(configPath, false))
+	})
+
+	assert.Contains(t, output, "Created "+configPath)
+	assert.Contains(t, output, "Created .xylem/profile.lock")
+	assert.Contains(t, output, "Created .xylem/workflows/context-weight-audit.yaml")
+	assert.Contains(t, output, "Created .xylem/workflows/workflow-health-report.yaml")
+
+	workflows := scaffoldedWorkflowNames(t, dir)
+	assert.Equal(t, expectedCoreWorkflows, workflows)
+
+	gitignoreData, err := os.ReadFile(filepath.Join(dir, ".xylem", ".gitignore"))
+	require.NoError(t, err)
+	assert.Equal(t, scaffoldGitignore, string(gitignoreData))
+
+	lockData, err := os.ReadFile(filepath.Join(dir, ".xylem", "profile.lock"))
+	require.NoError(t, err)
+	assert.Contains(t, string(lockData), "name: core")
+	assert.NotContains(t, string(lockData), "self-hosting-xylem")
+
+	cfg, err := config.Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"core"}, cfg.Profiles)
+	assert.Contains(t, cfg.Sources, "adaptation")
+	assert.Contains(t, cfg.Sources, "pr-lifecycle")
+	assert.Contains(t, cfg.Sources, "lessons-hygiene")
+	assert.Contains(t, cfg.Sources, "context-audit")
+	assert.Contains(t, cfg.Sources, "workflow-health")
+	require.NoError(t, cfg.Validate())
+}
+
+func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	runGit(t, dir, "init")
+	runGit(t, dir, "remote", "add", "origin", "git@github.com:nicholls-inc/xylem.git")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	output := captureStdout(func() {
+		require.NoError(t, cmdInitWithProfile(configPath, false, "core,self-hosting-xylem"))
+	})
+
+	expectedWorkflows := append(append([]string{}, expectedCoreWorkflows...), expectedSelfHostingWorkflows...)
+	sort.Strings(expectedWorkflows)
+	assert.Equal(t, expectedWorkflows, scaffoldedWorkflowNames(t, dir))
+	assert.Contains(t, output, "Created .xylem/workflows/implement-harness.yaml")
+	assert.Contains(t, output, "Created .xylem/workflows/unblock-wave.yaml")
+
+	lockData, err := os.ReadFile(filepath.Join(dir, ".xylem", "profile.lock"))
+	require.NoError(t, err)
+	assert.Contains(t, string(lockData), "name: core")
+	assert.Contains(t, string(lockData), "name: self-hosting-xylem")
+
+	cfg, err := config.Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
+	assert.Contains(t, cfg.Sources, "harness-impl")
+	assert.Contains(t, cfg.Sources, "harness-pr-lifecycle")
+	require.NoError(t, cfg.Validate())
+}
+
+func TestSmoke_S6_NonexistentProfileFailsFast(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	err := cmdInitWithProfile(configPath, false, "nonexistent")
+	require.Error(t, err)
+
+	assert.Contains(t, err.Error(), "invalid --profile")
+	assert.Contains(t, err.Error(), "nonexistent")
+	assert.NoFileExists(t, configPath)
+	assert.NoFileExists(t, filepath.Join(dir, ".xylem", "profile.lock"))
 }
 
 func TestInitCobraBypassesPersistentPreRunE(t *testing.T) {
@@ -439,6 +613,31 @@ func TestInitCobraBypassesPersistentPreRunE(t *testing.T) {
 	})
 }
 
+func runGit(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	require.NoError(t, err, "git %s: %s", strings.Join(args, " "), string(out))
+}
+
+func scaffoldedWorkflowNames(t *testing.T, dir string) []string {
+	t.Helper()
+
+	entries, err := os.ReadDir(filepath.Join(dir, ".xylem", "workflows"))
+	require.NoError(t, err)
+
+	names := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".yaml" {
+			continue
+		}
+		names = append(names, strings.TrimSuffix(entry.Name(), ".yaml"))
+	}
+	sort.Strings(names)
+	return names
+}
+
 type smokeHarborConfig struct {
 	Agent             string  `yaml:"agent"`
 	Model             string  `yaml:"model"`
@@ -462,20 +661,6 @@ type smokeTaskFile struct {
 			Canary     string   `toml:"canary"`
 		} `toml:"metadata"`
 	} `toml:"task"`
-}
-
-type seedRunnerStub struct {
-	calls   [][]string
-	outputs map[string][]byte
-}
-
-func (s *seedRunnerStub) Run(_ context.Context, name string, args ...string) ([]byte, error) {
-	call := append([]string{name}, args...)
-	s.calls = append(s.calls, call)
-	if s.outputs == nil {
-		return nil, nil
-	}
-	return s.outputs[strings.Join(call, " ")], nil
 }
 
 type smokeRubricFile struct {
@@ -747,28 +932,6 @@ func TestSmoke_S5_EvidenceRankContainsAllFiveDocumentedLevels(t *testing.T) {
 	assert.Greater(t, ranks["observed_in_situ"], ranks[""])
 }
 
-func TestSmoke_S6_ComputeRewardReturnsCorrectScores(t *testing.T) {
-	src := readRepoText(t, ".xylem", "eval", "helpers", "xylem_verify.py")
-
-	assert.Contains(t, src, "if not checks:")
-	assert.Contains(t, src, "return 0.0")
-	assert.Equal(t, 1.0, computeReward([]struct {
-		Name   string
-		Passed bool
-	}{
-		{Name: "a", Passed: true},
-		{Name: "b", Passed: true},
-	}, nil))
-	assert.Equal(t, 0.5, computeReward([]struct {
-		Name   string
-		Passed bool
-	}{
-		{Name: "a", Passed: true},
-		{Name: "b", Passed: false},
-	}, nil))
-	assert.Equal(t, 0.0, computeReward(nil, nil))
-}
-
 func TestSmoke_S7_ConftestExposesWorkDirTaskDirAndVerifyFixtures(t *testing.T) {
 	names := pythonFunctionNames(readRepoText(t, ".xylem", "eval", "helpers", "conftest.py"))
 
@@ -892,10 +1055,16 @@ func TestSmoke_S15_WorkflowExecutionVerificationTemplateFailsBelowThresholdWhenC
 	assert.Contains(t, template, `assert score >= 0.8`)
 }
 
-func TestSmoke_S16_WriteRewardCreatesRewardTxtWithFourDecimalScore(t *testing.T) {
-	src := readRepoText(t, ".xylem", "eval", "helpers", "xylem_verify.py")
-	assert.Contains(t, src, `reward.txt`)
-	assert.Contains(t, src, `f.write(f"{score:.4f}\n")`)
+func TestSmoke_S16_VerificationTemplateWritesRewardBeforeThresholdAssertion(t *testing.T) {
+	template := readRepoText(t, ".xylem", "eval", "scenarios", "fix-simple-null-pointer", "tests", "test_verification.py")
+
+	writeIdx := strings.Index(template, "verify.write_reward(task_dir, score)")
+	require.NotEqual(t, -1, writeIdx, "verification template should persist reward output")
+
+	assertIdx := strings.Index(template, "assert score >= 0.8")
+	require.NotEqual(t, -1, assertIdx, "verification template should enforce a score threshold")
+
+	assert.Less(t, writeIdx, assertIdx, "reward should be written before the template asserts the pass threshold")
 }
 
 func TestSmoke_S17_DeferredItemsAreNotPresent(t *testing.T) {

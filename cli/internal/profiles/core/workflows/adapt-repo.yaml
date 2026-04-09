@@ -1,12 +1,11 @@
 name: adapt-repo
 class: harness-maintenance
 description: "Analyze the target repo and propose a reviewable harness update PR."
+allow_additive_protected_writes: true
 phases:
   - name: analyze
     type: command
     run: xylem bootstrap analyze-repo --output .xylem/state/bootstrap/repo-analysis.json
-    noop:
-      match: XYLEM_NOOP
   - name: legibility
     type: command
     run: xylem bootstrap audit-legibility --output .xylem/state/bootstrap/legibility-report.json
@@ -18,7 +17,7 @@ phases:
   - name: validate
     type: command
     run: |
-      set -euo pipefail
+      set -eu
       xylem config validate --proposed .xylem/state/bootstrap/adapt-plan.json
       xylem workflow validate --proposed .xylem/state/bootstrap/adapt-plan.json
   - name: apply

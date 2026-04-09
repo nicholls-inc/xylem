@@ -3,33 +3,26 @@ description: "Implement a feature from a GitHub issue"
 phases:
   - name: analyze
     prompt_file: .xylem/prompts/implement-feature/analyze.md
-    max_turns: 5
+    max_turns: 20
     noop:
       match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/implement-feature/plan.md
-    max_turns: 3
-    gate:
-      type: label
-      wait_for: "plan-approved"
-      timeout: "24h"
+    max_turns: 20
   - name: implement
     prompt_file: .xylem/prompts/implement-feature/implement.md
-    max_turns: 15
+    max_turns: 60
     gate:
       type: command
       run: "make test"
       retries: 2
-      # Swap to a live gate when you need running-system verification:
-      # type: live
-      # live:
-      #   mode: command+assert
-      #   command_assert:
-      #     run: "./scripts/check-ready.sh"
-      #     expect_stdout_regex: "READY"
+  - name: verify
+    prompt_file: .xylem/prompts/implement-feature/verify.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "make test"
+      retries: 1
   - name: pr
     prompt_file: .xylem/prompts/implement-feature/pr.md
-    max_turns: 3
-    # Publication phase: git_push/pr_create are allowed by default so autonomous
-    # drains can finish. Add a review gate or restrictive harness.policy.rules
-    # if you want a human checkpoint here.
+    max_turns: 10
