@@ -468,7 +468,7 @@ func TestSmoke_S5_GitHubPRScanBlocksRetryUntilCooldownExpires(t *testing.T) {
 	require.NoError(t, err)
 	_, err = q.Dequeue()
 	require.NoError(t, err)
-	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "temporary network outage"))
+	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "temporary failure from upstream 503"))
 
 	artifact := recovery.Build(recovery.Input{
 		VesselID:  "pr-10-review-pr",
@@ -594,6 +594,152 @@ func TestSmoke_S7_GitHubPRScanKeepsLegacyBlockingWhenRecoveryArtifactMissing(t *
 	vessels, err := src.Scan(context.Background())
 	require.NoError(t, err)
 	assert.Empty(t, vessels)
+}
+
+func TestGitHubPRScanRetriesWhenOnlyWorkflowDigestChanges(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	qualifiedRef := prWorkflowRef(prs[0].URL, "review-pr")
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10-review-pr",
+		Source:   "github-pr",
+		Ref:      qualifiedRef,
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                    "10",
+			"source_input_fingerprint":  fingerprint,
+			recovery.MetaHarnessDigest:  "har-same",
+			recovery.MetaWorkflowDigest: "wf-old",
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "temporary network outage"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID: "pr-10-review-pr",
+		Source:   "github-pr",
+		Workflow: "review-pr",
+		Ref:      qualifiedRef,
+		State:    queue.StateFailed,
+		Error:    "temporary failure from upstream 503",
+		Meta: map[string]string{
+			"source_input_fingerprint":  fingerprint,
+			recovery.MetaHarnessDigest:  "har-same",
+			recovery.MetaWorkflowDigest: "wf-old",
+		},
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+
+	src := &GitHubPR{
+		Repo:                   "owner/repo",
+		Tasks:                  map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		StateDir:               dir,
+		Queue:                  q,
+		CmdRunner:              r,
+		HarnessDigestResolver:  func() string { return "har-same" },
+		WorkflowDigestResolver: func(string) string { return "wf-new" },
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "pr-10-review-pr-retry-1", vessels[0].ID)
+	assert.Equal(t, "workflow", vessels[0].Meta[recovery.MetaUnlockedBy])
+}
+
+func TestGitHubPRScanRetriesWhenOnlyDecisionDigestChanges(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 10, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/pull/10", HeadRefName: "fix",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "review-me"}}},
+	}
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "review-me", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+
+	fingerprint := githubSourceFingerprint("same title", "same body", []string{"review-me"})
+	qualifiedRef := prWorkflowRef(prs[0].URL, "review-pr")
+	storedDecision := "dec-old"
+	storedState := recovery.RemediationState{
+		SourceInputFP:    fingerprint,
+		HarnessDigest:    "har-same",
+		WorkflowDigest:   "wf-same",
+		DecisionDigest:   storedDecision,
+		RemediationEpoch: "0",
+	}
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "pr-10-review-pr",
+		Source:   "github-pr",
+		Ref:      qualifiedRef,
+		Workflow: "review-pr",
+		Meta: map[string]string{
+			"pr_num":                            "10",
+			"source_input_fingerprint":          fingerprint,
+			recovery.MetaHarnessDigest:          storedState.HarnessDigest,
+			recovery.MetaWorkflowDigest:         storedState.WorkflowDigest,
+			recovery.MetaDecisionDigest:         storedState.DecisionDigest,
+			recovery.MetaRemediationEpoch:       storedState.RemediationEpoch,
+			recovery.MetaRemediationFingerprint: recovery.ComputeRemediationFingerprint(storedState),
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID: "pr-10-review-pr",
+		Source:   "github-pr",
+		Workflow: "review-pr",
+		Ref:      qualifiedRef,
+		State:    queue.StateFailed,
+		Error:    "temporary failure from upstream 503",
+		Meta: map[string]string{
+			"source_input_fingerprint":  fingerprint,
+			recovery.MetaHarnessDigest:  storedState.HarnessDigest,
+			recovery.MetaWorkflowDigest: storedState.WorkflowDigest,
+		},
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+	require.NotEqual(t, storedDecision, recovery.DecisionDigest(artifact))
+
+	src := &GitHubPR{
+		Repo:                   "owner/repo",
+		Tasks:                  map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
+		StateDir:               dir,
+		Queue:                  q,
+		CmdRunner:              r,
+		HarnessDigestResolver:  func() string { return storedState.HarnessDigest },
+		WorkflowDigestResolver: func(string) string { return storedState.WorkflowDigest },
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "pr-10-review-pr-retry-1", vessels[0].ID)
+	assert.Equal(t, "decision", vessels[0].Meta[recovery.MetaUnlockedBy])
 }
 
 func TestPriorVesselBlocksReenqueue(t *testing.T) {
