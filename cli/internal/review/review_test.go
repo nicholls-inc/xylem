@@ -10,7 +10,11 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGenerateAggregatesReviewRecommendations(t *testing.T) {
@@ -194,21 +198,55 @@ func TestGenerateToleratesMissingOptionalArtifacts(t *testing.T) {
 	}
 }
 
+func TestSmoke_S1_LoadRunsIncludesRecoveryArtifactWhenPresent(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, time.April, 8, 13, 30, 0, 0, time.UTC)
+
+	writeRunArtifacts(t, stateDir, runFixture{
+		vesselID:  "failed-with-recovery",
+		source:    "github-issue",
+		workflow:  "implement-harness",
+		state:     "failed",
+		startedAt: now,
+		endedAt:   now.Add(time.Minute),
+		recoveryArtifact: recovery.Build(recovery.Input{
+			VesselID:    "failed-with-recovery",
+			Source:      "github-issue",
+			Workflow:    "implement-harness",
+			State:       queue.StateFailed,
+			FailedPhase: "analyze",
+			Error:       "missing requirement: acceptance criteria are ambiguous",
+			CreatedAt:   now.Add(time.Minute),
+		}),
+	})
+
+	runs, _, _, err := LoadRuns(stateDir, 10)
+	require.NoError(t, err)
+	require.Len(t, runs, 1)
+	require.NotNil(t, runs[0].Recovery)
+	assert.Equal(t, recovery.ClassSpecGap, runs[0].Recovery.RecoveryClass)
+	assert.Equal(t, recovery.ActionRefine, runs[0].Recovery.RecoveryAction)
+	assert.Equal(t, "needs-refinement", runs[0].Recovery.FollowUpRoute)
+	assert.True(t, runs[0].Recovery.RetrySuppressed)
+	assert.Equal(t, "suppressed", runs[0].Recovery.RetryOutcome)
+}
+
 type runFixture struct {
-	vesselID     string
-	source       string
-	workflow     string
-	state        string
-	startedAt    time.Time
-	endedAt      time.Time
-	phases       []runner.PhaseSummary
-	totalInput   int
-	totalOutput  int
-	totalCost    float64
-	manifest     *evidence.Manifest
-	costReport   *cost.CostReport
-	budgetAlerts []cost.BudgetAlert
-	evalReport   *evaluator.LoopResult
+	vesselID         string
+	source           string
+	workflow         string
+	state            string
+	startedAt        time.Time
+	endedAt          time.Time
+	phases           []runner.PhaseSummary
+	totalInput       int
+	totalOutput      int
+	totalCost        float64
+	manifest         *evidence.Manifest
+	costReport       *cost.CostReport
+	budgetAlerts     []cost.BudgetAlert
+	evalReport       *evaluator.LoopResult
+	recoveryArtifact *recovery.Artifact
 }
 
 func writeRunArtifacts(t *testing.T, stateDir string, fixture runFixture) {
@@ -281,7 +319,22 @@ func writeRunArtifacts(t *testing.T, stateDir string, fixture runFixture) {
 		summary.BudgetAlertsPath = filepath.ToSlash(filepath.Join("phases", fixture.vesselID, "budget-alerts.json"))
 		artifacts.BudgetAlerts = summary.BudgetAlertsPath
 	}
-	if artifacts.EvidenceManifest != "" || artifacts.CostReport != "" || artifacts.BudgetAlerts != "" || artifacts.EvalReport != "" {
+	if fixture.recoveryArtifact != nil {
+		if err := recovery.Save(stateDir, fixture.recoveryArtifact); err != nil {
+			t.Fatalf("recovery.Save() error = %v", err)
+		}
+		summary.FailureReviewPath = filepath.ToSlash(filepath.Join("phases", fixture.vesselID, "failure-review.json"))
+		summary.Recovery = &runner.RecoverySummary{
+			Class:           string(fixture.recoveryArtifact.RecoveryClass),
+			Action:          string(fixture.recoveryArtifact.RecoveryAction),
+			FollowUpRoute:   fixture.recoveryArtifact.FollowUpRoute,
+			RetrySuppressed: fixture.recoveryArtifact.RetrySuppressed,
+			RetryOutcome:    fixture.recoveryArtifact.RetryOutcome,
+			UnlockDimension: fixture.recoveryArtifact.UnlockDimension,
+		}
+		artifacts.FailureReview = summary.FailureReviewPath
+	}
+	if artifacts.EvidenceManifest != "" || artifacts.CostReport != "" || artifacts.BudgetAlerts != "" || artifacts.EvalReport != "" || artifacts.FailureReview != "" {
 		summary.ReviewArtifacts = artifacts
 	}
 	requireSummaryOnly(t, stateDir, summary)

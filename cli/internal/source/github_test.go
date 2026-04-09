@@ -10,6 +10,9 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestHasMergedPRTrue(t *testing.T) {
@@ -218,6 +221,39 @@ func TestOnFailAppliesLabel(t *testing.T) {
 	if !strings.Contains(joined, "--remove-label in-progress") {
 		t.Errorf("expected --remove-label in-progress in call, got %q", joined)
 	}
+}
+
+func TestSmoke_S1_OnFailRoutesSpecGapToNeedsRefinement(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := queue.Vessel{
+		ID:     "issue-214",
+		Source: "github-issue",
+		Meta: map[string]string{
+			"issue_num":            "214",
+			"status_label_failed":  "xylem-failed",
+			"status_label_running": "in-progress",
+			"trigger_label":        "ready-for-work",
+			recovery.MetaAction:    string(recovery.ActionRefine),
+		},
+		State: queue.StateFailed,
+	}
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	r := newMock()
+	g := &GitHub{
+		Repo:      "owner/repo",
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	require.NoError(t, g.OnFail(context.Background(), queue.Vessel{ID: vessel.ID, Meta: map[string]string{"issue_num": "214"}}))
+	require.Len(t, r.calls, 2)
+
+	refine := strings.Join(r.calls[1], " ")
+	assert.Contains(t, refine, "--add-label needs-refinement")
+	assert.Contains(t, refine, "--remove-label ready-for-work")
 }
 
 func TestOnFailNoLabelsConfigured(t *testing.T) {

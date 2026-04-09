@@ -339,7 +339,7 @@ None.
 ### Behavior
 
 1. Scans historical vessel summaries under `<state_dir>/phases/`.
-2. Loads any linked evidence manifests, cost reports, budget alerts, and eval reports when present.
+2. Loads any linked evidence manifests, cost reports, budget alerts, eval reports, and failure-review artifacts when present.
 3. Rolls those artifacts up by source, workflow, and phase into deterministic recommendations: `keep`, `investigate`, `prune-candidate`, or `insufficient-data`.
 4. Writes:
    - `<state_dir>/<harness.review.output_dir>/harness-review.json`
@@ -375,7 +375,7 @@ None.
 
 1. Scans historical vessel summaries under `<state_dir>/phases/`.
 2. Filters to failed and timed-out runs inside the last 30 days by default.
-3. Clusters recurring failures using structured artifacts first: evidence manifests, phase failures, and evaluator reports.
+3. Clusters recurring failures using structured artifacts first: evidence manifests, phase failures, evaluator reports, and persisted recovery decisions.
 4. Skips lessons already present in `.xylem/HARNESS.md` or already represented by an equivalent open PR.
 5. Writes:
    - `<state_dir>/reviews/lessons.json`
@@ -392,7 +392,7 @@ None.
 
 `<state_dir>/reviews/lessons.json` contains:
 
-- `lessons[]`: evidence-backed negative constraints with `fingerprint`, `negative_constraint`, `rationale`, `example`, and `evidence[]`
+- `lessons[]`: evidence-backed negative constraints with `fingerprint`, `negative_constraint`, `rationale`, `example`, `evidence[]`, and any recovery decision context (`recovery_class`, `recovery_action`, `follow_up_route`) that shaped the cluster
 - `proposals[]`: narrow PR slices with `branch`, `title`, `body`, `harness_path`, `harness_patch`, `lesson_fingerprints`, `status`, and optional `pr_number` / `pr_url`
 - `skipped[]`: deduplicated lessons omitted because the harness or an open PR already covers them
 
@@ -569,7 +569,7 @@ xylem retry <vessel-id> [flags]
 ### Behavior
 
 1. Looks up the vessel by ID. Returns an error if not found.
-2. Validates the vessel is in the `failed` state. Returns an error if the vessel is in any other state.
+2. Validates the vessel is in the `failed` or `timed_out` state. Returns an error if the vessel is in any other state.
 3. Creates a new vessel with ID `<original-id>-retry-<N>`, where `N` is auto-incremented based on existing retries in the queue.
 4. Copies all configuration from the original vessel (source, ref, workflow, prompt, metadata).
 5. Adds failure context to the new vessel's metadata:
@@ -580,6 +580,7 @@ xylem retry <vessel-id> [flags]
 6. Sets the new vessel to `pending` state.
 7. By default, if the failed vessel has a saved worktree path, retry resumes from the failed phase and copies phase outputs into the new retry vessel's phase directory.
 8. If `--from-scratch` is set, xylem does not reuse the saved worktree path or copied phase outputs.
+9. If `<state_dir>/phases/<vessel-id>/failure-review.json` exists, xylem records the prior run's `retry_outcome` as `enqueued` so operators can inspect that the failed run was explicitly retried.
 
 This failure context is available to prompt templates so the retried session can avoid repeating the same mistakes.
 

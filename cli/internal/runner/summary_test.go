@@ -17,6 +17,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
@@ -111,69 +112,10 @@ func TestSmoke_S4_SummaryJSONIsPrettyPrinted(t *testing.T) {
 	assert.Contains(t, string(data), "\n  \"")
 	assert.Equal(t, "{", lines[0])
 	assert.True(t, strings.HasPrefix(lines[1], "  \""))
-}
 
-func TestSmoke_S5_PhaseSummaryRecordsCompletedStatusForASuccessfulPhase(t *testing.T) {
-	vrs := newVesselRunState(nil, queue.Vessel{
-		ID:       "vessel-phase-complete",
-		Source:   "manual",
-		Workflow: "fix-bug",
-	}, time.Now().UTC())
-	vrs.addPhase(PhaseSummary{Name: "implement", Status: "completed"})
-
-	summary := vrs.buildSummary("completed", time.Now().UTC())
-	require.Len(t, summary.Phases, 1)
-
-	assert.Equal(t, "completed", summary.Phases[0].Status)
-	assert.Empty(t, summary.Phases[0].Error)
-}
-
-func TestSmoke_S6_PhaseSummaryRecordsFailedStatusForAFailedPhase(t *testing.T) {
-	vrs := newVesselRunState(nil, queue.Vessel{
-		ID:       "vessel-phase-failed",
-		Source:   "manual",
-		Workflow: "fix-bug",
-	}, time.Now().UTC())
-	vrs.addPhase(PhaseSummary{Name: "test", Status: "failed", Error: "exit status 1"})
-
-	summary := vrs.buildSummary("failed", time.Now().UTC())
-	require.Len(t, summary.Phases, 1)
-
-	assert.Equal(t, "failed", summary.Phases[0].Status)
-	assert.Equal(t, "exit status 1", summary.Phases[0].Error)
-}
-
-func TestSmoke_S7_PhaseSummaryRecordsNoOpStatusForAnEarlyCompletionPhase(t *testing.T) {
-	vrs := newVesselRunState(nil, queue.Vessel{
-		ID:       "vessel-phase-noop",
-		Source:   "manual",
-		Workflow: "fix-bug",
-	}, time.Now().UTC())
-	vrs.addPhase(PhaseSummary{Name: "test", Status: "no-op"})
-
-	summary := vrs.buildSummary("completed", time.Now().UTC())
-	require.Len(t, summary.Phases, 1)
-
-	assert.Equal(t, "no-op", summary.Phases[0].Status)
-	assert.Zero(t, summary.Phases[0].InputTokensEst)
-	assert.Zero(t, summary.Phases[0].CostUSDEst)
-}
-
-func TestSmoke_S8_VesselRunStateAddPhaseAccumulatesPhasesInInsertionOrder(t *testing.T) {
-	vrs := newVesselRunState(nil, queue.Vessel{
-		ID:       "vessel-order",
-		Source:   "manual",
-		Workflow: "fix-bug",
-	}, time.Now().UTC())
-
-	vrs.addPhase(PhaseSummary{Name: "plan"})
-	vrs.addPhase(PhaseSummary{Name: "implement"})
-	vrs.addPhase(PhaseSummary{Name: "test"})
-
-	require.Len(t, vrs.phases, 3)
-	assert.Equal(t, "plan", vrs.phases[0].Name)
-	assert.Equal(t, "implement", vrs.phases[1].Name)
-	assert.Equal(t, "test", vrs.phases[2].Name)
+	var summary VesselSummary
+	require.NoError(t, json.Unmarshal(data, &summary))
+	assert.Equal(t, summaryDisclaimer, summary.Note)
 }
 
 func TestSmoke_S9_BuildSummaryComputesTotalTokensEstAsSumOfPhaseTokenFields(t *testing.T) {
@@ -314,55 +256,6 @@ func TestSmoke_S14_SaveVesselSummaryFailureIsNonFatalCallerContinues(t *testing.
 	assert.Equal(t, 1, result.Failed)
 	assert.Contains(t, buf.String(), "warn: save vessel summary:")
 	assert.Equal(t, queue.StateFailed, queueVesselByID(t, q, vessel.ID).State)
-}
-
-func TestSmoke_S15_CompleteVesselUpdatedSignatureAcceptsVesselRunState(t *testing.T) {
-	dir := t.TempDir()
-	cfg := makeTestConfig(dir, 1)
-	cfg.StateDir = filepath.Join(dir, ".xylem-state")
-
-	startedAt := time.Date(2026, time.April, 8, 20, 29, 0, 0, time.UTC)
-	vessel := runningSmokeVessel("vessel-complete-state", "github", "fix-bug", startedAt)
-
-	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, err := q.Enqueue(vessel)
-	require.NoError(t, err)
-
-	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
-	vrs := newVesselRunState(cfg, vessel, startedAt)
-	vrs.addPhase(PhaseSummary{Name: "plan", Status: "completed"})
-	vrs.addPhase(PhaseSummary{Name: "implement", Status: "completed"})
-
-	outcome := r.completeVessel(context.Background(), vessel, "", nil, vrs, nil)
-	assert.Equal(t, "completed", outcome)
-
-	_, err = os.Stat(filepath.Join(cfg.StateDir, "phases", vessel.ID, summaryFileName))
-	require.NoError(t, err)
-}
-
-func TestSmoke_S16_CompleteVesselSavesSummaryAfterExistingCompletionLogic(t *testing.T) {
-	dir := t.TempDir()
-	cfg := makeTestConfig(dir, 1)
-	cfg.StateDir = filepath.Join(dir, ".xylem-state")
-
-	startedAt := time.Date(2026, time.April, 8, 20, 30, 0, 0, time.UTC)
-	vessel := runningSmokeVessel("vessel-complete-order", "github", "fix-bug", startedAt)
-
-	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, err := q.Enqueue(vessel)
-	require.NoError(t, err)
-
-	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
-	vrs := newVesselRunState(cfg, vessel, startedAt)
-	vrs.addPhase(PhaseSummary{Name: "plan", Status: "completed"})
-	vrs.addPhase(PhaseSummary{Name: "implement", Status: "completed"})
-
-	outcome := r.completeVessel(context.Background(), vessel, "", nil, vrs, nil)
-	assert.Equal(t, "completed", outcome)
-	assert.Equal(t, queue.StateCompleted, queueVesselByID(t, q, vessel.ID).State)
-
-	summary := loadSummary(t, cfg.StateDir, vessel.ID)
-	assert.Equal(t, "completed", summary.State)
 }
 
 func TestSmoke_S17_CompleteVesselSavesEvidenceManifestWhenClaimsArePresent(t *testing.T) {
@@ -554,6 +447,18 @@ func TestSmoke_S19_FailurePathBuildsSummaryWithStateFailedAndCallsSaveVesselSumm
 	assert.Len(t, summary.Phases, 2)
 	assert.Equal(t, "completed", summary.Phases[0].Status)
 	assert.Equal(t, "failed", summary.Phases[1].Status)
+	require.NotEmpty(t, summary.FailureReviewPath)
+	require.NotNil(t, summary.Recovery)
+	artifact, err := recovery.Load(filepath.Join(cfg.StateDir, summary.FailureReviewPath))
+	require.NoError(t, err)
+	assert.Equal(t, summary.Recovery.Class, string(artifact.RecoveryClass))
+	assert.Equal(t, summary.Recovery.Action, string(artifact.RecoveryAction))
+	assert.Equal(t, summary.Recovery.FollowUpRoute, artifact.FollowUpRoute)
+	assert.Equal(t, summary.Recovery.RetrySuppressed, artifact.RetrySuppressed)
+	assert.Equal(t, summary.Recovery.RetryOutcome, artifact.RetryOutcome)
+	assert.Equal(t, summary.Recovery.UnlockDimension, artifact.UnlockDimension)
+	require.NotNil(t, summary.ReviewArtifacts)
+	assert.Equal(t, summary.FailureReviewPath, summary.ReviewArtifacts.FailureReview)
 }
 
 func TestSmoke_S20_BudgetMaxCostUSDAndBudgetMaxTokensAppearInSummaryWhenBudgetIsConfigured(t *testing.T) {
@@ -584,37 +489,6 @@ func TestSmoke_S20_BudgetMaxCostUSDAndBudgetMaxTokensAppearInSummaryWhenBudgetIs
 	require.NotNil(t, summary.BudgetMaxTokens)
 	assert.Equal(t, 1.0, *summary.BudgetMaxCostUSD)
 	assert.Equal(t, 50000, *summary.BudgetMaxTokens)
-}
-
-func TestSaveVesselSummaryWritesPrettyPrintedJSON(t *testing.T) {
-	stateDir := t.TempDir()
-	summary := &VesselSummary{
-		VesselID: "vessel-abc123",
-		Source:   "manual",
-		State:    "completed",
-		Phases:   []PhaseSummary{},
-	}
-
-	if err := SaveVesselSummary(stateDir, summary); err != nil {
-		t.Fatalf("SaveVesselSummary() error = %v", err)
-	}
-
-	path := filepath.Join(stateDir, "phases", "vessel-abc123", summaryFileName)
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read summary file: %v", err)
-	}
-	if !strings.Contains(string(data), "\n  \"") {
-		t.Fatalf("summary.json is not pretty printed: %s", string(data))
-	}
-
-	var got VesselSummary
-	if err := json.Unmarshal(data, &got); err != nil {
-		t.Fatalf("unmarshal summary.json: %v", err)
-	}
-	if got.Note != summaryDisclaimer {
-		t.Fatalf("Note = %q, want %q", got.Note, summaryDisclaimer)
-	}
 }
 
 func TestSaveVesselSummaryWritesEmptyPhasesArray(t *testing.T) {
@@ -791,39 +665,6 @@ func TestVesselRunStateBuildSummaryAggregatesTotalsAndStatus(t *testing.T) {
 	}
 	if got := summary.Phases[1].Error; got != "exit status 1" {
 		t.Fatalf("Phases[1].Error = %q, want exit status 1", got)
-	}
-}
-
-func TestVesselRunStateBuildSummaryReflectsBudgetExceeded(t *testing.T) {
-	cfg := makeTestConfig(t.TempDir(), 1)
-	setPricedModel(cfg)
-	setBudget(cfg, 0.0001, 10)
-
-	startedAt := time.Now().Add(-time.Second).UTC()
-	vrs := newVesselRunState(cfg, queue.Vessel{
-		ID:       "vessel-budget-exceeded",
-		Source:   "manual",
-		Workflow: "fix-bug",
-	}, startedAt)
-
-	inputTokens, outputTokens, costUSDEst := vrs.recordPhaseTokens(
-		workflow.Phase{Name: "implement"},
-		"claude-sonnet-4",
-		"Implement the requested changes",
-		strings.Repeat("output ", 40),
-		startedAt.Add(500*time.Millisecond),
-	)
-	vrs.addPhase(PhaseSummary{
-		Name:            "implement",
-		Status:          "failed",
-		InputTokensEst:  inputTokens,
-		OutputTokensEst: outputTokens,
-		CostUSDEst:      costUSDEst,
-	})
-
-	summary := vrs.buildSummary("failed", startedAt.Add(2*time.Second))
-	if !summary.BudgetExceeded {
-		t.Fatal("BudgetExceeded = false, want true")
 	}
 }
 

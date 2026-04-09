@@ -84,6 +84,9 @@ type Lesson struct {
 	Phase              string        `json:"phase"`
 	SignalKind         string        `json:"signal_kind"`
 	Signal             string        `json:"signal"`
+	RecoveryClass      string        `json:"recovery_class,omitempty"`
+	RecoveryAction     string        `json:"recovery_action,omitempty"`
+	FollowUpRoute      string        `json:"follow_up_route,omitempty"`
 	Samples            int           `json:"samples"`
 	NegativeConstraint string        `json:"negative_constraint"`
 	Rationale          string        `json:"rationale"`
@@ -118,25 +121,31 @@ type SkippedLesson struct {
 }
 
 type observation struct {
-	theme        string
-	source       string
-	workflow     string
-	phase        string
-	signalKind   string
-	signal       string
-	example      string
-	artifactPath string
-	vesselID     string
-	endedAt      time.Time
+	theme          string
+	source         string
+	workflow       string
+	phase          string
+	signalKind     string
+	signal         string
+	recoveryClass  string
+	recoveryAction string
+	followUpRoute  string
+	example        string
+	artifactPath   string
+	vesselID       string
+	endedAt        time.Time
 }
 
 type clusterKey struct {
-	theme      string
-	source     string
-	workflow   string
-	phase      string
-	signalKind string
-	signal     string
+	theme          string
+	source         string
+	workflow       string
+	phase          string
+	signalKind     string
+	signal         string
+	recoveryClass  string
+	recoveryAction string
+	followUpRoute  string
 }
 
 type cluster struct {
@@ -272,12 +281,15 @@ func buildClusters(runs []review.LoadedRun) map[clusterKey]*cluster {
 	for _, run := range runs {
 		for _, obs := range extractObservations(run) {
 			key := clusterKey{
-				theme:      obs.theme,
-				source:     obs.source,
-				workflow:   obs.workflow,
-				phase:      obs.phase,
-				signalKind: obs.signalKind,
-				signal:     obs.signal,
+				theme:          obs.theme,
+				source:         obs.source,
+				workflow:       obs.workflow,
+				phase:          obs.phase,
+				signalKind:     obs.signalKind,
+				signal:         obs.signal,
+				recoveryClass:  obs.recoveryClass,
+				recoveryAction: obs.recoveryAction,
+				followUpRoute:  obs.followUpRoute,
 			}
 			group, ok := clusters[key]
 			if !ok {
@@ -352,6 +364,9 @@ func lessonFromCluster(group *cluster, maxEvidence int) Lesson {
 		Phase:              obs.phase,
 		SignalKind:         obs.signalKind,
 		Signal:             obs.signal,
+		RecoveryClass:      obs.recoveryClass,
+		RecoveryAction:     obs.recoveryAction,
+		FollowUpRoute:      obs.followUpRoute,
 		Samples:            len(group.items),
 		NegativeConstraint: rule,
 		Rationale:          rationale,
@@ -425,16 +440,19 @@ func extractObservations(run review.LoadedRun) []observation {
 		}
 		seen[seenKey] = true
 		observations = append(observations, observation{
-			theme:        themeFor(run.Summary.Workflow, phase),
-			source:       run.Summary.Source,
-			workflow:     run.Summary.Workflow,
-			phase:        phase,
-			signalKind:   kind,
-			signal:       normalized,
-			example:      truncate(example, 180),
-			artifactPath: artifactPath,
-			vesselID:     run.Summary.VesselID,
-			endedAt:      run.Summary.EndedAt,
+			theme:          themeFor(run.Summary.Workflow, phase),
+			source:         run.Summary.Source,
+			workflow:       run.Summary.Workflow,
+			phase:          phase,
+			signalKind:     kind,
+			signal:         normalized,
+			recoveryClass:  recoveryClass(run),
+			recoveryAction: recoveryAction(run),
+			followUpRoute:  recoveryFollowUpRoute(run),
+			example:        truncate(example, 180),
+			artifactPath:   artifactPath,
+			vesselID:       run.Summary.VesselID,
+			endedAt:        run.Summary.EndedAt,
 		})
 	}
 
@@ -528,7 +546,11 @@ func renderProposalBody(theme string, lessons []Lesson) string {
 	fmt.Fprintf(&b, "## Institutional memory updates for %s\n\n", theme)
 	b.WriteString("This PR proposes evidence-backed `Do Not` guidance derived from recurring failed vessels.\n\n")
 	for _, lesson := range lessons {
-		fmt.Fprintf(&b, "- `%s` (%d samples)\n", lesson.Fingerprint, lesson.Samples)
+		fmt.Fprintf(&b, "- `%s` (%d samples", lesson.Fingerprint, lesson.Samples)
+		if lesson.RecoveryClass != "" || lesson.RecoveryAction != "" {
+			fmt.Fprintf(&b, ", class=%s, action=%s", lesson.RecoveryClass, lesson.RecoveryAction)
+		}
+		b.WriteString(")\n")
 	}
 	b.WriteString("\n### Proposed HARNESS.md additions\n\n")
 	for _, lesson := range lessons {
@@ -558,7 +580,14 @@ func renderMarkdown(report *Report) string {
 	}
 	b.WriteString("## Lessons\n\n")
 	for _, lesson := range report.Lessons {
-		fmt.Fprintf(&b, "- `%s` — %s\n", lesson.Fingerprint, lesson.NegativeConstraint)
+		fmt.Fprintf(&b, "- `%s` — %s", lesson.Fingerprint, lesson.NegativeConstraint)
+		if lesson.RecoveryClass != "" || lesson.RecoveryAction != "" {
+			fmt.Fprintf(&b, " _(class=%s, action=%s)_", lesson.RecoveryClass, lesson.RecoveryAction)
+		}
+		if lesson.FollowUpRoute != "" {
+			fmt.Fprintf(&b, " _(route=%s)_", lesson.FollowUpRoute)
+		}
+		b.WriteString("\n")
 	}
 	if len(report.Proposals) > 0 {
 		b.WriteString("\n## Proposal slices\n\n")
@@ -651,4 +680,25 @@ func min(a, b int) int {
 
 func sha256Sum(data []byte) [32]byte {
 	return sha256.Sum256(data)
+}
+
+func recoveryClass(run review.LoadedRun) string {
+	if run.Recovery == nil {
+		return ""
+	}
+	return string(run.Recovery.RecoveryClass)
+}
+
+func recoveryAction(run review.LoadedRun) string {
+	if run.Recovery == nil {
+		return ""
+	}
+	return string(run.Recovery.RecoveryAction)
+}
+
+func recoveryFollowUpRoute(run review.LoadedRun) string {
+	if run.Recovery == nil {
+		return ""
+	}
+	return run.Recovery.FollowUpRoute
 }

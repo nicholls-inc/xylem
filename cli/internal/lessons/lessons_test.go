@@ -9,7 +9,11 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type prClientStub struct {
@@ -98,6 +102,31 @@ func TestGenerateSkipsLessonWhenEquivalentOpenPRExists(t *testing.T) {
 	}
 }
 
+func TestSmoke_S1_LessonsClusterCarriesRecoveryDecision(t *testing.T) {
+	stateDir := t.TempDir()
+	harnessPath := filepath.Join(stateDir, "HARNESS.md")
+	require.NoError(t, os.WriteFile(harnessPath, []byte("# Harness\n"), 0o644))
+
+	base := time.Date(2026, time.April, 9, 6, 0, 0, 0, time.UTC)
+	writeFailedRunWithRecovery(t, stateDir, "failed-a", base, "missing requirement: acceptance criteria are ambiguous")
+	writeFailedRunWithRecovery(t, stateDir, "failed-b", base.Add(time.Hour), "missing requirement: acceptance criteria are ambiguous")
+
+	result, err := Generate(context.Background(), stateDir, Options{
+		Repo:           "owner/repo",
+		HarnessPath:    harnessPath,
+		LookbackWindow: 30 * 24 * time.Hour,
+		MinSamples:     2,
+		Now:            base.Add(2 * time.Hour),
+	}, &prClientStub{})
+	require.NoError(t, err)
+	require.Len(t, result.Report.Lessons, 1)
+
+	lesson := result.Report.Lessons[0]
+	assert.Equal(t, string(recovery.ClassSpecGap), lesson.RecoveryClass)
+	assert.Equal(t, string(recovery.ActionRefine), lesson.RecoveryAction)
+	assert.Equal(t, "needs-refinement", lesson.FollowUpRoute)
+}
+
 func writeFailedRun(t *testing.T, stateDir, vesselID string, endedAt time.Time, claim string) {
 	t.Helper()
 	startedAt := endedAt.Add(-2 * time.Minute)
@@ -137,5 +166,42 @@ func writeFailedRun(t *testing.T, stateDir, vesselID string, endedAt time.Time, 
 	}
 	if err := runner.SaveVesselSummary(stateDir, summary); err != nil {
 		t.Fatalf("SaveVesselSummary() error = %v", err)
+	}
+}
+
+func writeFailedRunWithRecovery(t *testing.T, stateDir, vesselID string, endedAt time.Time, claim string) {
+	t.Helper()
+	writeFailedRun(t, stateDir, vesselID, endedAt, claim)
+	artifact := recovery.Build(recovery.Input{
+		VesselID:    vesselID,
+		Source:      "schedule",
+		Workflow:    "lessons",
+		State:       queue.StateFailed,
+		FailedPhase: "verify",
+		Error:       claim,
+		CreatedAt:   endedAt,
+	})
+	if err := recovery.Save(stateDir, artifact); err != nil {
+		t.Fatalf("Save() recovery artifact error = %v", err)
+	}
+
+	summary, err := runner.LoadVesselSummary(stateDir, vesselID)
+	if err != nil {
+		t.Fatalf("LoadVesselSummary() error = %v", err)
+	}
+	summary.FailureReviewPath = filepath.ToSlash(filepath.Join("phases", vesselID, "failure-review.json"))
+	if summary.ReviewArtifacts == nil {
+		summary.ReviewArtifacts = &runner.ReviewArtifacts{}
+	}
+	summary.ReviewArtifacts.FailureReview = summary.FailureReviewPath
+	summary.Recovery = &runner.RecoverySummary{
+		Class:           string(artifact.RecoveryClass),
+		Action:          string(artifact.RecoveryAction),
+		FollowUpRoute:   artifact.FollowUpRoute,
+		RetrySuppressed: artifact.RetrySuppressed,
+		RetryOutcome:    artifact.RetryOutcome,
+	}
+	if err := runner.SaveVesselSummary(stateDir, summary); err != nil {
+		t.Fatalf("SaveVesselSummary() updated error = %v", err)
 	}
 }

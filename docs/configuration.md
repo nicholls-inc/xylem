@@ -427,7 +427,7 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs. When failed or timed-out runs also have `<state_dir>/phases/<vessel-id>/failure-review.json`, the review loader reconstructs those recovery decisions alongside the existing evidence/cost/eval artifacts.
 
 ### Observability settings
 
@@ -639,7 +639,7 @@ sources:
 - `schedule_fired_at`
 - `schedule_next_due_at`
 
-The built-in `lessons` workflow is designed for this source type: it synthesizes recurring failures into `.xylem/HARNESS.md` proposals, records them under `<state_dir>/reviews/lessons.{json,md}`, and opens reviewable PRs instead of editing the default branch directly.
+The built-in `lessons` workflow is designed for this source type: it synthesizes recurring failures into `.xylem/HARNESS.md` proposals, records them under `<state_dir>/reviews/lessons.{json,md}`, and opens reviewable PRs instead of editing the default branch directly. When recovery artifacts are present, the lessons report also carries forward the persisted `recovery_class`, `recovery_action`, and `follow_up_route` fields so operators can inspect why a failure clustered the way it did.
 
 ## Legacy config format
 

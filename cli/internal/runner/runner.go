@@ -27,6 +27,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
@@ -238,6 +239,7 @@ drainLoop:
 					AnomalyCount: len(status.Anomalies),
 					Anomalies:    AnomalyCodes(status.Anomalies),
 				}))
+				vesselSpan.AddAttributes(observability.RecoveryAttributes(recoveryAttributesFromMeta(finalVessel.Meta)))
 			}
 
 			drainStatsMu.Lock()
@@ -401,13 +403,19 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 					continue
 				}
+				vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
+				vrs.setTraceContext(observability.TraceContextFromContext(timeoutSpan.Context()))
+				r.annotateRecoveryMetadata(vessel.ID, queue.StateTimedOut, "label gate timed out", traceContextPointer(vrs.trace))
 				src := r.resolveSourceForVessel(vessel)
 				if err := src.OnTimedOut(ctx, vessel); err != nil {
 					log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
 				}
-				vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
-				vrs.setTraceContext(observability.TraceContextFromContext(timeoutSpan.Context()))
 				r.persistRunArtifacts(vessel, string(queue.StateTimedOut), vrs, nil, r.runtimeNow())
+				if r.Tracer != nil {
+					if current, findErr := r.Queue.FindByID(vessel.ID); findErr == nil && current != nil {
+						timeoutSpan.AddAttributes(observability.RecoveryAttributes(recoveryAttributesFromMeta(current.Meta)))
+					}
+				}
 				r.finishWaitTransitionSpan(timeoutSpan, nil)
 				// Clean up worktree (best-effort)
 				r.removeWorktree(ctx, vessel.WorktreePath, vessel.ID)
@@ -1332,7 +1340,9 @@ func (r *Runner) failVessel(id string, errMsg string) {
 			return
 		}
 		log.Printf("warn: failed to update vessel %s state: %v", id, updateErr)
+		return
 	}
+	r.annotateRecoveryMetadata(id, queue.StateFailed, errMsg, nil)
 }
 
 func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
@@ -1343,12 +1353,52 @@ func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
 	vessel.State = queue.StateFailed
 	vessel.Error = errMsg
 	vessel.EndedAt = &now
+	vessel.Meta = recovery.ApplyToMeta(vessel.Meta, recovery.Build(recovery.Input{
+		VesselID:    vessel.ID,
+		Source:      vessel.Source,
+		Workflow:    vessel.Workflow,
+		Ref:         vessel.Ref,
+		State:       queue.StateFailed,
+		FailedPhase: vessel.FailedPhase,
+		Error:       errMsg,
+		GateOutput:  vessel.GateOutput,
+		RetryOf:     vessel.RetryOf,
+		Meta:        vessel.Meta,
+		CreatedAt:   now,
+	}))
 	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
 		if r.cancelledTransition(vessel.ID, updateErr) {
 			return
 		}
 		log.Printf("warn: failed to persist vessel %s state: %v", vessel.ID, updateErr)
 		r.failVessel(vessel.ID, errMsg)
+	}
+}
+
+func (r *Runner) annotateRecoveryMetadata(id string, state queue.VesselState, errMsg string, trace *observability.TraceContextData) {
+	if r.Queue == nil {
+		return
+	}
+	current, err := r.Queue.FindByID(id)
+	if err != nil || current == nil {
+		return
+	}
+	current.Meta = recovery.ApplyToMeta(current.Meta, recovery.Build(recovery.Input{
+		VesselID:    current.ID,
+		Source:      current.Source,
+		Workflow:    current.Workflow,
+		Ref:         current.Ref,
+		State:       state,
+		FailedPhase: current.FailedPhase,
+		Error:       errMsg,
+		GateOutput:  current.GateOutput,
+		RetryOf:     current.RetryOf,
+		Meta:        current.Meta,
+		Trace:       trace,
+		CreatedAt:   r.runtimeNow(),
+	}))
+	if updateErr := r.Queue.UpdateVessel(*current); updateErr != nil {
+		log.Printf("warn: annotate recovery metadata for vessel %s: %v", id, updateErr)
 	}
 }
 
@@ -1382,6 +1432,10 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 
 	summary := vrs.buildSummary(state, now)
 	reviewArtifacts := &ReviewArtifacts{}
+	artifactVessel := vessel
+	if latest, err := r.Queue.FindByID(vessel.ID); err == nil && latest != nil {
+		artifactVessel = *latest
+	}
 	var manifest *evidence.Manifest
 	if len(claims) > 0 {
 		manifest = &evidence.Manifest{
@@ -1424,8 +1478,32 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 		reviewArtifacts.EvalReport = summary.EvalReportPath
 	}
 
+	if state == string(queue.StateFailed) || state == string(queue.StateTimedOut) {
+		reviewArtifact := recovery.Build(recovery.Input{
+			VesselID:    artifactVessel.ID,
+			Source:      artifactVessel.Source,
+			Workflow:    artifactVessel.Workflow,
+			Ref:         artifactVessel.Ref,
+			State:       artifactVessel.State,
+			FailedPhase: artifactVessel.FailedPhase,
+			Error:       artifactVessel.Error,
+			GateOutput:  artifactVessel.GateOutput,
+			RetryOf:     artifactVessel.RetryOf,
+			Meta:        artifactVessel.Meta,
+			Trace:       traceContextPointer(vrs.trace),
+			CreatedAt:   now,
+		})
+		if err := recovery.Save(r.Config.StateDir, reviewArtifact); err != nil {
+			log.Printf("warn: save recovery artifact: %v", err)
+		} else {
+			summary.FailureReviewPath = failureReviewRelativePath(vessel.ID)
+			reviewArtifacts.FailureReview = summary.FailureReviewPath
+			summary.Recovery = recoverySummaryFromArtifact(reviewArtifact)
+		}
+	}
+
 	if reviewArtifacts.EvidenceManifest != "" || reviewArtifacts.CostReport != "" ||
-		reviewArtifacts.BudgetAlerts != "" || reviewArtifacts.EvalReport != "" {
+		reviewArtifacts.BudgetAlerts != "" || reviewArtifacts.EvalReport != "" || reviewArtifacts.FailureReview != "" {
 		summary.ReviewArtifacts = reviewArtifacts
 	}
 
@@ -1448,6 +1526,29 @@ func saveJSONArtifact(path string, value any) error {
 		return fmt.Errorf("write: %w", err)
 	}
 	return nil
+}
+
+func recoveryAttributesFromMeta(meta map[string]string) observability.RecoveryData {
+	if meta == nil {
+		return observability.RecoveryData{}
+	}
+	return observability.RecoveryData{
+		Class:           meta[recovery.MetaClass],
+		Action:          meta[recovery.MetaAction],
+		RetrySuppressed: meta[recovery.MetaRetrySuppressed],
+		RetryOutcome:    meta[recovery.MetaRetryOutcome],
+		UnlockDimension: meta[recovery.MetaUnlockDimension],
+	}
+}
+
+func traceContextPointer(data *TraceArtifacts) *observability.TraceContextData {
+	if data == nil {
+		return nil
+	}
+	return &observability.TraceContextData{
+		TraceID: data.TraceID,
+		SpanID:  data.SpanID,
+	}
 }
 
 // runVesselOrchestrated executes a workflow with explicit phase dependencies
@@ -3397,7 +3498,17 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 		timeoutSpan := r.startWaitTransitionSpan(ctx, vessel, "timed_out", elapsed)
 		vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
 		vrs.setTraceContext(observability.TraceContextFromContext(timeoutSpan.Context()))
+		r.annotateRecoveryMetadata(vessel.ID, queue.StateTimedOut, errMsg, traceContextPointer(vrs.trace))
+		src := r.resolveSourceForVessel(vessel)
+		if err := src.OnTimedOut(ctx, vessel); err != nil {
+			log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
+		}
 		r.persistRunArtifacts(vessel, string(queue.StateTimedOut), vrs, nil, r.runtimeNow())
+		if r.Tracer != nil {
+			if current, findErr := r.Queue.FindByID(vessel.ID); findErr == nil && current != nil {
+				timeoutSpan.AddAttributes(observability.RecoveryAttributes(recoveryAttributesFromMeta(current.Meta)))
+			}
+		}
 		r.finishWaitTransitionSpan(timeoutSpan, nil)
 
 		// Clean up worktree (best-effort)

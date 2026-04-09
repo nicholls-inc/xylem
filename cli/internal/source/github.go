@@ -13,6 +13,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 )
 
 // GitHubTask defines a label-based task for the GitHub source.
@@ -185,16 +186,32 @@ func (g *GitHub) OnComplete(ctx context.Context, vessel queue.Vessel) error {
 }
 
 func (g *GitHub) OnFail(ctx context.Context, vessel queue.Vessel) error {
-	g.applyIssueLabels(ctx, vessel.Meta["issue_num"],
-		[]string{vessel.Meta["status_label_failed"]},
+	latest := g.recoveryAwareVessel(vessel)
+	g.applyIssueLabels(ctx, latest.Meta["issue_num"],
+		[]string{latest.Meta["status_label_failed"]},
 		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
+	if shouldRouteToRefinement(latest) {
+		remove := []string{}
+		if trig := latest.Meta["trigger_label"]; trig != "" {
+			remove = append(remove, trig)
+		}
+		g.applyIssueLabels(ctx, latest.Meta["issue_num"], []string{"needs-refinement"}, remove)
+	}
 	return nil
 }
 
 func (g *GitHub) OnTimedOut(ctx context.Context, vessel queue.Vessel) error {
-	g.applyIssueLabels(ctx, vessel.Meta["issue_num"],
-		[]string{vessel.Meta["status_label_timed_out"]},
+	latest := g.recoveryAwareVessel(vessel)
+	g.applyIssueLabels(ctx, latest.Meta["issue_num"],
+		[]string{latest.Meta["status_label_timed_out"]},
 		[]string{ResolveRunningLabel(vessel), resolveWaitingLabel(vessel), resolveReadyLabel(vessel)})
+	if shouldRouteToRefinement(latest) {
+		remove := []string{}
+		if trig := latest.Meta["trigger_label"]; trig != "" {
+			remove = append(remove, trig)
+		}
+		g.applyIssueLabels(ctx, latest.Meta["issue_num"], []string{"needs-refinement"}, remove)
+	}
 	return nil
 }
 
@@ -258,6 +275,26 @@ func (g *GitHub) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
 	}
 	isTerminalFailure := latest.State == queue.StateFailed || latest.State == queue.StateTimedOut
 	return isTerminalFailure && latest.Meta["source_input_fingerprint"] == fingerprint
+}
+
+func (g *GitHub) recoveryAwareVessel(vessel queue.Vessel) queue.Vessel {
+	if g == nil || g.Queue == nil {
+		return vessel
+	}
+	latest, err := g.Queue.FindByID(vessel.ID)
+	if err != nil || latest == nil {
+		return vessel
+	}
+	return *latest
+}
+
+func shouldRouteToRefinement(vessel queue.Vessel) bool {
+	action := vessel.Meta[recovery.MetaAction]
+	class := vessel.Meta[recovery.MetaClass]
+	return action == string(recovery.ActionRefine) ||
+		action == string(recovery.ActionSplitTask) ||
+		class == string(recovery.ClassSpecGap) ||
+		class == string(recovery.ClassScopeGap)
 }
 
 func issueLabelNames(labels []struct {
