@@ -71,6 +71,7 @@ func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeMana
 
 	r := runner.New(cfg, q, wt, cmdRunner)
 	r.Sources = buildSourceMap(cfg, q, cmdRunner)
+	r.BuiltinWorkflows = buildBuiltinWorkflowHandlers(cfg, wt, cmdRunner)
 	wireRunnerScaffolding(cfg, r, tracer)
 
 	return r, func() {
@@ -119,7 +120,13 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {
 	sources := make(map[string]source.Source)
-	for _, srcCfg := range cfg.Sources {
+	for name, srcCfg := range cfg.Sources {
+		register := func(src source.Source) {
+			sources[name] = src
+			if _, exists := sources[src.Name()]; !exists {
+				sources[src.Name()] = src
+			}
+		}
 		switch srcCfg.Type {
 		case "github":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
@@ -133,7 +140,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gh.Name()] = gh
+			register(gh)
 		case "github-pr":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -146,7 +153,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pr.Name()] = pr
+			register(pr)
 		case "github-pr-events":
 			prEventsTasks := make(map[string]source.PREventsTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -168,7 +175,7 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[pre.Name()] = pre
+			register(pre)
 		case "github-merge":
 			mergeTasks := make(map[string]source.MergeTask, len(srcCfg.Tasks))
 			for name, t := range srcCfg.Tasks {
@@ -182,7 +189,15 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				Queue:     q,
 				CmdRunner: cmdRunner,
 			}
-			sources[gm.Name()] = gm
+			register(gm)
+		case "schedule":
+			register(&source.Schedule{
+				ConfigName: name,
+				Cadence:    srcCfg.Cadence,
+				Workflow:   srcCfg.Workflow,
+				StateDir:   cfg.StateDir,
+				Queue:      q,
+			})
 		}
 	}
 	return sources

@@ -206,11 +206,12 @@ xylem scan [flags]
 ### Behavior
 
 - Iterates over every source defined in `.xylem.yml` and calls its `Scan()` method.
-- Supported source types are `github`, `github-pr`, `github-pr-events`, and `github-merge`.
+- Supported source types are `github`, `github-pr`, `github-pr-events`, `github-merge`, and `schedule`.
 - `github` scans open issues matching task labels.
 - `github-pr` scans open pull requests matching task labels.
 - `github-pr-events` scans open pull requests for configured `on` triggers such as labels, submitted reviews, failed checks, and comments.
 - `github-merge` scans merged pull requests and dedupes by merge commit SHA.
+- `schedule` enqueues a single synthetic vessel when its cadence has elapsed since the last recorded firing in `<state_dir>/schedule-state.json`.
 - If scanning is paused (via `xylem pause`), prints a message and exits without scanning.
 - Deduplication is handled automatically. Depending on the source, xylem skips refs that are already present in the queue, already present in any vessel state, or already have xylem-owned branches/open PRs.
 
@@ -350,6 +351,56 @@ Missing historical artifacts from older runs are tolerated; the review degrades 
 ```bash
 # Generate the latest review report on demand
 xylem review
+```
+
+---
+
+## xylem lessons
+
+Synthesize recurring failed-run patterns into institutional-memory proposals for `.xylem/HARNESS.md`.
+
+### Usage
+
+```
+xylem lessons
+```
+
+### Flags
+
+None.
+
+### Behavior
+
+1. Scans historical vessel summaries under `<state_dir>/phases/`.
+2. Filters to failed and timed-out runs inside the last 30 days by default.
+3. Clusters recurring failures using structured artifacts first: evidence manifests, phase failures, and evaluator reports.
+4. Skips lessons already present in `.xylem/HARNESS.md` or already represented by an equivalent open PR.
+5. Writes:
+   - `<state_dir>/reviews/lessons.json`
+   - `<state_dir>/reviews/lessons.md`
+6. For each remaining proposal slice, creates a branch, commits the generated `.xylem/HARNESS.md` patch, pushes it, and opens a reviewable PR.
+7. Persists proposal records containing:
+    - a branch name
+    - a PR title/body
+    - the exact HARNESS.md markdown block to add
+    - evidence references back to failed runs
+    - PR creation status plus `pr_number` / `pr_url` when a PR was opened
+
+### Artifact contract
+
+`<state_dir>/reviews/lessons.json` contains:
+
+- `lessons[]`: evidence-backed negative constraints with `fingerprint`, `negative_constraint`, `rationale`, `example`, and `evidence[]`
+- `proposals[]`: narrow PR slices with `branch`, `title`, `body`, `harness_path`, `harness_patch`, `lesson_fingerprints`, `status`, and optional `pr_number` / `pr_url`
+- `skipped[]`: deduplicated lessons omitted because the harness or an open PR already covers them
+
+Future agents can consume this artifact directly to inspect what was synthesized, what was skipped, and which PRs were opened.
+
+### Examples
+
+```bash
+# Generate the current institutional-memory proposal set
+xylem lessons
 ```
 
 ---

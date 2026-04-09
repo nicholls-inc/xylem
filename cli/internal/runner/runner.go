@@ -55,6 +55,10 @@ type DrainResult struct {
 	Waiting   int
 }
 
+// BuiltinWorkflowHandler runs a workflow without loading a YAML definition.
+// It is used for internal workflows that execute Go code directly.
+type BuiltinWorkflowHandler func(ctx context.Context, vessel queue.Vessel) error
+
 // Runner launches Claude sessions for queued vessels with concurrency control.
 type Runner struct {
 	Config   *config.Config
@@ -62,7 +66,10 @@ type Runner struct {
 	Worktree WorktreeManager
 	Runner   CommandRunner
 	Sources  map[string]source.Source
-	Reporter *reporter.Reporter // may be nil for non-github vessels
+	// BuiltinWorkflows handles workflow names that execute internal logic
+	// instead of loading .xylem/workflows/<name>.yaml.
+	BuiltinWorkflows map[string]BuiltinWorkflowHandler
+	Reporter         *reporter.Reporter // may be nil for non-github vessels
 	// Shared harness scaffolding for phase policy enforcement, audit logging,
 	// protected-surface verification, and tracing.
 	Intermediary *intermediary.Intermediary // nil = no policy enforcement
@@ -380,7 +387,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 				}
-				src := r.resolveSource(vessel.Source)
+				src := r.resolveSourceForVessel(vessel)
 				if err := src.OnTimedOut(ctx, vessel); err != nil {
 					log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -421,7 +428,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 
 func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome string) {
 	// Look up source for this vessel
-	src := r.resolveSource(vessel.Source)
+	src := r.resolveSourceForVessel(vessel)
 
 	// Source-specific start hook (e.g., add in-progress label)
 	startErr := src.OnStart(ctx, vessel)
@@ -450,46 +457,12 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		r.persistRunArtifacts(vessel, string(queue.StateFailed), vrs, claims, r.runtimeNow())
 	}()
 
-	// Worktree: reuse if set (resuming from waiting), otherwise create.
-	// If set but missing on disk (e.g., retry after cleanup), recreate it.
-	worktreePath := vessel.WorktreePath
-	if worktreePath != "" {
-		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
-			log.Printf("vessel %s: worktree %s missing on disk, recreating", vessel.ID, worktreePath)
-			branchName := src.BranchName(vessel)
-			recreated, recreateErr := r.Worktree.Create(ctx, branchName)
-			if recreateErr != nil {
-				r.failVessel(vessel.ID, fmt.Sprintf("recreate missing worktree: %v", recreateErr))
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				return "failed"
-			}
-			worktreePath = recreated
-			vessel.WorktreePath = worktreePath
-			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
-				log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
-			}
-		}
-	} else {
-		branchName := src.BranchName(vessel)
-		var err error
-		worktreePath, err = r.Worktree.Create(ctx, branchName)
-		if err != nil {
-			r.failVessel(vessel.ID, err.Error())
-			if err := src.OnFail(ctx, vessel); err != nil {
-				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-			}
-			return "failed"
-		}
-		vessel.WorktreePath = worktreePath
-		if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
-			log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
-		}
-	}
-
 	// Prompt-only vessel (no workflow): single claude -p invocation
 	if vessel.Workflow == "" && vessel.Prompt != "" {
+		worktreePath, ok := r.ensureWorktree(ctx, &vessel, src)
+		if !ok {
+			return "failed"
+		}
 		return r.runPromptOnly(ctx, vessel, worktreePath, src, vrs)
 	}
 
@@ -499,6 +472,15 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 		}
+		return "failed"
+	}
+
+	if builtin, ok := r.BuiltinWorkflows[vessel.Workflow]; ok {
+		return r.runBuiltinWorkflow(ctx, vessel, src, vrs, builtin)
+	}
+
+	worktreePath, ok := r.ensureWorktree(ctx, &vessel, src)
+	if !ok {
 		return "failed"
 	}
 
@@ -1021,6 +1003,81 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	return r.completeVessel(ctx, vessel, worktreePath, nil, vrs, nil)
 }
 
+func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, src source.Source, vrs *vesselRunState, handler BuiltinWorkflowHandler) string {
+	startedAt := r.runtimeNow()
+	if err := handler(ctx, vessel); err != nil {
+		duration := r.runtimeSince(startedAt)
+		if vrs != nil {
+			vrs.addPhase(PhaseSummary{
+				Name:       vessel.Workflow,
+				Type:       "builtin",
+				DurationMS: duration.Milliseconds(),
+				Status:     "failed",
+				Error:      err.Error(),
+			})
+		}
+		r.failVessel(vessel.ID, err.Error())
+		if failErr := src.OnFail(ctx, vessel); failErr != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+		}
+		return "failed"
+	}
+
+	if vrs != nil {
+		vrs.addPhase(PhaseSummary{
+			Name:       vessel.Workflow,
+			Type:       "builtin",
+			DurationMS: r.runtimeSince(startedAt).Milliseconds(),
+			Status:     "completed",
+		})
+	}
+	if err := src.OnComplete(ctx, vessel); err != nil {
+		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
+	}
+	return r.completeVessel(ctx, vessel, "", nil, vrs, nil)
+}
+
+func (r *Runner) ensureWorktree(ctx context.Context, vessel *queue.Vessel, src source.Source) (string, bool) {
+	// Worktree: reuse if set (resuming from waiting), otherwise create.
+	// If set but missing on disk (e.g., retry after cleanup), recreate it.
+	worktreePath := vessel.WorktreePath
+	if worktreePath != "" {
+		if _, statErr := os.Stat(worktreePath); os.IsNotExist(statErr) {
+			log.Printf("vessel %s: worktree %s missing on disk, recreating", vessel.ID, worktreePath)
+			branchName := src.BranchName(*vessel)
+			recreated, recreateErr := r.Worktree.Create(ctx, branchName)
+			if recreateErr != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("recreate missing worktree: %v", recreateErr))
+				if err := src.OnFail(ctx, *vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return "", false
+			}
+			worktreePath = recreated
+			vessel.WorktreePath = worktreePath
+			if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
+				log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
+			}
+		}
+		return worktreePath, true
+	}
+
+	branchName := src.BranchName(*vessel)
+	created, err := r.Worktree.Create(ctx, branchName)
+	if err != nil {
+		r.failVessel(vessel.ID, err.Error())
+		if failErr := src.OnFail(ctx, *vessel); failErr != nil {
+			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
+		}
+		return "", false
+	}
+	vessel.WorktreePath = created
+	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
+		log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
+	}
+	return created, true
+}
+
 func (r *Runner) resolveSource(name string) source.Source {
 	if r.Sources != nil {
 		if src, ok := r.Sources[name]; ok {
@@ -1028,6 +1085,15 @@ func (r *Runner) resolveSource(name string) source.Source {
 		}
 	}
 	return &source.Manual{}
+}
+
+func (r *Runner) resolveSourceForVessel(vessel queue.Vessel) source.Source {
+	if configName := r.sourceConfigNameFromMeta(vessel); configName != "" && r.Sources != nil {
+		if src, ok := r.Sources[configName]; ok {
+			return src
+		}
+	}
+	return r.resolveSource(vessel.Source)
 }
 
 // buildCommand constructs the LLM command and args from config and vessel.
@@ -2470,13 +2536,7 @@ func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 }
 
 func (r *Runner) resolveRepo(vessel queue.Vessel) string {
-	if r.Sources == nil {
-		return ""
-	}
-	src, ok := r.Sources[vessel.Source]
-	if !ok {
-		return ""
-	}
+	src := r.resolveSourceForVessel(vessel)
 	switch s := src.(type) {
 	case *source.GitHub:
 		return s.Repo

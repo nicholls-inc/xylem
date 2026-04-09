@@ -15,7 +15,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
-type loadedRun struct {
+type LoadedRun struct {
 	Summary      runner.VesselSummary
 	Evidence     *evidence.Manifest
 	CostReport   *cost.CostReport
@@ -23,7 +23,7 @@ type loadedRun struct {
 	EvalReport   *evaluator.LoopResult
 }
 
-func loadRuns(stateDir string, lookbackRuns int) ([]loadedRun, int, []string, error) {
+func LoadRuns(stateDir string, lookbackRuns int) ([]LoadedRun, int, []string, error) {
 	phaseDir := filepath.Join(stateDir, "phases")
 	entries, err := os.ReadDir(phaseDir)
 	if err != nil {
@@ -67,9 +67,9 @@ func loadRuns(stateDir string, lookbackRuns int) ([]loadedRun, int, []string, er
 		return summaries[i].summary.EndedAt.Before(summaries[j].summary.EndedAt)
 	})
 
-	runs := make([]loadedRun, 0, len(summaries))
+	runs := make([]LoadedRun, 0, len(summaries))
 	for _, record := range summaries {
-		run := loadedRun{Summary: record.summary}
+		run := LoadedRun{Summary: record.summary}
 
 		if manifestPath := resolveArtifactPath(stateDir, record.summary.EvidenceManifestPath, reviewArtifactValue(record.summary.ReviewArtifacts, func(a *runner.ReviewArtifacts) string {
 			return a.EvidenceManifest
@@ -118,7 +118,7 @@ func loadRuns(stateDir string, lookbackRuns int) ([]loadedRun, int, []string, er
 }
 
 func CountAvailableRuns(stateDir string) (int, error) {
-	runs, total, _, err := loadRuns(stateDir, 0)
+	runs, total, _, err := LoadRuns(stateDir, 0)
 	if err != nil {
 		return 0, err
 	}

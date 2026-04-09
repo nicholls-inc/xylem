@@ -238,6 +238,23 @@ func TestBuildDrainRunnerPropagatesProtectedSurfaces(t *testing.T) {
 	}
 }
 
+func TestBuildDrainRunnerRegistersBuiltinLessonsWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	cmdRunner := newCmdRunner(cfg)
+
+	r, cleanup := buildDrainRunner(cfg, q, &configurableWorktreeStub{}, cmdRunner)
+	defer cleanup()
+
+	if r == nil {
+		t.Fatal("buildDrainRunner() returned nil runner")
+	}
+	if _, ok := r.BuiltinWorkflows["lessons"]; !ok {
+		t.Fatal("expected lessons builtin workflow to be registered")
+	}
+}
+
 func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTracing(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)

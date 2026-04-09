@@ -2238,6 +2238,51 @@ func TestSmoke_WS6_S14_PromptOnlyVesselGetsSurfaceVerification(t *testing.T) {
 	assert.Equal(t, originalContents, string(data))
 }
 
+func TestRunVessel_BuiltinWorkflowCompletesWithoutLoadingWorkflowFile(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "lessons-1",
+		Source:    "manual",
+		Workflow:  "lessons",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	wt := &mockWorktree{createErr: errors.New("worktree should not be created")}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+	called := false
+	r.BuiltinWorkflows = map[string]BuiltinWorkflowHandler{
+		"lessons": func(_ context.Context, got queue.Vessel) error {
+			called = true
+			assert.Equal(t, "lessons-1", got.ID)
+			return nil
+		},
+	}
+
+	outcome := r.runVessel(context.Background(), *vessel)
+	assert.Equal(t, "completed", outcome)
+	assert.True(t, called)
+
+	final := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateCompleted, final.State)
+	assert.Empty(t, final.WorktreePath)
+
+	summary := loadSummary(t, cfg.StateDir, "lessons-1")
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "lessons", summary.Phases[0].Name)
+	assert.Equal(t, "builtin", summary.Phases[0].Type)
+	assert.Equal(t, "completed", summary.Phases[0].Status)
+}
+
 func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)

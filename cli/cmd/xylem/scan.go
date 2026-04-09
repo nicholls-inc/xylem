@@ -54,6 +54,7 @@ func dryRunScan(cfg *config.Config, q *queue.Queue, runner scanner.CommandRunner
 
 	dryQ := queue.New(tmpFile.Name())
 	s := scanner.New(cfg, dryQ, runner)
+	s.RunHooks = false
 	result, err := s.Scan(context.Background())
 	if err != nil {
 		return fmt.Errorf("scan error: %w", err)

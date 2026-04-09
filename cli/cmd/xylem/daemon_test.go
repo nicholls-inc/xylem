@@ -185,6 +185,65 @@ func noopDrain(_ context.Context) (runner.DrainResult, error) {
 	return runner.DrainResult{}, nil
 }
 
+type daemonNoopRunner struct{}
+
+func (daemonNoopRunner) Run(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte("[]"), nil
+}
+
+func TestDaemonLoopScheduledSourceRunsSingleTick(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"lessons": {
+				Type:     "schedule",
+				Cadence:  "@hourly",
+				Workflow: "lessons",
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	scan := func(ctx context.Context) (scanner.ScanResult, error) {
+		s := scanner.New(cfg, q, daemonNoopRunner{})
+		return s.Scan(ctx)
+	}
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		vessel, err := q.Dequeue()
+		if err != nil {
+			return runner.DrainResult{}, err
+		}
+		if vessel == nil {
+			return runner.DrainResult{}, nil
+		}
+		if vessel.Source != "schedule" {
+			t.Fatalf("vessel.Source = %q, want schedule", vessel.Source)
+		}
+		if err := q.Update(vessel.ID, queue.StateCompleted, ""); err != nil {
+			return runner.DrainResult{}, err
+		}
+		cancel()
+		return runner.DrainResult{Launched: 1, Completed: 1}, nil
+	}
+
+	if err := daemonLoop(ctx, q, tracker, scan, drain, nil, nil, 10*time.Millisecond, 10*time.Millisecond, 0); err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+
+	completed, err := q.ListByState(queue.StateCompleted)
+	if err != nil {
+		t.Fatalf("ListByState(completed) error = %v", err)
+	}
+	if len(completed) != 1 {
+		t.Fatalf("len(completed) = %d, want 1", len(completed))
+	}
+}
+
 type trackerStub struct {
 	wg       sync.WaitGroup
 	inFlight atomic.Int32

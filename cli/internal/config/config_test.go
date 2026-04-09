@@ -227,6 +227,34 @@ func TestValidateMissingRepoInGitHubSource(t *testing.T) {
 	requireErrorContains(t, err, "repo")
 }
 
+func TestValidateScheduleSource(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"lessons": {
+			Type:     "schedule",
+			Cadence:  "@daily",
+			Workflow: "lessons",
+		},
+	}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateScheduleSourceRejectsMalformedCadence(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"lessons": {
+			Type:     "schedule",
+			Cadence:  "not-a-cadence",
+			Workflow: "lessons",
+		},
+	}
+
+	requireErrorContains(t, cfg.Validate(), `source "lessons" (schedule): cadence is invalid`)
+}
+
 func TestValidateNoSourcesNoRepoIsValid(t *testing.T) {
 	cfg := &Config{
 		Concurrency: 2,

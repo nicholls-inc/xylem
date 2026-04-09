@@ -128,12 +128,14 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`. |
 | `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
-| `tasks` | map | -- | Yes | Map of task names to task configurations. At least one task is required per source. |
+| `tasks` | map | -- | Yes (GitHub sources) | Map of task names to task configurations. At least one task is required per GitHub-backed source. |
+| `cadence` | string | -- | Yes (`schedule`) | Either a Go duration (`1h`, `24h`) or a cron descriptor / expression (`@daily`, `0 6 * * 1`). |
+| `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue whenever the schedule fires. |
 
 ### Tasks
 
@@ -152,6 +154,7 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 - `github-pr`: requires `labels`, supports `status_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
+- `schedule`: requires source-level `cadence` and `workflow`; does not use `tasks`
 
 ### `status_labels`
 
@@ -524,6 +527,25 @@ sources:
       followup:
         workflow: post-merge-followup
 ```
+
+### Schedule recurring vessels
+
+```yaml
+sources:
+  lessons:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
+```
+
+`schedule` sources persist their last-fired state under `<state_dir>/schedule-state.json`. The generated vessel metadata includes:
+
+- `schedule_name`
+- `schedule_cadence`
+- `schedule_fired_at`
+- `schedule_next_due_at`
+
+The built-in `lessons` workflow is designed for this source type: it synthesizes recurring failures into `.xylem/HARNESS.md` proposals, records them under `<state_dir>/reviews/lessons.{json,md}`, and opens reviewable PRs instead of editing the default branch directly.
 
 ## Legacy config format
 
