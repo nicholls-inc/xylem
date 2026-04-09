@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"time"
@@ -43,7 +43,7 @@ func compactQueue(q *queue.Queue, dryRun bool) {
 	if dryRun {
 		removed, err := q.CompactDryRun()
 		if err != nil {
-			log.Printf("warn: could not check queue for compaction: %v", err)
+			slog.Warn("queue compaction dry-run check failed", "error", err)
 			return
 		}
 		if removed > 0 {
@@ -54,7 +54,7 @@ func compactQueue(q *queue.Queue, dryRun bool) {
 
 	removed, err := q.Compact()
 	if err != nil {
-		log.Printf("warn: queue compaction failed: %v", err)
+		slog.Warn("queue compaction failed", "error", err)
 		return
 	}
 	if removed > 0 {
@@ -104,7 +104,7 @@ func cleanupPhaseOutputs(cfg *config.Config, q *queue.Queue, dryRun bool) {
 
 	vessels, err := q.List()
 	if err != nil {
-		log.Printf("warn: could not read queue for phase cleanup: %v", err)
+		slog.Warn("phase cleanup failed to read queue", "error", err)
 		return
 	}
 
@@ -120,7 +120,7 @@ func cleanupPhaseOutputs(cfg *config.Config, q *queue.Queue, dryRun bool) {
 
 	entries, err := os.ReadDir(phasesDir)
 	if err != nil {
-		log.Printf("warn: could not read phases directory: %v", err)
+		slog.Warn("phase cleanup failed to read phases directory", "path", phasesDir, "error", err)
 		return
 	}
 
@@ -137,7 +137,7 @@ func cleanupPhaseOutputs(cfg *config.Config, q *queue.Queue, dryRun bool) {
 			fmt.Printf("Would remove phase outputs: %s\n", dirPath)
 		} else {
 			if err := os.RemoveAll(dirPath); err != nil {
-				log.Printf("warn: failed to remove %s: %v", dirPath, err)
+				slog.Warn("phase cleanup failed to remove directory", "path", dirPath, "error", err)
 				continue
 			}
 			fmt.Printf("Removed phase outputs: %s\n", dirPath)

@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/signal"
 	"path/filepath"
 	"syscall"
@@ -87,12 +87,16 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 	r.Tracer = tracer
 }
 
+var newConfiguredTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+	return newTracer(cfg)
+}
+
 func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 	if !cfg.ObservabilityEnabled() {
 		return nil
 	}
 
-	tracer, err := newTracer(observability.TracerConfig{
+	tracer, err := newConfiguredTracer(observability.TracerConfig{
 		ServiceName:    "xylem",
 		ServiceVersion: "",
 		Endpoint:       cfg.Observability.Endpoint,
@@ -100,7 +104,7 @@ func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 		SampleRate:     cfg.ObservabilitySampleRate(),
 	})
 	if err != nil {
-		log.Printf("warn: failed to initialize tracer: %v", err)
+		slog.Warn("initialize tracer", "error", err)
 		return nil
 	}
 
@@ -113,7 +117,7 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 	}
 
 	if err := tracer.Shutdown(context.Background()); err != nil {
-		log.Printf("warn: %v", fmt.Errorf("shutdown tracer: %w", err))
+		slog.Warn("shutdown tracer", "error", err)
 	}
 }
 

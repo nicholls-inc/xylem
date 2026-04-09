@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os/exec"
 	"regexp"
 	"strconv"
@@ -221,7 +221,7 @@ func allChecksGreen(pr prSummary) bool {
 func autoMergeXylemPRs(ctx context.Context, repo string) {
 	prs, err := listOpenPRsFn(ctx, repo)
 	if err != nil {
-		log.Printf("daemon: auto-merge: list PRs: %v", err)
+		slog.Error("daemon auto-merge failed to list PRs", "repo", repo, "error", err)
 		return
 	}
 
@@ -233,44 +233,85 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 		case actionRequestReview:
 			if err := requestCopilotReviewFn(ctx, repo, pr.Number); err != nil {
 				if isBenignGhWarning(err) {
-					log.Printf("daemon: auto-merge: requested copilot review on PR #%d (gh warning ignored): %s", pr.Number, pr.HeadRefName)
+					slog.Info("daemon auto-merge requested copilot review with gh warning ignored",
+						"repo", repo,
+						"pr", pr.Number,
+						"head_ref", pr.HeadRefName,
+						"error", err)
 				} else if isReviewerNotCollaborator(err) {
-					log.Printf("daemon: auto-merge: PR #%d skipping copilot review request (%q is not a collaborator on %s); enabling auto-merge anyway", pr.Number, copilotReviewerLogin, repo)
+					slog.Warn("daemon auto-merge skipping copilot review request; reviewer is not a collaborator",
+						"repo", repo,
+						"pr", pr.Number,
+						"reviewer", copilotReviewerLogin,
+						"error", err)
 				} else {
-					log.Printf("daemon: auto-merge: PR #%d request review failed: %v; enabling auto-merge anyway", pr.Number, err)
+					slog.Warn("daemon auto-merge request review failed; enabling auto-merge anyway",
+						"repo", repo,
+						"pr", pr.Number,
+						"error", err)
 				}
 			} else {
-				log.Printf("daemon: auto-merge: requested copilot review on PR #%d (%s)", pr.Number, pr.HeadRefName)
+				slog.Info("daemon auto-merge requested copilot review",
+					"repo", repo,
+					"pr", pr.Number,
+					"head_ref", pr.HeadRefName)
 			}
 			if err := enableAutoMergePRFn(ctx, repo, pr.Number); err != nil {
-				log.Printf("daemon: auto-merge: PR #%d enable auto-merge failed: %v", pr.Number, err)
+				slog.Error("daemon auto-merge failed to enable auto-merge",
+					"repo", repo,
+					"pr", pr.Number,
+					"error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: enabled auto-merge on PR #%d (%s)", pr.Number, pr.HeadRefName)
+			slog.Info("daemon auto-merge enabled auto-merge",
+				"repo", repo,
+				"pr", pr.Number,
+				"head_ref", pr.HeadRefName)
 		case actionRouteConflict:
 			if err := addPRLabelsFn(ctx, repo, pr.Number, conflictResolutionLabels); err != nil {
 				if isBenignGhWarning(err) {
-					log.Printf("daemon: auto-merge: routed PR #%d to resolve-conflicts workflow (gh warning ignored)", pr.Number)
+					slog.Info("daemon auto-merge routed PR to resolve-conflicts workflow with gh warning ignored",
+						"repo", repo,
+						"pr", pr.Number,
+						"error", err)
 					continue
 				}
-				log.Printf("daemon: auto-merge: PR #%d add conflict labels failed: %v", pr.Number, err)
+				slog.Error("daemon auto-merge failed to add conflict labels",
+					"repo", repo,
+					"pr", pr.Number,
+					"error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: routed PR #%d to resolve-conflicts workflow (%s)", pr.Number, pr.HeadRefName)
+			slog.Info("daemon auto-merge routed PR to resolve-conflicts workflow",
+				"repo", repo,
+				"pr", pr.Number,
+				"head_ref", pr.HeadRefName)
 		case actionWaitForChecks:
-			log.Printf("daemon: auto-merge: PR #%d waiting for CI checks", pr.Number)
+			slog.Info("daemon auto-merge waiting for CI checks", "repo", repo, "pr", pr.Number)
 		case actionWaitForMergeable:
-			log.Printf("daemon: auto-merge: PR #%d waiting for mergeable state (conflicts being resolved or computing)", pr.Number)
+			slog.Info("daemon auto-merge waiting for mergeable state",
+				"repo", repo,
+				"pr", pr.Number)
 		case actionAddressReview:
-			log.Printf("daemon: auto-merge: PR #%d has changes requested, respond-to-pr-review workflow will handle", pr.Number)
+			slog.Info("daemon auto-merge waiting for review follow-up",
+				"repo", repo,
+				"pr", pr.Number)
 		case actionEnableAutoMerge:
 			if err := enableAutoMergePRFn(ctx, repo, pr.Number); err != nil {
-				log.Printf("daemon: auto-merge: PR #%d enable auto-merge failed: %v", pr.Number, err)
+				slog.Error("daemon auto-merge failed to enable auto-merge",
+					"repo", repo,
+					"pr", pr.Number,
+					"error", err)
 				continue
 			}
-			log.Printf("daemon: auto-merge: enabled auto-merge on PR #%d (%s)", pr.Number, pr.HeadRefName)
+			slog.Info("daemon auto-merge enabled auto-merge",
+				"repo", repo,
+				"pr", pr.Number,
+				"head_ref", pr.HeadRefName)
 		case actionWaitForAutoMerge:
-			log.Printf("daemon: auto-merge: PR #%d waiting for GitHub auto-merge", pr.Number)
+			slog.Info("daemon auto-merge waiting for GitHub auto-merge",
+				"repo", repo,
+				"pr", pr.Number)
 		}
 	}
 }
