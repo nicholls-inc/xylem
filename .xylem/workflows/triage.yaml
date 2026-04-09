@@ -1,0 +1,9 @@
+name: triage
+description: "Classify issues, split if too large, and label for refinement"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/triage/analyze.md
+    max_turns: 20
+  - name: triage
+    prompt_file: .xylem/prompts/triage/triage.md
+    max_turns: 20
