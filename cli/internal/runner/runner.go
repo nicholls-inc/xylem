@@ -590,19 +590,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			phaseStart := r.runtimeNow()
 
 			// Build template data
-			td := phase.TemplateData{
-				Issue: issueData,
-				Phase: phase.PhaseData{
-					Name:  p.Name,
-					Index: i,
-				},
-				PreviousOutputs: previousOutputs,
-				GateResult:      gateResult,
-				Vessel: phase.VesselData{
-					ID:     vessel.ID,
-					Source: vessel.Source,
-				},
-			}
+			td := r.buildTemplateData(vessel, issueData, p.Name, i, previousOutputs, gateResult)
 
 			var output []byte
 			var runErr error
@@ -1880,19 +1868,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
 		phaseStart := r.runtimeNow()
 
-		td := phase.TemplateData{
-			Issue: issueData,
-			Phase: phase.PhaseData{
-				Name:  p.Name,
-				Index: phaseIdx,
-			},
-			PreviousOutputs: previousOutputs,
-			GateResult:      gateResult,
-			Vessel: phase.VesselData{
-				ID:     vessel.ID,
-				Source: vessel.Source,
-			},
-		}
+		td := r.buildTemplateData(vessel, issueData, p.Name, phaseIdx, previousOutputs, gateResult)
 
 		var output []byte
 		var runErr error
@@ -3517,6 +3493,52 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 		return s.Repo
 	default:
 		return ""
+	}
+}
+
+func (r *Runner) resolveDefaultBranch() string {
+	if r.Config != nil && strings.TrimSpace(r.Config.DefaultBranch) != "" {
+		return strings.TrimSpace(r.Config.DefaultBranch)
+	}
+	return "main"
+}
+
+func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string) phase.TemplateData {
+	sourceName := vessel.Source
+	if configSource := r.sourceConfigNameFromMeta(vessel); configSource != "" {
+		sourceName = configSource
+	}
+	repoSlug := strings.TrimSpace(r.resolveRepo(vessel))
+	validation := phase.ValidationData{}
+	if r.Config != nil {
+		validation = phase.ValidationData{
+			Format: strings.TrimSpace(r.Config.Validation.Format),
+			Lint:   strings.TrimSpace(r.Config.Validation.Lint),
+			Build:  strings.TrimSpace(r.Config.Validation.Build),
+			Test:   strings.TrimSpace(r.Config.Validation.Test),
+		}
+	}
+	return phase.TemplateData{
+		Issue: issueData,
+		Phase: phase.PhaseData{
+			Name:  phaseName,
+			Index: phaseIndex,
+		},
+		PreviousOutputs: previousOutputs,
+		GateResult:      gateResult,
+		Vessel: phase.VesselData{
+			ID:     vessel.ID,
+			Source: vessel.Source,
+		},
+		Repo: phase.RepoData{
+			Slug:          repoSlug,
+			DefaultBranch: r.resolveDefaultBranch(),
+		},
+		Source: phase.SourceData{
+			Name: sourceName,
+			Repo: repoSlug,
+		},
+		Validation: validation,
 	}
 }
 

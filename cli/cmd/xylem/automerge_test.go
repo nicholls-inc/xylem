@@ -5,9 +5,23 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func xylemAutoMergeSettings(t *testing.T) autoMergeSettings {
+	t.Helper()
+
+	settings, err := newAutoMergeSettings(config.DaemonConfig{
+		AutoMergeRepo:          "nicholls-inc/xylem",
+		AutoMergeLabels:        []string{"ready-to-merge", "harness-impl"},
+		AutoMergeBranchPattern: `^(feat|fix|chore)/issue-\d+`,
+		AutoMergeReviewer:      "copilot-pull-request-reviewer",
+	})
+	require.NoError(t, err)
+	return settings
+}
 
 func TestIsBenignGhWarning(t *testing.T) {
 	tests := []struct {
@@ -84,13 +98,13 @@ func TestPRSummary_HasLabel(t *testing.T) {
 	pr := prSummary{
 		Labels: []struct {
 			Name string `json:"name"`
-		}{{Name: "needs-conflict-resolution"}, {Name: harnessImplLabel}},
+		}{{Name: "needs-conflict-resolution"}, {Name: "harness-impl"}},
 	}
 	if !pr.hasLabel("needs-conflict-resolution") {
 		t.Error("hasLabel('needs-conflict-resolution') = false, want true")
 	}
-	if !pr.hasLabel(harnessImplLabel) {
-		t.Errorf("hasLabel(%q) = false, want true", harnessImplLabel)
+	if !pr.hasLabel("harness-impl") {
+		t.Errorf("hasLabel(%q) = false, want true", "harness-impl")
 	}
 	if pr.hasLabel("nonexistent") {
 		t.Error("hasLabel('nonexistent') = true, want false")
@@ -98,6 +112,7 @@ func TestPRSummary_HasLabel(t *testing.T) {
 }
 
 func TestXylemBranchPattern(t *testing.T) {
+	settings := xylemAutoMergeSettings(t)
 	tests := []struct {
 		branch string
 		want   bool
@@ -114,12 +129,38 @@ func TestXylemBranchPattern(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.branch, func(t *testing.T) {
-			got := xylemBranchPattern.MatchString(tt.branch)
+			got := settings.branchPattern.MatchString(tt.branch)
 			if got != tt.want {
-				t.Errorf("xylemBranchPattern.MatchString(%q) = %v, want %v", tt.branch, got, tt.want)
+				t.Errorf("branchPattern.MatchString(%q) = %v, want %v", tt.branch, got, tt.want)
 			}
 		})
 	}
+}
+
+func TestNewAutoMergeSettingsDefaults(t *testing.T) {
+	settings, err := newAutoMergeSettings(config.DaemonConfig{})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ready-to-merge"}, settings.labels)
+	assert.Equal(t, ".*", settings.branchPatternRaw)
+	assert.Equal(t, "", settings.reviewer)
+	assert.Equal(t, []string{"needs-conflict-resolution", "ready-to-merge"}, settings.conflictResolutionLabels)
+	assert.True(t, settings.branchPattern.MatchString("any/branch"))
+}
+
+func TestNewAutoMergeSettingsCustomizesLabelsPatternAndReviewer(t *testing.T) {
+	settings, err := newAutoMergeSettings(config.DaemonConfig{
+		AutoMergeRepo:          "owner/repo",
+		AutoMergeLabels:        []string{"merge-ready", "bot-authored"},
+		AutoMergeBranchPattern: "^release/",
+		AutoMergeReviewer:      "copilot-bot",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "owner/repo", settings.repo)
+	assert.Equal(t, []string{"merge-ready", "bot-authored"}, settings.labels)
+	assert.Equal(t, "copilot-bot", settings.reviewer)
+	assert.Equal(t, []string{"needs-conflict-resolution", "merge-ready", "bot-authored"}, settings.conflictResolutionLabels)
+	assert.True(t, settings.branchPattern.MatchString("release/1.2"))
+	assert.False(t, settings.branchPattern.MatchString("feat/issue-1-1"))
 }
 
 func TestAllChecksGreen(t *testing.T) {
@@ -158,13 +199,14 @@ func TestAllChecksGreen(t *testing.T) {
 }
 
 func TestDecideAutoMergeAction(t *testing.T) {
+	settings := xylemAutoMergeSettings(t)
 	greenChecks := []struct {
 		Conclusion string `json:"conclusion"`
 		Status     string `json:"status"`
 	}{{Conclusion: "SUCCESS", Status: "COMPLETED"}}
 	mergeReadyLabels := []struct {
 		Name string `json:"name"`
-	}{{Name: readyToMergeLabel}, {Name: harnessImplLabel}}
+	}{{Name: "ready-to-merge"}, {Name: "harness-impl"}}
 	copilotReviewed := []struct {
 		Author struct {
 			Login string `json:"login"`
@@ -173,7 +215,7 @@ func TestDecideAutoMergeAction(t *testing.T) {
 	}{{
 		Author: struct {
 			Login string `json:"login"`
-		}{Login: copilotReviewerLogin},
+		}{Login: settings.reviewer},
 		State: "APPROVED",
 	}}
 
@@ -195,7 +237,7 @@ func TestDecideAutoMergeAction(t *testing.T) {
 				Mergeable:   "MERGEABLE",
 				Labels: []struct {
 					Name string `json:"name"`
-				}{{Name: harnessImplLabel}},
+				}{{Name: "harness-impl"}},
 			},
 			want: actionSkip,
 		},
@@ -215,7 +257,7 @@ func TestDecideAutoMergeAction(t *testing.T) {
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "CONFLICTING",
 				Labels: []struct {
 					Name string `json:"name"`
-				}{{Name: "needs-conflict-resolution"}, {Name: readyToMergeLabel}, {Name: harnessImplLabel}},
+				}{{Name: "needs-conflict-resolution"}, {Name: "ready-to-merge"}, {Name: "harness-impl"}},
 			},
 			want: actionWaitForMergeable,
 		},
@@ -259,7 +301,7 @@ func TestDecideAutoMergeAction(t *testing.T) {
 				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "REVIEW_REQUIRED",
 				ReviewRequests: []struct {
 					Login string `json:"login"`
-				}{{Login: copilotReviewerLogin}},
+				}{{Login: settings.reviewer}},
 			},
 			want: actionEnableAutoMerge,
 		},
@@ -288,14 +330,15 @@ func TestDecideAutoMergeAction(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := decideAutoMergeAction(tt.pr); got != tt.want {
+			if got := decideAutoMergeAction(tt.pr, settings); got != tt.want {
 				t.Errorf("decideAutoMergeAction() = %v, want %v", got, tt.want)
 			}
 		})
 	}
 }
 
-func TestSmoke_S1_AutoMergeContinuesWhenCopilotReviewerIsNotCollaborator(t *testing.T) {
+func TestSmoke_S8_AutoMergeContinuesWhenConfiguredReviewerIsNotCollaborator(t *testing.T) {
+	settings := xylemAutoMergeSettings(t)
 	origListOpenPRsFn := listOpenPRsFn
 	origRequestCopilotReviewFn := requestCopilotReviewFn
 	origAddPRLabelsFn := addPRLabelsFn
@@ -315,13 +358,13 @@ func TestSmoke_S1_AutoMergeContinuesWhenCopilotReviewerIsNotCollaborator(t *test
 		ReviewDecision: "REVIEW_REQUIRED",
 		Labels: []struct {
 			Name string `json:"name"`
-		}{{Name: readyToMergeLabel}, {Name: harnessImplLabel}},
+		}{{Name: "ready-to-merge"}, {Name: "harness-impl"}},
 		StatusCheckRollup: []struct {
 			Conclusion string `json:"conclusion"`
 			Status     string `json:"status"`
 		}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
 	}
-	require.Equal(t, actionRequestReview, decideAutoMergeAction(mergeReadyPR))
+	require.Equal(t, actionRequestReview, decideAutoMergeAction(mergeReadyPR, settings))
 
 	listCalls := 0
 	listOpenPRsFn = func(context.Context, string) ([]prSummary, error) {
@@ -338,10 +381,11 @@ func TestSmoke_S1_AutoMergeContinuesWhenCopilotReviewerIsNotCollaborator(t *test
 	}
 
 	reviewCalls := 0
-	requestCopilotReviewFn = func(_ context.Context, repo string, number int) error {
+	requestCopilotReviewFn = func(_ context.Context, repo string, number int, reviewer string) error {
 		reviewCalls++
 		assert.Equal(t, "nicholls-inc/xylem", repo)
 		assert.Equal(t, 42, number)
+		assert.Equal(t, settings.reviewer, reviewer)
 		return errors.New(`exit status 1: {"message":"Reviews may only be requested from collaborators"}`)
 	}
 
@@ -363,7 +407,12 @@ func TestSmoke_S1_AutoMergeContinuesWhenCopilotReviewerIsNotCollaborator(t *test
 		return nil
 	}
 
-	autoMergeXylemPRs(context.Background(), "nicholls-inc/xylem")
+	autoMergeXylemPRs(context.Background(), config.DaemonConfig{
+		AutoMergeRepo:          settings.repo,
+		AutoMergeLabels:        append([]string(nil), settings.labels...),
+		AutoMergeBranchPattern: settings.branchPatternRaw,
+		AutoMergeReviewer:      settings.reviewer,
+	})
 
 	assert.Equal(t, 1, listCalls)
 	assert.Equal(t, 1, reviewCalls)

@@ -22,6 +22,9 @@ type TemplateData struct {
 	PreviousOutputs map[string]string // phase name → output text
 	GateResult      string            // most recent gate command output
 	Vessel          VesselData
+	Repo            RepoData
+	Source          SourceData
+	Validation      ValidationData
 }
 
 // IssueData describes the issue being worked on.
@@ -43,6 +46,26 @@ type PhaseData struct {
 type VesselData struct {
 	ID     string
 	Source string
+}
+
+// RepoData describes repository-level template metadata for the vessel.
+type RepoData struct {
+	Slug          string
+	DefaultBranch string
+}
+
+// SourceData describes the configured source that produced the vessel.
+type SourceData struct {
+	Name string
+	Repo string
+}
+
+// ValidationData describes optional repo-specific validation commands.
+type ValidationData struct {
+	Format string
+	Lint   string
+	Build  string
+	Test   string
 }
 
 // TruncateOutput truncates s to maxLen characters, appending a suffix if truncated.

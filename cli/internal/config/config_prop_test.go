@@ -212,6 +212,53 @@ func TestPropNormalizeLegacyProvidersPreservesDefaultTierModels(t *testing.T) {
 	})
 }
 
+func TestPropValidationRequirementAcceptsAnyNonEmptyValidationCommand(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := validConfig()
+		cfg.Sources = map[string]SourceConfig{
+			"github": {
+				Type: "github",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"fix-checks": {Labels: []string{"ci"}, Workflow: "fix-pr-checks"},
+				},
+			},
+		}
+		commands := []*string{
+			&cfg.Validation.Format,
+			&cfg.Validation.Lint,
+			&cfg.Validation.Build,
+			&cfg.Validation.Test,
+		}
+		idx := rapid.IntRange(0, len(commands)-1).Draw(t, "command-index")
+		*commands[idx] = rapid.StringMatching(`[a-z0-9 ./_-]{4,32}`).Draw(t, "command")
+
+		if err := cfg.validateWorkflowRequirements(); err != nil {
+			t.Fatalf("validateWorkflowRequirements() error = %v", err)
+		}
+	})
+}
+
+func TestPropEffectiveAutoMergeLabelsNeverReturnsBlank(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		size := rapid.IntRange(0, 6).Draw(t, "size")
+		labels := make([]string, 0, size)
+		for i := 0; i < size; i++ {
+			labels = append(labels, rapid.SampledFrom([]string{"ready-to-merge", "harness-impl", " ci ", "   "}).Draw(t, fmt.Sprintf("label-%d", i)))
+		}
+
+		got := (DaemonConfig{AutoMergeLabels: labels}).EffectiveAutoMergeLabels()
+		if len(got) == 0 {
+			t.Fatal("EffectiveAutoMergeLabels() returned no labels")
+		}
+		for _, label := range got {
+			if strings.TrimSpace(label) == "" {
+				t.Fatalf("EffectiveAutoMergeLabels() returned blank label in %#v", got)
+			}
+		}
+	})
+}
+
 func containsString(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {

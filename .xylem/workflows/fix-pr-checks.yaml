@@ -15,7 +15,12 @@ phases:
     model: gpt-5.4
     gate:
       type: command
-      run: "cd cli && goimports -l . | grep -c . | xargs test 0 -eq && go vet ./... && go build ./cmd/xylem && go test ./..."
+      run: |
+        set -e
+        {{ if .Validation.Format }}{{ .Validation.Format }}{{ end }}
+        {{ if .Validation.Lint }}{{ .Validation.Lint }}{{ end }}
+        {{ if .Validation.Build }}{{ .Validation.Build }}{{ end }}
+        {{ if .Validation.Test }}{{ .Validation.Test }}{{ end }}
       retries: 3
   - name: push
     prompt_file: .xylem/prompts/fix-pr-checks/push.md

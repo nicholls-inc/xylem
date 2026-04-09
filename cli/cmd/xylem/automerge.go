@@ -9,24 +9,35 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 )
 
-// xylemBranchPattern matches branch names created by xylem vessels.
-// Examples: feat/issue-42-42, fix/issue-99-99, feat/issue-60-60-runner-context
-var xylemBranchPattern = regexp.MustCompile(`^(feat|fix|chore)/issue-\d+`)
+type autoMergeSettings struct {
+	repo                     string
+	labels                   []string
+	branchPattern            *regexp.Regexp
+	branchPatternRaw         string
+	reviewer                 string
+	conflictResolutionLabels []string
+}
 
-// copilotReviewerLogin is the GitHub bot that performs automated code review.
-const copilotReviewerLogin = "copilot-pull-request-reviewer"
-
-const (
-	harnessImplLabel  = "harness-impl"
-	readyToMergeLabel = "ready-to-merge"
-)
-
-// conflictResolutionLabels are the labels that trigger the resolve-conflicts
-// workflow via the conflict-resolution github-pr source. Auto-merge adds
-// these to any CONFLICTING xylem PR so the workflow picks it up.
-var conflictResolutionLabels = []string{"needs-conflict-resolution", harnessImplLabel}
+func newAutoMergeSettings(dc config.DaemonConfig) (autoMergeSettings, error) {
+	pattern := dc.EffectiveAutoMergeBranchPattern()
+	compiled, err := regexp.Compile(pattern)
+	if err != nil {
+		return autoMergeSettings{}, fmt.Errorf("compile auto-merge branch pattern %q: %w", pattern, err)
+	}
+	labels := dc.EffectiveAutoMergeLabels()
+	return autoMergeSettings{
+		repo:                     strings.TrimSpace(dc.AutoMergeRepo),
+		labels:                   labels,
+		branchPattern:            compiled,
+		branchPatternRaw:         pattern,
+		reviewer:                 dc.EffectiveAutoMergeReviewer(),
+		conflictResolutionLabels: append([]string{"needs-conflict-resolution"}, labels...),
+	}, nil
+}
 
 // isBenignGhWarning reports whether a gh CLI error is a non-fatal warning
 // that should not block the intended operation. The most common case is the
@@ -100,6 +111,15 @@ func (p prSummary) hasLabel(name string) bool {
 	return false
 }
 
+func (p prSummary) hasLabels(names ...string) bool {
+	for _, name := range names {
+		if !p.hasLabel(name) {
+			return false
+		}
+	}
+	return true
+}
+
 // autoMergeAction describes what the daemon should do with a PR this cycle.
 type autoMergeAction int
 
@@ -129,8 +149,8 @@ const (
 // 8. Auto-merge already enabled → wait for GitHub
 // 9. No copilot review requested or submitted → request review, then enable auto-merge
 // 10. Otherwise enable auto-merge and let branch protection enforce review
-func decideAutoMergeAction(pr prSummary) autoMergeAction {
-	if !isMergeReadyXylemPR(pr) {
+func decideAutoMergeAction(pr prSummary, settings autoMergeSettings) autoMergeAction {
+	if !isMergeReadyPR(pr, settings) {
 		return actionSkip
 	}
 	if pr.State != "OPEN" && pr.State != "" {
@@ -141,7 +161,7 @@ func decideAutoMergeAction(pr prSummary) autoMergeAction {
 		// If the PR already has the labels that trigger resolve-conflicts
 		// workflow, just wait — the workflow is (or will be) processing it.
 		// Otherwise, add the labels so the workflow picks it up.
-		if pr.hasLabel("needs-conflict-resolution") && pr.hasLabel(harnessImplLabel) {
+		if pr.hasLabels(settings.conflictResolutionLabels...) {
 			return actionWaitForMergeable
 		}
 		return actionRouteConflict
@@ -159,32 +179,31 @@ func decideAutoMergeAction(pr prSummary) autoMergeAction {
 	if autoMergeEnabled(pr) {
 		return actionWaitForAutoMerge
 	}
-	if !copilotReviewRequestedOrSubmitted(pr) {
+	if settings.reviewer != "" && !reviewRequestedOrSubmitted(pr, settings.reviewer) {
 		return actionRequestReview
 	}
 	return actionEnableAutoMerge
 }
 
-func isMergeReadyXylemPR(pr prSummary) bool {
-	return xylemBranchPattern.MatchString(pr.HeadRefName) &&
-		pr.hasLabel(readyToMergeLabel) &&
-		pr.hasLabel(harnessImplLabel)
+func isMergeReadyPR(pr prSummary, settings autoMergeSettings) bool {
+	return settings.branchPattern.MatchString(pr.HeadRefName) &&
+		pr.hasLabels(settings.labels...)
 }
 
 func autoMergeEnabled(pr prSummary) bool {
 	return pr.AutoMergeRequest != nil
 }
 
-// copilotReviewRequestedOrSubmitted returns true if copilot has either been
-// requested as a reviewer or has already submitted a review.
-func copilotReviewRequestedOrSubmitted(pr prSummary) bool {
+// reviewRequestedOrSubmitted returns true if the configured reviewer has either
+// been requested as a reviewer or has already submitted a review.
+func reviewRequestedOrSubmitted(pr prSummary, reviewer string) bool {
 	for _, r := range pr.ReviewRequests {
-		if r.Login == copilotReviewerLogin {
+		if r.Login == reviewer {
 			return true
 		}
 	}
 	for _, r := range pr.LatestReviews {
-		if r.Author.Login == copilotReviewerLogin {
+		if r.Author.Login == reviewer {
 			return true
 		}
 	}
@@ -216,9 +235,15 @@ func allChecksGreen(pr prSummary) bool {
 // review cycle and (2) enable GitHub auto-merge when the PR is otherwise
 // merge-ready.
 //
-// Repo is the GitHub repo slug (e.g., "owner/name"). If empty, gh uses the
+// The repo slug comes from daemon.auto_merge_repo. If empty, gh uses the
 // current directory's origin remote.
-func autoMergeXylemPRs(ctx context.Context, repo string) {
+func autoMergeXylemPRs(ctx context.Context, dc config.DaemonConfig) {
+	settings, err := newAutoMergeSettings(dc)
+	if err != nil {
+		slog.Error("daemon auto-merge disabled by invalid configuration", "error", err)
+		return
+	}
+	repo := settings.repo
 	prs, err := listOpenPRsFn(ctx, repo)
 	if err != nil {
 		slog.Error("daemon auto-merge failed to list PRs", "repo", repo, "error", err)
@@ -226,12 +251,12 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 	}
 
 	for _, pr := range prs {
-		action := decideAutoMergeAction(pr)
+		action := decideAutoMergeAction(pr, settings)
 		switch action {
 		case actionSkip:
 			continue
 		case actionRequestReview:
-			if err := requestCopilotReviewFn(ctx, repo, pr.Number); err != nil {
+			if err := requestCopilotReviewFn(ctx, repo, pr.Number, settings.reviewer); err != nil {
 				if isBenignGhWarning(err) {
 					slog.Info("daemon auto-merge requested copilot review with gh warning ignored",
 						"repo", repo,
@@ -242,7 +267,7 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 					slog.Warn("daemon auto-merge skipping copilot review request; reviewer is not a collaborator",
 						"repo", repo,
 						"pr", pr.Number,
-						"reviewer", copilotReviewerLogin,
+						"reviewer", settings.reviewer,
 						"error", err)
 				} else {
 					slog.Warn("daemon auto-merge request review failed; enabling auto-merge anyway",
@@ -268,7 +293,7 @@ func autoMergeXylemPRs(ctx context.Context, repo string) {
 				"pr", pr.Number,
 				"head_ref", pr.HeadRefName)
 		case actionRouteConflict:
-			if err := addPRLabelsFn(ctx, repo, pr.Number, conflictResolutionLabels); err != nil {
+			if err := addPRLabelsFn(ctx, repo, pr.Number, settings.conflictResolutionLabels); err != nil {
 				if isBenignGhWarning(err) {
 					slog.Info("daemon auto-merge routed PR to resolve-conflicts workflow with gh warning ignored",
 						"repo", repo,
@@ -372,15 +397,18 @@ func addPRLabels(ctx context.Context, repo string, number int, labels []string) 
 	return nil
 }
 
-// requestCopilotReview adds copilot-pull-request-reviewer as a reviewer on
-// the given PR. Uses the GitHub REST API directly (not `gh pr edit`) so we
+// requestCopilotReview adds the configured reviewer as a reviewer on the given
+// PR. Uses the GitHub REST API directly (not `gh pr edit`) so we
 // avoid the GraphQL Projects-deprecation warning that `gh pr edit` emits
 // alongside a non-zero exit code even when the underlying operation succeeds.
-func requestCopilotReview(ctx context.Context, repo string, number int) error {
+func requestCopilotReview(ctx context.Context, repo string, number int, reviewer string) error {
 	if repo == "" {
 		return fmt.Errorf("requestCopilotReview: repo slug required")
 	}
-	body, err := json.Marshal(map[string][]string{"reviewers": {copilotReviewerLogin}})
+	if strings.TrimSpace(reviewer) == "" {
+		return fmt.Errorf("requestCopilotReview: reviewer required")
+	}
+	body, err := json.Marshal(map[string][]string{"reviewers": {reviewer}})
 	if err != nil {
 		return fmt.Errorf("marshal reviewer payload: %w", err)
 	}

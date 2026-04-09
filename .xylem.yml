@@ -149,10 +149,19 @@ observability:
   insecure: true
   sample_rate: 1.0
 
+validation:
+  format: "goimports -l ./cli/..."
+  lint: "go vet ./cli/..."
+  build: "go build ./cli/cmd/xylem"
+  test: "go test ./cli/..."
+
 daemon:
   auto_upgrade: true
   auto_merge: true
   auto_merge_repo: nicholls-inc/xylem
+  auto_merge_labels: [ready-to-merge, harness-impl]
+  auto_merge_branch_pattern: "^(feat|fix|chore)/issue-\\d+"
+  auto_merge_reviewer: "copilot-pull-request-reviewer"
 
 concurrency: 3
 max_turns: 80

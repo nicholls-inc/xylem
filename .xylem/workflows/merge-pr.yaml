@@ -15,4 +15,4 @@ phases:
     # attempted to bypass protection but hit the same mergeability gate when
     # a PR was behind main or had pending CI, producing exit status 1 and
     # blocking further merge-pr vessels. --auto correctly waits.
-    run: "gh pr merge {{.Issue.Number}} --repo nicholls-inc/xylem --squash --delete-branch --auto"
+    run: "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} --squash --delete-branch --auto"
