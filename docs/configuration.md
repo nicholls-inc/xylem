@@ -128,8 +128,9 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"scheduled"`. |
 | `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `schedule` | string | -- | Required for `scheduled` | Positive Go duration string (for example `1h`, `24h`) that controls how often xylem enqueues the source's tasks. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
@@ -152,6 +153,24 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 - `github-pr`: requires `labels`, supports `status_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
+- `scheduled`: requires `workflow`; tasks are enqueued once per configured time bucket and do not use labels
+
+### `scheduled`
+
+`scheduled` sources create recurring vessels on a fixed cadence instead of scanning GitHub labels or events. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work.
+
+```yaml
+sources:
+  context-weight-audit:
+    type: scheduled
+    repo: owner/repo
+    schedule: 24h
+    tasks:
+      audit:
+        workflow: context-weight-audit
+```
+
+The built-in `context-weight-audit` workflow reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
 
 ### `status_labels`
 
@@ -330,7 +349,7 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs.
 
 ### Observability settings
 

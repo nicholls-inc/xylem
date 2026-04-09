@@ -293,7 +293,12 @@ func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *workt
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.DrainBudget = budget
+	builtInResult, err := runBuiltInScheduledVessels(ctx, cfg, q, cmdRunner)
+	if err != nil {
+		return builtInResult, fmt.Errorf("drain built-in audit vessels: %w", err)
+	}
 	result, err := r.DrainAndWait(ctx)
+	addDrainResults(&result, builtInResult)
 	if err == nil {
 		maybeAutoGenerateHarnessReview(cfg, result)
 	}

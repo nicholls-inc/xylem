@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -51,10 +52,16 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	// Check waiting vessels before draining pending ones
 	r.CheckWaitingVessels(ctx)
 
+	builtInResult, err := runBuiltInScheduledVessels(ctx, cfg, q, cmdRunner)
+	if err != nil {
+		return &exitError{code: 2, err: fmt.Errorf("drain built-in audit vessels: %w", err)}
+	}
+
 	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}
+	addDrainResults(&result, builtInResult)
 	maybeAutoGenerateHarnessReview(cfg, result)
 	fmt.Printf("Completed %d, failed %d, skipped %d, waiting %d\n", result.Completed, result.Failed, result.Skipped, result.Waiting)
 	if result.Failed > 0 {
@@ -119,7 +126,7 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 
 func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.CommandRunner) map[string]source.Source {
 	sources := make(map[string]source.Source)
-	for _, srcCfg := range cfg.Sources {
+	for name, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
 		case "github":
 			tasks := make(map[string]source.GitHubTask, len(srcCfg.Tasks))
@@ -183,6 +190,26 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				CmdRunner: cmdRunner,
 			}
 			sources[gm.Name()] = gm
+		case "scheduled":
+			scheduledTasks := make(map[string]source.ScheduledTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				scheduledTasks[name] = source.ScheduledTask{
+					Workflow: t.Workflow,
+				}
+			}
+			scheduledDur, err := time.ParseDuration(srcCfg.Schedule)
+			if err != nil {
+				log.Printf("warn: skip scheduled source %q: parse schedule %q: %v", name, srcCfg.Schedule, err)
+				continue
+			}
+			scheduled := &source.Scheduled{
+				Repo:       srcCfg.Repo,
+				StateDir:   cfg.StateDir,
+				ConfigName: name,
+				Schedule:   scheduledDur,
+				Tasks:      scheduledTasks,
+			}
+			sources[scheduled.Name()] = scheduled
 		}
 	}
 	return sources
@@ -192,7 +219,7 @@ func buildReporter(cfg *config.Config, cmdRunner reporter.Runner) *reporter.Repo
 	// Find the first GitHub-based source repo for reporting
 	for _, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
-		case "github", "github-pr", "github-pr-events", "github-merge":
+		case "github", "github-pr", "github-pr-events", "github-merge", "scheduled":
 			if srcCfg.Repo != "" {
 				return &reporter.Reporter{Runner: cmdRunner, Repo: srcCfg.Repo}
 			}

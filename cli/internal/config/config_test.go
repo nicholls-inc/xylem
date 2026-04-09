@@ -1091,6 +1091,48 @@ func TestValidateGitHubMergeMissingRepo(t *testing.T) {
 	requireErrorContains(t, err, "repo is required")
 }
 
+func TestValidateScheduledSourceValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"audit": {
+				Type:     "scheduled",
+				Repo:     "owner/name",
+				Schedule: "24h",
+				Tasks: map[string]Task{
+					"context": {Workflow: "context-weight-audit"},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid config, got: %v", err)
+	}
+}
+
+func TestValidateScheduledSourceMissingSchedule(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"audit": {
+				Type: "scheduled",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"context": {Workflow: "context-weight-audit"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "schedule is required")
+}
+
 func TestValidateUnknownSourceType(t *testing.T) {
 	cfg := &Config{
 		Concurrency: 2,
