@@ -65,7 +65,7 @@ func ws1Drain(t *testing.T, env *dtuScenarioEnv, cfg *config.Config) (scanner.Sc
 
 	src := &source.GitHub{Repo: "acme/widget", CmdRunner: env.cmdRunner}
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -74,6 +74,7 @@ func ws1Drain(t *testing.T, env *dtuScenarioEnv, cfg *config.Config) (scanner.Sc
 
 // DrainResult is imported from runner; alias here for the helper signature.
 type DrainResult = struct {
+	Launched  int
 	Completed int
 	Failed    int
 	Skipped   int

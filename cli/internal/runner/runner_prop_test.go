@@ -1,8 +1,10 @@
 package runner
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -265,6 +267,85 @@ func TestProp_PhasePolicyIntentsStayUniqueAndClassifyHighRiskActions(t *testing.
 		}
 		if resources["pr_create"] != wantPRRepo {
 			t.Fatalf("pr_create resource = %q, want %q", resources["pr_create"], wantPRRepo)
+		}
+	})
+}
+
+func TestProp_InFlightAccountingMatchesLaunchedWork(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		concurrency := rapid.IntRange(1, 4).Draw(t, "concurrency")
+		occupied := rapid.IntRange(0, concurrency-1).Draw(t, "occupied")
+		pendingCount := rapid.IntRange(0, 8).Draw(t, "pending")
+
+		dir, err := os.MkdirTemp("", "runner-inflight-prop-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(dir)
+
+		cfg := makeTestConfig(dir, concurrency)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		for i := 1; i <= pendingCount; i++ {
+			if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+				t.Fatalf("Enqueue(%d) error = %v", i, err)
+			}
+		}
+		writeSinglePhaseWorkflow(t, dir, "fix-bug")
+
+		oldWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd() error = %v", err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatalf("Chdir(%q) error = %v", dir, err)
+		}
+		defer os.Chdir(oldWd)
+
+		r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{
+			phaseOutputs: map[string][]byte{
+				"Analyze": []byte("analysis complete"),
+			},
+		})
+		r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+		heldDone := make(chan struct{})
+		for range occupied {
+			r.sem <- struct{}{}
+			r.inFlight.Add(1)
+			r.wg.Add(1)
+			go func() {
+				<-heldDone
+				<-r.sem
+				r.inFlight.Add(-1)
+				r.wg.Done()
+			}()
+		}
+
+		result, err := r.Drain(context.Background())
+		if err != nil {
+			t.Fatalf("Drain() error = %v", err)
+		}
+
+		available := concurrency - occupied
+		wantLaunched := pendingCount
+		if wantLaunched > available {
+			wantLaunched = available
+		}
+		if result.Launched != wantLaunched {
+			t.Fatalf("Drain().Launched = %d, want %d (pending=%d, available=%d)", result.Launched, wantLaunched, pendingCount, available)
+		}
+		if got := r.InFlightCount(); got != occupied+result.Launched {
+			t.Fatalf("InFlightCount() = %d, want %d", got, occupied+result.Launched)
+		}
+
+		close(heldDone)
+		waited := r.Wait()
+		if got := r.InFlightCount(); got != 0 {
+			t.Fatalf("InFlightCount() after Wait = %d, want 0", got)
+		}
+		if waited.Completed != result.Launched {
+			t.Fatalf("Wait().Completed = %d, want %d", waited.Completed, result.Launched)
 		}
 	})
 }

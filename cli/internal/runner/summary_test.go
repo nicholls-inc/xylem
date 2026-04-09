@@ -308,7 +308,7 @@ func TestSmoke_S14_SaveVesselSummaryFailureIsNonFatalCallerContinues(t *testing.
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.Failed)
@@ -545,7 +545,7 @@ func TestSmoke_S19_FailurePathBuildsSummaryWithStateFailedAndCallsSaveVesselSumm
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 
 	assert.Equal(t, 1, result.Failed)
@@ -977,7 +977,7 @@ func TestDrainPromptOnlyWritesSummaryArtifact(t *testing.T) {
 	}
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1049,7 +1049,7 @@ func TestDrainWritesFailureSummaryAndEvidenceManifest(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1135,7 +1135,7 @@ func TestSmoke_WS6S8_ClaimsFromPriorPhasesPreservedWhenLaterPhaseFails(t *testin
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1193,7 +1193,7 @@ func TestSmoke_WS6S9_ClaimsFromFailedPhaseAreDiscarded(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1259,7 +1259,7 @@ func TestDrainOrchestratedWritesSummaryManifestAndReporterEvidence(t *testing.T)
 	}
 	r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1331,7 +1331,7 @@ func TestDrainWorkflowWithoutGateOmitsEvidenceFromCompletionComment(t *testing.T
 	}
 	r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}

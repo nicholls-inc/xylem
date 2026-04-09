@@ -58,7 +58,7 @@ func TestScenarioIssueLabelGateTimesOut(t *testing.T) {
 	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
 	drainer.Reporter = &reporter.Reporter{Runner: env.cmdRunner, Repo: "owner/repo"}
 
-	drainResult, err := drainer.Drain(context.Background())
+	drainResult, err := drainer.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -183,6 +185,37 @@ func noopDrain(_ context.Context) (runner.DrainResult, error) {
 	return runner.DrainResult{}, nil
 }
 
+type trackerStub struct {
+	wg       sync.WaitGroup
+	inFlight atomic.Int32
+	maxSeen  atomic.Int32
+}
+
+func (t *trackerStub) Wait() runner.DrainResult {
+	t.wg.Wait()
+	return runner.DrainResult{}
+}
+
+func (t *trackerStub) InFlightCount() int {
+	return int(t.inFlight.Load())
+}
+
+func (t *trackerStub) Start(duration time.Duration) {
+	cur := t.inFlight.Add(1)
+	for {
+		old := t.maxSeen.Load()
+		if cur <= old || t.maxSeen.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+	t.wg.Add(1)
+	go func() {
+		defer t.wg.Done()
+		time.Sleep(duration)
+		t.inFlight.Add(-1)
+	}()
+}
+
 func TestDaemonShutdown(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
@@ -190,7 +223,7 @@ func TestDaemonShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, nil, time.Hour, time.Hour, 0)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, time.Hour, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("expected nil error on shutdown, got: %v", err)
 	}
@@ -252,7 +285,7 @@ func TestDaemonLoopPeriodicUpgradeFiresAtDrainEnd(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, time.Millisecond)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -274,7 +307,7 @@ func TestDaemonLoopPeriodicUpgradeRespectsInterval(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, 10*time.Second)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, 10*time.Second)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -294,7 +327,7 @@ func TestDaemonLoopPeriodicUpgradeNilDisables(t *testing.T) {
 	defer cancel()
 
 	// Passing nil upgrade should not panic even with a non-zero interval.
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, nil, time.Hour, 2*time.Millisecond, 10*time.Millisecond)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, time.Hour, 2*time.Millisecond, 10*time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -333,7 +366,7 @@ func TestDaemonLoopUpgradeWaitsForDrainCompletion(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, slowDrain, nil, upgrade, time.Hour, time.Millisecond, time.Millisecond)
+	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, upgrade, time.Hour, time.Millisecond, time.Millisecond)
 	if err != nil {
 		t.Fatalf("daemonLoop() error = %v", err)
 	}
@@ -344,6 +377,64 @@ func TestDaemonLoopUpgradeWaitsForDrainCompletion(t *testing.T) {
 	if upgradeSaw.Load() < 2 {
 		t.Errorf("expected at least 2 upgrade invocations, got %d", upgradeSaw.Load())
 	}
+}
+
+func TestSmoke_S35_DaemonLoopAllowsNewDrainTicksWhileVesselsRemainInFlight(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var drainCalls atomic.Int32
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		drainCalls.Add(1)
+		tracker.Start(80 * time.Millisecond)
+		return runner.DrainResult{Launched: 1}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, nil, time.Hour, 10*time.Millisecond, 0)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, drainCalls.Load(), int32(2))
+	assert.GreaterOrEqual(t, tracker.maxSeen.Load(), int32(2))
+}
+
+func TestSmoke_S36_DaemonLoopUpgradeWaitsForTrackerIdle(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var (
+		launchedAt  atomic.Int64
+		upgradedAt  atomic.Int64
+		drainCalls  atomic.Int32
+		upgradeSeen atomic.Int32
+	)
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		if drainCalls.Add(1) == 1 {
+			launchedAt.Store(time.Now().UnixNano())
+			tracker.Start(60 * time.Millisecond)
+			return runner.DrainResult{Launched: 1}, nil
+		}
+		return runner.DrainResult{}, nil
+	}
+	upgrade := func() {
+		upgradedAt.Store(time.Now().UnixNano())
+		upgradeSeen.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 10*time.Millisecond, time.Millisecond)
+	require.NoError(t, err)
+
+	assert.NotZero(t, upgradeSeen.Load())
+	launchTime := time.Unix(0, launchedAt.Load())
+	upgradeTime := time.Unix(0, upgradedAt.Load())
+	assert.GreaterOrEqual(t, upgradeTime.Sub(launchTime), 60*time.Millisecond)
 }
 
 func TestParseUpgradeInterval(t *testing.T) {
@@ -425,7 +516,7 @@ func TestDaemonNonBlockingDrain(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := daemonLoop(ctx, q, noopScan, slowDrain, nil, nil, time.Hour, time.Millisecond, 0)
+	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, nil, time.Hour, time.Millisecond, 0)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -450,10 +541,26 @@ func TestLogTickSummary(t *testing.T) {
 	now := time.Now().UTC()
 
 	q.Enqueue(queue.Vessel{ID: "v1", Source: "manual", State: queue.StatePending, CreatedAt: now})   //nolint:errcheck
-	q.Enqueue(queue.Vessel{ID: "v2", Source: "manual", State: queue.StateCompleted, CreatedAt: now}) //nolint:errcheck
+	q.Enqueue(queue.Vessel{ID: "v2", Source: "manual", State: queue.StateRunning, CreatedAt: now})   //nolint:errcheck
+	q.Enqueue(queue.Vessel{ID: "v3", Source: "manual", State: queue.StateCompleted, CreatedAt: now}) //nolint:errcheck
+	q.Enqueue(queue.Vessel{ID: "v4", Source: "manual", State: queue.StateFailed, CreatedAt: now})    //nolint:errcheck
 
-	// logTickSummary should not panic on any queue state
+	var logBuf bytes.Buffer
+	oldLogWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldLogWriter)
+
 	logTickSummary(q)
+
+	got := logBuf.String()
+	if !strings.Contains(got, "daemon: tick summary") {
+		t.Fatalf("logTickSummary() log = %q, want daemon tick summary prefix", got)
+	}
+	for _, want := range []string{"pending=1", "running=1", "completed=1", "failed=1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("logTickSummary() log = %q, want substring %q", got, want)
+		}
+	}
 }
 
 // TestWS1S28DaemonPathWiresScaffolding verifies that the daemon drain path
