@@ -133,14 +133,15 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`. |
-| `repo` | string | -- | Yes (GitHub sources) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`, `"scheduled"`. |
+| `repo` | string | -- | Yes (GitHub sources and `scheduled`) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
+| `schedule` | string | -- | Required for `scheduled` | Positive Go duration string (for example `1h`, `24h`) that controls how often xylem enqueues the source's task map. |
 | `cadence` | string | -- | Yes (`schedule`) | Recurrence for scheduled sources. Accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions. |
 | `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue each time a scheduled source fires. Scheduled sources define the workflow directly and do not use `tasks`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
 | `llm` | string | `""` | No | Provider override for this source. Valid values: `claude`, `copilot`. When set, all tasks in this source use this provider instead of the top-level `llm`. |
 | `model` | string | `""` | No | Model override for this source. When set, all tasks in this source use this model instead of the top-level or provider-default model. |
-| `tasks` | map | -- | Yes (GitHub sources) | Map of task names to task configurations. Required for GitHub-based sources; not used by `schedule`. |
+| `tasks` | map | -- | Yes (GitHub sources and `scheduled`) | Map of task names to task configurations. Required for GitHub-based sources and `scheduled`; not used by `schedule`. |
 
 ### Tasks
 
@@ -151,15 +152,18 @@ Each key under `tasks` is an arbitrary name. The value defines which issues matc
 | `labels` | list of strings | -- | Required for `github` and `github-pr` | Labels that trigger this task. The item must have all listed labels to match. |
 | `workflow` | string | -- | Yes | Name of the workflow to invoke (e.g., `fix-bug`, `implement-feature`). Must not be empty or whitespace-only. Corresponds to a YAML file in `<state_dir>/workflows/`. |
 | `status_labels` | object | omitted | No | Optional labels to apply as a vessel moves through queue states. Supported for `github` and `github-pr`. |
+| `label_gate_labels` | object | omitted | No | Optional labels to apply when a GitHub-backed vessel enters or exits a label-gate wait. Supported for `github` and `github-pr`. |
 | `on` | object | omitted | Required for `github-pr-events` | Event triggers for pull-request event scanning. Must include at least one trigger. |
 
 ### Task fields by source type
 
 - `github`: requires `labels`, supports `status_labels`
 - `github-pr`: requires `labels`, supports `status_labels`
+- `github` and `github-pr` also support `label_gate_labels`
 - `github-pr-events`: requires `workflow` and `on`
 - `github-merge`: requires `workflow`
 - `schedule`: does not use `tasks`; configure `cadence` and `workflow` directly on the source
+- `scheduled`: uses `tasks` plus `schedule`; optimized for recurring task-backed hygiene workflows such as `context-weight-audit`
 
 ### `schedule`
 
@@ -190,6 +194,23 @@ Behavior:
 - Scheduled sources do not use `tasks`.
 - Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
 
+### `scheduled`
+
+`scheduled` sources create recurring task-backed vessels on a fixed Go-duration cadence. Xylem persists the last-enqueued schedule bucket under `<state_dir>/schedules/` so repeated scans in the same window do not duplicate work.
+
+```yaml
+sources:
+  context-weight-audit:
+    type: scheduled
+    repo: owner/repo
+    schedule: 24h
+    tasks:
+      audit:
+        workflow: context-weight-audit
+```
+
+The built-in `context-weight-audit` workflow reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
+
 ### `status_labels`
 
 When `status_labels` is set, xylem records the configured labels in vessel metadata and applies them during source lifecycle hooks.
@@ -213,6 +234,28 @@ Behavior:
 - `running` replaces `queued` when work starts
 - `completed`, `failed`, and `timed_out` replace `running` on terminal states
 - If `status_labels` is omitted entirely, `github` and `github-pr` keep the legacy fallback of adding `in-progress` on start
+- If the block is present and a field is empty, xylem skips that specific label operation
+
+### `label_gate_labels`
+
+When `label_gate_labels` is set, xylem records the configured labels in vessel metadata and applies them from deterministic runner code when a label gate blocks or resumes a GitHub-backed vessel.
+
+```yaml
+tasks:
+  fix-bugs:
+    labels: [bug, ready-for-work]
+    workflow: fix-bug
+    label_gate_labels:
+      waiting: blocked
+      ready: ready-for-implementation
+```
+
+Behavior:
+
+- `waiting` is added when the runner transitions a vessel into `waiting` for a label gate
+- `ready` replaces `waiting` when the gate passes and the vessel returns to `pending`
+- `ready` is removed again when the resumed vessel starts running, and both labels are cleaned up on terminal exits like `failed`, `timed_out`, and `completed`
+- If `label_gate_labels` is omitted entirely, the runner performs no extra label edits for label-gate waits
 - If the block is present and a field is empty, xylem skips that specific label operation
 
 ### `on`
@@ -316,7 +359,16 @@ The `daemon` section controls polling intervals when running `xylem daemon`.
 
 The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, and audit logging.
 
-When `harness.policy.rules` is empty, xylem installs a default policy that denies writes to the protected control surfaces, requires approval for `git_push` and `pr_create`, and allows other actions. The runner classifies those high-risk actions from rendered command phases and from prompt phases that explicitly instruct an agent to push or open a pull request. The same `harness.protected_surfaces.paths` list also drives the worktree's read-only hardening and the runner's post-phase surface verification.
+When `harness.policy.rules` is empty, xylem installs a default policy that denies writes to protected control surfaces and otherwise allows the actions the runner currently classifies, so autonomous drains can finish without a built-in approval pause. Today that boundary is narrow: every phase is classified as `phase_execute` or `external_command`, and the runner may additionally emit `git_commit`, `git_push`, and `pr_create` when it detects those publication steps in rendered prompts or commands. The same `harness.protected_surfaces.paths` list also drives the worktree's read-only hardening and the runner's post-phase surface verification.
+
+| Action class | Current runner classification | Default effect | Notes |
+|--------------|-------------------------------|----------------|-------|
+| Protected-surface writes | `file_write` on matched path | `deny` | Prevents agents from mutating xylem control files. |
+| Git commit | `git_commit` | `allow` | Commit creation is classified separately but kept autonomous by default. |
+| Git push | `git_push` | `allow` | Publication is allowed by default so daemon runs can complete end-to-end. |
+| Pull request creation | `pr_create` | `allow` | PR creation stays autonomous unless the operator adds a stricter rule or workflow gate. |
+| Destructive git operations (`reset --hard`, branch deletion, force-push) | No separate action today; `git push --force` still collapses to `git_push`, other cases remain `phase_execute`/`external_command` | No separate default effect | If you need review here today, gate the phase or add stricter rules around the enclosing action class. |
+| Deploy or production-impacting actions | No separate action today; they remain `phase_execute`/`external_command` | No separate default effect | Add an explicit workflow gate or policy rule for the deploy phase until xylem grows deploy-specific classification. |
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
@@ -337,6 +389,8 @@ When `harness.policy.rules` is empty, xylem installs a default policy that denie
 | `action` | string | Yes | The action to match (e.g., `file_write`, `git_push`, `pr_create`, `*`). |
 | `resource` | string | Yes | The resource to match (e.g., `.xylem.yml`, `*`). Supports glob patterns. |
 | `effect` | string | Yes | The effect when matched. Valid values: `allow`, `deny`, `require_approval`. |
+
+The example below opts into human review before publication:
 
 ```yaml
 harness:
@@ -367,7 +421,7 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs.
 
 ### Observability settings
 

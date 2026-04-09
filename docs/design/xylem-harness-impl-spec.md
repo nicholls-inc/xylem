@@ -194,9 +194,7 @@ func DefaultPolicy() intermediary.Policy {
             {Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
             {Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
             {Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
-            {Action: "file_write", Resource: ".xylem/prompts/*", Effect: intermediary.Deny},
-            {Action: "git_push", Resource: "*", Effect: intermediary.RequireApproval},
-            {Action: "pr_create", Resource: "*", Effect: intermediary.RequireApproval},
+            {Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
             {Action: "*", Resource: "*", Effect: intermediary.Allow},
         },
     }
@@ -287,12 +285,6 @@ harness:
       - action: "file_write"
         resource: ".xylem/*"
         effect: "deny"
-      - action: "git_push"
-        resource: "*"
-        effect: "require_approval"
-      - action: "pr_create"
-        resource: "*"
-        effect: "require_approval"
       - action: "*"
         resource: "*"
         effect: "allow"
@@ -341,17 +333,23 @@ observability:
   enabled: false
 ```
 
-### 2.6 Action vocabulary
+### 2.6 Action vocabulary and audited defaults
 
-| Action | When emitted | Resource value |
-|--------|-------------|----------------|
-| `file_write` | Protected surface mutation detected | Relative file path |
-| `git_push` | Push phase in workflow | Branch name or `*` |
-| `git_commit` | Commit phase in workflow | `*` |
-| `pr_create` | PR creation phase | `owner/repo` |
-| `pr_comment` | Issue/PR comment | `owner/repo#N` |
-| `external_command` | Command-type phase execution | Phase name |
-| `phase_execute` | Prompt-type phase execution | Phase name |
+| Action | When emitted | Resource value | Default effect | Notes |
+|--------|-------------|----------------|----------------|-------|
+| `file_write` | Protected surface mutation detected | Relative file path | `deny` on protected paths | Protects xylem control files. |
+| `git_push` | Push phase in workflow | Branch name or `*` | `allow` | Includes force-push today because the classifier does not distinguish it. |
+| `git_commit` | Commit phase in workflow | `*` | `allow` | Classified separately for audit visibility, not paused by default. |
+| `pr_create` | PR creation phase | `owner/repo` | `allow` | Kept autonomous unless the operator adds a stricter rule. |
+| `pr_comment` | Issue/PR comment | `owner/repo#N` | `allow` | Follows the wildcard allow rule today. |
+| `external_command` | Command-type phase execution | Phase name | `allow` | Deploy and destructive non-push git actions currently fall back here. |
+| `phase_execute` | Prompt-type phase execution | Phase name | `allow` | Deploy and destructive non-push git actions currently fall back here. |
+
+Destructive git operations other than push (for example `git reset --hard` or
+branch deletion) and deploy or production-impacting actions do not yet emit
+separate intents. If operators need a human gate at those boundaries today,
+they must gate the whole phase or add stricter rules around `phase_execute` /
+`external_command` for the affected workflow.
 
 ---
 
@@ -2052,7 +2050,7 @@ Add to existing `config_test.go`:
 - `TestValidate_BadGlob` — invalid glob fails
 - `TestValidate_BadEffect` — unknown effect fails
 - `TestDefaultPolicy_DeniesProtectedSurface` — file_write to `.xylem/HARNESS.md` returns Deny
-- `TestDefaultPolicy_RequiresApprovalForPush` — git_push returns RequireApproval
+- `TestDefaultPolicy_AllowsClassifiedGitLifecycleActions` — git_commit/git_push/pr_create return Allow
 - `TestDefaultPolicy_AllowsGeneral` — phase_execute returns Allow
 - `TestLoadWithObservability` — full observability config
 - `TestLoadWithObservabilityDefaults` — absent config = enabled, rate 1.0

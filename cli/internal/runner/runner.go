@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -408,6 +409,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 		// Check label
 		issueNum := r.parseIssueNum(vessel)
 		repo := r.resolveRepo(vessel)
+		src := r.resolveSourceForVessel(vessel)
 		if issueNum == 0 || repo == "" {
 			continue
 		}
@@ -423,6 +425,10 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 			// pick the vessel back up through the normal dequeue flow.
 			if err := r.Queue.Update(vessel.ID, queue.StatePending, ""); err != nil {
 				log.Printf("warn: failed to resume vessel %s: %v", vessel.ID, err)
+				continue
+			}
+			if err := src.OnResume(ctx, vessel); err != nil {
+				log.Printf("warn: OnResume hook for vessel %s: %v", vessel.ID, err)
 			}
 		}
 	}
@@ -591,16 +597,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			if p.Type == "command" {
 				// Command phase: render and execute shell command
-				rendered, err := phase.RenderPrompt(p.Run, td)
+				rendered, err := renderCommandTemplate(p.Name, "command", p.Run, td)
 				if err != nil {
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, fmt.Sprintf("render command for phase %s: %v", p.Name, err))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					return "failed"
-				}
-				if err := validateCommandRender(p.Name, rendered); err != nil {
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, err.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
@@ -821,7 +819,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			switch p.Gate.Type {
 			case "command", "live":
-				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, td, worktreePath, retryAttempt)
 				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 				if gateErr != nil {
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
@@ -907,6 +905,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
 					finishCurrentPhaseSpan(updateErr)
 					return "failed"
+				}
+				if err := src.OnWait(ctx, vessel); err != nil {
+					log.Printf("warn: OnWait hook for vessel %s: %v", vessel.ID, err)
 				}
 				finishCurrentPhaseSpan(nil)
 				return "waiting"
@@ -1488,16 +1489,8 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 
 		if p.Type == "command" {
-			rendered, err := phase.RenderPrompt(p.Run, td)
+			rendered, err := renderCommandTemplate(p.Name, "command", p.Run, td)
 			if err != nil {
-				finishCurrentPhaseSpan(err)
-				r.failVessel(vessel.ID, fmt.Sprintf("render command for phase %s: %v", p.Name, err))
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
-			}
-			if err := validateCommandRender(p.Name, rendered); err != nil {
 				finishCurrentPhaseSpan(err)
 				r.failVessel(vessel.ID, err.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -1717,7 +1710,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		switch p.Gate.Type {
 		case "command", "live":
-			gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+			gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, td, worktreePath, retryAttempt)
 			gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 			if gateErr != nil {
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
@@ -1808,6 +1801,9 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
 				finishCurrentPhaseSpan(updateErr)
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
+			}
+			if err := src.OnWait(ctx, vessel); err != nil {
+				log.Printf("warn: OnWait hook for vessel %s: %v", vessel.ID, err)
 			}
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{output: string(output), status: "waiting", duration: r.runtimeSince(phaseStart)}
@@ -1904,15 +1900,19 @@ func finishGateStepSpan(tracer *observability.Tracer, span observability.SpanCon
 	span.End()
 }
 
-func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observability.SpanContext, vessel queue.Vessel, p workflow.Phase, worktreePath string, retryAttempt int) gateExecutionResult {
+func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observability.SpanContext, vessel queue.Vessel, p workflow.Phase, td phase.TemplateData, worktreePath string, retryAttempt int) gateExecutionResult {
 	if p.Gate == nil {
 		return gateExecutionResult{passed: true}
 	}
 
 	switch p.Gate.Type {
 	case "command":
+		rendered, err := renderCommandTemplate(p.Name, "gate command", p.Gate.Run, td)
+		if err != nil {
+			return gateExecutionResult{err: err}
+		}
 		gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-		gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
+		gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, rendered)
 		finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
 			Type:         p.Gate.Type,
 			Passed:       passed,
@@ -2331,11 +2331,12 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	}
 
 	violations := surface.Compare(before, after)
-	allowAdditive, err := r.workflowAllowsAdditiveProtectedWrites(vessel, violations)
+	policy, err := r.workflowProtectedWritePolicy(vessel, violations)
 	if err != nil {
 		return fmt.Errorf("resolve protected surface policy: %w", err)
 	}
-	violations = filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
+	violations = filterAdditiveProtectedSurfaceViolations(violations, policy.allowAdditive)
+	violations = filterCanonicalProtectedSurfaceViolations(vessel, p, violations, policy.allowCanonical)
 
 	// Source-root alignment filter: drop modification violations where the
 	// after-hash matches the canonical source root's current hash for that
@@ -2387,24 +2388,44 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	return fmt.Errorf("%s", errMsg)
 }
 
-func (r *Runner) workflowAllowsAdditiveProtectedWrites(vessel queue.Vessel, violations []surface.Violation) (bool, error) {
-	if !containsAdditiveProtectedSurfaceViolation(violations) {
-		return false, nil
+type protectedSurfaceWorkflowPolicy struct {
+	allowAdditive  bool
+	allowCanonical bool
+}
+
+func (r *Runner) workflowProtectedWritePolicy(vessel queue.Vessel, violations []surface.Violation) (protectedSurfaceWorkflowPolicy, error) {
+	needsAdditivePolicy := containsAdditiveProtectedSurfaceViolation(violations)
+	needsCanonicalPolicy := containsCanonicalProtectedSurfaceModification(violations) &&
+		strings.TrimSpace(vessel.Meta["issue_body"]) != ""
+	if !needsAdditivePolicy && !needsCanonicalPolicy {
+		return protectedSurfaceWorkflowPolicy{}, nil
 	}
 	if strings.TrimSpace(vessel.Workflow) == "" {
-		return false, nil
+		return protectedSurfaceWorkflowPolicy{}, nil
 	}
 
 	sk, err := r.loadWorkflow(vessel.Workflow)
 	if err != nil {
-		return false, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
+		return protectedSurfaceWorkflowPolicy{}, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
 	}
-	return sk.AllowAdditiveProtectedWrites, nil
+	return protectedSurfaceWorkflowPolicy{
+		allowAdditive:  sk.AllowAdditiveProtectedWrites,
+		allowCanonical: sk.AllowCanonicalProtectedWrites,
+	}, nil
 }
 
 func containsAdditiveProtectedSurfaceViolation(violations []surface.Violation) bool {
 	for _, violation := range violations {
 		if violation.Before == "absent" {
+			return true
+		}
+	}
+	return false
+}
+
+func containsCanonicalProtectedSurfaceModification(violations []surface.Violation) bool {
+	for _, violation := range violations {
+		if isProtectedSurfaceModification(violation) {
 			return true
 		}
 	}
@@ -2424,6 +2445,41 @@ func filterAdditiveProtectedSurfaceViolations(violations []surface.Violation, al
 		filtered = append(filtered, violation)
 	}
 	return filtered
+}
+
+func filterCanonicalProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, violations []surface.Violation, allowCanonical bool) []surface.Violation {
+	if !allowCanonical || len(violations) == 0 {
+		return violations
+	}
+
+	issueBody := strings.TrimSpace(vessel.Meta["issue_body"])
+	if issueBody == "" {
+		return violations
+	}
+
+	filtered := make([]surface.Violation, 0, len(violations))
+	for _, violation := range violations {
+		if !isProtectedSurfaceModification(violation) || !issueBodyMentionsProtectedPath(issueBody, violation.Path) {
+			filtered = append(filtered, violation)
+			continue
+		}
+		log.Printf("%sphase %q: suppressing canonical protected-surface violation on %s (workflow opt-in + issue body reference)",
+			vesselLabel(vessel), p.Name, violation.Path)
+	}
+	return filtered
+}
+
+func isProtectedSurfaceModification(violation surface.Violation) bool {
+	return violation.Before != "absent" && violation.After != "deleted"
+}
+
+func issueBodyMentionsProtectedPath(issueBody, path string) bool {
+	normalizedPath := filepath.ToSlash(strings.TrimSpace(path))
+	if normalizedPath == "" {
+		return false
+	}
+	re := regexp.MustCompile(`(^|[^A-Za-z0-9._/-])` + regexp.QuoteMeta(normalizedPath) + `([^A-Za-z0-9._/-]|$)`)
+	return re.FindStringIndex(issueBody) != nil
 }
 
 // filterViolationsAlignedWithSourceRoot drops modification violations whose
@@ -2939,30 +2995,41 @@ func vesselLabel(v queue.Vessel) string {
 	return fmt.Sprintf("[%s] ", v.ID)
 }
 
+func renderCommandTemplate(phaseName, kind, command string, td phase.TemplateData) (string, error) {
+	rendered, err := phase.RenderPrompt(command, td)
+	if err != nil {
+		return "", fmt.Errorf("render %s for phase %s: %w", kind, phaseName, err)
+	}
+	if err := validateCommandRender(fmt.Sprintf("%s for phase %s", kind, phaseName), rendered); err != nil {
+		return "", err
+	}
+	return rendered, nil
+}
+
 // validateCommandRender checks the rendered command string for unresolved
 // template variables (leftover "{{" sequences). This catches cases where
 // template data has zero values that cause confusing downstream failures.
-func validateCommandRender(phaseName, rendered string) error {
+func validateCommandRender(subject, rendered string) error {
 	if strings.Contains(rendered, "{{") {
-		return fmt.Errorf("command phase %s: unresolved template variable in: %s", phaseName, rendered)
+		return fmt.Errorf("%s: unresolved template variable in: %s", subject, rendered)
 	}
 	return nil
 }
 
 // validateIssueDataForWorkflow returns an error when the workflow contains
-// command phases that reference .Issue template variables but the issue data
-// has a zero Number. This prevents commands like `gh pr merge 0` from
-// executing with confusing results.
+// command phases or command gates that reference .Issue template variables but
+// the issue data has a zero Number. This prevents commands like
+// `gh pr merge 0` from executing with confusing results.
 func validateIssueDataForWorkflow(vessel queue.Vessel, data phase.IssueData, wf *workflow.Workflow) error {
 	if wf == nil {
 		return nil
 	}
 	for _, p := range wf.Phases {
-		if p.Type != "command" {
-			continue
-		}
-		if strings.Contains(p.Run, ".Issue.") && data.Number == 0 {
+		if p.Type == "command" && strings.Contains(p.Run, ".Issue.") && data.Number == 0 {
 			return fmt.Errorf("command phase %s references .Issue but issue data is unavailable for vessel %s (Number is 0)", p.Name, vessel.ID)
+		}
+		if p.Gate != nil && p.Gate.Type == "command" && strings.Contains(p.Gate.Run, ".Issue.") && data.Number == 0 {
+			return fmt.Errorf("command gate for phase %s references .Issue but issue data is unavailable for vessel %s (Number is 0)", p.Name, vessel.ID)
 		}
 	}
 	return nil

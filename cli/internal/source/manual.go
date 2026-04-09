@@ -20,6 +20,8 @@ func (m *Manual) Scan(_ context.Context) ([]queue.Vessel, error) {
 
 func (m *Manual) OnEnqueue(_ context.Context, _ queue.Vessel) error          { return nil }
 func (m *Manual) OnStart(_ context.Context, _ queue.Vessel) error            { return nil }
+func (m *Manual) OnWait(_ context.Context, _ queue.Vessel) error             { return nil }
+func (m *Manual) OnResume(_ context.Context, _ queue.Vessel) error           { return nil }
 func (m *Manual) OnComplete(_ context.Context, _ queue.Vessel) error         { return nil }
 func (m *Manual) OnFail(_ context.Context, _ queue.Vessel) error             { return nil }
 func (m *Manual) OnTimedOut(_ context.Context, _ queue.Vessel) error         { return nil }

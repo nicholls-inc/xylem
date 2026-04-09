@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -27,7 +26,6 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 type daemonDTUCmdRunner struct {
@@ -344,48 +342,52 @@ func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
 }
 
 func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
-	oldNewTracer := newTracer
-	defer func() { newTracer = oldNewTracer }()
-
-	exporter := &recordingExporter{}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	var calls int
-	newTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
-		calls++
-		if cfg.Endpoint != "" {
-			t.Fatalf("cfg.Endpoint = %q, want empty endpoint for stdout-mode tracer", cfg.Endpoint)
-		}
-		return observability.NewTracerFromProvider(tp), nil
-	}
-
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var exporters []*recordingSpanExporter
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, exporter := newRecordingTracer()
+		exporters = append(exporters, exporter)
+		return tracer, nil
+	})
 
 	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
 	require.NoError(t, err)
 	assert.Equal(t, runner.DrainResult{}, result)
-	assert.Equal(t, 1, calls)
+
+	secondResult, secondErr := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
+	require.NoError(t, secondErr)
+	assert.Equal(t, runner.DrainResult{}, secondResult)
+
+	require.Len(t, exporters, 2)
+	for _, exporter := range exporters {
+		requireSpanNamed(t, exporter.snapshots(), "drain_run")
+		assert.Equal(t, 1, exporter.shutdownCount())
+	}
 }
 
 func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
-	oldNewTracer := newTracer
-	defer func() { newTracer = oldNewTracer }()
-
-	exporter := &recordingExporter{}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	newTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
-		return observability.NewTracerFromProvider(tp), nil
-	}
-
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
+	var exporter *recordingSpanExporter
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, spanExporter := newRecordingTracer()
+		exporter = spanExporter
+		return tracer, nil
+	})
+
 	_, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
 	require.NoError(t, err)
-	assert.True(t, exporter.shutdownCalled)
+	require.NotNil(t, exporter)
+	assert.Equal(t, 1, exporter.shutdownCount())
 }
+
 func TestDaemonLoopPeriodicUpgradeFiresAtDrainEnd(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
@@ -747,15 +749,12 @@ func TestLogTickSummary(t *testing.T) {
 	q.Enqueue(queue.Vessel{ID: "v3", Source: "manual", State: queue.StateCompleted, CreatedAt: now}) //nolint:errcheck
 	q.Enqueue(queue.Vessel{ID: "v4", Source: "manual", State: queue.StateFailed, CreatedAt: now})    //nolint:errcheck
 
-	var logBuf bytes.Buffer
-	oldLogWriter := log.Writer()
-	log.SetOutput(&logBuf)
-	defer log.SetOutput(oldLogWriter)
+	logBuf := withBufferedDefaultLogger(t)
 
 	logTickSummary(q)
 
 	got := logBuf.String()
-	if !strings.Contains(got, "daemon: tick summary") {
+	if !strings.Contains(got, "msg=\"daemon tick summary\"") {
 		t.Fatalf("logTickSummary() log = %q, want daemon tick summary prefix", got)
 	}
 	for _, want := range []string{"pending=1", "running=1", "completed=1", "failed=1"} {

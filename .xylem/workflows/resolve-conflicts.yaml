@@ -15,7 +15,7 @@ phases:
     model: gpt-5.4
     gate:
       type: command
-      run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
+      run: "git fetch origin main && test \"$(git branch --show-current)\" = \"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\" && git merge-base --is-ancestor origin/main HEAD && cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
       retries: 2
   - name: push
     prompt_file: .xylem/prompts/resolve-conflicts/push.md

@@ -12,6 +12,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
@@ -51,6 +52,25 @@ func TestProp_FilterAdditiveProtectedSurfaceViolationsDropsOnlyAdditions(t *test
 		got := filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("filterAdditiveProtectedSurfaceViolations() = %#v, want %#v", got, want)
+		}
+	})
+}
+
+func TestProp_IssueBodyMentionsProtectedPathHonorsTokenBoundaries(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		pathSuffix := rapid.StringMatching(`[a-z0-9._/-]{1,24}`).Draw(t, "pathSuffix")
+		path := ".xylem/" + pathSuffix
+		validBoundary := rapid.SampledFrom([]string{"", " ", "\n", "`", "(", "[", ":", "="}).Draw(t, "validBoundary")
+		invalidBoundary := rapid.SampledFrom([]string{"a", "0", ".", "/", "_", "-"}).Draw(t, "invalidBoundary")
+
+		if !issueBodyMentionsProtectedPath(validBoundary+path+validBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = false, want true for bounded path %q", path)
+		}
+		if issueBodyMentionsProtectedPath(invalidBoundary+path+validBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = true, want false for prefixed path %q", path)
+		}
+		if issueBodyMentionsProtectedPath(validBoundary+path+invalidBoundary, path) {
+			t.Fatalf("issueBodyMentionsProtectedPath() = true, want false for suffixed path %q", path)
 		}
 	})
 }
@@ -169,6 +189,52 @@ func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 			if exceeded && !tracker.BudgetExceeded() {
 				t.Fatal("BudgetExceeded reverted to false")
 			}
+		}
+	})
+}
+
+func TestProp_ValidateIssueDataForWorkflowRequiresIssueNumberForCommandTemplates(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		phaseUsesIssue := rapid.Bool().Draw(t, "phaseUsesIssue")
+		gateUsesIssue := rapid.Bool().Draw(t, "gateUsesIssue")
+		phaseType := rapid.SampledFrom([]string{"", "command"}).Draw(t, "phaseType")
+		issueNumber := rapid.IntRange(0, 3).Draw(t, "issueNumber")
+
+		phaseRun := "echo ready"
+		if phaseUsesIssue {
+			phaseRun = "gh pr merge {{.Issue.Number}}"
+		}
+
+		var gateCfg *workflow.Gate
+		if rapid.Bool().Draw(t, "hasGate") {
+			gateRun := "echo gate"
+			if gateUsesIssue {
+				gateRun = "gh pr view {{.Issue.Number}} --json mergeable"
+			}
+			gateCfg = &workflow.Gate{
+				Type: "command",
+				Run:  gateRun,
+			}
+		}
+
+		p := workflow.Phase{
+			Name:       "resolve",
+			Type:       phaseType,
+			Run:        phaseRun,
+			PromptFile: ".xylem/prompts/resolve-conflicts/resolve.md",
+			MaxTurns:   10,
+			Gate:       gateCfg,
+		}
+		wf := &workflow.Workflow{Phases: []workflow.Phase{p}}
+		err := validateIssueDataForWorkflow(queue.Vessel{ID: "issue-1"}, phase.IssueData{Number: issueNumber}, wf)
+
+		wantErr := issueNumber == 0 &&
+			((phaseType == "command" && phaseUsesIssue) || (gateCfg != nil && gateUsesIssue))
+		if wantErr && err == nil {
+			t.Fatalf("validateIssueDataForWorkflow() error = nil, want error for phaseType=%q phaseUsesIssue=%t gateUsesIssue=%t", phaseType, phaseUsesIssue, gateUsesIssue)
+		}
+		if !wantErr && err != nil {
+			t.Fatalf("validateIssueDataForWorkflow() error = %v, want nil for phaseType=%q phaseUsesIssue=%t gateUsesIssue=%t issueNumber=%d", err, phaseType, phaseUsesIssue, gateUsesIssue, issueNumber)
 		}
 	})
 }

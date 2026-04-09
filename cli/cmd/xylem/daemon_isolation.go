@@ -2,7 +2,7 @@ package main
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,11 +75,11 @@ func daemonIsolationOverride() bool {
 // Returns true if the daemon should proceed, false if it should exit.
 func logDaemonWorktreeCheck() bool {
 	if daemonIsolationOverride() {
-		log.Println("daemon: isolation check bypassed via XYLEM_DAEMON_ALLOW_MAIN_WORKTREE=1")
+		slog.Warn("daemon isolation check bypassed", "env", "XYLEM_DAEMON_ALLOW_MAIN_WORKTREE")
 		return true
 	}
 	if err := ensureDaemonNotInMainWorktree(); err != nil {
-		log.Printf("daemon: %v", err)
+		slog.Error("daemon isolation check failed", "error", err)
 		return false
 	}
 	return true

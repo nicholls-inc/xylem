@@ -90,7 +90,11 @@ phases:
 | `description` | No | Human-readable description of the workflow's purpose. |
 | `llm` | No | Default provider for prompt phases in this workflow. Valid values: `claude`, `copilot`. |
 | `model` | No | Default model for prompt phases in this workflow. Provider-specific string. |
+| `allow_additive_protected_writes` | No | Permits this workflow to create new files that match configured protected-surface patterns without failing post-phase verification. Existing protected files are still immutable. |
+| `allow_canonical_protected_writes` | No | Permits this workflow to modify existing protected files when the vessel's issue body explicitly names the same protected path being changed. |
 | `phases` | Yes | Ordered list of phases. At least one is required. |
+
+Protected-surface write allowances are intentionally narrow. `allow_additive_protected_writes` only covers new protected files, while `allow_canonical_protected_writes` still requires the triggering issue body to name the protected path being edited so a workflow cannot silently rewrite unrelated control-plane files.
 
 **Phase fields:**
 
@@ -427,6 +431,20 @@ When a label gate is evaluated:
 
 Label gates are useful when you want a human to review an intermediate artifact (like an implementation plan) before the agent proceeds with execution.
 
+For `github` and `github-pr` tasks, you can also set `label_gate_labels` in `.xylem.yml` so the runner applies deterministic `gh issue edit` / `gh pr edit` updates alongside the queue transition:
+
+```yaml
+tasks:
+  fix-bugs:
+    labels: [bug, ready-for-work]
+    workflow: fix-bug
+    label_gate_labels:
+      waiting: blocked
+      ready: ready-for-implementation
+```
+
+With that config, entering `waiting` adds `blocked`, resuming back to `pending` swaps `blocked` for `ready-for-implementation`, and terminal exits clean up any leftover label-gate labels so GitHub stays aligned with queue state.
+
 ## Prompt templates
 
 Prompt files are Go templates used by `prompt` phases. They live in `.xylem/prompts/<workflow-name>/` and are referenced by `prompt_file` in the workflow YAML. Command phases do not use `prompt_file`; instead, their `run` field is rendered as a Go template with the same template data.
@@ -591,11 +609,11 @@ phases:
 1. **analyze** -- Reads the issue and the codebase to identify relevant files, the root cause, and constraints. If the output contains `XYLEM_NOOP`, the workflow completes early.
 2. **plan** -- Takes the analysis output and produces a step-by-step implementation plan: which files to change, in what order, what tests to update, and what risks exist.
 3. **implement** -- Executes the plan. After implementation, a command gate runs `make test`. If tests fail, the phase retries up to 2 times with the test output fed back via `{{.GateResult}}`.
-4. **pr** -- Commits changes, pushes the branch, and creates a pull request linking to the issue. Under the default harness policy, `git_push` and `pr_create` are mediated high-risk actions and will stop here until your workflow or policy explicitly approves them.
+4. **pr** -- Commits changes, pushes the branch, and creates a pull request linking to the issue. Under the default harness policy, `git_push` and `pr_create` are classified publication actions but still allowed so autonomous runs can finish. Add a workflow review gate or stricter `harness.policy.rules` if you want a human checkpoint before publication.
 
 **When to use:** Assign this workflow to tasks triggered by `bug`-labeled GitHub issues. It works best for well-described bugs with clear reproduction steps.
 
-**Customization:** After running `xylem init`, edit the `run` field in the implement phase's gate to match your project's test command. The scaffolded default is `make test`, but you might need `go test ./...`, `npm test`, `pytest`, or something else. If you keep the scaffolded `pr` prompt phase, add an approval step before it or a policy rule that explicitly allows `git_push` and `pr_create` after review.
+**Customization:** After running `xylem init`, edit the `run` field in the implement phase's gate to match your project's test command. The scaffolded default is `make test`, but you might need `go test ./...`, `npm test`, `pytest`, or something else. If you want human review before publication, add a gate before the scaffolded `pr` phase or policy rules that require approval for `git_push` and `pr_create`.
 
 ### implement-feature
 
@@ -634,11 +652,11 @@ phases:
 1. **analyze** -- Reads the issue and the codebase to identify requirements, affected modules, and existing patterns to follow.
 2. **plan** -- Produces an implementation plan with file changes, ordering, test strategy, and risk assessment. A label gate then waits for `plan-approved` before implementation continues.
 3. **implement** -- Executes the approved plan. Gated on `make test` with 2 retries in the scaffolded workflow.
-4. **pr** -- Commits, pushes, and creates a pull request. Under the default harness policy, `git_push` and `pr_create` are mediated high-risk actions and will stop here until your workflow or policy explicitly approves them.
+4. **pr** -- Commits, pushes, and creates a pull request. Under the default harness policy, `git_push` and `pr_create` are classified publication actions but still allowed so autonomous runs can finish. Add a workflow review gate or stricter `harness.policy.rules` if you want a human checkpoint before publication.
 
 **When to use:** Assign this workflow to tasks triggered by `enhancement`-labeled issues that have been refined and marked as ready for autonomous implementation.
 
-**Customization:** After running `xylem init`, update the label gate and test command to match your process. For example, you might use a different approval label than `plan-approved`, or replace `make test` with `go test ./...`, `npm test`, or `pytest`. If you keep the scaffolded `pr` prompt phase, add an approval step before it or a policy rule that explicitly allows `git_push` and `pr_create` after review.
+**Customization:** After running `xylem init`, update the label gate and test command to match your process. For example, you might use a different approval label than `plan-approved`, or replace `make test` with `go test ./...`, `npm test`, or `pytest`. If you want human review before publication, add a gate before the scaffolded `pr` phase or policy rules that require approval for `git_push` and `pr_create`.
 
 ### implement-harness (repo-specific)
 

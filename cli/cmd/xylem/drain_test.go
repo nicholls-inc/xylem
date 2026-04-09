@@ -4,10 +4,11 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,9 +16,11 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/attribute"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -41,8 +44,15 @@ func makeDrainConfig(dir string) *config.Config {
 	}
 }
 
-type recordingExporter struct {
-	shutdownCalled bool
+type exportedSpanSnapshot struct {
+	Name       string
+	Attributes map[string]string
+}
+
+type recordingSpanExporter struct {
+	mu            sync.Mutex
+	spans         []exportedSpanSnapshot
+	shutdownCalls int
 }
 
 type configurableWorktreeStub struct {
@@ -61,13 +71,113 @@ func (w *configurableWorktreeStub) SetProtectedSurfaces(patterns []string) {
 	w.patterns = append([]string(nil), patterns...)
 }
 
-func (e *recordingExporter) ExportSpans(context.Context, []sdktrace.ReadOnlySpan) error {
+func (e *recordingSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	for _, span := range spans {
+		attrs := make(map[string]string, len(span.Attributes()))
+		for _, attr := range span.Attributes() {
+			attrs[string(attr.Key)] = attrValueString(attr.Value)
+		}
+		e.spans = append(e.spans, exportedSpanSnapshot{
+			Name:       span.Name(),
+			Attributes: attrs,
+		})
+	}
 	return nil
 }
 
-func (e *recordingExporter) Shutdown(context.Context) error {
-	e.shutdownCalled = true
+func (e *recordingSpanExporter) Shutdown(context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.shutdownCalls++
 	return nil
+}
+
+func (e *recordingSpanExporter) snapshots() []exportedSpanSnapshot {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	out := make([]exportedSpanSnapshot, len(e.spans))
+	for i, span := range e.spans {
+		attrs := make(map[string]string, len(span.Attributes))
+		for key, value := range span.Attributes {
+			attrs[key] = value
+		}
+		out[i] = exportedSpanSnapshot{
+			Name:       span.Name,
+			Attributes: attrs,
+		}
+	}
+	return out
+}
+
+func (e *recordingSpanExporter) shutdownCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.shutdownCalls
+}
+
+func attrValueString(value attribute.Value) string {
+	switch value.Type() {
+	case attribute.BOOL:
+		if value.AsBool() {
+			return "true"
+		}
+		return "false"
+	case attribute.INT64:
+		return value.Emit()
+	case attribute.FLOAT64:
+		return value.Emit()
+	case attribute.STRING:
+		return value.AsString()
+	default:
+		return value.Emit()
+	}
+}
+
+func newRecordingTracer() (*observability.Tracer, *recordingSpanExporter) {
+	exporter := &recordingSpanExporter{}
+	provider := sdktrace.NewTracerProvider(
+		sdktrace.WithSyncer(exporter),
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+	)
+	return observability.NewTracerFromProvider(provider), exporter
+}
+
+func stubConfiguredTracerFactory(t *testing.T, fn func(observability.TracerConfig) (*observability.Tracer, error)) {
+	t.Helper()
+
+	prev := newConfiguredTracer
+	newConfiguredTracer = fn
+	t.Cleanup(func() {
+		newConfiguredTracer = prev
+	})
+}
+
+func withBufferedDefaultLogger(t *testing.T) *bytes.Buffer {
+	t.Helper()
+
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(newTextLogger(&buf))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+	})
+	return &buf
+}
+
+func requireSpanNamed(t *testing.T, spans []exportedSpanSnapshot, want string) exportedSpanSnapshot {
+	t.Helper()
+
+	for _, span := range spans {
+		if span.Name == want {
+			return span
+		}
+	}
+	t.Fatalf("span %q not found in %#v", want, spans)
+	return exportedSpanSnapshot{}
 }
 
 func TestDrainDryRun(t *testing.T) {
@@ -258,10 +368,13 @@ func TestBuildDrainRunnerRegistersBuiltinLessonsWorkflow(t *testing.T) {
 func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTracing(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "collector:4317"
+	cfg.Observability.Insecure = true
 	cfg.Claude.Command = "true"
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
 	wt := &configurableWorktreeStub{}
+	logs := withBufferedDefaultLogger(t)
 	worktreePath := filepath.Join(dir, "prompt-worktree")
 	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q) error = %v", worktreePath, err)
@@ -277,21 +390,17 @@ func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTraci
 		t.Fatalf("Enqueue() error = %v", err)
 	}
 
-	oldNewTracer := newTracer
-	defer func() { newTracer = oldNewTracer }()
-	newTracer = func(observability.TracerConfig) (*observability.Tracer, error) {
-		return nil, errors.New("boom")
-	}
-
-	var logBuf bytes.Buffer
-	oldLogWriter := log.Writer()
-	log.SetOutput(&logBuf)
-	defer log.SetOutput(oldLogWriter)
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		return nil, errors.New("bridge down")
+	})
 
 	runnerInstance, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 
-	assert.Nil(t, runnerInstance.Tracer)
+	require.Nil(t, runnerInstance.Tracer)
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.Contains(t, logs.String(), "msg=\"initialize tracer\"")
+	assert.Contains(t, logs.String(), "error=\"bridge down\"")
 
 	result, err := runnerInstance.DrainAndWait(context.Background())
 	require.NoError(t, err)
@@ -299,7 +408,6 @@ func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTraci
 	assert.Zero(t, result.Failed)
 	assert.Zero(t, result.Skipped)
 	assert.Zero(t, result.Waiting)
-	assert.Contains(t, logBuf.String(), "warn: failed to initialize tracer: boom")
 
 	vessel, findErr := q.FindByID("prompt-1")
 	require.NoError(t, findErr)
@@ -308,35 +416,69 @@ func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTraci
 	assert.Equal(t, worktreePath, wt.removedPaths[0])
 }
 
-func TestSmoke_S30_TracerWiredInDrainAfterConfigLoad(t *testing.T) {
+func TestSmoke_S30_TracerWiredInDrainGoAfterConfigLoad(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
+	tracer, exporter := newRecordingTracer()
+
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		return tracer, nil
+	})
 
 	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
-	defer cleanup()
+	require.NotNil(t, r.Tracer)
+	require.Zero(t, exporter.shutdownCount())
 
-	assert.NotNil(t, r.Tracer)
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, result)
+
+	spans := exporter.snapshots()
+	drainSpan := requireSpanNamed(t, spans, "drain_run")
+	assert.Equal(t, "2", drainSpan.Attributes["xylem.drain.concurrency"])
+	assert.Equal(t, "30m", drainSpan.Attributes["xylem.drain.timeout"])
+
+	assert.Zero(t, exporter.shutdownCount())
+	cleanup()
+	assert.Equal(t, 1, exporter.shutdownCount())
 }
 
-func TestSmoke_S32_TracerShutdownDeferredInDrainPath(t *testing.T) {
-	oldNewTracer := newTracer
-	defer func() { newTracer = oldNewTracer }()
-
-	exporter := &recordingExporter{}
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
-	newTracer = func(observability.TracerConfig) (*observability.Tracer, error) {
-		return observability.NewTracerFromProvider(tp), nil
-	}
-
+func TestSmoke_S32_TracerShutdownDeferredInBothDrainAndDaemonPaths(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
 
-	_, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
-	cleanup()
+	var exporters []*recordingSpanExporter
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, exporter := newRecordingTracer()
+		exporters = append(exporters, exporter)
+		return tracer, nil
+	})
 
-	assert.True(t, exporter.shutdownCalled)
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	drainRunner, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	require.NotNil(t, drainRunner.Tracer)
+	result, err := drainRunner.Drain(cancelledCtx)
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, result)
+	require.Len(t, exporters, 1)
+	assert.Zero(t, exporters[0].shutdownCount())
+	requireSpanNamed(t, exporters[0].snapshots(), "drain_run")
+
+	cleanup()
+	assert.Equal(t, 1, exporters[0].shutdownCount())
+
+	daemonResult, err := runDrain(cancelledCtx, cfg, q, worktree.New(dir, cmdRunner), 0)
+	require.NoError(t, err)
+	assert.Equal(t, runner.DrainResult{}, daemonResult)
+	require.Len(t, exporters, 2)
+	requireSpanNamed(t, exporters[1].snapshots(), "drain_run")
+	assert.Equal(t, 1, exporters[1].shutdownCount())
 }

@@ -714,6 +714,71 @@ claude:
 	}
 }
 
+func TestLoadLabelGateLabels(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+        label_gate_labels:
+          waiting: "blocked"
+          ready: "ready-for-implementation"
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	task := cfg.Sources["github"].Tasks["fix-bugs"]
+	if task.LabelGateLabels == nil {
+		t.Fatal("LabelGateLabels should not be nil when label_gate_labels block is present")
+	}
+	if task.LabelGateLabels.Waiting != "blocked" {
+		t.Errorf("LabelGateLabels.Waiting = %q, want blocked", task.LabelGateLabels.Waiting)
+	}
+	if task.LabelGateLabels.Ready != "ready-for-implementation" {
+		t.Errorf("LabelGateLabels.Ready = %q, want ready-for-implementation", task.LabelGateLabels.Ready)
+	}
+}
+
+func TestLoadLabelGateLabelsOmitted(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix-bugs:
+        labels: [bug]
+        workflow: fix-bug
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	task := cfg.Sources["github"].Tasks["fix-bugs"]
+	if task.LabelGateLabels != nil {
+		t.Errorf("expected LabelGateLabels to be nil when label_gate_labels block is omitted, got %+v", task.LabelGateLabels)
+	}
+}
+
 func TestLoadDaemonConfig(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:
@@ -1119,6 +1184,28 @@ func TestValidateGitHubMergeMissingRepo(t *testing.T) {
 	requireErrorContains(t, err, "repo is required")
 }
 
+func TestValidateScheduledSourceValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"audit": {
+				Type:     "scheduled",
+				Repo:     "owner/name",
+				Schedule: "24h",
+				Tasks: map[string]Task{
+					"context": {Workflow: "context-weight-audit"},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid scheduled config, got: %v", err)
+	}
+}
+
 func TestValidateScheduleValid(t *testing.T) {
 	cfg := &Config{
 		Concurrency: 2,
@@ -1136,6 +1223,26 @@ func TestValidateScheduleValid(t *testing.T) {
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("expected valid schedule config, got: %v", err)
 	}
+}
+
+func TestValidateScheduledSourceMissingSchedule(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"audit": {
+				Type: "scheduled",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"context": {Workflow: "context-weight-audit"},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "schedule is required")
 }
 
 func TestValidateScheduleMissingWorkflow(t *testing.T) {
@@ -1374,7 +1481,12 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 
-	assert.Equal(t, DefaultProtectedSurfaces, cfg.EffectiveProtectedSurfaces())
+	// DefaultProtectedSurfaces is now empty (see rationale in config.go).
+	// EffectiveProtectedSurfaces() returns nil when no paths are configured,
+	// which is equivalent to "nothing protected" — the self-improving
+	// default. Deployments that want strict enforcement opt in explicitly
+	// via harness.protected_surfaces.paths.
+	assert.Empty(t, cfg.EffectiveProtectedSurfaces())
 	assert.Equal(t, DefaultAuditLogPath, cfg.EffectiveAuditLogPath())
 	assert.Equal(t, "manual", cfg.HarnessReviewCadence())
 	assert.Equal(t, 10, cfg.HarnessReviewEveryNRuns())
@@ -1457,6 +1569,45 @@ func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
 	require.NotNil(t, result.MatchedRule)
 	assert.Equal(t, "*", result.MatchedRule.Action)
 	assert.Equal(t, "*", result.MatchedRule.Resource)
+}
+
+func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
+	tests := []struct {
+		name     string
+		action   string
+		resource string
+	}{
+		{
+			name:     "git commit",
+			action:   "git_commit",
+			resource: "*",
+		},
+		{
+			name:     "git push",
+			action:   "git_push",
+			resource: "main",
+		},
+		{
+			name:     "pull request create",
+			action:   "pr_create",
+			resource: "owner/name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+				Action:   tt.action,
+				Resource: tt.resource,
+				AgentID:  "vessel-009",
+			})
+
+			assert.Equal(t, intermediary.Allow, result.Effect)
+			require.NotNil(t, result.MatchedRule)
+			assert.Equal(t, "*", result.MatchedRule.Action)
+			assert.Equal(t, "*", result.MatchedRule.Resource)
+		})
+	}
 }
 
 func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {

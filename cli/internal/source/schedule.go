@@ -93,6 +93,8 @@ func (s *Schedule) OnEnqueue(_ context.Context, vessel queue.Vessel) error {
 }
 
 func (s *Schedule) OnStart(_ context.Context, _ queue.Vessel) error            { return nil }
+func (s *Schedule) OnWait(_ context.Context, _ queue.Vessel) error             { return nil }
+func (s *Schedule) OnResume(_ context.Context, _ queue.Vessel) error           { return nil }
 func (s *Schedule) OnComplete(_ context.Context, _ queue.Vessel) error         { return nil }
 func (s *Schedule) OnFail(_ context.Context, _ queue.Vessel) error             { return nil }
 func (s *Schedule) OnTimedOut(_ context.Context, _ queue.Vessel) error         { return nil }

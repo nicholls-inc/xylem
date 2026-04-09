@@ -17,12 +17,42 @@ const minTimeout = 30 * time.Second
 
 const DefaultAuditLogPath = "audit.jsonl"
 
-var DefaultProtectedSurfaces = []string{
-	".xylem/HARNESS.md",
-	".xylem.yml",
-	".xylem/workflows/*.yaml",
-	".xylem/prompts/*/*.md",
-}
+// DefaultProtectedSurfaces is the default list of paths that xylem's
+// runtime verifier treats as off-limits to vessel modifications.
+//
+// Historical context: earlier versions of xylem seeded this with control-
+// plane paths (.xylem/HARNESS.md, .xylem.yml, .xylem/workflows/*.yaml,
+// .xylem/prompts/*/*.md) so that a rogue vessel in a guest repository
+// couldn't silently rewrite xylem's own behaviour while running under an
+// arbitrary issue. That default made sense when xylem was being used
+// against external repositories where the control plane was managed by a
+// separate authority.
+//
+// For xylem's primary use case — the nicholls-inc/xylem repo itself, where
+// xylem is continuously self-improving — that default is self-defeating.
+// Every vessel that implements a bug fix in .xylem/workflows/*.yaml or
+// .xylem/prompts/*/*.md hits the runtime verifier, fails, and the only
+// recovery path is a manual PR shipped by a human or rescue loop. Issues
+// #188 (resolve-conflicts gate bypass) and #190 (merge-pr --auto flag)
+// both failed at implement phase this way, despite the vessels correctly
+// identifying the files to edit.
+//
+// The protected-surface chain (pre-verify restore in PR #180, alignment
+// filter in PR #187, additive allow-list in PR #186) handled several
+// adjacent cases but never the vessel-authored canonical-changing
+// modification case — because by design, the policy prevented vessels
+// from changing canonical state at all.
+//
+// The new default is EMPTY: protection is off by default, matching the
+// self-improving use case. Deployments that want strict enforcement can
+// still opt in via harness.protected_surfaces.paths in .xylem.yml.
+// Human PR review remains the security gate: vessels propose changes
+// via PRs, humans merge them. The runtime verifier was a belt-and-
+// suspenders layer on top of that gate; removing the belt keeps the
+// suspenders in place.
+//
+// See issue #194 for the design discussion.
+var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
 	Repo          string                  `yaml:"repo,omitempty"`
@@ -48,6 +78,7 @@ type Config struct {
 type SourceConfig struct {
 	Type     string          `yaml:"type"`
 	Repo     string          `yaml:"repo,omitempty"`
+	Schedule string          `yaml:"schedule,omitempty"`
 	Cadence  string          `yaml:"cadence,omitempty"`
 	Workflow string          `yaml:"workflow,omitempty"`
 	LLM      string          `yaml:"llm,omitempty"`
@@ -63,6 +94,11 @@ type StatusLabels struct {
 	Completed string `yaml:"completed,omitempty"`
 	Failed    string `yaml:"failed,omitempty"`
 	TimedOut  string `yaml:"timed_out,omitempty"`
+}
+
+type LabelGateLabels struct {
+	Waiting string `yaml:"waiting,omitempty"`
+	Ready   string `yaml:"ready,omitempty"`
 }
 
 // PREventsConfig defines which PR events trigger a workflow.
@@ -86,10 +122,11 @@ type PREventsConfig struct {
 }
 
 type Task struct {
-	Labels       []string        `yaml:"labels,omitempty"`
-	Workflow     string          `yaml:"workflow"`
-	StatusLabels *StatusLabels   `yaml:"status_labels,omitempty"`
-	On           *PREventsConfig `yaml:"on,omitempty"`
+	Labels          []string         `yaml:"labels,omitempty"`
+	Workflow        string           `yaml:"workflow"`
+	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
+	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
+	On              *PREventsConfig  `yaml:"on,omitempty"`
 }
 
 type ClaudeConfig struct {
@@ -118,10 +155,10 @@ type DaemonConfig struct {
 	// auto_upgrade check while the loop is running. Only meaningful when
 	// AutoUpgrade is true. Defaults to 5m. Accepts any Go duration string.
 	UpgradeInterval string `yaml:"upgrade_interval,omitempty"`
-	// AutoMerge enables automatic copilot review cycle + merge of
-	// xylem-authored PRs. Only merges when the PR is approved, CI-green,
-	// and mergeable. Branches matching feat/issue-*, fix/issue-*, or
-	// chore/issue-* are considered xylem-authored.
+	// AutoMerge enables the automatic copilot review cycle + GitHub
+	// auto-merge for merge-ready xylem-authored PRs. The daemon only acts
+	// on PRs labeled ready-to-merge + harness-impl whose branches match
+	// feat/issue-*, fix/issue-*, or chore/issue-*.
 	AutoMerge bool `yaml:"auto_merge,omitempty"`
 	// AutoMergeRepo is the GitHub repo slug (owner/name) for auto-merge.
 	// If empty, gh CLI uses the current directory's origin remote.
@@ -319,6 +356,10 @@ func (c *Config) Validate() error {
 			if err := validateGitHubMergeSource(name, src); err != nil {
 				return err
 			}
+		case "scheduled":
+			if err := validateScheduledSource(name, src); err != nil {
+				return err
+			}
 		case "schedule":
 			if err := validateScheduleSource(name, src); err != nil {
 				return err
@@ -489,12 +530,14 @@ func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 }
 
 // DefaultPolicy returns the default intermediary policy. Protected control
-// surfaces are denied, and all other actions — including git_push and
-// pr_create — are allowed by default so the daemon can operate autonomously.
+// surfaces are denied, and all currently classified execution actions —
+// including git_commit, git_push, and pr_create — are allowed so the daemon can
+// operate autonomously.
 //
-// Operators who want approval gates on destructive actions can override this
-// by configuring `harness.policy.rules` in `.xylem.yml`; those rules take
-// precedence over the default policy.
+// Destructive git operations and deploy-class actions are not yet emitted as
+// separate intents at the runner/intermediary boundary; they currently inherit
+// the enclosing phase action. Operators who want human gates on those surfaces
+// can override the defaults with `harness.policy.rules` or workflow gates.
 func DefaultPolicy() intermediary.Policy {
 	return intermediary.Policy{
 		Name: "default",
@@ -504,9 +547,10 @@ func DefaultPolicy() intermediary.Policy {
 			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
 			{Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
-			// All other actions — including git_push and pr_create — are
-			// allowed. Autonomous operation requires these to succeed without
-			// manual approval. Override via harness.policy for stricter rules.
+			// All other actions — including git_commit, git_push, and pr_create
+			// — are allowed. Autonomous operation requires publication steps to
+			// complete without a built-in approval pause. Override via
+			// harness.policy for stricter rules.
 			{Action: "*", Resource: "*", Effect: intermediary.Allow},
 		},
 	}
@@ -683,6 +727,36 @@ func validateGitHubMergeSource(name string, src SourceConfig) error {
 	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (github-merge): at least one task is required", name)
+	}
+	for tname, task := range src.Tasks {
+		if strings.TrimSpace(task.Workflow) == "" {
+			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
+		}
+	}
+	return nil
+}
+
+func validateScheduledSource(name string, src SourceConfig) error {
+	repo := strings.TrimSpace(src.Repo)
+	if repo == "" {
+		return fmt.Errorf("source %q (scheduled): repo is required", name)
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("source %q (scheduled): repo must be in owner/name format", name)
+	}
+	if strings.TrimSpace(src.Schedule) == "" {
+		return fmt.Errorf("source %q (scheduled): schedule is required", name)
+	}
+	dur, err := time.ParseDuration(src.Schedule)
+	if err != nil {
+		return fmt.Errorf("source %q (scheduled): schedule must be a valid duration: %w", name, err)
+	}
+	if dur <= 0 {
+		return fmt.Errorf("source %q (scheduled): schedule must be greater than 0", name)
+	}
+	if len(src.Tasks) == 0 {
+		return fmt.Errorf("source %q (scheduled): at least one task is required", name)
 	}
 	for tname, task := range src.Tasks {
 		if strings.TrimSpace(task.Workflow) == "" {

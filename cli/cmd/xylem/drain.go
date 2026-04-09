@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -51,10 +53,16 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 	// Check waiting vessels before draining pending ones
 	r.CheckWaitingVessels(ctx)
 
+	builtInResult, err := runBuiltInScheduledVessels(ctx, cfg, q, cmdRunner)
+	if err != nil {
+		return &exitError{code: 2, err: fmt.Errorf("drain built-in audit vessels: %w", err)}
+	}
+
 	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}
+	addDrainResults(&result, builtInResult)
 	maybeAutoGenerateHarnessReview(cfg, result)
 	fmt.Printf("Completed %d, failed %d, skipped %d, waiting %d\n", result.Completed, result.Failed, result.Skipped, result.Waiting)
 	if result.Failed > 0 {
@@ -88,12 +96,16 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 	r.Tracer = tracer
 }
 
+var newConfiguredTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+	return newTracer(cfg)
+}
+
 func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 	if !cfg.ObservabilityEnabled() {
 		return nil
 	}
 
-	tracer, err := newTracer(observability.TracerConfig{
+	tracer, err := newConfiguredTracer(observability.TracerConfig{
 		ServiceName:    "xylem",
 		ServiceVersion: "",
 		Endpoint:       cfg.Observability.Endpoint,
@@ -101,7 +113,7 @@ func buildConfiguredTracer(cfg *config.Config) *observability.Tracer {
 		SampleRate:     cfg.ObservabilitySampleRate(),
 	})
 	if err != nil {
-		log.Printf("warn: failed to initialize tracer: %v", err)
+		slog.Warn("initialize tracer", "error", err)
 		return nil
 	}
 
@@ -114,7 +126,7 @@ func shutdownConfiguredTracer(tracer *observability.Tracer) {
 	}
 
 	if err := tracer.Shutdown(context.Background()); err != nil {
-		log.Printf("warn: %v", fmt.Errorf("shutdown tracer: %w", err))
+		slog.Warn("shutdown tracer", "error", err)
 	}
 }
 
@@ -190,6 +202,26 @@ func buildSourceMap(cfg *config.Config, q *queue.Queue, cmdRunner source.Command
 				CmdRunner: cmdRunner,
 			}
 			addSource(name, gm)
+		case "scheduled":
+			scheduledTasks := make(map[string]source.ScheduledTask, len(srcCfg.Tasks))
+			for name, t := range srcCfg.Tasks {
+				scheduledTasks[name] = source.ScheduledTask{
+					Workflow: t.Workflow,
+				}
+			}
+			scheduledDur, err := time.ParseDuration(srcCfg.Schedule)
+			if err != nil {
+				log.Printf("warn: skip scheduled source %q: parse schedule %q: %v", name, srcCfg.Schedule, err)
+				continue
+			}
+			scheduled := &source.Scheduled{
+				Repo:       srcCfg.Repo,
+				StateDir:   cfg.StateDir,
+				ConfigName: name,
+				Schedule:   scheduledDur,
+				Tasks:      scheduledTasks,
+			}
+			addSource(name, scheduled)
 		case "schedule":
 			sched := &source.Schedule{
 				ConfigName: name,
@@ -208,7 +240,7 @@ func buildReporter(cfg *config.Config, cmdRunner reporter.Runner) *reporter.Repo
 	// Find the first GitHub-based source repo for reporting
 	for _, srcCfg := range cfg.Sources {
 		switch srcCfg.Type {
-		case "github", "github-pr", "github-pr-events", "github-merge":
+		case "github", "github-pr", "github-pr-events", "github-merge", "scheduled":
 			if srcCfg.Repo != "" {
 				return &reporter.Reporter{Runner: cmdRunner, Repo: srcCfg.Repo}
 			}

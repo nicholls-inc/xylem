@@ -23,6 +23,8 @@ type appDeps struct {
 var deps *appDeps
 
 func newRootCmd() *cobra.Command {
+	registerCommandLoggerFinalizer()
+
 	cmd := &cobra.Command{
 		Use:           "xylem",
 		Short:         "Autonomous Claude Code session scheduler",
@@ -48,6 +50,9 @@ func newRootCmd() *cobra.Command {
 			cfg, err := config.Load(configPath)
 			if err != nil {
 				return fmt.Errorf("error loading config %s: %w", configPath, err)
+			}
+			if err := configureCommandLogger(cmd, cfg); err != nil {
+				return fmt.Errorf("configure command logger: %w", err)
 			}
 
 			// Only require gh if a GitHub source is configured
@@ -99,7 +104,8 @@ func newRootCmd() *cobra.Command {
 
 func hasGitHubSource(cfg *config.Config) bool {
 	for _, src := range cfg.Sources {
-		if src.Type == "github" {
+		switch src.Type {
+		case "github", "github-pr", "github-pr-events", "github-merge", "scheduled":
 			return true
 		}
 	}

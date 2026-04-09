@@ -19,12 +19,13 @@ var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // Workflow defines a multi-phase execution plan loaded from a YAML file.
 type Workflow struct {
-	Name                         string  `yaml:"name"`
-	Description                  string  `yaml:"description,omitempty"`
-	LLM                          *string `yaml:"llm,omitempty"`
-	Model                        *string `yaml:"model,omitempty"`
-	AllowAdditiveProtectedWrites bool    `yaml:"allow_additive_protected_writes,omitempty"`
-	Phases                       []Phase `yaml:"phases"`
+	Name                          string  `yaml:"name"`
+	Description                   string  `yaml:"description,omitempty"`
+	LLM                           *string `yaml:"llm,omitempty"`
+	Model                         *string `yaml:"model,omitempty"`
+	AllowAdditiveProtectedWrites  bool    `yaml:"allow_additive_protected_writes,omitempty"`
+	AllowCanonicalProtectedWrites bool    `yaml:"allow_canonical_protected_writes,omitempty"`
+	Phases                        []Phase `yaml:"phases"`
 }
 
 // Phase represents a single step in a workflow's execution pipeline.
@@ -58,7 +59,7 @@ type GateEvidence struct {
 // Gate defines an inter-phase quality gate that must pass before the next phase begins.
 type Gate struct {
 	Type         string        `yaml:"type"`                    // "command" or "label"
-	Run          string        `yaml:"run,omitempty"`           // shell command (type=command)
+	Run          string        `yaml:"run,omitempty"`           // shell command (type=command), supports template variables
 	Retries      int           `yaml:"retries,omitempty"`       // default 0
 	RetryDelay   string        `yaml:"retry_delay,omitempty"`   // default "10s"
 	WaitFor      string        `yaml:"wait_for,omitempty"`      // label name (type=label)

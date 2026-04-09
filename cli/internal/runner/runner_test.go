@@ -107,6 +107,10 @@ func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string
 	return []byte{}, m.outputErr
 }
 
+func (m *mockCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return m.RunOutput(ctx, name, args...)
+}
+
 func (m *mockCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
 	atomic.AddInt32(&m.started, 1)
 	return m.processErr
@@ -253,6 +257,20 @@ func makeTestConfig(dir string, concurrency int) *config.Config {
 		Claude: config.ClaudeConfig{
 			Command: "claude",
 		},
+		// Explicit protected surfaces because the package default is now
+		// empty (to support xylem's self-improving use case — see PR
+		// loop11/#194). Tests in this package exercise the verifier and
+		// rely on non-empty protection patterns to trigger violations.
+		Harness: config.HarnessConfig{
+			ProtectedSurfaces: config.ProtectedSurfacesConfig{
+				Paths: []string{
+					".xylem/HARNESS.md",
+					".xylem.yml",
+					".xylem/workflows/*.yaml",
+					".xylem/prompts/*/*.md",
+				},
+			},
+		},
 		Sources: map[string]config.SourceConfig{
 			"github": {
 				Type:    "github",
@@ -312,6 +330,26 @@ func countRunOutputCalls(m *mockCmdRunner, name string) int {
 		}
 	}
 	return count
+}
+
+func hasRunOutputCallContaining(m *mockCmdRunner, fragments ...string) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for _, args := range m.outputArgs {
+		joined := strings.Join(args, " ")
+		match := true
+		for _, fragment := range fragments {
+			if !strings.Contains(joined, fragment) {
+				match = false
+				break
+			}
+		}
+		if match {
+			return true
+		}
+	}
+	return false
 }
 
 func loadSingleVessel(t *testing.T, q *queue.Queue) queue.Vessel {
@@ -811,6 +849,27 @@ func TestPhasePolicyIntents_IgnoresHighRiskPhrasesFromRenderedPromptContext(t *t
 	require.Len(t, intents, 1)
 	assert.Equal(t, "phase_execute", intents[0].Action)
 	assert.Equal(t, "analyze", intents[0].Resource)
+}
+
+func TestPhasePolicyIntents_DoesNotClassifyDestructiveGitOrDeploySeparately(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "publish", Type: "command"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, "git reset --hard HEAD~1 && git push --force origin main && ./deploy.sh production", "")
+	require.Len(t, intents, 2)
+
+	assert.Equal(t, "external_command", intents[0].Action)
+	assert.Equal(t, "publish", intents[0].Resource)
+	assert.Equal(t, "git_push", intents[1].Action)
+	assert.Equal(t, "main", intents[1].Resource)
 }
 
 func TestSmoke_S1_PolicyDenialShortCircuitsBeforeSurfaceSnapshot(t *testing.T) {
@@ -2580,6 +2639,139 @@ func TestDrainCommandGateFailsWithRetries(t *testing.T) {
 	}
 }
 
+func TestSmoke_S31_ResolveConflictsGateFailsBeforePushWhenOriginMainIsNotAncestor(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(164, "resolve-conflicts")
+	vessel.Meta["issue_title"] = "Resolve PR conflicts"
+	vessel.Meta["issue_body"] = "Merge origin/main into the PR branch."
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "resolve-conflicts", []testPhase{
+		{name: "analyze", promptContent: "Analyze conflicts", maxTurns: 5},
+		{
+			name:          "resolve",
+			promptContent: "Resolve conflicts\n{{.GateResult}}",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"git fetch origin main && test \\\"$(git branch --show-current)\\\" = \\\"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\\\" && git merge-base --is-ancestor origin/main HEAD && cd cli && go test ./...\"\n      retries: 0",
+		},
+		{name: "push", promptContent: "Push branch", maxTurns: 5},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("origin/main is not an ancestor of HEAD"),
+		gateErr:    &mockExitError{code: 1},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	require.Len(t, cmdRunner.phaseCalls, 2)
+	assert.Contains(t, cmdRunner.phaseCalls[0].prompt, "Analyze conflicts")
+	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Resolve conflicts")
+
+	stored := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, stored.State)
+	assert.Equal(t, "resolve", stored.FailedPhase)
+	assert.Contains(t, stored.GateOutput, "origin/main is not an ancestor")
+}
+
+func TestDrainCommandGateRendersTemplateData(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(42, "fix-bug")
+	vessel.Meta["issue_title"] = "Template gate"
+	vessel.Meta["issue_body"] = "Ensure gate commands render template data."
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name:          "implement",
+			promptContent: "Implement fix",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"echo {{.Issue.Number}} {{.Vessel.ID}} {{.Phase.Name}}\"\n      retries: 0",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	var gateCommand string
+	for _, args := range cmdRunner.outputArgs {
+		if len(args) == 3 && args[0] == "sh" && args[1] == "-c" && strings.Contains(args[2], "echo 42 issue-42 implement") {
+			gateCommand = args[2]
+			break
+		}
+	}
+	require.NotEmpty(t, gateCommand)
+	assert.NotContains(t, gateCommand, "{{")
+}
+
+func TestSmoke_S32_ResolveConflictsGateRendersPRHeadAndAncestorChecks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := makeVessel(42, "resolve-conflicts")
+	vessel.Meta["issue_title"] = "Resolve PR conflicts"
+	vessel.Meta["issue_body"] = "Merge origin/main into the PR branch."
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "resolve-conflicts", []testPhase{
+		{name: "analyze", promptContent: "Analyze conflicts", maxTurns: 5},
+		{
+			name:          "resolve",
+			promptContent: "Resolve conflicts",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"git fetch origin main && test \\\"$(git branch --show-current)\\\" = \\\"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\\\" && git merge-base --is-ancestor origin/main HEAD && cd cli && go test ./...\"\n      retries: 0",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	var gateCommand string
+	for _, args := range cmdRunner.outputArgs {
+		if len(args) == 3 && args[0] == "sh" && args[1] == "-c" && strings.Contains(args[2], "gh pr view 42 --json headRefName --jq '.headRefName'") {
+			gateCommand = args[2]
+			break
+		}
+	}
+	require.NotEmpty(t, gateCommand)
+	assert.Contains(t, gateCommand, "git fetch origin main")
+	assert.Contains(t, gateCommand, "git branch --show-current")
+	assert.Contains(t, gateCommand, "gh pr view 42 --json headRefName --jq '.headRefName'")
+	assert.NotContains(t, gateCommand, "{{")
+}
+
 func TestDrainLabelGateTransitionsToWaiting(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
@@ -2727,6 +2919,134 @@ func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
 	}
 	if wt.removePath != waiting.WorktreePath {
 		t.Fatalf("removed worktree path = %q, want %q", wt.removePath, waiting.WorktreePath)
+	}
+}
+
+func TestDrainLabelGateAppliesWaitingLabels(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(1, "fix-bug")
+	vessel.Meta["status_label_running"] = "in-progress"
+	vessel.Meta["label_gate_label_waiting"] = "blocked"
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Waiting != 1 {
+		t.Fatalf("DrainAndWait().Waiting = %d, want 1", result.Waiting)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label blocked") {
+		t.Fatalf("expected waiting-label gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--remove-label in-progress") {
+		t.Fatalf("expected running-label cleanup gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+}
+
+func TestCheckWaitingVesselsAppliesReadyLabelsOnResume(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(1, "fix-bug")
+	vessel.Meta["label_gate_label_waiting"] = "blocked"
+	vessel.Meta["label_gate_label_ready"] = "ready-for-implementation"
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	first, err := r.DrainAndWait(context.Background())
+	if err != nil {
+		t.Fatalf("first Drain() error = %v", err)
+	}
+	if first.Waiting != 1 {
+		t.Fatalf("first DrainAndWait().Waiting = %d, want 1", first.Waiting)
+	}
+
+	cmdRunner.outputData = []byte(`{"labels":[{"name":"plan-approved"}]}`)
+	r.CheckWaitingVessels(context.Background())
+
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label ready-for-implementation", "--remove-label blocked") {
+		t.Fatalf("expected ready-label gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+}
+
+func TestCheckWaitingVesselsTimeoutAppliesTimedOutLabels(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	waitingSince := time.Now().UTC().Add(-48 * time.Hour)
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:           "issue-1",
+		Source:       "github-issue",
+		Ref:          "https://github.com/owner/repo/issues/1",
+		Workflow:     "fix-bug",
+		Meta:         map[string]string{"issue_num": "1", "status_label_timed_out": "timed-out", "label_gate_label_waiting": "blocked"},
+		State:        queue.StateWaiting,
+		CreatedAt:    time.Now().UTC(),
+		WaitingFor:   "plan-approved",
+		WaitingSince: &waitingSince,
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": &source.GitHub{Repo: "owner/repo", CmdRunner: cmdRunner},
+	}
+
+	r.CheckWaitingVessels(context.Background())
+
+	done, err := q.FindByID("issue-1")
+	if err != nil {
+		t.Fatalf("FindByID() error = %v", err)
+	}
+	if done.State != queue.StateTimedOut {
+		t.Fatalf("state after timeout = %s, want timed_out", done.State)
+	}
+	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label timed-out", "--remove-label blocked") {
+		t.Fatalf("expected timed-out gh issue edit call, got %v", cmdRunner.outputArgs)
 	}
 }
 
@@ -5505,6 +5825,103 @@ phases:
 	assert.Empty(t, entries)
 }
 
+func setupCanonicalProtectedWriteSmokeTest(t *testing.T) (*Runner, *intermediary.AuditLog, string, string, surface.Snapshot) {
+	t.Helper()
+
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "prompts", "doctor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "prompts", "doctor", "analyze.md"), []byte("analyze"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "doctor.yaml"), []byte(`name: doctor
+allow_canonical_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doctor/analyze.md
+    max_turns: 1
+`), 0o644))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	protectedRelPath := ".xylem/workflows/doctor.yaml"
+	protectedPath := filepath.Join(worktreeDir, filepath.FromSlash(protectedRelPath))
+	require.NoError(t, os.MkdirAll(filepath.Dir(protectedPath), 0o755))
+	require.NoError(t, os.WriteFile(protectedPath, []byte("name: doctor\nphases: []\n"), 0o644))
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	return r, auditLog, worktreeDir, protectedPath, before
+}
+
+func TestSmoke_S21_SurfacePostVerificationAllowsReferencedCanonicalProtectedWrite(t *testing.T) {
+	r, auditLog, worktreeDir, protectedPath, before := setupCanonicalProtectedWriteSmokeTest(t)
+
+	modifiedContents := "name: doctor\nupdated: true\n"
+	require.NoError(t, os.WriteFile(protectedPath, []byte(modifiedContents), 0o644))
+
+	err := r.verifyProtectedSurfaces(
+		queue.Vessel{
+			ID:       "issue-canonical-allowed",
+			Source:   "github-issue",
+			Workflow: "doctor",
+			Meta: map[string]string{
+				"issue_body": "Please fix `.xylem/workflows/doctor.yaml` so the harness workflow stops failing.",
+			},
+		},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.NoError(t, err)
+
+	data, readErr := os.ReadFile(protectedPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, modifiedContents, string(data))
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestSmoke_S23_AuditLogRecordsDeniedCanonicalProtectedWriteWithoutIssuePathReference(t *testing.T) {
+	r, auditLog, worktreeDir, protectedPath, before := setupCanonicalProtectedWriteSmokeTest(t)
+
+	modifiedContents := "name: doctor\nupdated: true\n"
+	require.NoError(t, os.WriteFile(protectedPath, []byte(modifiedContents), 0o644))
+
+	err := r.verifyProtectedSurfaces(
+		queue.Vessel{
+			ID:       "issue-canonical-denied",
+			Source:   "github-issue",
+			Workflow: "doctor",
+			Meta: map[string]string{
+				"issue_body": "Please fix the harness workflow bug.",
+			},
+		},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "violated protected surfaces")
+	assert.Contains(t, err.Error(), ".xylem/workflows/doctor.yaml")
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "file_write", entries[0].Intent.Action)
+	assert.Equal(t, ".xylem/workflows/doctor.yaml", entries[0].Intent.Resource)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+}
+
 func TestSmoke_S23_AuditLogRecordsDeniedAdditiveProtectedWriteWithoutWorkflowOptIn(t *testing.T) {
 	repoRoot := t.TempDir()
 	withTestWorkingDir(t, repoRoot)
@@ -6242,6 +6659,55 @@ func TestValidateIssueDataForWorkflow_CommandPhaseValidNumber(t *testing.T) {
 	if err := validateIssueDataForWorkflow(vessel, data, wf); err != nil {
 		t.Fatalf("unexpected error for valid issue number: %v", err)
 	}
+}
+
+func TestValidateIssueDataForWorkflow_CommandGateZeroNumber(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 0}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{
+				Name:       "resolve",
+				PromptFile: ".xylem/prompts/resolve-conflicts/resolve.md",
+				MaxTurns:   10,
+				Gate: &workflow.Gate{
+					Type: "command",
+					Run:  "gh pr view {{.Issue.Number}} --json mergeable",
+				},
+			},
+		},
+	}
+
+	err := validateIssueDataForWorkflow(vessel, data, wf)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "command gate for phase resolve references .Issue")
+	assert.Contains(t, err.Error(), "Number is 0")
+}
+
+func TestValidateIssueDataForWorkflow_CommandGateValidNumber(t *testing.T) {
+	vessel := queue.Vessel{
+		ID:     "issue-1",
+		Source: "github-issue",
+	}
+	data := phase.IssueData{Number: 42}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{
+				Name:       "resolve",
+				PromptFile: ".xylem/prompts/resolve-conflicts/resolve.md",
+				MaxTurns:   10,
+				Gate: &workflow.Gate{
+					Type: "command",
+					Run:  "gh pr view {{.Issue.Number}} --json mergeable",
+				},
+			},
+		},
+	}
+
+	require.NoError(t, validateIssueDataForWorkflow(vessel, data, wf))
 }
 
 func TestValidateIssueDataForWorkflow_NonCommandPhase(t *testing.T) {
