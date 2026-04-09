@@ -55,8 +55,12 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 	StateTimedOut:  {},
 }
 
-// ErrInvalidTransition is returned when a state transition is not allowed.
-var ErrInvalidTransition = errors.New("invalid state transition")
+var (
+	// ErrInvalidTransition is returned when a state transition is not allowed.
+	ErrInvalidTransition = errors.New("invalid state transition")
+	// ErrNotFound is returned when a requested vessel cannot be found in the queue.
+	ErrNotFound = errors.New("vessel not found")
+)
 
 // IsTerminal reports whether s is a terminal vessel state.
 func (s VesselState) IsTerminal() bool {
@@ -264,7 +268,7 @@ func (q *Queue) FindByID(id string) (*Vessel, error) {
 				return nil
 			}
 		}
-		return fmt.Errorf("vessel %s not found", id)
+		return fmt.Errorf("%w: vessel %s", ErrNotFound, id)
 	})
 	return found, err
 }
@@ -285,7 +289,7 @@ func (q *Queue) FindLatestByRef(ref string) (*Vessel, error) {
 			found = &v
 			return nil
 		}
-		return fmt.Errorf("vessel with ref %s not found", ref)
+		return fmt.Errorf("%w: vessel with ref %s", ErrNotFound, ref)
 	})
 	return found, err
 }
