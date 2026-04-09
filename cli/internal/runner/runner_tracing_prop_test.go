@@ -104,7 +104,7 @@ func TestProp_SpanHierarchyMaintainedAcrossVessels(t *testing.T) {
 			"github-issue": makeGitHubSource(),
 		}
 
-		result, err := r.Drain(context.Background())
+		result, err := r.DrainAndWait(context.Background())
 		if err != nil {
 			t.Fatalf("Drain() error = %v", err)
 		}
@@ -199,7 +199,7 @@ func TestProp_NilTracerNeverPanicsUnderConcurrency(t *testing.T) {
 			"github-issue": makeGitHubSource(),
 		}
 
-		result, err := r.Drain(context.Background())
+		result, err := r.DrainAndWait(context.Background())
 		if err != nil {
 			t.Fatalf("Drain() error = %v", err)
 		}

@@ -11,7 +11,9 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestPropWireRunnerScaffoldingNeverNil(t *testing.T) {
@@ -97,5 +99,38 @@ func TestPropWireRunnerScaffoldingAuditLogUnderStateDir(t *testing.T) {
 		if _, err := os.Stat(expectedPath); err != nil {
 			rt.Fatalf("Stat(%q) error = %v", expectedPath, err)
 		}
+	})
+}
+
+func TestPropBuildConfiguredTracerCreatesStdoutTracerWithoutEndpoint(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		sampleRate := rapid.Float64Range(0.0001, 1.0).Draw(rt, "sampleRate")
+		cfg := &config.Config{}
+		cfg.Observability.SampleRate = sampleRate
+
+		oldNewTracer := newTracer
+		defer func() { newTracer = oldNewTracer }()
+
+		var calls int
+		newTracer = func(tc observability.TracerConfig) (*observability.Tracer, error) {
+			calls++
+			if tc.Endpoint != "" {
+				rt.Fatalf("TracerConfig.Endpoint = %q, want empty endpoint", tc.Endpoint)
+			}
+			if tc.SampleRate != sampleRate {
+				rt.Fatalf("TracerConfig.SampleRate = %v, want %v", tc.SampleRate, sampleRate)
+			}
+			return observability.NewTracerFromProvider(sdktrace.NewTracerProvider()), nil
+		}
+
+		tracer := buildConfiguredTracer(cfg)
+		if tracer == nil {
+			rt.Fatal("buildConfiguredTracer() = nil, want tracer")
+		}
+		if calls != 1 {
+			rt.Fatalf("newTracer call count = %d, want 1", calls)
+		}
+
+		shutdownConfiguredTracer(tracer)
 	})
 }

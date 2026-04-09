@@ -40,6 +40,8 @@ func newDaemonCmd() *cobra.Command {
 }
 
 func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
+	slog.Info("daemon starting", "commit", buildInfo())
+
 	// Isolation check: refuse to run in the main git worktree because vessel
 	// subprocesses may switch branches or modify the working tree, which
 	// would corrupt the user's primary checkout.
@@ -60,6 +62,11 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	// Auto-upgrade: pull latest main, rebuild, exec() if binary changed.
 	// Runs after PID lock (prevents concurrent upgrades) and before any vessel
 	// processing. If exec() fires, the new process re-acquires the lock.
+	//
+	// Captures the executable path and repo dir once so the same closure can
+	// also be used for periodic upgrades inside the daemon loop.
+	var upgrade upgradeFunc
+	upgradeInterval := time.Duration(0)
 	if cfg.Daemon.AutoUpgrade {
 		execPath, execErr := os.Executable()
 		if execErr != nil {
@@ -67,6 +74,9 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		} else {
 			repoDir := filepath.Dir(filepath.Dir(execPath))
 			selfUpgrade(repoDir, execPath)
+
+			upgrade = func() { selfUpgrade(repoDir, execPath) }
+			upgradeInterval = parseUpgradeInterval(cfg.Daemon)
 		}
 	}
 
@@ -81,23 +91,43 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	scan := func(ctx context.Context) (scanner.ScanResult, error) {
 		return runScan(ctx, cfg, q)
 	}
+	cmdRunner := newCmdRunner(cfg)
+	drainRunner, cleanupDrainRunner := buildDrainRunner(cfg, q, wt, cmdRunner)
+	defer cleanupDrainRunner()
+	drainRunner.Reporter = buildReporter(cfg, cmdRunner)
+	drainRunner.DrainBudget = drainInterval
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
-		return runDrain(ctx, cfg, q, wt)
+		return drainRunner.Drain(ctx)
 	}
 	check := func(ctx context.Context) {
-		cmdRunner := &realCmdRunner{}
-		r := runner.New(cfg, q, wt, cmdRunner)
-		r.Sources = buildSourceMap(cfg, q, cmdRunner)
-		r.CheckWaitingVessels(ctx)
-		r.CheckHungVessels(ctx)
-		// Auto-merge: request copilot review on unreviewed xylem PRs,
-		// and merge PRs that are approved + CI-green + mergeable.
+		drainRunner.CheckWaitingVessels(ctx)
+		drainRunner.CheckHungVessels(ctx)
+		// Auto-merge: best-effort request copilot review on merge-ready
+		// harness PRs, then enable GitHub auto-merge once checks are green
+		// and the PR is mergeable.
 		if cfg.Daemon.AutoMerge {
 			autoMergeXylemPRs(ctx, cfg.Daemon.AutoMergeRepo)
 		}
 	}
 
-	return daemonLoop(ctx, q, scan, drain, check, scanInterval, drainInterval)
+	return daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+}
+
+// parseUpgradeInterval returns the effective periodic upgrade interval. If
+// the config provides an explicit value, it is parsed; otherwise the default
+// is returned.
+func parseUpgradeInterval(dc config.DaemonConfig) time.Duration {
+	if dc.UpgradeInterval == "" {
+		return defaultUpgradeInterval
+	}
+	d, err := time.ParseDuration(dc.UpgradeInterval)
+	if err != nil || d <= 0 {
+		slog.Warn("daemon invalid upgrade interval; using default",
+			"value", dc.UpgradeInterval,
+			"default", defaultUpgradeInterval)
+		return defaultUpgradeInterval
+	}
+	return d
 }
 
 func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
@@ -120,32 +150,92 @@ func parseDaemonIntervals(dc config.DaemonConfig) (scan, drain time.Duration) {
 // scanFunc and drainFunc abstract scan/drain for testability.
 type scanFunc func(ctx context.Context) (scanner.ScanResult, error)
 type drainFunc func(ctx context.Context) (runner.DrainResult, error)
+type inFlightTracker interface {
+	Wait() runner.DrainResult
+	InFlightCount() int
+}
 
 // checkFunc runs periodic vessel health checks (waiting vessel label checks,
 // hung vessel timeouts). May be nil if no checks are needed.
 type checkFunc func(ctx context.Context)
 
+// upgradeFunc runs a self-upgrade attempt. If it succeeds with a binary
+// change, it calls exec() and never returns. If it returns, either the
+// binary was unchanged or the upgrade failed; the daemon continues normally.
+// May be nil to disable periodic upgrades.
+type upgradeFunc func()
+
+// defaultUpgradeInterval is how often the daemon checks for a new binary.
+// Five minutes balances fast activation of newly-merged fixes against
+// excessive git fetches and rebuilds.
+const defaultUpgradeInterval = 5 * time.Minute
+
+// upgradeOverdueMultiplier controls the forced-upgrade escape hatch: after
+// this many upgradeIntervals have elapsed without a successful upgrade
+// (because the daemon was never idle enough to fire the normal path), the
+// next drain tick is PAUSED — new vessels are not dequeued — so that the
+// currently in-flight vessels can finish naturally and the upgrade condition
+// (`in_flight == 0`) is eventually satisfied.
+//
+// At the default 5m upgradeInterval + 3x multiplier = 15 minutes of
+// "upgrade pending" before drain starts gracefully parking. This preserves
+// the safety invariant (no exec() while subprocesses are alive) while
+// guaranteeing that a continuously-saturated scheduled source can never
+// permanently lock the daemon on a stale binary.
+//
+// 3 is chosen so that a single healthy upgrade cycle (5m interval, fires
+// reliably) is not perturbed, but a degraded "always saturated" condition
+// is resolved in bounded time.
+const upgradeOverdueMultiplier = 3
+
 // daemonLoop is the core loop extracted for testability. It accepts an
 // externally-controlled context so tests can cancel it without signals,
 // and injectable scan/drain/check functions so tests can use stubs.
-func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainFunc, check checkFunc, scanInterval, drainInterval time.Duration) error {
+//
+// If upgrade is non-nil, it is called under one of two conditions:
+//
+//  1. Normal path: daemon is fully idle (no active drain, zero in-flight
+//     vessels) and upgradeInterval has elapsed since the last upgrade.
+//
+//  2. Overdue path: upgrade has been pending for
+//     upgradeInterval*upgradeOverdueMultiplier without firing because the
+//     daemon was never idle enough. In this case, new drain ticks are
+//     paused (no new dequeue) so in-flight vessels can drain naturally.
+//     Once in_flight reaches zero, the normal path fires.
+//
+// Pass nil/zero upgrade/upgradeInterval to disable.
+func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
 	}
 
-	var lastScan, lastDrain time.Time
+	var lastScan, lastDrain, lastUpgrade time.Time
 	var draining int32 // 0=idle, 1=running
 	var drainWg sync.WaitGroup
 
-	slog.Info("daemon started", "scan_interval", scanInterval, "drain_interval", drainInterval)
+	// Initialise lastUpgrade to now so the first upgrade check happens after
+	// upgradeInterval — not immediately, since cmdDaemon already ran the
+	// startup upgrade.
+	lastUpgrade = daemonNow()
+
+	slog.Info("daemon started",
+		"scan_interval", scanInterval,
+		"drain_interval", drainInterval,
+		"upgrade_interval", upgradeInterval)
 
 	for {
 		select {
 		case <-ctx.Done():
 			slog.Info("daemon received shutdown signal", "waiting_for", "in-flight drain")
 			waitDone := make(chan struct{})
-			go func() { drainWg.Wait(); close(waitDone) }()
+			go func() {
+				drainWg.Wait()
+				if tracker != nil {
+					tracker.Wait()
+				}
+				close(waitDone)
+			}()
 			select {
 			case <-waitDone:
 				slog.Info("daemon drain finished during shutdown")
@@ -173,7 +263,36 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 			check(ctx)
 		}
 
-		if now.Sub(lastDrain) >= drainInterval {
+		// Compute upgrade state once per tick so both the upgrade check and
+		// the drain-pause decision share a single snapshot of conditions.
+		upgradeReady := upgrade != nil && upgradeInterval > 0
+		upgradeElapsed := now.Sub(lastUpgrade)
+		upgradePending := upgradeReady && upgradeElapsed >= upgradeInterval
+		upgradeOverdue := upgradeReady && upgradeElapsed >= upgradeInterval*time.Duration(upgradeOverdueMultiplier)
+		inFlight := trackerInFlightCount(tracker)
+		drainIdle := atomic.LoadInt32(&draining) == 0
+
+		if upgradePending && drainIdle && inFlight == 0 {
+			// Normal path: daemon is fully idle and upgrade is due.
+			lastUpgrade = now
+			upgrade()
+		} else if upgradeOverdue && drainIdle && inFlight > 0 {
+			// Overdue: log that we're pausing new dequeue to let in-flight
+			// vessels drain naturally, creating an idle window for the
+			// normal upgrade path on a subsequent tick. This does NOT kill
+			// running vessels — we wait for them to complete on their own.
+			slog.Warn("daemon auto-upgrade overdue; pausing new drain dequeue until idle",
+				"elapsed", upgradeElapsed,
+				"in_flight", inFlight)
+		}
+
+		// Drain dequeue is suppressed while an upgrade is overdue and
+		// in-flight vessels still exist. This creates the idle window the
+		// normal upgrade path needs, without exec()ing while subprocesses
+		// are alive. When in_flight reaches zero, the next tick fires the
+		// normal upgrade path above and dequeue resumes.
+		drainPaused := upgradeOverdue && inFlight > 0
+		if !drainPaused && now.Sub(lastDrain) >= drainInterval {
 			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
 				drainWg.Add(1)
@@ -186,9 +305,12 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 						return
 					}
 					slog.Info("daemon drain complete",
+						"launched", drainResult.Launched,
 						"completed", drainResult.Completed,
 						"failed", drainResult.Failed,
-						"skipped", drainResult.Skipped)
+						"skipped", drainResult.Skipped,
+						"waiting", drainResult.Waiting,
+						"in_flight", trackerInFlightCount(tracker))
 				}()
 			}
 		}
@@ -199,7 +321,13 @@ func daemonLoop(ctx context.Context, q *queue.Queue, scan scanFunc, drain drainF
 		case <-ctx.Done():
 			slog.Info("daemon received shutdown signal", "waiting_for", "in-flight drain")
 			waitDone := make(chan struct{})
-			go func() { drainWg.Wait(); close(waitDone) }()
+			go func() {
+				drainWg.Wait()
+				if tracker != nil {
+					tracker.Wait()
+				}
+				close(waitDone)
+			}()
 			select {
 			case <-waitDone:
 				slog.Info("daemon drain finished during shutdown")
@@ -218,15 +346,23 @@ func runScan(ctx context.Context, cfg *config.Config, q *queue.Queue) (scanner.S
 	return s.Scan(ctx)
 }
 
-func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager) (runner.DrainResult, error) {
+func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, budget time.Duration) (runner.DrainResult, error) {
 	cmdRunner := newCmdRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
-	result, err := r.Drain(ctx)
+	r.DrainBudget = budget
+	result, err := r.DrainAndWait(ctx)
 	if err == nil {
 		maybeAutoGenerateHarnessReview(cfg, result)
 	}
 	return result, err
+}
+
+func trackerInFlightCount(tracker inFlightTracker) int {
+	if tracker == nil {
+		return 0
+	}
+	return tracker.InFlightCount()
 }
 
 func logTickSummary(q *queue.Queue) {

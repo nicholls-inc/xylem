@@ -5,6 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func writeWorkflowFile(t *testing.T, dir, name, content string) string {
@@ -56,11 +59,7 @@ func chdirTemp(t *testing.T, dir string) {
 	t.Cleanup(func() { os.Chdir(orig) })
 }
 
-// TestWS6S27WorkflowGateWithoutEvidenceLoads verifies that a workflow gate
-// without evidence metadata still loads and leaves Gate.Evidence unset.
-//
-// Covers: WS6 S27.
-func TestWS6S27WorkflowGateWithoutEvidenceLoads(t *testing.T) {
+func TestSmoke_S11_GateWithoutEvidenceMetadataLoadsCleanlyWithNilEvidenceField(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
 	createPromptFile(t, dir, "prompts/analyze.md")
@@ -76,15 +75,271 @@ phases:
 `)
 
 	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	assert.Nil(t, got.Phases[0].Gate.Evidence)
+}
+
+func TestSmoke_S12_GateWithValidEvidenceMetadataParsesCorrectly(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "All tests pass"
+        level: behaviorally_checked
+        checker: "go test"
+        trust_boundary: "Package-level only"
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	require.NotNil(t, got.Phases[0].Gate.Evidence)
+
+	e := got.Phases[0].Gate.Evidence
+	assert.Equal(t, "All tests pass", e.Claim)
+	assert.Equal(t, "behaviorally_checked", e.Level)
+	assert.Equal(t, "go test", e.Checker)
+	assert.Equal(t, "Package-level only", e.TrustBoundary)
+}
+
+func TestSmoke_S13_GateWithInvalidEvidenceLevelIsRejectedByValidateGate(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "All tests pass"
+        level: high
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `high`)
+	assert.Contains(t, err.Error(), `gate evidence level "high" is not valid`)
+	assert.Contains(t, err.Error(), "must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ")
+}
+
+func TestLoadWorkflowGateRejectsUntypedEvidenceLevelKeyword(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "All tests pass"
+        level: untyped
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `gate evidence level "untyped" is not valid`)
+	requireErrorContains(t, err, "must be proved, mechanically_checked, behaviorally_checked, or observed_in_situ")
+}
+
+func TestSmoke_S14_GateWithPartialEvidenceClaimAndLevelOnlyParsesWithoutError(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "Tests pass"
+        level: mechanically_checked
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	require.NotNil(t, got.Phases[0].Gate.Evidence)
+
+	e := got.Phases[0].Gate.Evidence
+	assert.Equal(t, "", e.Checker)
+	assert.Equal(t, "", e.TrustBoundary)
+}
+
+func TestLoadWorkflowAllowAdditiveProtectedWritesDefaultsFalse(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.False(t, got.AllowAdditiveProtectedWrites)
+}
+
+func TestLoadWorkflowAllowAdditiveProtectedWritesParsesTrue(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	assert.True(t, got.AllowAdditiveProtectedWrites)
+}
+
+func TestLoadWorkflowGateWithEvidenceAndEmptyLevel(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: command
+      run: "go test ./..."
+      evidence:
+        claim: "Analyzer ran"
+        checker: "go test"
+`)
+
+	got, err := Load(path)
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if got.Phases[0].Gate == nil {
-		t.Fatal("Gate = nil, want non-nil gate")
+	if got.Phases[0].Gate == nil || got.Phases[0].Gate.Evidence == nil {
+		t.Fatal("Gate.Evidence = nil, want evidence metadata")
 	}
-	if got.Phases[0].Gate.Evidence != nil {
-		t.Fatalf("Gate.Evidence = %#v, want nil", got.Phases[0].Gate.Evidence)
+
+	if got.Phases[0].Gate.Evidence.Level != "" {
+		t.Fatalf("Evidence.Level = %q, want empty string", got.Phases[0].Gate.Evidence.Level)
 	}
+}
+
+func TestLoadWorkflowLiveHTTPGateParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      retries: 1
+      live:
+        mode: http
+        timeout: "30s"
+        http:
+          base_url: "http://127.0.0.1:3000"
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200
+              max_latency: "2s"
+              expect_body_regex: '"status":"ok"'
+              expect_headers:
+                - name: Content-Type
+                  regex: 'application/json'
+              expect_json:
+                - path: $.status
+                  equals: ok
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Gate)
+	require.NotNil(t, got.Phases[0].Gate.Live)
+	assert.Equal(t, "http", got.Phases[0].Gate.Live.Mode)
+	require.Len(t, got.Phases[0].Gate.Live.HTTP.Steps, 1)
+	assert.Equal(t, "/health", got.Phases[0].Gate.Live.HTTP.Steps[0].URL)
+}
+
+func TestLoadWorkflowLiveGateRejectsMissingModeSpecificConfig(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      live:
+        mode: browser
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `live.browser is required`)
+}
+
+func TestLoadWorkflowLiveGateRejectsInvalidJSONPathAndDuration(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    gate:
+      type: live
+      live:
+        mode: command+assert
+        command_assert:
+          run: "cat status.json"
+          timeout: "not-a-duration"
+          expect_json:
+            - path: status
+              equals: ok
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `invalid live.command_assert.timeout`)
 }
 
 func TestLoad(t *testing.T) {
@@ -134,6 +389,7 @@ phases:
 			workflowName: "deploy",
 			yaml: `name: deploy
 description: Deploy with gates
+allow_additive_protected_writes: true
 phases:
   - name: build
     prompt_file: prompts/build.md
@@ -158,6 +414,9 @@ phases:
 				t.Helper()
 				if s.Phases[0].Gate.Type != "command" {
 					t.Fatalf("gate type = %q, want command", s.Phases[0].Gate.Type)
+				}
+				if !s.AllowAdditiveProtectedWrites {
+					t.Fatal("AllowAdditiveProtectedWrites = false, want true")
 				}
 				if s.Phases[0].Gate.Retries != 2 {
 					t.Fatalf("gate retries = %d, want 2", s.Phases[0].Gate.Retries)
@@ -267,7 +526,7 @@ phases:
       type: webhook
 `,
 			prompts: []string{"prompts/analyze.md"},
-			wantErr: `type must be "command" or "label"`,
+			wantErr: `type must be "command", "label", or "live"`,
 		},
 		{
 			name:         "command gate missing run",
@@ -706,7 +965,7 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			prompts: []string{"prompt.md"},
-			wantErr: `type must be "command" or "label"`,
+			wantErr: `type must be "command", "label", or "live"`,
 		},
 		{
 			name:             "command gate missing run",

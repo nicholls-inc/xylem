@@ -1,0 +1,28 @@
+name: fix-bug
+description: "Diagnose and fix a bug from a GitHub issue"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/fix-bug/analyze.md
+    max_turns: 20
+    noop:
+      match: XYLEM_NOOP
+  - name: plan
+    prompt_file: .xylem/prompts/fix-bug/plan.md
+    max_turns: 20
+  - name: implement
+    prompt_file: .xylem/prompts/fix-bug/implement.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 2
+  - name: verify
+    prompt_file: .xylem/prompts/fix-bug/verify.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "cd cli && go test ./..."
+      retries: 1
+  - name: pr
+    prompt_file: .xylem/prompts/fix-bug/pr.md
+    max_turns: 10

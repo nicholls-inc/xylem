@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -47,6 +48,7 @@ type WorktreeManager interface {
 
 // DrainResult summarises a drain run.
 type DrainResult struct {
+	Launched  int
 	Completed int
 	Failed    int
 	Skipped   int
@@ -59,6 +61,7 @@ type Runner struct {
 	Queue    *queue.Queue
 	Worktree WorktreeManager
 	Runner   CommandRunner
+	LiveGate gate.LiveGateRunner
 	Sources  map[string]source.Source
 	Reporter *reporter.Reporter // may be nil for non-github vessels
 	// Shared harness scaffolding for phase policy enforcement, audit logging,
@@ -66,15 +69,49 @@ type Runner struct {
 	Intermediary *intermediary.Intermediary // nil = no policy enforcement
 	AuditLog     *intermediary.AuditLog     // nil = no audit logging
 	Tracer       *observability.Tracer      // nil = no tracing
+	// DrainBudget bounds the wall time that Drain() spends dequeueing new
+	// vessels. When the deadline elapses, Drain() stops dequeueing and
+	// returns immediately while already-started goroutines continue in the
+	// background. Call Wait or DrainAndWait if the caller needs terminal
+	// outcomes for the in-flight vessels. Any pending vessels are picked up
+	// by the next drain tick. Zero means unbounded (legacy behavior).
+	//
+	// Set this to drainInterval in the daemon so that Drain() returns
+	// roughly once per tick even under sustained pool saturation. Without
+	// this bound, a saturated tick holds the daemon's draining CAS guard
+	// for the full vessel runtime, which prevents later ticks from using
+	// newly available capacity and blocks idle-only work such as upgrades.
+	DrainBudget time.Duration
+
+	sem      chan struct{}
+	wg       sync.WaitGroup
+	traceWg  sync.WaitGroup
+	inFlight atomic.Int32
+
+	resultMu sync.Mutex
+	result   DrainResult
 }
 
 // New creates a Runner.
 func New(cfg *config.Config, q *queue.Queue, wt WorktreeManager, r CommandRunner) *Runner {
-	return &Runner{Config: cfg, Queue: q, Worktree: wt, Runner: r}
+	concurrency := 1
+	if cfg != nil && cfg.Concurrency > 0 {
+		concurrency = cfg.Concurrency
+	}
+	return &Runner{
+		Config:   cfg,
+		Queue:    q,
+		Worktree: wt,
+		Runner:   r,
+		LiveGate: gate.NewLiveVerifier(),
+		sem:      make(chan struct{}, concurrency),
+	}
 }
 
 // Drain dequeues pending vessels and launches sessions up to Config.Concurrency concurrently.
 // On context cancellation, no new vessels are launched; running vessels complete normally.
+// Drain returns once the current dequeue tick ends. Use DrainAndWait or Wait for
+// synchronous callers that need terminal outcomes.
 func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 	var drainSpan observability.SpanContext
 	if r.Tracer != nil {
@@ -83,7 +120,6 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			Timeout:     r.Config.Timeout,
 		}))
 		ctx = drainSpan.Context()
-		defer drainSpan.End()
 	}
 
 	timeout, err := time.ParseDuration(r.Config.Timeout)
@@ -94,32 +130,61 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 		return DrainResult{}, fmt.Errorf("parse timeout: %w", err)
 	}
 
-	sem := make(chan struct{}, r.Config.Concurrency)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
 	var result DrainResult
 	healthCounts := FleetStatusReport{}
 	patternCounts := map[string]int{}
+	var drainStatsMu sync.Mutex
+	var drainLaunchWg sync.WaitGroup
 
+	// Drain budget: if set, Drain() stops dequeueing once the deadline
+	// elapses. Already-started goroutines continue in the background.
+	var drainDeadline time.Time
+	if r.DrainBudget > 0 {
+		drainDeadline = time.Now().Add(r.DrainBudget)
+	}
+
+drainLoop:
 	for {
 		select {
 		case <-ctx.Done():
-			goto wait
+			break drainLoop
 		default:
+		}
+
+		if !drainDeadline.IsZero() && time.Now().After(drainDeadline) {
+			log.Printf("drain: budget %s elapsed, stopping dequeue (%d in-flight)", r.DrainBudget, r.InFlightCount())
+			break drainLoop
+		}
+
+		select {
+		case r.sem <- struct{}{}:
+		default:
+			if result.Launched == 0 && r.InFlightCount() > 0 {
+				log.Printf("drain: concurrency saturated, ending tick with %d in-flight", r.InFlightCount())
+			}
+			break drainLoop
 		}
 
 		vessel, err := r.Queue.Dequeue()
 		if err != nil || vessel == nil {
-			break
+			<-r.sem
+			break drainLoop
 		}
 
 		log.Printf("%sdequeued vessel workflow=%s", vesselLabel(*vessel), vessel.Workflow)
 
-		sem <- struct{}{}
-		wg.Add(1)
+		result.Launched++
+		r.recordLaunched()
+		r.inFlight.Add(1)
+		r.wg.Add(1)
+		drainLaunchWg.Add(1)
 		go func(j queue.Vessel) {
-			defer wg.Done()
-			defer func() { <-sem }()
+			defer r.wg.Done()
+			defer drainLaunchWg.Done()
+			defer func() {
+				<-r.sem
+				r.inFlight.Add(-1)
+			}()
 
 			vesselBaseCtx := context.Background()
 			var vesselSpan observability.SpanContext
@@ -161,17 +226,7 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 				}))
 			}
 
-			mu.Lock()
-			switch outcome {
-			case "completed":
-				result.Completed++
-			case "failed":
-				result.Failed++
-			case "waiting":
-				result.Waiting++
-			default:
-				result.Skipped++
-			}
+			drainStatsMu.Lock()
 			switch status.Health {
 			case VesselHealthHealthy:
 				healthCounts.Healthy++
@@ -183,31 +238,119 @@ func (r *Runner) Drain(ctx context.Context) (DrainResult, error) {
 			for _, anomaly := range status.Anomalies {
 				patternCounts[anomaly.Code]++
 			}
-			mu.Unlock()
+			drainStatsMu.Unlock()
+			r.recordOutcome(outcome)
 		}(*vessel)
 	}
 
-wait:
-	wg.Wait()
 	if r.Tracer != nil {
-		patterns := make([]FleetPattern, 0, len(patternCounts))
-		for code, count := range patternCounts {
-			patterns = append(patterns, FleetPattern{Code: code, Count: count})
+		if result.Launched == 0 {
+			drainSpan.End()
+		} else {
+			r.traceWg.Add(1)
+			go func() {
+				defer r.traceWg.Done()
+				drainLaunchWg.Wait()
+				drainStatsMu.Lock()
+				patterns := make([]FleetPattern, 0, len(patternCounts))
+				for code, count := range patternCounts {
+					patterns = append(patterns, FleetPattern{Code: code, Count: count})
+				}
+				drainStatsMu.Unlock()
+				sort.Slice(patterns, func(i, j int) bool {
+					if patterns[i].Count == patterns[j].Count {
+						return patterns[i].Code < patterns[j].Code
+					}
+					return patterns[i].Count > patterns[j].Count
+				})
+				drainSpan.AddAttributes(observability.DrainHealthAttributes(observability.DrainHealthData{
+					Healthy:   healthCounts.Healthy,
+					Degraded:  healthCounts.Degraded,
+					Unhealthy: healthCounts.Unhealthy,
+					Patterns:  FormatFleetPatterns(patterns),
+				}))
+				drainSpan.End()
+			}()
 		}
-		sort.Slice(patterns, func(i, j int) bool {
-			if patterns[i].Count == patterns[j].Count {
-				return patterns[i].Code < patterns[j].Code
-			}
-			return patterns[i].Count > patterns[j].Count
-		})
-		drainSpan.AddAttributes(observability.DrainHealthAttributes(observability.DrainHealthData{
-			Healthy:   healthCounts.Healthy,
-			Degraded:  healthCounts.Degraded,
-			Unhealthy: healthCounts.Unhealthy,
-			Patterns:  FormatFleetPatterns(patterns),
-		}))
+	}
+
+	return result, nil
+}
+
+// DrainAndWait preserves the historical synchronous Drain behaviour for callers
+// that need a terminal outcome summary rather than a per-tick launch count.
+func (r *Runner) DrainAndWait(ctx context.Context) (DrainResult, error) {
+	before := r.SnapshotResults()
+	var launched int
+	for {
+		tickResult, err := r.Drain(ctx)
+		if err != nil {
+			return DrainResult{}, err
+		}
+		launched += tickResult.Launched
+		r.Wait()
+		if r.DrainBudget > 0 || tickResult.Launched == 0 || ctx.Err() != nil {
+			break
+		}
+		pending, pendingErr := r.Queue.ListByState(queue.StatePending)
+		if pendingErr != nil {
+			return DrainResult{}, fmt.Errorf("list pending vessels: %w", pendingErr)
+		}
+		if len(pending) == 0 {
+			break
+		}
+	}
+	after := r.SnapshotResults()
+	result := DrainResult{
+		Launched:  launched,
+		Completed: after.Completed - before.Completed,
+		Failed:    after.Failed - before.Failed,
+		Skipped:   after.Skipped - before.Skipped,
+		Waiting:   after.Waiting - before.Waiting,
 	}
 	return result, nil
+}
+
+// Wait blocks until all in-flight vessels have finished and returns the
+// cumulative outcome counts recorded by this Runner.
+func (r *Runner) Wait() DrainResult {
+	r.wg.Wait()
+	r.traceWg.Wait()
+	return r.SnapshotResults()
+}
+
+// InFlightCount reports the number of launched vessels that have not yet
+// reached a terminal outcome.
+func (r *Runner) InFlightCount() int {
+	return int(r.inFlight.Load())
+}
+
+// SnapshotResults returns the cumulative outcome counts recorded by this Runner.
+func (r *Runner) SnapshotResults() DrainResult {
+	r.resultMu.Lock()
+	defer r.resultMu.Unlock()
+	return r.result
+}
+
+func (r *Runner) recordLaunched() {
+	r.resultMu.Lock()
+	defer r.resultMu.Unlock()
+	r.result.Launched++
+}
+
+func (r *Runner) recordOutcome(outcome string) {
+	r.resultMu.Lock()
+	defer r.resultMu.Unlock()
+	switch outcome {
+	case "completed":
+		r.result.Completed++
+	case "failed":
+		r.result.Failed++
+	case "waiting":
+		r.result.Waiting++
+	default:
+		r.result.Skipped++
+	}
 }
 
 // CheckWaitingVessels checks all waiting vessels for label gate resolution.
@@ -239,7 +382,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 				if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, "label gate timed out"); updateErr != nil {
 					log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
 				}
-				src := r.resolveSource(vessel.Source)
+				src := r.resolveSource(vessel)
 				if err := src.OnTimedOut(ctx, vessel); err != nil {
 					log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -280,7 +423,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 
 func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome string) {
 	// Look up source for this vessel
-	src := r.resolveSource(vessel.Source)
+	src := r.resolveSource(vessel)
 
 	// Source-specific start hook (e.g., add in-progress label)
 	startErr := src.OnStart(ctx, vessel)
@@ -404,7 +547,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		gateResult := ""
 
 		// Initialize gate retries for this phase (once, before retry loop)
-		if p.Gate != nil && p.Gate.Type == "command" && p.Gate.Retries > 0 && vessel.GateRetries == 0 {
+		if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") && p.Gate.Retries > 0 && vessel.GateRetries == 0 {
 			vessel.GateRetries = p.Gate.Retries
 		}
 
@@ -436,7 +579,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			provider := resolveProvider(r.Config, srcCfg, sk, &p)
 			model := resolveModel(r.Config, srcCfg, sk, &p, provider)
 			retryAttempt := 0
-			if p.Gate != nil && p.Gate.Type == "command" {
+			if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 				retryAttempt = providerAttempt(&p, vessel.GateRetries)
 			}
 			phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, sk, p, i)
@@ -490,7 +633,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
-					r.failVessel(vessel.ID, policyErr.Error())
+					r.failUpdatedVessel(&vessel, policyErr.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -501,7 +644,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 				if err != nil {
 					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 					finishCurrentPhaseSpan(snapErr)
@@ -552,7 +695,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					finishCurrentPhaseSpan(policyErr)
 					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 					vessel.FailedPhase = p.Name
-					r.failVessel(vessel.ID, policyErr.Error())
+					r.failUpdatedVessel(&vessel, policyErr.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -563,7 +706,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
-				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 				if err != nil {
 					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 					finishCurrentPhaseSpan(snapErr)
@@ -600,7 +743,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, runErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -618,7 +761,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
 					vessel.FailedPhase = p.Name
-					r.failVessel(vessel.ID, err.Error())
+					r.failUpdatedVessel(&vessel, err.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -638,7 +781,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg))
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, errMsg)
+				r.failUpdatedVessel(&vessel, errMsg)
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -695,14 +838,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			}
 
 			switch p.Gate.Type {
-			case "command":
-				gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-				gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
-				finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
-					Type:         p.Gate.Type,
-					Passed:       passed,
-					RetryAttempt: retryAttempt,
-				}, gateErr)
+			case "command", "live":
+				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 				if gateErr != nil {
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
 					finishCurrentPhaseSpan(nil)
@@ -715,8 +853,9 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if passed {
 					log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
 					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, gatePassedPointer(true), ""))
-					gateRecordedAt := r.runtimeNow()
-					claims = append(claims, buildGateClaim(p, true, phaseArtifactRelativePath(vessel.ID, p.Name), gateRecordedAt))
+					if gateResultExec.evidenceClaim != nil {
+						claims = append(claims, *gateResultExec.evidenceClaim)
+					}
 					finishCurrentPhaseSpan(nil)
 					break // gate passed, proceed to next phase
 				}
@@ -735,7 +874,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					finishCurrentPhaseSpan(nil)
 					vessel.FailedPhase = p.Name
 					vessel.GateOutput = gateOut
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+					r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
 					if err := src.OnFail(ctx, vessel); err != nil {
 						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 					}
@@ -832,7 +971,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	cmd, args := buildPromptOnlyCmdArgs(r.Config, prompt)
 	provider := resolveProvider(r.Config, nil, nil, nil)
 	model := resolveModel(r.Config, nil, nil, nil, provider)
-	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(worktreePath)
+	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 	if err != nil {
 		snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 		r.failVessel(vessel.ID, snapErr.Error())
@@ -880,9 +1019,14 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	return r.completeVessel(ctx, vessel, worktreePath, nil, vrs, nil)
 }
 
-func (r *Runner) resolveSource(name string) source.Source {
+func (r *Runner) resolveSource(vessel queue.Vessel) source.Source {
 	if r.Sources != nil {
-		if src, ok := r.Sources[name]; ok {
+		if configName := r.sourceConfigNameFromMeta(vessel); configName != "" {
+			if src, ok := r.Sources[configName]; ok {
+				return src
+			}
+		}
+		if src, ok := r.Sources[vessel.Source]; ok {
 			return src
 		}
 	}
@@ -919,6 +1063,20 @@ func (r *Runner) removeWorktree(worktreePath, vesselID string) {
 func (r *Runner) failVessel(id string, errMsg string) {
 	if updateErr := r.Queue.Update(id, queue.StateFailed, errMsg); updateErr != nil {
 		log.Printf("warn: failed to update vessel %s state: %v", id, updateErr)
+	}
+}
+
+func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
+	if vessel == nil {
+		return
+	}
+	now := r.runtimeNow()
+	vessel.State = queue.StateFailed
+	vessel.Error = errMsg
+	vessel.EndedAt = &now
+	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
+		log.Printf("warn: failed to persist vessel %s state: %v", vessel.ID, updateErr)
+		r.failVessel(vessel.ID, errMsg)
 	}
 }
 
@@ -1199,6 +1357,13 @@ type singlePhaseResult struct {
 	evidenceClaim *evidence.Claim
 }
 
+type gateExecutionResult struct {
+	output        string
+	passed        bool
+	err           error
+	evidenceClaim *evidence.Claim
+}
+
 // runSinglePhase executes a single workflow phase (prompt or command), including
 // gate evaluation and retries. It returns the outcome without mutating the
 // vessel's queue state directly (the caller handles that).
@@ -1206,7 +1371,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 	p := wf.Phases[phaseIdx]
 	gateResult := ""
 	gateRetries := 0
-	if p.Gate != nil && p.Gate.Type == "command" && p.Gate.Retries > 0 {
+	if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") && p.Gate.Retries > 0 {
 		gateRetries = p.Gate.Retries
 	}
 
@@ -1238,7 +1403,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		provider := resolveProvider(r.Config, srcCfg, wf, &p)
 		model := resolveModel(r.Config, srcCfg, wf, &p, provider)
 		retryAttempt := 0
-		if p.Gate != nil && p.Gate.Type == "command" {
+		if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 			retryAttempt = providerAttempt(&p, gateRetries)
 		}
 		phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, wf, p, phaseIdx)
@@ -1290,7 +1455,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, policyErr.Error())
+				r.failUpdatedVessel(&vessel, policyErr.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1301,7 +1466,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 			if err != nil {
 				snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 				finishCurrentPhaseSpan(snapErr)
@@ -1351,7 +1516,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, policyErr.Error())
+				r.failUpdatedVessel(&vessel, policyErr.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1362,7 +1527,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
-			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(worktreePath)
+			beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 			if err != nil {
 				snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 				finishCurrentPhaseSpan(snapErr)
@@ -1398,7 +1563,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			finishCurrentPhaseSpan(runErr)
 			log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
 			vessel.FailedPhase = p.Name
-			r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, runErr))
+			r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, runErr))
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 			}
@@ -1419,7 +1584,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				finishCurrentPhaseSpan(err)
 				log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
 				vessel.FailedPhase = p.Name
-				r.failVessel(vessel.ID, err.Error())
+				r.failUpdatedVessel(&vessel, err.Error())
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1442,7 +1607,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
 				p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
 			vessel.FailedPhase = p.Name
-			r.failVessel(vessel.ID, errMsg)
+			r.failUpdatedVessel(&vessel, errMsg)
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 			}
@@ -1494,14 +1659,9 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 
 		switch p.Gate.Type {
-		case "command":
-			gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-			gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
-			finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
-				Type:         p.Gate.Type,
-				Passed:       passed,
-				RetryAttempt: retryAttempt,
-			}, gateErr)
+		case "command", "live":
+			gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, worktreePath, retryAttempt)
+			gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 			if gateErr != nil {
 				r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -1517,15 +1677,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			if passed {
 				log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
-				gateRecordedAt := r.runtimeNow()
-				claim := buildGateClaim(p, true, phaseArtifactRelativePath(vessel.ID, p.Name), gateRecordedAt)
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
 					output:        string(output),
 					status:        "completed",
 					duration:      phaseDuration,
 					phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", gatePassedPointer(true), ""),
-					evidenceClaim: &claim,
+					evidenceClaim: gateResultExec.evidenceClaim,
 				}
 			}
 
@@ -1540,7 +1698,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
 				vessel.FailedPhase = p.Name
 				vessel.GateOutput = gateOut
-				r.failVessel(vessel.ID, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
+				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
 				if err := src.OnFail(ctx, vessel); err != nil {
 					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 				}
@@ -1664,6 +1822,107 @@ func finishGateSpan(tracer *observability.Tracer, span observability.SpanContext
 	span.End()
 }
 
+func startGateStepSpan(tracer *observability.Tracer, gateSpan observability.SpanContext, ctx context.Context, name string) observability.SpanContext {
+	if tracer == nil {
+		return observability.SpanContext{}
+	}
+
+	stepCtx := ctx
+	if gateCtx := gateSpan.Context(); gateCtx != nil {
+		stepCtx = gateCtx
+	}
+
+	return tracer.StartSpan(stepCtx, "gate_step:"+name, nil)
+}
+
+func finishGateStepSpan(tracer *observability.Tracer, span observability.SpanContext, data observability.GateStepSpanData, err error) {
+	if tracer == nil {
+		return
+	}
+
+	span.AddAttributes(observability.GateStepSpanAttributes(data))
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.End()
+}
+
+func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observability.SpanContext, vessel queue.Vessel, p workflow.Phase, worktreePath string, retryAttempt int) gateExecutionResult {
+	if p.Gate == nil {
+		return gateExecutionResult{passed: true}
+	}
+
+	switch p.Gate.Type {
+	case "command":
+		gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
+		gateOut, passed, gateErr := gate.RunCommandGate(ctx, r.Runner, worktreePath, p.Gate.Run)
+		finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
+			Type:         p.Gate.Type,
+			Passed:       passed,
+			RetryAttempt: retryAttempt,
+		}, gateErr)
+		result := gateExecutionResult{
+			output: gateOut,
+			passed: passed,
+			err:    gateErr,
+		}
+		if passed {
+			gateRecordedAt := r.runtimeNow()
+			claim := buildGateClaim(p, true, phaseArtifactRelativePath(vessel.ID, p.Name), gateRecordedAt)
+			result.evidenceClaim = &claim
+		}
+		return result
+	case "live":
+		gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
+		liveGate := r.LiveGate
+		if liveGate == nil {
+			liveGate = gate.NewLiveVerifier()
+		}
+		liveResult, gateErr := liveGate.Run(ctx, r.Runner, gate.LiveRequest{
+			StateDir:    r.Config.StateDir,
+			VesselID:    vessel.ID,
+			PhaseName:   p.Name,
+			WorktreeDir: worktreePath,
+			Gate:        p.Gate,
+		})
+		if liveResult != nil {
+			for _, step := range liveResult.Steps {
+				stepSpan := startGateStepSpan(r.Tracer, gateSpan, ctx, step.Name)
+				var stepErr error
+				if !step.Passed && step.Message != "" {
+					stepErr = fmt.Errorf("%s", step.Message)
+				}
+				finishGateStepSpan(r.Tracer, stepSpan, observability.GateStepSpanData{
+					Name:   step.Name,
+					Mode:   step.Mode,
+					Passed: step.Passed,
+				}, stepErr)
+			}
+		}
+		passed := gateErr == nil && liveResult != nil && liveResult.Passed
+		finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
+			Type:         p.Gate.Type,
+			Passed:       passed,
+			RetryAttempt: retryAttempt,
+		}, gateErr)
+		result := gateExecutionResult{
+			passed: passed,
+			err:    gateErr,
+		}
+		if liveResult != nil {
+			result.output = liveResult.Output
+			if liveResult.Passed {
+				gateRecordedAt := r.runtimeNow()
+				claim := buildGateClaim(p, true, liveResult.ReportPath, gateRecordedAt)
+				result.evidenceClaim = &claim
+			}
+		}
+		return result
+	default:
+		return gateExecutionResult{passed: true}
+	}
+}
+
 func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, renderedPrompt, output string, duration time.Duration) observability.PhaseResultData {
 	data := observability.PhaseResultData{
 		DurationMS: duration.Milliseconds(),
@@ -1697,7 +1956,18 @@ func buildGateClaim(p workflow.Phase, passed bool, artifactPath string, recorded
 	}
 
 	if p.Gate != nil {
-		claim.Checker = p.Gate.Run
+		switch p.Gate.Type {
+		case "live":
+			claim.Level = evidence.ObservedInSitu
+			if p.Gate.Live != nil {
+				claim.Checker = "live/" + p.Gate.Live.Mode
+			} else {
+				claim.Checker = "live"
+			}
+			claim.TrustBoundary = "Running system observation"
+		default:
+			claim.Checker = p.Gate.Run
+		}
 	}
 	if p.Gate == nil || p.Gate.Evidence == nil {
 		return claim
@@ -1928,10 +2198,17 @@ func extractRepoFlag(rendered, fallback string) string {
 	return "*"
 }
 
-func (r *Runner) takeProtectedSurfaceSnapshot(worktreePath string) (surface.Snapshot, bool, error) {
+func (r *Runner) takeProtectedSurfaceSnapshot(ctx context.Context, worktreePath string) (surface.Snapshot, bool, error) {
 	patterns := r.Config.EffectiveProtectedSurfaces()
 	if len(patterns) == 0 {
 		return surface.Snapshot{}, false, nil
+	}
+
+	sourceRoot, err := r.protectedSurfaceSourceRoot(ctx, worktreePath)
+	if err == nil {
+		if _, restoreErr := restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot, patterns); restoreErr != nil {
+			return surface.Snapshot{}, false, fmt.Errorf("restore missing protected surfaces: %w", restoreErr)
+		}
 	}
 
 	snapshot, err := surface.TakeSnapshot(worktreePath, patterns)
@@ -1962,6 +2239,33 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 		return nil
 	}
 
+	// Pre-verify restore: if the phase temporarily removed protected files
+	// (e.g., resolve-conflicts workflow runs `gh pr checkout` on a PR branch
+	// that predates the .xylem/ tracking commit (#157), then git switches
+	// branches and drops tracked files that the target branch doesn't have),
+	// restore them from the canonical source root before comparing the
+	// after-snapshot. Only MISSING files are restored (those with
+	// violation.After == "deleted" against the source root); modifications
+	// are untouched and will still be caught by the Compare below.
+	//
+	// This closes the loop on issue #174: Fix B's post-phase self-heal was
+	// correctly running but only AFTER the violation was recorded, so
+	// vessels still failed. Restoring before the snapshot eliminates the
+	// spurious "deleted" category while preserving all other enforcement.
+	//
+	// Uses context.Background() because the vessel's ctx may already be
+	// cancelling (e.g., phase timeout) — cleanup work should survive.
+	if sourceRoot, srcErr := r.protectedSurfaceSourceRoot(context.Background(), worktreePath); srcErr == nil {
+		restored, restoreErr := restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot, patterns)
+		if restoreErr != nil {
+			log.Printf("%sphase %q pre-verify restore failed: %v",
+				vesselLabel(vessel), p.Name, restoreErr)
+		} else if restored > 0 {
+			log.Printf("%sphase %q pre-verify restored %d protected surface file(s) from source root",
+				vesselLabel(vessel), p.Name, restored)
+		}
+	}
+
 	after, err := surface.TakeSnapshot(worktreePath, patterns)
 	if err != nil {
 		log.Printf("%sphase %q protected surface verification skipped: %v",
@@ -1970,6 +2274,48 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	}
 
 	violations := surface.Compare(before, after)
+	allowAdditive, err := r.workflowAllowsAdditiveProtectedWrites(vessel, violations)
+	if err != nil {
+		return fmt.Errorf("resolve protected surface policy: %w", err)
+	}
+	violations = filterAdditiveProtectedSurfaceViolations(violations, allowAdditive)
+
+	// Source-root alignment filter: drop modification violations where the
+	// after-hash matches the canonical source root's current hash for that
+	// path. This handles the resolve-conflicts cascade where the phase runs
+	// `git merge origin/main --no-commit` on a PR branch that predates the
+	// .xylem/ control-plane tracking commit (#157). The merge brings the PR
+	// branch's view of .xylem/ files INTO ALIGNMENT with main's canonical
+	// state — exactly the outcome the control plane wants. Flagging this as
+	// a violation blocks PR #143, PR #164, and any other PR cut from a
+	// pre-#157 commit that needs a conflict resolution merge.
+	//
+	// Rationale: the protected-surface policy exists to prevent vessels
+	// from DIVERGING the control plane from its canonical state. A
+	// modification that CONVERGES to the canonical state is the opposite —
+	// it's the intended normalization. We suppress it and log for audit.
+	//
+	// This does NOT mask legitimate violations where the agent modifies a
+	// file to some other content (neither the branch's original hash nor
+	// the canonical source root's hash): those still raise violations.
+	//
+	// GUARD: we only apply the filter when the source root is DIFFERENT
+	// from the worktree path. If they're the same (as in tests where
+	// `git rev-parse --git-common-dir` fails and the helper falls back to
+	// returning worktreePath), the source snapshot would be the same as
+	// the after snapshot — every modification would "align" and every
+	// violation would be suppressed. The existing SuppressesTransient /
+	// StillCatchesMutation tests would break. Requiring a distinct source
+	// root ensures we only suppress real merge-alignment cases.
+	//
+	// Source snapshot uses context.Background() because the vessel's ctx
+	// may be cancelling; the snapshot is a fast read-only filesystem walk.
+	if sourceRoot, srcErr := r.protectedSurfaceSourceRoot(context.Background(), worktreePath); srcErr == nil && sourceRoot != worktreePath {
+		if sourceSnapshot, sErr := surface.TakeSnapshot(sourceRoot, patterns); sErr == nil {
+			violations = filterViolationsAlignedWithSourceRoot(vessel, p, violations, sourceSnapshot)
+		}
+	}
+
 	if len(violations) == 0 {
 		return nil
 	}
@@ -1978,7 +2324,336 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	if err := r.recordProtectedSurfaceViolations(vessel, p, errMsg, violations); err != nil {
 		return fmt.Errorf("%s (record audit evidence: %w)", errMsg, err)
 	}
+	if err := r.restoreDeletedProtectedSurfaces(context.Background(), worktreePath, violations); err != nil {
+		log.Printf("%sphase %q protected surface self-heal failed: %v", vesselLabel(vessel), p.Name, err)
+	}
 	return fmt.Errorf("%s", errMsg)
+}
+
+func (r *Runner) workflowAllowsAdditiveProtectedWrites(vessel queue.Vessel, violations []surface.Violation) (bool, error) {
+	if !containsAdditiveProtectedSurfaceViolation(violations) {
+		return false, nil
+	}
+	if strings.TrimSpace(vessel.Workflow) == "" {
+		return false, nil
+	}
+
+	sk, err := r.loadWorkflow(vessel.Workflow)
+	if err != nil {
+		return false, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
+	}
+	return sk.AllowAdditiveProtectedWrites, nil
+}
+
+func containsAdditiveProtectedSurfaceViolation(violations []surface.Violation) bool {
+	for _, violation := range violations {
+		if violation.Before == "absent" {
+			return true
+		}
+	}
+	return false
+}
+
+func filterAdditiveProtectedSurfaceViolations(violations []surface.Violation, allowAdditive bool) []surface.Violation {
+	if !allowAdditive || len(violations) == 0 {
+		return violations
+	}
+
+	filtered := make([]surface.Violation, 0, len(violations))
+	for _, violation := range violations {
+		if violation.Before == "absent" {
+			continue
+		}
+		filtered = append(filtered, violation)
+	}
+	return filtered
+}
+
+// filterViolationsAlignedWithSourceRoot drops modification violations whose
+// after-hash exactly matches the canonical source root's current hash for
+// that path. See the extended comment at the call site in verifyProtectedSurfaces
+// for rationale.
+//
+// A violation is suppressed if ALL of:
+//   - it has a real before-hash (not "absent" — those are additions, handled
+//     separately by filterAdditiveProtectedSurfaceViolations)
+//   - it has a real after-hash (not "deleted" — those are handled by the
+//     post-phase self-heal and pre-verify restore code paths)
+//   - the path exists in the source snapshot
+//   - the after-hash exactly equals the source snapshot's hash for that path
+//
+// All other violations pass through unchanged, preserving detection of
+// rogue modifications and any deletion/addition patterns that weren't
+// already covered upstream.
+func filterViolationsAlignedWithSourceRoot(vessel queue.Vessel, p workflow.Phase, violations []surface.Violation, sourceSnapshot surface.Snapshot) []surface.Violation {
+	if len(violations) == 0 {
+		return violations
+	}
+	sourceHashByPath := make(map[string]string, len(sourceSnapshot.Files))
+	for _, f := range sourceSnapshot.Files {
+		sourceHashByPath[f.Path] = f.Hash
+	}
+	filtered := make([]surface.Violation, 0, len(violations))
+	for _, v := range violations {
+		if v.Before == "absent" || v.After == "deleted" {
+			// Not a modification — pass through (additions and deletions
+			// are handled by other filters / self-heal paths).
+			filtered = append(filtered, v)
+			continue
+		}
+		sourceHash, ok := sourceHashByPath[v.Path]
+		if !ok {
+			// Path not tracked in source root — can't determine alignment,
+			// preserve as violation to be safe.
+			filtered = append(filtered, v)
+			continue
+		}
+		if v.After == sourceHash {
+			// Modification brings file INTO ALIGNMENT with canonical source.
+			// Suppress and log for audit visibility.
+			log.Printf("%sphase %q: suppressing alignment violation on %s (after-hash matches source root)",
+				vesselLabel(vessel), p.Name, v.Path)
+			continue
+		}
+		filtered = append(filtered, v)
+	}
+	return filtered
+}
+
+func (r *Runner) protectedSurfaceSourceRoot(ctx context.Context, worktreePath string) (string, error) {
+	out, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err != nil {
+		return worktreePath, nil
+	}
+
+	commonDir := strings.TrimSpace(string(out))
+	if commonDir == "" {
+		return worktreePath, nil
+	}
+	if filepath.Base(commonDir) == ".git" {
+		return filepath.Dir(commonDir), nil
+	}
+	return worktreePath, nil
+}
+
+func restoreMissingProtectedSurfacesFromRoot(worktreePath, sourceRoot string, patterns []string) (int, error) {
+	if len(patterns) == 0 {
+		return 0, nil
+	}
+
+	sourceSnapshot, err := surface.TakeSnapshot(sourceRoot, patterns)
+	if err != nil {
+		return 0, fmt.Errorf("take source protected surface snapshot: %w", err)
+	}
+	worktreeSnapshot, err := surface.TakeSnapshot(worktreePath, patterns)
+	if err != nil {
+		return 0, fmt.Errorf("take worktree protected surface snapshot: %w", err)
+	}
+
+	restored := 0
+	for _, violation := range surface.Compare(sourceSnapshot, worktreeSnapshot) {
+		if violation.After != "deleted" {
+			continue
+		}
+		if err := copyProtectedSurfaceFile(sourceRoot, worktreePath, violation.Path); err != nil {
+			return restored, fmt.Errorf("restore %s from source root: %w", violation.Path, err)
+		}
+		restored++
+	}
+
+	return restored, nil
+}
+
+func copyProtectedSurfaceFile(sourceRoot, worktreePath, relPath string) error {
+	srcPath := filepath.Join(sourceRoot, filepath.FromSlash(relPath))
+	dstPath := filepath.Join(worktreePath, filepath.FromSlash(relPath))
+
+	info, err := os.Stat(srcPath)
+	if err != nil {
+		return fmt.Errorf("stat source file: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dstPath), 0o755); err != nil {
+		return fmt.Errorf("mkdir parent dir: %w", err)
+	}
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return fmt.Errorf("read source file: %w", err)
+	}
+	// Idempotency: a prior call may have left the destination chmod'd
+	// 0o444 (read-only). Make it writable before os.WriteFile so repeated
+	// restores across multiple pre-verify cycles succeed.
+	if dstInfo, statErr := os.Stat(dstPath); statErr == nil && dstInfo.Mode().Perm()&0o200 == 0 {
+		if chmodErr := os.Chmod(dstPath, 0o644); chmodErr != nil {
+			return fmt.Errorf("chmod writable for rewrite: %w", chmodErr)
+		}
+	}
+	if err := os.WriteFile(dstPath, data, info.Mode()); err != nil {
+		return fmt.Errorf("write restored file: %w", err)
+	}
+	if err := os.Chmod(dstPath, 0o444); err != nil {
+		return fmt.Errorf("mark restored file read-only: %w", err)
+	}
+	// Add the restored path to the worktree's .git/info/exclude so that
+	// subsequent `git add -A` (e.g., in resolve-conflicts's push phase) does
+	// NOT stage the restored file into the PR commit. This only affects
+	// untracked files; a file that's already tracked on the PR branch is
+	// unaffected by exclude entries.
+	//
+	// Fail-soft: exclude is a best-effort pollution guard, not a safety
+	// invariant. If it fails (e.g., .git dir missing in a test or some
+	// corner case), the file restore still succeeds — worst case a later
+	// `git add -A` stages the restored file into a PR commit, which is no
+	// worse than the pre-fix behavior of failing the vessel outright.
+	if err := addWorktreeExcludeEntry(worktreePath, relPath); err != nil {
+		log.Printf("warn: copyProtectedSurfaceFile: add exclude entry for %s: %v", relPath, err)
+	}
+	return nil
+}
+
+// addWorktreeExcludeEntry appends a path to the worktree's .git/info/exclude
+// file if not already present. For linked worktrees (the xylem vessel case),
+// $GIT_DIR points to .git/worktrees/<name>, and info/exclude there is
+// per-worktree — it does NOT affect sibling worktrees.
+//
+// Idempotent: a second call with the same relPath no-ops because the exact
+// line is already present.
+func addWorktreeExcludeEntry(worktreePath, relPath string) error {
+	gitdir, err := resolveWorktreeGitdir(worktreePath)
+	if err != nil {
+		return fmt.Errorf("resolve gitdir: %w", err)
+	}
+	excludePath := filepath.Join(gitdir, "info", "exclude")
+	if err := os.MkdirAll(filepath.Dir(excludePath), 0o755); err != nil {
+		return fmt.Errorf("mkdir info: %w", err)
+	}
+
+	// Use a leading slash so the pattern anchors at the worktree root,
+	// matching exactly this file (not any subdirectory with the same name).
+	line := "/" + relPath
+
+	existing, err := os.ReadFile(excludePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read exclude: %w", err)
+	}
+	for _, e := range strings.Split(string(existing), "\n") {
+		if strings.TrimSpace(e) == line {
+			return nil
+		}
+	}
+
+	f, err := os.OpenFile(excludePath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open exclude: %w", err)
+	}
+	defer f.Close()
+
+	prefix := ""
+	if len(existing) > 0 && !strings.HasSuffix(string(existing), "\n") {
+		prefix = "\n"
+	}
+	if _, err := f.WriteString(prefix + line + "\n"); err != nil {
+		return fmt.Errorf("write exclude: %w", err)
+	}
+	return nil
+}
+
+// resolveWorktreeGitdir returns the $GIT_DIR for a worktree. For the main
+// repo, .git is a directory and that IS the gitdir. For linked worktrees,
+// .git is a file containing "gitdir: <absolute-or-relative-path>".
+func resolveWorktreeGitdir(worktreePath string) (string, error) {
+	gitPath := filepath.Join(worktreePath, ".git")
+	info, err := os.Stat(gitPath)
+	if err != nil {
+		return "", err
+	}
+	if info.IsDir() {
+		return gitPath, nil
+	}
+	data, err := os.ReadFile(gitPath)
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(string(data))
+	const prefix = "gitdir:"
+	if !strings.HasPrefix(line, prefix) {
+		return "", fmt.Errorf("unexpected .git file content: %q", line)
+	}
+	gitdir := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	if !filepath.IsAbs(gitdir) {
+		gitdir = filepath.Join(worktreePath, gitdir)
+	}
+	return gitdir, nil
+}
+
+func (r *Runner) restoreDeletedProtectedSurfaces(ctx context.Context, worktreePath string, violations []surface.Violation) error {
+	var errs []error
+	defaultBranch := ""
+
+	for _, violation := range violations {
+		if violation.After != "deleted" {
+			continue
+		}
+		if err := r.restoreProtectedSurfacePath(ctx, worktreePath, violation.Path, &defaultBranch); err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", violation.Path, err))
+		}
+	}
+
+	return errors.Join(errs...)
+}
+
+func (r *Runner) restoreProtectedSurfacePath(ctx context.Context, worktreePath, relPath string, defaultBranch *string) error {
+	if _, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "checkout", "--", relPath); err == nil {
+		return markProtectedSurfaceReadOnly(worktreePath, relPath)
+	}
+
+	if defaultBranch != nil && *defaultBranch == "" {
+		branch, err := r.detectDefaultBranchAtPath(ctx, worktreePath)
+		if err != nil {
+			return fmt.Errorf("detect default branch: %w", err)
+		}
+		*defaultBranch = branch
+	}
+
+	if defaultBranch == nil || *defaultBranch == "" {
+		return fmt.Errorf("default branch unavailable for restore")
+	}
+
+	if _, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "checkout", "origin/"+*defaultBranch, "--", relPath); err != nil {
+		return fmt.Errorf("checkout origin/%s -- %s: %w", *defaultBranch, relPath, err)
+	}
+	return markProtectedSurfaceReadOnly(worktreePath, relPath)
+}
+
+func markProtectedSurfaceReadOnly(worktreePath, relPath string) error {
+	if err := os.Chmod(filepath.Join(worktreePath, filepath.FromSlash(relPath)), 0o444); err != nil {
+		return fmt.Errorf("chmod restored file: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) detectDefaultBranchAtPath(ctx context.Context, worktreePath string) (string, error) {
+	out, err := r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "symbolic-ref", "refs/remotes/origin/HEAD")
+	if err == nil {
+		ref := strings.TrimSpace(string(out))
+		if branch := strings.TrimPrefix(ref, "refs/remotes/origin/"); branch != ref && branch != "" {
+			return branch, nil
+		}
+	}
+
+	out, err = r.Runner.RunOutput(ctx, "git", "-C", worktreePath, "remote", "show", "origin")
+	if err != nil {
+		return "", fmt.Errorf("git remote show origin: %w", err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "HEAD branch:") {
+			branch := strings.TrimSpace(strings.TrimPrefix(line, "HEAD branch:"))
+			if branch != "" {
+				return branch, nil
+			}
+		}
+	}
+	return "", fmt.Errorf("could not detect default branch from origin")
 }
 
 func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, errMsg string, violations []surface.Violation) error {
@@ -2180,13 +2855,7 @@ func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 }
 
 func (r *Runner) resolveRepo(vessel queue.Vessel) string {
-	if r.Sources == nil {
-		return ""
-	}
-	src, ok := r.Sources[vessel.Source]
-	if !ok {
-		return ""
-	}
+	src := r.resolveSource(vessel)
 	switch s := src.(type) {
 	case *source.GitHub:
 		return s.Repo

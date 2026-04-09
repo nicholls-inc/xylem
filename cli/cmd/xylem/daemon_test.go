@@ -9,6 +9,7 @@ import (
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,6 +183,37 @@ func noopDrain(_ context.Context) (runner.DrainResult, error) {
 	return runner.DrainResult{}, nil
 }
 
+type trackerStub struct {
+	wg       sync.WaitGroup
+	inFlight atomic.Int32
+	maxSeen  atomic.Int32
+}
+
+func (t *trackerStub) Wait() runner.DrainResult {
+	t.wg.Wait()
+	return runner.DrainResult{}
+}
+
+func (t *trackerStub) InFlightCount() int {
+	return int(t.inFlight.Load())
+}
+
+func (t *trackerStub) Start(duration time.Duration) {
+	cur := t.inFlight.Add(1)
+	for {
+		old := t.maxSeen.Load()
+		if cur <= old || t.maxSeen.CompareAndSwap(old, cur) {
+			break
+		}
+	}
+	t.wg.Add(1)
+	go func() {
+		defer t.wg.Done()
+		time.Sleep(duration)
+		t.inFlight.Add(-1)
+	}()
+}
+
 func TestDaemonShutdown(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
@@ -189,13 +221,68 @@ func TestDaemonShutdown(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 
-	err := daemonLoop(ctx, q, noopScan, noopDrain, nil, time.Hour, time.Hour)
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, time.Hour, time.Hour, 0)
 	if err != nil {
 		t.Fatalf("expected nil error on shutdown, got: %v", err)
 	}
 }
 
-func TestSmoke_S31_TracerWiredInDaemonGoRunDrain(t *testing.T) {
+func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    filepath.Join(dir, ".xylem"),
+		Claude:      config.ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]config.SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "1h",
+				Workflow: "doctor",
+			},
+		},
+	}
+	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", cfg.StateDir, err)
+	}
+	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	drain := func(ctx context.Context) (runner.DrainResult, error) {
+		vessel, err := q.Dequeue()
+		if err != nil {
+			return runner.DrainResult{}, err
+		}
+		if vessel == nil {
+			return runner.DrainResult{}, nil
+		}
+		if err := q.Update(vessel.ID, queue.StateCompleted, ""); err != nil {
+			return runner.DrainResult{}, err
+		}
+		cancel()
+		return runner.DrainResult{Launched: 1, Completed: 1}, nil
+	}
+
+	err := daemonLoop(ctx, q, nil, func(ctx context.Context) (scanner.ScanResult, error) {
+		return runScan(ctx, cfg, q)
+	}, drain, nil, nil, time.Millisecond, time.Millisecond, 0)
+	require.NoError(t, err)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "schedule", vessels[0].Source)
+	assert.Equal(t, queue.StateCompleted, vessels[0].State)
+	assert.Equal(t, "doctor", vessels[0].Workflow)
+	assert.Equal(t, "1h", vessels[0].Meta["schedule.cadence"])
+	assert.Equal(t, "doctor", vessels[0].Meta["schedule.source_name"])
+	assert.NotEmpty(t, vessels[0].Meta["schedule.fired_at"])
+}
+
+func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
 	cfg.Observability.Endpoint = "localhost:4317"
@@ -209,11 +296,11 @@ func TestSmoke_S31_TracerWiredInDaemonGoRunDrain(t *testing.T) {
 		return tracer, nil
 	})
 
-	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
+	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
 	require.NoError(t, err)
 	assert.Equal(t, runner.DrainResult{}, result)
 
-	secondResult, secondErr := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
+	secondResult, secondErr := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
 	require.NoError(t, secondErr)
 	assert.Equal(t, runner.DrainResult{}, secondResult)
 
@@ -221,6 +308,300 @@ func TestSmoke_S31_TracerWiredInDaemonGoRunDrain(t *testing.T) {
 	for _, exporter := range exporters {
 		requireSpanNamed(t, exporter.snapshots(), "drain_run")
 		assert.Equal(t, 1, exporter.shutdownCount())
+	}
+}
+
+func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeDrainConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var exporter *recordingSpanExporter
+	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, spanExporter := newRecordingTracer()
+		exporter = spanExporter
+		return tracer, nil
+	})
+
+	_, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
+	require.NoError(t, err)
+	require.NotNil(t, exporter)
+	assert.Equal(t, 1, exporter.shutdownCount())
+}
+
+func TestDaemonLoopPeriodicUpgradeFiresAtDrainEnd(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var upgradeCalls atomic.Int32
+	upgrade := func() { upgradeCalls.Add(1) }
+
+	// drainInterval=2ms so drains fire rapidly; upgradeInterval=1ms so every
+	// drain end should trigger an upgrade. Over 200ms we expect at least 5
+	// upgrade calls, proving the drain-end check fires on every cycle.
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+
+	if got := upgradeCalls.Load(); got < 5 {
+		t.Errorf("upgrade called %d times, want at least 5", got)
+	}
+}
+
+func TestDaemonLoopPeriodicUpgradeRespectsInterval(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var upgradeCalls atomic.Int32
+	upgrade := func() { upgradeCalls.Add(1) }
+
+	// drainInterval=2ms → drains fire rapidly (~50 drains in 100ms), but
+	// upgradeInterval=10s → upgrade fires at most ONCE in that window.
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, upgrade, time.Hour, 2*time.Millisecond, 10*time.Second)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+
+	// With lastUpgrade initialised to daemonNow() at startup and a 10s
+	// interval, no upgrade should fire within 100ms.
+	if got := upgradeCalls.Load(); got != 0 {
+		t.Errorf("upgrade called %d times, want 0 (interval not elapsed)", got)
+	}
+}
+
+func TestDaemonLoopPeriodicUpgradeNilDisables(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// Passing nil upgrade should not panic even with a non-zero interval.
+	err := daemonLoop(ctx, q, nil, noopScan, noopDrain, nil, nil, time.Hour, 2*time.Millisecond, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+}
+
+// TestDaemonLoopUpgradeWaitsForDrainCompletion verifies the upgrade callback
+// only fires AFTER the drain function returns — i.e., in a guaranteed idle
+// window where no vessel subprocesses are alive.
+func TestDaemonLoopUpgradeWaitsForDrainCompletion(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	var (
+		drainActive atomic.Int32
+		drainSeen   atomic.Int32
+		upgradeSaw  atomic.Int32
+	)
+	slowDrain := func(_ context.Context) (runner.DrainResult, error) {
+		drainActive.Store(1)
+		drainSeen.Add(1)
+		defer drainActive.Store(0)
+		// Hold drain long enough for the tick loop to observe it.
+		time.Sleep(20 * time.Millisecond)
+		return runner.DrainResult{}, nil
+	}
+	upgrade := func() {
+		// If the drain goroutine were still running when upgrade fires,
+		// drainActive would be 1. Option A guarantees it's 0 (drain has
+		// returned, but the defer clearing `draining` hasn't run yet).
+		if drainActive.Load() != 0 {
+			t.Errorf("upgrade fired while drain active")
+		}
+		upgradeSaw.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, upgrade, time.Hour, time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("daemonLoop() error = %v", err)
+	}
+
+	if drainSeen.Load() < 2 {
+		t.Errorf("expected at least 2 drain invocations, got %d", drainSeen.Load())
+	}
+	if upgradeSaw.Load() < 2 {
+		t.Errorf("expected at least 2 upgrade invocations, got %d", upgradeSaw.Load())
+	}
+}
+
+func TestSmoke_S35_DaemonLoopAllowsNewDrainTicksWhileVesselsRemainInFlight(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var drainCalls atomic.Int32
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		drainCalls.Add(1)
+		tracker.Start(80 * time.Millisecond)
+		return runner.DrainResult{Launched: 1}, nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, nil, time.Hour, 10*time.Millisecond, 0)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, drainCalls.Load(), int32(2))
+	assert.GreaterOrEqual(t, tracker.maxSeen.Load(), int32(2))
+}
+
+func TestSmoke_S36_DaemonLoopUpgradeWaitsForTrackerIdle(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var (
+		launchedAt  atomic.Int64
+		upgradedAt  atomic.Int64
+		drainCalls  atomic.Int32
+		upgradeSeen atomic.Int32
+	)
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		if drainCalls.Add(1) == 1 {
+			launchedAt.Store(time.Now().UnixNano())
+			tracker.Start(60 * time.Millisecond)
+			return runner.DrainResult{Launched: 1}, nil
+		}
+		return runner.DrainResult{}, nil
+	}
+	upgrade := func() {
+		upgradedAt.Store(time.Now().UnixNano())
+		upgradeSeen.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 10*time.Millisecond, time.Millisecond)
+	require.NoError(t, err)
+
+	assert.NotZero(t, upgradeSeen.Load())
+	launchTime := time.Unix(0, launchedAt.Load())
+	upgradeTime := time.Unix(0, upgradedAt.Load())
+	assert.GreaterOrEqual(t, upgradeTime.Sub(launchTime), 60*time.Millisecond)
+}
+
+// TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow verifies the
+// overdue path: when upgrade has been pending for upgradeInterval*3 without
+// firing (because in-flight vessels kept in_flight > 0 continuously), new
+// drain ticks are paused so in-flight vessels can drain naturally. Once
+// in_flight reaches zero, the normal upgrade path fires.
+//
+// This is the regression test for the loop 8 diagnosis: scheduled sources
+// that continuously fill concurrency slots previously locked the daemon on
+// its current binary forever because the normal upgrade path required
+// in_flight == 0, which the scheduled source prevented.
+func TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var (
+		drainCalls  atomic.Int32
+		upgradeSeen atomic.Int32
+	)
+
+	// Saturating drain: every drain call starts a "long" in-flight vessel
+	// (relative to upgradeInterval) and returns Launched=1. Without the
+	// overdue pause, this would keep in_flight > 0 indefinitely and the
+	// normal upgrade path would never fire.
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		drainCalls.Add(1)
+		// Each vessel lasts ~50ms. Drain interval is 5ms, so without pause
+		// the tracker stays above zero for the entire test window.
+		tracker.Start(50 * time.Millisecond)
+		return runner.DrainResult{Launched: 1}, nil
+	}
+
+	upgrade := func() {
+		upgradeSeen.Add(1)
+	}
+
+	// upgradeInterval=5ms → overdue threshold = 15ms. Drain interval=5ms so
+	// drain is triggered frequently. The tracker starts a 50ms vessel on
+	// each drain call, but once upgrade is overdue (>15ms elapsed), drain
+	// should be paused — no new tracker.Start calls — allowing the existing
+	// in-flight vessels to complete, which then lets upgrade fire.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 5*time.Millisecond, 5*time.Millisecond)
+	require.NoError(t, err)
+
+	// Upgrade MUST have fired at least once despite the continuously saturating drain.
+	// Previously this would have been 0 because in_flight never reached 0 naturally.
+	assert.GreaterOrEqual(t, upgradeSeen.Load(), int32(1),
+		"upgrade must fire via overdue-pause path even when drain is saturating")
+	// Drain must have been invoked multiple times before the pause kicked in.
+	assert.GreaterOrEqual(t, drainCalls.Load(), int32(1),
+		"drain must have been called at least once")
+}
+
+// TestDaemonLoopUpgradeOverdueDoesNotFireUnderNormalConditions verifies that
+// the overdue path does NOT trigger under normal conditions where upgrade
+// fires naturally on the idle path.
+func TestDaemonLoopUpgradeOverdueDoesNotFireUnderNormalConditions(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	tracker := &trackerStub{}
+
+	var (
+		upgradeSeen atomic.Int32
+	)
+
+	// Idle drain: no vessels ever started, so in_flight stays at 0 and
+	// the normal upgrade path fires on every cycle.
+	drain := func(_ context.Context) (runner.DrainResult, error) {
+		return runner.DrainResult{}, nil
+	}
+	upgrade := func() {
+		upgradeSeen.Add(1)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	// upgradeInterval=2ms; over 100ms, normal path should fire many times.
+	err := daemonLoop(ctx, q, tracker, noopScan, drain, nil, upgrade, time.Hour, 2*time.Millisecond, 2*time.Millisecond)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, upgradeSeen.Load(), int32(5),
+		"normal-path upgrade should fire multiple times under idle conditions")
+}
+
+func TestParseUpgradeInterval(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  time.Duration
+	}{
+		{"empty uses default", "", defaultUpgradeInterval},
+		{"valid 10m", "10m", 10 * time.Minute},
+		{"valid 30s", "30s", 30 * time.Second},
+		{"invalid falls back to default", "not-a-duration", defaultUpgradeInterval},
+		{"zero falls back to default", "0s", defaultUpgradeInterval},
+		{"negative falls back to default", "-5m", defaultUpgradeInterval},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := parseUpgradeInterval(config.DaemonConfig{UpgradeInterval: tt.input})
+			if got != tt.want {
+				t.Errorf("parseUpgradeInterval(%q) = %s, want %s", tt.input, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -280,7 +661,7 @@ func TestDaemonNonBlockingDrain(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	err := daemonLoop(ctx, q, noopScan, slowDrain, nil, time.Hour, time.Millisecond)
+	err := daemonLoop(ctx, q, nil, noopScan, slowDrain, nil, nil, time.Hour, time.Millisecond, 0)
 	elapsed := time.Since(start)
 
 	if err != nil {
@@ -305,10 +686,23 @@ func TestLogTickSummary(t *testing.T) {
 	now := time.Now().UTC()
 
 	q.Enqueue(queue.Vessel{ID: "v1", Source: "manual", State: queue.StatePending, CreatedAt: now})   //nolint:errcheck
-	q.Enqueue(queue.Vessel{ID: "v2", Source: "manual", State: queue.StateCompleted, CreatedAt: now}) //nolint:errcheck
+	q.Enqueue(queue.Vessel{ID: "v2", Source: "manual", State: queue.StateRunning, CreatedAt: now})   //nolint:errcheck
+	q.Enqueue(queue.Vessel{ID: "v3", Source: "manual", State: queue.StateCompleted, CreatedAt: now}) //nolint:errcheck
+	q.Enqueue(queue.Vessel{ID: "v4", Source: "manual", State: queue.StateFailed, CreatedAt: now})    //nolint:errcheck
 
-	// logTickSummary should not panic on any queue state
+	logBuf := withBufferedDefaultLogger(t)
+
 	logTickSummary(q)
+
+	got := logBuf.String()
+	if !strings.Contains(got, "msg=\"daemon tick summary\"") {
+		t.Fatalf("logTickSummary() log = %q, want daemon tick summary prefix", got)
+	}
+	for _, want := range []string{"pending=1", "running=1", "completed=1", "failed=1"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("logTickSummary() log = %q, want substring %q", got, want)
+		}
+	}
 }
 
 // TestWS1S28DaemonPathWiresScaffolding verifies that the daemon drain path

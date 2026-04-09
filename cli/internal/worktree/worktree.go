@@ -159,6 +159,21 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 		}
 	}
 
+	// Also check if the BRANCH is already checked out at a different path.
+	// This happens when a prior vessel's worktree was registered under a
+	// different path (e.g., main-repo vs daemon-root) or when two concurrent
+	// vessels target the same branch. Without this guard, `git worktree add
+	// -B` fails with exit 128: "branch '<x>' is already used by worktree at
+	// '<other path>'".
+	if existingPath := m.pathForBranch(ctx, branchName); existingPath != "" {
+		if _, removeErr := m.Runner.Run(ctx, "git", "worktree", "remove", existingPath, "--force"); removeErr != nil {
+			// Prune may succeed even when remove fails (e.g., path already deleted).
+			if _, pruneErr := m.Runner.Run(ctx, "git", "worktree", "prune"); pruneErr != nil {
+				return "", fmt.Errorf("remove cross-path worktree %s for branch %s: %w", existingPath, branchName, removeErr)
+			}
+		}
+	}
+
 	if _, err := retryGitCmd(ctx, m.Runner, 3, "worktree", "add", worktreePath, "-B", branchName, startPoint); err != nil {
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
@@ -349,6 +364,22 @@ func (m *Manager) branchForWorktree(ctx context.Context, worktreePath string) st
 		candidate := filepath.Clean(wt.Path)
 		if candidate == absTarget {
 			return wt.Branch
+		}
+	}
+	return ""
+}
+
+// pathForBranch returns the path of the worktree currently holding the given
+// branch, or empty string if no worktree holds it. Used to detect and clean
+// up cross-path branch collisions before `git worktree add -B` would fail.
+func (m *Manager) pathForBranch(ctx context.Context, branchName string) string {
+	out, err := m.Runner.Run(ctx, "git", "worktree", "list", "--porcelain")
+	if err != nil {
+		return ""
+	}
+	for _, wt := range parsePorcelain(string(out)) {
+		if wt.Branch == branchName {
+			return wt.Path
 		}
 	}
 	return ""

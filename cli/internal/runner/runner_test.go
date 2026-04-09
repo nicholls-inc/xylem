@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -17,6 +19,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
@@ -249,6 +253,20 @@ func makeTestConfig(dir string, concurrency int) *config.Config {
 		Claude: config.ClaudeConfig{
 			Command: "claude",
 		},
+		// Explicit protected surfaces because the package default is now
+		// empty (to support xylem's self-improving use case — see PR
+		// loop11/#194). Tests in this package exercise the verifier and
+		// rely on non-empty protection patterns to trigger violations.
+		Harness: config.HarnessConfig{
+			ProtectedSurfaces: config.ProtectedSurfacesConfig{
+				Paths: []string{
+					".xylem/HARNESS.md",
+					".xylem.yml",
+					".xylem/workflows/*.yaml",
+					".xylem/prompts/*/*.md",
+				},
+			},
+		},
 		Sources: map[string]config.SourceConfig{
 			"github": {
 				Type:    "github",
@@ -470,17 +488,22 @@ func spanAttrMap(span sdktrace.ReadOnlySpan) map[string]string {
 }
 
 func spanHasExceptionEvent(span sdktrace.ReadOnlySpan, message string) bool {
+	_, ok := spanExceptionEvent(span, message)
+	return ok
+}
+
+func spanExceptionEvent(span sdktrace.ReadOnlySpan, message string) (sdktrace.Event, bool) {
 	for _, event := range span.Events() {
 		if event.Name != "exception" {
 			continue
 		}
 		for _, attr := range event.Attributes {
 			if attr.Key == attribute.Key("exception.message") && attr.Value.AsString() == message {
-				return true
+				return event, true
 			}
 		}
 	}
-	return false
+	return sdktrace.Event{}, false
 }
 
 func newWorkflowRunner(t *testing.T, workflowName string, phases []testPhase, cmdRunner *mockCmdRunner, tracer *observability.Tracer) *Runner {
@@ -612,7 +635,7 @@ func TestDrainTracingSurfacesVesselHealthAndPatterns(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -716,12 +739,12 @@ func TestPhaseActionType(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "prompt phase",
+			name:  "S25 prompt phase",
 			phase: &workflow.Phase{Name: "plan"},
 			want:  "phase_execute",
 		},
 		{
-			name:  "command phase",
+			name:  "S24 command phase",
 			phase: &workflow.Phase{Name: "lint", Type: "command"},
 			want:  "external_command",
 		},
@@ -804,6 +827,27 @@ func TestPhasePolicyIntents_IgnoresHighRiskPhrasesFromRenderedPromptContext(t *t
 	assert.Equal(t, "analyze", intents[0].Resource)
 }
 
+func TestPhasePolicyIntents_DoesNotClassifyDestructiveGitOrDeploySeparately(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "publish", Type: "command"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, "git reset --hard HEAD~1 && git push --force origin main && ./deploy.sh production", "")
+	require.Len(t, intents, 2)
+
+	assert.Equal(t, "external_command", intents[0].Action)
+	assert.Equal(t, "publish", intents[0].Resource)
+	assert.Equal(t, "git_push", intents[1].Action)
+	assert.Equal(t, "main", intents[1].Resource)
+}
+
 func TestSmoke_S1_PolicyDenialShortCircuitsBeforeSurfaceSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
@@ -826,7 +870,7 @@ func TestSmoke_S1_PolicyDenialShortCircuitsBeforeSurfaceSnapshot(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, nil, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -857,7 +901,7 @@ func TestSmoke_S2_SurfacePreSnapshotFailureShortCircuitsBeforePhaseExecution(t *
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -901,7 +945,7 @@ func TestSmoke_S3_PhaseExecutionFailureShortCircuitsBeforeSurfacePostVerificatio
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -945,7 +989,7 @@ func TestSmoke_S4_SurfaceViolationShortCircuitsBeforeBudgetCheck(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -978,7 +1022,7 @@ func TestSmoke_S17_RunnerWithNilIntermediarySkipsPolicyCheck(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1009,7 +1053,7 @@ func TestSmoke_S18_RunnerPolicyDeniesPhase(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, nil, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1041,7 +1085,7 @@ func TestSmoke_S19_RunnerPolicyRequireApproval(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.RequireApproval}},
 	}}, nil, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1084,7 +1128,7 @@ func TestSmoke_S20_SurfacePreSnapshotIsTakenBeforePhaseExecution(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.True(t, sawOriginal.Load())
@@ -1120,7 +1164,7 @@ func TestSmoke_S21_SurfacePostVerificationDetectsMutation(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1155,7 +1199,7 @@ func TestSmoke_S22_AuditLogRecordsPolicyDecisions(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1198,7 +1242,7 @@ func TestSmoke_S23_AuditLogRecordsSurfaceViolations(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1213,14 +1257,6 @@ func TestSmoke_S23_AuditLogRecordsSurfaceViolations(t *testing.T) {
 		}
 	}
 	assert.True(t, found)
-}
-
-func TestSmoke_S24_PhaseActionTypeReturnsExternalCommandForCommandPhases(t *testing.T) {
-	assert.Equal(t, "external_command", phaseActionType(&workflow.Phase{Type: "command"}))
-}
-
-func TestSmoke_S25_PhaseActionTypeReturnsPhaseExecuteForPromptPhases(t *testing.T) {
-	assert.Equal(t, "phase_execute", phaseActionType(&workflow.Phase{}))
 }
 
 func TestSmoke_S26_FormatViolationsProducesHumanReadableOutput(t *testing.T) {
@@ -1260,7 +1296,7 @@ func TestDrainSingleVessel(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1326,7 +1362,7 @@ func TestWS6S29NilHarnessFieldsRunsNormally(t *testing.T) {
 		t.Fatalf("r.Tracer = %#v, want nil", r.Tracer)
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -1344,6 +1380,262 @@ func TestWS6S29NilHarnessFieldsRunsNormally(t *testing.T) {
 	if vessels[0].State != queue.StateCompleted {
 		t.Errorf("vessel state = %q, want %q", vessels[0].State, queue.StateCompleted)
 	}
+}
+
+// TestDrainBudgetStopsDequeueingAfterDeadline verifies that a non-zero
+// Runner.DrainBudget bounds how long Drain() continues dequeueing new
+// vessels. Under sustained load the budget elapses, Drain() stops
+// dequeueing, waits for already-started goroutines, and returns. The
+// remaining pending vessels are left for the next drain tick.
+//
+// This is the primary regression guard for the auto-upgrade deadlock:
+// without a bounded Drain(), the daemon's drain-end periodic upgrade
+// check at cli/cmd/xylem/daemon.go:248-254 cannot fire during sustained
+// saturation.
+func TestDrainBudgetStopsDequeueingAfterDeadline(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1) // concurrency=1 for deterministic timing
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	// Enqueue 10 vessels; each runs one "fix" phase that sleeps for
+	// 60ms via the countingCmdRunner delay. With concurrency=1, each
+	// vessel takes ~60ms to process. Budget=150ms allows ~2 vessels to
+	// complete before the dequeue loop stops.
+	for i := 1; i <= 10; i++ {
+		if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 60 * time.Millisecond}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.DrainBudget = 150 * time.Millisecond
+
+	start := time.Now()
+	result, err := r.DrainAndWait(context.Background())
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+
+	// Drain() must return in roughly (budget + one vessel cycle), well
+	// under the time it would take to process all 10 vessels (>600ms).
+	if elapsed > 400*time.Millisecond {
+		t.Errorf("Drain() took %s, expected under 400ms (budget=150ms + in-flight)", elapsed)
+	}
+	if result.Completed >= 10 {
+		t.Errorf("Drain() completed %d vessels, expected partial drain (fewer than 10)", result.Completed)
+	}
+	if result.Completed < 1 {
+		t.Errorf("Drain() completed %d vessels, expected at least 1", result.Completed)
+	}
+
+	// Remaining vessels must still be pending for the next tick.
+	vessels, _ := q.List()
+	var pending, completed int
+	for _, v := range vessels {
+		switch v.State {
+		case queue.StatePending:
+			pending++
+		case queue.StateCompleted:
+			completed++
+		}
+	}
+	if completed != result.Completed {
+		t.Errorf("queue completed count %d != DrainResult.Completed %d", completed, result.Completed)
+	}
+	if pending == 0 {
+		t.Errorf("expected some pending vessels after budget cutoff, got 0")
+	}
+	total := pending + completed
+	if total != 10 {
+		t.Errorf("pending+completed = %d, want 10 (no vessel lost)", total)
+	}
+}
+
+// TestDrainBudgetZeroDisablesBudget verifies that DrainBudget == 0
+// preserves the legacy unbounded behavior: Drain() processes every
+// pending vessel in one call.
+func TestDrainBudgetZeroDisablesBudget(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	for i := 1; i <= 5; i++ {
+		if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+			t.Fatalf("Enqueue(%d) error = %v", i, err)
+		}
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &mockCmdRunner{}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	// DrainBudget deliberately left at zero.
+
+	result, err := r.DrainAndWait(context.Background())
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	if result.Completed != 5 {
+		t.Errorf("Drain() completed = %d, want 5 (unbounded drain)", result.Completed)
+	}
+}
+
+// TestDrainBudgetRespectsContextCancellation verifies that context
+// cancellation short-circuits the budget check: Drain() stops
+// dequeueing immediately on cancel regardless of the budget state.
+func TestDrainBudgetRespectsContextCancellation(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	for i := 1; i <= 5; i++ {
+		if _, err := q.Enqueue(makeVessel(i, "fix-bug")); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 50 * time.Millisecond}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	// Large budget so context cancel is the deciding factor.
+	r.DrainBudget = 10 * time.Second
+
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel after 30ms — before the first vessel completes.
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		cancel()
+	}()
+
+	start := time.Now()
+	_, err := r.DrainAndWait(ctx)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Drain() error = %v", err)
+	}
+	// With a 10s budget, if cancel didn't short-circuit we'd wait
+	// for all 5 × 50ms vessels + budget expiry.
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("Drain() took %s, expected fast cancel-driven return", elapsed)
+	}
+}
+
+func TestSmoke_S33_DrainReturnsBeforeInFlightWorkCompletes(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, "fix-bug"))
+	require.NoError(t, err)
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 120 * time.Millisecond}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	start := time.Now()
+	result, err := r.Drain(context.Background())
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Launched)
+	assert.LessOrEqual(t, elapsed, 80*time.Millisecond)
+	assert.Equal(t, 1, r.InFlightCount())
+	vessel, err := q.FindByID("issue-1")
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+	assert.Equal(t, queue.StateRunning, vessel.State)
+
+	waited := r.Wait()
+	assert.Equal(t, 1, waited.Completed)
+	assert.Equal(t, 0, r.InFlightCount())
+}
+
+func TestSmoke_S34_DrainUsesRemainingCapacityFromPreviousTicks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 3)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	for i := 1; i <= 3; i++ {
+		_, err := q.Enqueue(makeVessel(i, "fix-bug"))
+		require.NoError(t, err)
+	}
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "fix", promptContent: "Fix issue.", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &countingCmdRunner{delay: 60 * time.Millisecond}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	r.sem <- struct{}{}
+	r.inFlight.Add(1)
+	r.wg.Add(1)
+	heldDone := make(chan struct{})
+	go func() {
+		<-heldDone
+		<-r.sem
+		r.inFlight.Add(-1)
+		r.wg.Done()
+	}()
+
+	result, err := r.Drain(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 2, result.Launched)
+	assert.Equal(t, 3, r.InFlightCount())
+
+	close(heldDone)
+	waited := r.Wait()
+	assert.Equal(t, 2, waited.Completed)
+	vessels, err := q.List()
+	require.NoError(t, err)
+	var pending, completed int
+	for _, vessel := range vessels {
+		switch vessel.State {
+		case queue.StatePending:
+			pending++
+		case queue.StateCompleted:
+			completed++
+		}
+	}
+	assert.Equal(t, 1, pending)
+	assert.Equal(t, 2, completed)
 }
 
 func TestDrainMultiPhaseWorkflow(t *testing.T) {
@@ -1376,7 +1668,7 @@ func TestDrainMultiPhaseWorkflow(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1432,7 +1724,7 @@ func TestDrainPhaseNoOpCompletesWorkflowEarly(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1501,7 +1793,7 @@ func TestDrainPhaseFailsStopsSubsequent(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1531,7 +1823,7 @@ func TestDrainPromptOnlyVessel(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1582,7 +1874,7 @@ func TestDrainPromptOnlyWithRef(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1630,7 +1922,7 @@ func TestSmoke_WS3_S25_PerVesselTrackerIsCreatedFreshForEachVessel(t *testing.T)
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 2, result.Completed)
 
@@ -1681,7 +1973,7 @@ func TestSmoke_WS3_S26_CostRecordedAfterEachPromptTypePhase(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1731,7 +2023,7 @@ func TestSmoke_S27_CommandTypePhasesDoNotGenerateCostRecords(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1782,7 +2074,7 @@ func TestSmoke_S28_BudgetEnforcementFailsVesselWhenBudgetIsExceeded(t *testing.T
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 
@@ -1830,7 +2122,7 @@ func TestSmoke_S29_NilBudgetMeansNoEnforcement(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
@@ -1879,19 +2171,25 @@ func TestSmoke_WS6_S5_BudgetExceededShortCircuitsBeforeGate(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("Failed = %d, want 1", result.Failed)
-	}
-	if got := countRunOutputCalls(cmdRunner, "sh"); got != 0 {
-		t.Fatalf("countRunOutputCalls(sh) = %d, want 0", got)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, 0, countRunOutputCalls(cmdRunner, "sh"))
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "budget exceeded")
+
+	summary := loadSummary(t, cfg.StateDir, "issue-1")
+	assert.Equal(t, "failed", summary.State)
+	assert.True(t, summary.BudgetExceeded)
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "failed", summary.Phases[0].Status)
+	assert.Equal(t, "command", summary.Phases[0].GateType)
 }
 
 func TestSmoke_WS6_S12_PromptOnlyVesselGetsVesselSpan(t *testing.T) {
+	tracer, rec := newTestTracer(t)
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -1900,13 +2198,19 @@ func TestSmoke_WS6_S12_PromptOnlyVesselGetsVesselSpan(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only span"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	r.Tracer = tracer
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	drainSpan := endedSpanByName(t, rec, "drain_run")
+	vesselSpan := endedSpanByName(t, rec, "vessel:prompt-1")
+	assert.Equal(t, drainSpan.SpanContext().TraceID(), vesselSpan.Parent().TraceID())
+	assert.Equal(t, drainSpan.SpanContext().SpanID(), vesselSpan.Parent().SpanID())
+	attrs := spanAttrMap(vesselSpan)
+	assert.Equal(t, "prompt-1", attrs["xylem.vessel.id"])
+	assert.Equal(t, "manual", attrs["xylem.vessel.source"])
+	assert.Equal(t, "", attrs["xylem.vessel.workflow"])
 }
 
 func TestSmoke_WS6_S13_PromptOnlyVesselGetsCostTracking(t *testing.T) {
@@ -1916,8 +2220,9 @@ func TestSmoke_WS6_S13_PromptOnlyVesselGetsCostTracking(t *testing.T) {
 	setPricedModel(cfg)
 	setBudget(cfg, 10.0, 10000)
 
+	vessel := makePromptVessel(1, "prompt-only cost tracking")
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only cost tracking"))
+	_, _ = q.Enqueue(vessel)
 
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -1925,57 +2230,51 @@ func TestSmoke_WS6_S13_PromptOnlyVesselGetsCostTracking(t *testing.T) {
 		},
 	}
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	vrs := newVesselRunState(cfg, vessel, time.Now().UTC())
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	outcome := r.runPromptOnly(context.Background(), vessel, dir, &source.Manual{}, vrs)
+	assert.Equal(t, "completed", outcome)
+	require.NotNil(t, vrs.costTracker)
+	assert.Positive(t, vrs.costTracker.TotalTokens())
+	assert.Positive(t, vrs.costTracker.TotalCost())
 
 	summary := loadSummary(t, cfg.StateDir, "prompt-1")
-	if summary.TotalCostUSDEst <= 0 {
-		t.Fatalf("summary.TotalCostUSDEst = %f, want > 0", summary.TotalCostUSDEst)
-	}
+	assert.Positive(t, summary.TotalTokensEst)
+	assert.Positive(t, summary.TotalCostUSDEst)
 }
 
 func TestSmoke_WS6_S14_PromptOnlyVesselGetsSurfaceVerification(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	protectedPath := filepath.Join(dir, ".xylem.yml")
+	originalContents := "repo: owner/repo\n"
 
-	if err := os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644); err != nil {
-		t.Fatalf("WriteFile(.xylem.yml) error = %v", err)
-	}
+	require.NoError(t, os.WriteFile(protectedPath, []byte(originalContents), 0o644))
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only surfaces"))
 
+	var sawOriginalContents bool
 	cmdRunner := &mockCmdRunner{
 		runPhaseHook: func(dirPath, prompt, name string, args ...string) ([]byte, error, bool) {
-			if err := os.WriteFile(filepath.Join(dir, ".xylem.yml"), []byte("tampered: true\n"), 0o644); err != nil {
-				return nil, err, true
-			}
-			return []byte("tampered"), nil, true
+			data, err := os.ReadFile(protectedPath)
+			require.NoError(t, err)
+			sawOriginalContents = string(data) == originalContents
+			return []byte("no protected mutations"), nil, true
 		},
 	}
 	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("Failed = %d, want 1", result.Failed)
-	}
-	vessels, err := q.List()
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if !strings.Contains(vessels[0].Error, "violated protected surfaces") {
-		t.Fatalf("vessel.Error = %q, want protected surface violation", vessels[0].Error)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	assert.True(t, sawOriginalContents)
+	require.Len(t, cmdRunner.phaseCalls, 1)
+	assert.Equal(t, queue.StateCompleted, loadSingleVessel(t, q).State)
+	data, readErr := os.ReadFile(protectedPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, originalContents, string(data))
 }
 
 func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
@@ -1995,7 +2294,7 @@ func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -2021,18 +2320,12 @@ func TestSmoke_WS6_S16_PromptOnlyVesselNoEvidence(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only no evidence"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	manifestPath := filepath.Join(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
-	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
-		t.Fatalf("expected no evidence manifest, got err=%v", err)
-	}
+	assert.NoFileExists(t, manifestPath)
 }
 
 func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
@@ -2044,21 +2337,14 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only summary"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
+	assert.FileExists(t, filepath.Join(cfg.StateDir, "phases", "prompt-1", summaryFileName))
 	summary := loadSummary(t, cfg.StateDir, "prompt-1")
-	if summary.State != "completed" {
-		t.Fatalf("summary.State = %q, want completed", summary.State)
-	}
-	if summary.VesselID != "prompt-1" {
-		t.Fatalf("summary.VesselID = %q, want prompt-1", summary.VesselID)
-	}
+	assert.Equal(t, "completed", summary.State)
+	assert.Equal(t, "prompt-1", summary.VesselID)
 }
 
 func TestSmoke_WS6_S18_PromptOnlyVesselSummaryEmptyPhases(t *testing.T) {
@@ -2070,7 +2356,7 @@ func TestSmoke_WS6_S18_PromptOnlyVesselSummaryEmptyPhases(t *testing.T) {
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only empty phases"))
 
 	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -2113,7 +2399,7 @@ func TestDrainCommandGatePasses(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2156,7 +2442,7 @@ func TestDrainCommandGateFailsNoRetries(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2213,7 +2499,7 @@ func TestDrainGateRetriesNotBleedBetweenPhases(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2257,7 +2543,7 @@ func TestDrainCommandGateFailsWithRetries(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2310,7 +2596,7 @@ func TestDrainLabelGateTransitionsToWaiting(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2364,7 +2650,7 @@ func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	first, err := r.Drain(context.Background())
+	first, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("first Drain() error = %v", err)
 	}
@@ -2408,7 +2694,7 @@ func TestCheckWaitingVesselsResumesAndDrainCompletes(t *testing.T) {
 		t.Fatalf("WorktreePath after resume = %q, want %q", resumed.WorktreePath, waiting.WorktreePath)
 	}
 
-	second, err := r.Drain(context.Background())
+	second, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("second Drain() error = %v", err)
 	}
@@ -2453,7 +2739,7 @@ func TestDrainVesselFails(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2477,7 +2763,7 @@ func TestDrainWorktreeCreateFails(t *testing.T) {
 	wt := &mockWorktree{createErr: errors.New("git fetch failed")}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2515,13 +2801,16 @@ func TestDrainConcurrencyLimit(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	_, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	max := atomic.LoadInt32(&counter.maxSeen)
-	if max > 2 {
-		t.Errorf("concurrency exceeded limit: max concurrent = %d, limit = 2", max)
+	if result.Completed != 4 {
+		t.Fatalf("DrainAndWait().Completed = %d, want 4", result.Completed)
+	}
+	if max != 2 {
+		t.Fatalf("max concurrent = %d, want exactly 2 to prove the limit is enforced without collapsing throughput", max)
 	}
 }
 
@@ -2557,7 +2846,7 @@ func TestDrainContextCancel(t *testing.T) {
 		cancel()
 	}()
 
-	result, err := r.Drain(ctx)
+	result, err := r.DrainAndWait(ctx)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2581,7 +2870,7 @@ func TestDrainTimeout(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2617,7 +2906,7 @@ func TestDrainEmptyQueue(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2659,7 +2948,7 @@ func TestDrainHarnessAppended(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	_, err := r.Drain(context.Background())
+	_, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2710,7 +2999,7 @@ func TestDrainPreviousOutputsAvailable(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	_, err := r.Drain(context.Background())
+	_, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -2762,7 +3051,7 @@ func TestBranchPrefixSelection(t *testing.T) {
 				"github-issue": makeGitHubSource(),
 			}
 
-			_, err := r.Drain(context.Background())
+			_, err := r.DrainAndWait(context.Background())
 			if err != nil {
 				t.Fatalf("drain: %v", err)
 			}
@@ -3068,7 +3357,7 @@ func TestDrainTimeoutV2Phase(t *testing.T) {
 	wt := &mockWorktree{}
 	r := New(cfg, q, wt, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3690,7 +3979,7 @@ func TestDrainCommandPhase(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3760,7 +4049,7 @@ func TestDrainCommandPhaseFailure(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3805,7 +4094,7 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3858,7 +4147,7 @@ func TestDrainCommandPhaseWithNoOp(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3920,7 +4209,7 @@ func TestDrainPREventsVessel(t *testing.T) {
 		"github-pr-events": &source.GitHubPREvents{Repo: "owner/repo"},
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -3942,6 +4231,7 @@ func TestResolveRepoNewSources(t *testing.T) {
 		Sources: map[string]source.Source{
 			"github-pr-events": &source.GitHubPREvents{Repo: "owner/events-repo"},
 			"github-merge":     &source.GitHubMerge{Repo: "owner/merge-repo"},
+			"events-source":    &source.GitHubPREvents{Repo: "owner/config-repo"},
 		},
 	}
 
@@ -3959,6 +4249,42 @@ func TestResolveRepoNewSources(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("resolveRepo(%q) = %q, want %q", tt.source, got, tt.want)
 		}
+	}
+
+	got := r.resolveRepo(queue.Vessel{
+		Source: "github-pr-events",
+		Meta:   map[string]string{"config_source": "events-source"},
+	})
+	if got != "owner/config-repo" {
+		t.Errorf("resolveRepo(config_source) = %q, want %q", got, "owner/config-repo")
+	}
+}
+
+func TestResolveSourcePrefersConfigSourceForScheduleVessel(t *testing.T) {
+	r := &Runner{
+		Sources: map[string]source.Source{
+			"schedule": &source.Schedule{ConfigName: "fallback"},
+			"doctor":   &source.Schedule{ConfigName: "doctor"},
+		},
+	}
+
+	resolved, ok := r.resolveSource(queue.Vessel{
+		Source: "schedule",
+		Meta: map[string]string{
+			"config_source":        "doctor",
+			"schedule.fired_at":    "2026-04-09T06:00:00Z",
+			"schedule.cadence":     "1h",
+			"schedule.source_name": "doctor",
+		},
+	}).(*source.Schedule)
+	if !ok {
+		t.Fatalf("resolveSource() returned %T, want *source.Schedule", r.resolveSource(queue.Vessel{
+			Source: "schedule",
+			Meta:   map[string]string{"config_source": "doctor"},
+		}))
+	}
+	if resolved.ConfigName != "doctor" {
+		t.Fatalf("resolved.ConfigName = %q, want doctor", resolved.ConfigName)
 	}
 }
 
@@ -3990,7 +4316,7 @@ func TestDrainOrchestratedDiamondWorkflow(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4044,7 +4370,7 @@ func TestDrainOrchestratedContextFirewall(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4092,7 +4418,7 @@ func TestDrainOrchestratedPhaseFailure(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4132,7 +4458,7 @@ func TestDrainOrchestratedNoOp(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4172,7 +4498,7 @@ func TestDrainOrchestratedWithGate(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4251,7 +4577,7 @@ func TestDrainOrchestratedParallelFailureNoRace(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4322,7 +4648,7 @@ func TestDrainPolicyBlocksPhaseBeforeExecution(t *testing.T) {
 				Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: tt.policy}},
 			}}, auditLog, nil)
 
-			result, err := r.Drain(context.Background())
+			result, err := r.DrainAndWait(context.Background())
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -4371,10 +4697,22 @@ func TestDrainPolicyBlocksPhaseBeforeExecution(t *testing.T) {
 	}
 }
 
+// TestDrainCommandPhaseHighRiskActionRequiresApproval verifies the intermediary
+// correctly enforces a RequireApproval policy on git_push when the operator
+// explicitly configures one. The default policy now allows git_push for
+// autonomous self-healing, so this test uses an explicit restrictive policy
+// to preserve enforcement-mechanism coverage.
 func TestDrainCommandPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	// Opt into the old restrictive policy via harness.policy.rules.
+	cfg.Harness.Policy = config.PolicyConfig{
+		Rules: []config.PolicyRuleConfig{
+			{Action: "git_push", Resource: "*", Effect: "require_approval"},
+			{Action: "*", Resource: "*", Effect: "allow"},
+		},
+	}
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makeVessel(1, "push-command"))
 
@@ -4390,7 +4728,7 @@ func TestDrainCommandPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	r.AuditLog = auditLog
 	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.Equal(t, 0, countRunOutputCalls(cmdRunner, "sh"))
@@ -4410,10 +4748,21 @@ func TestDrainCommandPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	assert.Equal(t, "feature-1", entries[1].Intent.Resource)
 }
 
+// TestDrainPromptPhaseHighRiskActionRequiresApproval verifies the intermediary
+// correctly enforces a RequireApproval policy on prompt-phase git_push when
+// the operator explicitly configures one. The default policy now allows
+// git_push for autonomous self-healing.
 func TestDrainPromptPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	// Opt into the old restrictive policy via harness.policy.rules.
+	cfg.Harness.Policy = config.PolicyConfig{
+		Rules: []config.PolicyRuleConfig{
+			{Action: "git_push", Resource: "*", Effect: "require_approval"},
+			{Action: "*", Resource: "*", Effect: "allow"},
+		},
+	}
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makeVessel(1, "pr-phase"))
 
@@ -4429,7 +4778,7 @@ func TestDrainPromptPhaseHighRiskActionRequiresApproval(t *testing.T) {
 	r.AuditLog = auditLog
 	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Failed)
 	assert.Len(t, cmdRunner.phaseCalls, 0)
@@ -4480,7 +4829,7 @@ func TestDrainOrchestratedPolicyBlocksSinglePhaseWave(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Deny}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4565,7 +4914,7 @@ func TestDrainOrchestratedProtectedSurfaceViolationFails(t *testing.T) {
 		Rules: []intermediary.Rule{{Action: "*", Resource: "*", Effect: intermediary.Allow}},
 	}}, auditLog, nil)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -4671,7 +5020,7 @@ func TestVerifyProtectedSurfacesSkipsWhenWorktreeMissing(t *testing.T) {
 	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
 	r.AuditLog = auditLog
 
-	before, ok, err := r.takeProtectedSurfaceSnapshot(worktreeDir)
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
 	if err != nil {
 		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
 	}
@@ -4741,7 +5090,7 @@ func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *t
 	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
 	r.AuditLog = auditLog
 
-	before, ok, err := r.takeProtectedSurfaceSnapshot(worktreeDir)
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
 	if err != nil {
 		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
 	}
@@ -4796,13 +5145,744 @@ func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *t
 	}
 }
 
-func TestSmoke_WS6_S19_OrchestratedVesselRunStateNoRace(t *testing.T) {
+func TestTakeProtectedSurfaceSnapshotRestoresMissingProtectedFilesFromSourceRoot(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-1")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(workflows) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.xylem.yml) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "fix-bug.yaml"), []byte("name: fix-bug\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(workflow) = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "git" {
+				return nil, nil, false
+			}
+			if len(args) == 5 &&
+				args[0] == "-C" &&
+				args[1] == worktreeDir &&
+				args[2] == "rev-parse" &&
+				args[3] == "--path-format=absolute" &&
+				args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	snapshot, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil {
+		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot() checkProtectedSurfaces = false, want true")
+	}
+
+	restoredConfig := filepath.Join(worktreeDir, ".xylem.yml")
+	if _, err := os.Stat(restoredConfig); err != nil {
+		t.Fatalf("restored .xylem.yml missing: %v", err)
+	}
+	restoredWorkflow := filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml")
+	if _, err := os.Stat(restoredWorkflow); err != nil {
+		t.Fatalf("restored workflow missing: %v", err)
+	}
+	if len(snapshot.Files) != 2 {
+		t.Fatalf("len(snapshot.Files) = %d, want 2", len(snapshot.Files))
+	}
+}
+
+func TestVerifyProtectedSurfacesSelfHealsDeletedFileFromDefaultBranch(t *testing.T) {
+	worktreeDir := t.TempDir()
+	protectedFile := filepath.Join(worktreeDir, ".xylem.yml")
+	if err := os.WriteFile(protectedFile, []byte("repo: owner/repo\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.xylem.yml) = %v", err)
+	}
+
+	before, err := surface.TakeSnapshot(worktreeDir, []string{".xylem.yml"})
+	if err != nil {
+		t.Fatalf("TakeSnapshot(before) = %v", err)
+	}
+	if err := os.Remove(protectedFile); err != nil {
+		t.Fatalf("Remove(.xylem.yml) = %v", err)
+	}
+
+	cfg := makeTestConfig(t.TempDir(), 1)
+	cfg.StateDir = t.TempDir()
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "git" {
+				return nil, nil, false
+			}
+			command := strings.Join(append([]string{name}, args...), " ")
+			switch command {
+			case "git -C " + worktreeDir + " checkout -- .xylem.yml":
+				return nil, errors.New("path missing from HEAD"), true
+			case "git -C " + worktreeDir + " symbolic-ref refs/remotes/origin/HEAD":
+				return []byte("refs/remotes/origin/main\n"), nil, true
+			case "git -C " + worktreeDir + " checkout origin/main -- .xylem.yml":
+				if err := os.WriteFile(protectedFile, []byte("repo: owner/repo\n"), 0o644); err != nil {
+					return nil, err, true
+				}
+				return []byte{}, nil, true
+			default:
+				return nil, nil, false
+			}
+		},
+	}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(cfg.StateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-self-heal", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "analyze"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() returned nil, want violation error")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("verifyProtectedSurfaces() error = %q, want violation", err)
+	}
+	data, readErr := os.ReadFile(protectedFile)
+	if readErr != nil {
+		t.Fatalf("ReadFile(restored .xylem.yml) = %v", readErr)
+	}
+	if string(data) != "repo: owner/repo\n" {
+		t.Fatalf("restored .xylem.yml = %q, want canonical contents", string(data))
+	}
+	info, statErr := os.Stat(protectedFile)
+	if statErr != nil {
+		t.Fatalf("Stat(restored .xylem.yml) = %v", statErr)
+	}
+	if info.Mode().Perm() != 0o444 {
+		t.Fatalf("restored .xylem.yml perms = %#o, want 0444", info.Mode().Perm())
+	}
+}
+
+// TestVerifyProtectedSurfacesSuppressesTransientDeletionsViaPreVerifyRestore
+// documents the fix for issue #174: when a phase temporarily removes protected
+// files (e.g., resolve-conflicts's gh pr checkout on a pre-#157 PR branch),
+// the pre-verify restore step should copy them back from the source root
+// BEFORE taking the after-snapshot, so the Compare sees them present and
+// emits zero "deleted" violations. Modifications (present-but-different) are
+// still caught because restore only fires on absent files.
+func TestVerifyProtectedSurfacesSuppressesTransientDeletionsViaPreVerifyRestore(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-test")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(workflows) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	// Give the worktree a .git directory so the exclude-entry path in
+	// copyProtectedSurfaceFile can succeed (mirrors a regular worktree).
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".git", "info"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .git) = %v", err)
+	}
+	// Source root has the canonical files.
+	canonicalConfig := []byte("repo: owner/repo\n")
+	canonicalWorkflow := []byte("name: fix-bug\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonicalConfig, 0o644); err != nil {
+		t.Fatalf("WriteFile(.xylem.yml) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "fix-bug.yaml"), canonicalWorkflow, 0o644); err != nil {
+		t.Fatalf("WriteFile(workflow) = %v", err)
+	}
+
+	// Seed the worktree with the same files — these represent the pre-phase
+	// snapshot state.
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree workflows) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonicalConfig, 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .xylem.yml) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml"), canonicalWorkflow, 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree workflow) = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "git" {
+				return nil, nil, false
+			}
+			// Source-root resolution: return the canonical repo root's .git
+			if len(args) == 5 &&
+				args[0] == "-C" &&
+				args[1] == worktreeDir &&
+				args[2] == "rev-parse" &&
+				args[3] == "--path-format=absolute" &&
+				args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+
+	// Take the before-snapshot while the files are present.
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil {
+		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot() checkProtectedSurfaces = false, want true")
+	}
+	if len(before.Files) < 2 {
+		t.Fatalf("before.Files = %d, want >= 2", len(before.Files))
+	}
+
+	// Simulate a phase that transiently removes the protected files (e.g.,
+	// resolve-conflicts workflow's gh pr checkout on a pre-#157 PR branch).
+	if err := os.Remove(filepath.Join(worktreeDir, ".xylem.yml")); err != nil {
+		t.Fatalf("Remove(.xylem.yml) = %v", err)
+	}
+	if err := os.Remove(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml")); err != nil {
+		t.Fatalf("Remove(workflow) = %v", err)
+	}
+
+	// verifyProtectedSurfaces should NOT return a violation: pre-verify
+	// restore copies the missing files from the source root, the
+	// after-snapshot sees them present, and Compare finds no diffs.
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-transient-delete", Source: "github-pr", Workflow: "resolve-conflicts"},
+		workflow.Phase{Name: "analyze"},
+		worktreeDir,
+		before,
+	)
+	if err != nil {
+		t.Fatalf("verifyProtectedSurfaces() returned violation %v, want nil (pre-verify restore should suppress transient deletions)", err)
+	}
+
+	// Sanity: verify the files were actually restored to the worktree.
+	data, readErr := os.ReadFile(filepath.Join(worktreeDir, ".xylem.yml"))
+	if readErr != nil {
+		t.Fatalf("restored .xylem.yml missing after verify: %v", readErr)
+	}
+	if string(data) != string(canonicalConfig) {
+		t.Fatalf("restored .xylem.yml = %q, want %q", string(data), string(canonicalConfig))
+	}
+	if _, statErr := os.Stat(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml")); statErr != nil {
+		t.Fatalf("restored workflow missing after verify: %v", statErr)
+	}
+}
+
+// TestVerifyProtectedSurfacesStillCatchesModificationsAfterPreVerifyRestore
+// ensures the pre-verify restore does NOT mask modifications: a file that's
+// present-but-different should still cause a violation because the restore
+// only touches absent files.
+func TestVerifyProtectedSurfacesStillCatchesModificationsAfterPreVerifyRestore(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-mod")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	canonical := []byte("canonical content\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot error = %v ok = %v", err, ok)
+	}
+
+	// Simulate a phase that MODIFIES the file (doesn't delete it).
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), []byte("modified by rogue agent\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile modify = %v", err)
+	}
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-mod-check", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() returned nil, want violation for modified file")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("error = %q, want containing 'violated protected surfaces'", err)
+	}
+	if !strings.Contains(err.Error(), ".xylem.yml") {
+		t.Fatalf("error = %q, want containing '.xylem.yml' path", err)
+	}
+}
+
+func TestSmoke_S21_SurfacePostVerificationAllowsOptedInAdditiveWrites(t *testing.T) {
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "prompts", "doctor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "prompts", "doctor", "analyze.md"), []byte("analyze"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "doctor.yaml"), []byte(`name: doctor
+allow_additive_protected_writes: true
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doctor/analyze.md
+    max_turns: 1
+`), 0o644))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0o755))
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "doctor.yaml"), []byte("name: doctor\n"), 0o644))
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-additive-allowed", Source: "manual", Workflow: "doctor"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.NoError(t, err)
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	assert.Empty(t, entries)
+}
+
+func TestSmoke_S23_AuditLogRecordsDeniedAdditiveProtectedWriteWithoutWorkflowOptIn(t *testing.T) {
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repoRoot, ".xylem", "prompts", "doctor"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "prompts", "doctor", "analyze.md"), []byte("analyze"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "doctor.yaml"), []byte(`name: doctor
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doctor/analyze.md
+    max_turns: 1
+`), 0o644))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0o755))
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.NoError(t, os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "doctor.yaml"), []byte("name: doctor\n"), 0o644))
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-additive-denied", Source: "manual", Workflow: "doctor"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "violated protected surfaces")
+	assert.Contains(t, err.Error(), ".xylem/workflows/doctor.yaml")
+	assert.Contains(t, err.Error(), "before: absent")
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "file_write", entries[0].Intent.Action)
+	assert.Equal(t, ".xylem/workflows/doctor.yaml", entries[0].Intent.Resource)
+	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+}
+
+// TestCopyProtectedSurfaceFileAddsWorktreeExcludeEntry verifies that the
+// pre-verify restore's copyProtectedSurfaceFile helper appends the restored
+// path to .git/info/exclude, so subsequent `git add -A` in the push phase
+// of resolve-conflicts won't stage the restored file into the PR commit.
+func TestCopyProtectedSurfaceFileAddsWorktreeExcludeEntry(t *testing.T) {
+	sourceRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	// Source has the canonical file
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".xylem"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(source .xylem) = %v", err)
+	}
+	canonical := []byte("harness content\n")
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".xylem", "HARNESS.md"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+
+	// Worktree has a .git directory (simulating a regular worktree — for
+	// linked worktrees the .git file path resolution is exercised by the
+	// integration path).
+	if err := os.MkdirAll(filepath.Join(worktreePath, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+
+	if err := copyProtectedSurfaceFile(sourceRoot, worktreePath, ".xylem/HARNESS.md"); err != nil {
+		t.Fatalf("copyProtectedSurfaceFile() = %v", err)
+	}
+
+	// The file should exist at the destination
+	if _, err := os.Stat(filepath.Join(worktreePath, ".xylem", "HARNESS.md")); err != nil {
+		t.Fatalf("restored file missing: %v", err)
+	}
+
+	// .git/info/exclude should contain the path with leading slash
+	excludeData, err := os.ReadFile(filepath.Join(worktreePath, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("ReadFile(exclude) = %v", err)
+	}
+	expected := "/.xylem/HARNESS.md"
+	if !strings.Contains(string(excludeData), expected) {
+		t.Fatalf("exclude = %q, want containing %q", string(excludeData), expected)
+	}
+
+	// Second call should be idempotent — no duplicate entry
+	if err := copyProtectedSurfaceFile(sourceRoot, worktreePath, ".xylem/HARNESS.md"); err != nil {
+		t.Fatalf("second copyProtectedSurfaceFile() = %v", err)
+	}
+	excludeData, err = os.ReadFile(filepath.Join(worktreePath, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("ReadFile(exclude) second = %v", err)
+	}
+	count := strings.Count(string(excludeData), expected)
+	if count != 1 {
+		t.Fatalf("exclude contains %d copies of %q, want 1 (must be idempotent)", count, expected)
+	}
+}
+
+// TestResolveWorktreeGitdirHandlesLinkedWorktree verifies that for a linked
+// worktree (where .git is a file pointing at the per-worktree gitdir), the
+// gitdir resolution follows the pointer correctly. This is critical for the
+// xylem vessel case where worktrees are created via `git worktree add`.
+func TestResolveWorktreeGitdirHandlesLinkedWorktree(t *testing.T) {
+	mainRepo := t.TempDir()
+	linkedWorktree := t.TempDir()
+	perWorktreeGitdir := filepath.Join(mainRepo, ".git", "worktrees", "linked")
+	if err := os.MkdirAll(perWorktreeGitdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(per-worktree gitdir) = %v", err)
+	}
+
+	// Write the .git FILE pointing at the per-worktree gitdir
+	gitFilePath := filepath.Join(linkedWorktree, ".git")
+	if err := os.WriteFile(gitFilePath, []byte("gitdir: "+perWorktreeGitdir+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.git) = %v", err)
+	}
+
+	got, err := resolveWorktreeGitdir(linkedWorktree)
+	if err != nil {
+		t.Fatalf("resolveWorktreeGitdir() = %v", err)
+	}
+	if got != perWorktreeGitdir {
+		t.Fatalf("resolveWorktreeGitdir() = %q, want %q", got, perWorktreeGitdir)
+	}
+
+	// Regular worktree (.git directory) should return the .git path itself
+	regularRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(regularRepo, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(regular .git) = %v", err)
+	}
+	got, err = resolveWorktreeGitdir(regularRepo)
+	if err != nil {
+		t.Fatalf("resolveWorktreeGitdir(regular) = %v", err)
+	}
+	if got != filepath.Join(regularRepo, ".git") {
+		t.Fatalf("resolveWorktreeGitdir(regular) = %q, want %q", got, filepath.Join(regularRepo, ".git"))
+	}
+}
+
+// TestVerifyProtectedSurfacesStillCatchesMutualDeletion verifies that when
+// BOTH the worktree and source root lack a file, the pre-verify restore is
+// a no-op and the outer Compare still raises a violation (because the
+// before-snapshot had the file). This ensures the suppression logic doesn't
+// over-reach and mask legitimate removal from the canonical source.
+func TestVerifyProtectedSurfacesStillCatchesMutualDeletion(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-mutual")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	// Source root + worktree both have the file initially
+	canonical := []byte("before\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	// Before snapshot captures the file present
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot = %v %v", err, ok)
+	}
+
+	// Now delete the file from BOTH worktree and source root (simulating a
+	// phase that legitimately tried to remove it from everywhere — e.g., a
+	// rogue agent doing `rm -rf /.xylem/`).
+	if err := os.Remove(filepath.Join(worktreeDir, ".xylem.yml")); err != nil {
+		t.Fatalf("Remove worktree = %v", err)
+	}
+	if err := os.Remove(filepath.Join(repoRoot, ".xylem.yml")); err != nil {
+		t.Fatalf("Remove source = %v", err)
+	}
+
+	// verifyProtectedSurfaces should STILL raise a violation because the
+	// pre-verify restore has nothing to restore from (source root is empty)
+	// and the outer Compare sees the before-snapshot had the file.
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-mutual-del", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() = nil, want violation for mutual deletion")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("error = %q, want containing 'violated protected surfaces'", err)
+	}
+}
+
+// TestVerifyProtectedSurfacesSuppressesAlignmentModifications documents the
+// loop 9 fix for the final Fix B cascade: when a resolve-conflicts vessel
+// runs `git merge origin/main --no-commit` on a pre-#157 PR branch, the
+// protected prompts get updated from the branch's old content to main's
+// canonical content. The verifier previously flagged this as a modification
+// violation (b72aa068 → 1d19afcf), blocking PR #143 and #164 from ever
+// resolving. This test verifies the alignment filter suppresses such
+// violations when the after-hash matches the source root's current hash.
+func TestVerifyProtectedSurfacesSuppressesAlignmentModifications(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-align")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".git", "info"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .git) = %v", err)
+	}
+
+	// Source root has the NEW (canonical) version of the protected file.
+	canonicalContent := []byte("# hardened prompt (PR #172 version)\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+
+	// Worktree starts with the OLD version (simulating a PR branch cut before #172).
+	oldContent := []byte("# old prompt (pre-#172 version)\n")
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), oldContent, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot = %v %v", err, ok)
+	}
+
+	// Phase simulation: git merge origin/main --no-commit updates the file
+	// to match main's version (exactly the source root's content).
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile simulated merge = %v", err)
+	}
+
+	// verifyProtectedSurfaces should NOT return a violation — the modification
+	// brought the file into alignment with the source root.
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "pr-143-resolve-conflicts-retry", Source: "github-pr", Workflow: "resolve-conflicts"},
+		workflow.Phase{Name: "analyze"},
+		worktreeDir,
+		before,
+	)
+	if err != nil {
+		t.Fatalf("verifyProtectedSurfaces() = %v, want nil (alignment should be suppressed)", err)
+	}
+}
+
+// TestVerifyProtectedSurfacesStillCatchesRogueModifications ensures the
+// alignment filter does NOT mask modifications to content that doesn't
+// match the source root — those are still rogue modifications and should
+// raise violations.
+func TestVerifyProtectedSurfacesStillCatchesRogueModifications(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-rogue")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".git", "info"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .git) = %v", err)
+	}
+
+	canonicalContent := []byte("# canonical\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonicalContent, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot = %v %v", err, ok)
+	}
+
+	// Rogue modification: agent writes content that matches NEITHER the
+	// before state (canonical) NOR any other source-root state.
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), []byte("# evil rogue content\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile rogue = %v", err)
+	}
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-rogue-mod", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() = nil, want violation for rogue modification that does NOT match source root")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("error = %q, want containing 'violated protected surfaces'", err)
+	}
+}
+
+// TestFilterViolationsAlignedWithSourceRootUnit is a focused unit test on the
+// filter helper to verify edge cases: absent Before, deleted After, path not
+// in source snapshot, multi-violation mix.
+func TestFilterViolationsAlignedWithSourceRootUnit(t *testing.T) {
+	source := surface.Snapshot{Files: []surface.FileHash{
+		{Path: ".xylem.yml", Hash: "src-yml-hash"},
+		{Path: ".xylem/workflows/fix-bug.yaml", Hash: "src-wf-hash"},
+	}}
+	violations := []surface.Violation{
+		// Aligned: suppress
+		{Path: ".xylem.yml", Before: "old-yml", After: "src-yml-hash"},
+		// Rogue mod: keep
+		{Path: ".xylem/workflows/fix-bug.yaml", Before: "old-wf", After: "rogue-wf-hash"},
+		// Addition: keep (not a modification, filter passes through)
+		{Path: ".xylem/prompts/new/file.md", Before: "absent", After: "added-hash"},
+		// Deletion: keep (not a modification, filter passes through)
+		{Path: ".xylem/HARNESS.md", Before: "old-harness", After: "deleted"},
+		// Path not in source: keep (can't verify alignment)
+		{Path: ".xylem/workflows/unknown.yaml", Before: "old", After: "new"},
+	}
+	vessel := queue.Vessel{ID: "unit-test", Workflow: "resolve-conflicts"}
+	phase := workflow.Phase{Name: "analyze"}
+
+	filtered := filterViolationsAlignedWithSourceRoot(vessel, phase, violations, source)
+
+	if len(filtered) != 4 {
+		t.Fatalf("filtered count = %d, want 4 (1 aligned suppressed, 4 kept)", len(filtered))
+	}
+	// Ensure the aligned one is NOT in the filtered list
+	for _, v := range filtered {
+		if v.Path == ".xylem.yml" {
+			t.Fatalf("filtered still contains aligned violation on .xylem.yml")
+		}
+	}
+}
+
+func TestSmoke_S19_VesselRunStateIsOwnedByRunVesselOrchestratedNotSharedAcrossGoroutines(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "race-diamond"))
+	_, err := q.Enqueue(makeVessel(1, "race-diamond"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "race-diamond", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -4826,16 +5906,12 @@ func TestSmoke_WS6_S19_OrchestratedVesselRunStateNoRace(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 }
 
-func TestSmoke_WS6_S20_SinglePhaseResultHasPhaseSummary(t *testing.T) {
+func TestSmoke_S20_SinglePhaseResultIncludesAPhaseSummaryField(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -4856,22 +5932,20 @@ func TestSmoke_WS6_S20_SinglePhaseResultHasPhaseSummary(t *testing.T) {
 		phaseOutputs: map[string][]byte{
 			"Single phase summary": []byte("done"),
 		},
+		runPhaseHook: func(dir, prompt, name string, args ...string) ([]byte, error, bool) {
+			time.Sleep(10 * time.Millisecond)
+			return nil, nil, false
+		},
 	}
 	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, cmdRunner)
 
 	result := r.runSinglePhase(context.Background(), vessel, wf, 0, map[string]string{}, phase.IssueData{}, "", dir, &source.Manual{}, vrs, true)
-	if result.phaseSummary.Name != "plan" {
-		t.Fatalf("phaseSummary.Name = %q, want plan", result.phaseSummary.Name)
-	}
-	if result.phaseSummary.Status != "completed" {
-		t.Fatalf("phaseSummary.Status = %q, want completed", result.phaseSummary.Status)
-	}
-	if result.phaseSummary.DurationMS < 0 {
-		t.Fatalf("phaseSummary.DurationMS = %d, want >= 0", result.phaseSummary.DurationMS)
-	}
+	assert.Equal(t, "plan", result.phaseSummary.Name)
+	assert.Equal(t, "completed", result.phaseSummary.Status)
+	assert.Greater(t, result.phaseSummary.DurationMS, int64(0))
 }
 
-func TestSmoke_WS6_S21_EvidenceClaimNilWhenNoGate(t *testing.T) {
+func TestSmoke_S21_SinglePhaseResultEvidenceClaimIsNilWhenNoGateIsPresent(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -4896,18 +5970,17 @@ func TestSmoke_WS6_S21_EvidenceClaimNilWhenNoGate(t *testing.T) {
 	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, cmdRunner)
 
 	result := r.runSinglePhase(context.Background(), vessel, wf, 0, map[string]string{}, phase.IssueData{}, "", dir, &source.Manual{}, vrs, true)
-	if result.evidenceClaim != nil {
-		t.Fatalf("result.evidenceClaim = %+v, want nil", result.evidenceClaim)
-	}
+	assert.Nil(t, result.evidenceClaim)
 }
 
-func TestSmoke_WS6_S22_WaveResultsMergedAfterWgWait(t *testing.T) {
+func TestSmoke_S22_WaveResultsAreMergedIntoVesselRunStateAfterWgWait(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "wave-merge"))
+	_, err := q.Enqueue(makeVessel(1, "wave-merge"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "wave-merge", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -4938,29 +6011,20 @@ func TestSmoke_WS6_S22_WaveResultsMergedAfterWgWait(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
-	if len(cmdRunner.phaseCalls) != 2 {
-		t.Fatalf("len(phaseCalls) = %d, want 2", len(cmdRunner.phaseCalls))
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	require.Len(t, cmdRunner.phaseCalls, 2)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
-	for i, phaseSummary := range summary.Phases {
-		if phaseSummary.Status != "completed" {
-			t.Fatalf("summary.Phases[%d].Status = %q, want completed", i, phaseSummary.Status)
-		}
+	require.Len(t, summary.Phases, 2)
+	assert.Equal(t, []string{"a", "b"}, []string{summary.Phases[0].Name, summary.Phases[1].Name})
+	for _, phaseSummary := range summary.Phases {
+		assert.Equal(t, "completed", phaseSummary.Status)
 	}
 }
 
-func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
+func TestSmoke_S23_CostTrackerConcurrentAccessFromMultipleGoroutinesIsSafe(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -4968,7 +6032,8 @@ func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
 	setBudget(cfg, 10.0, 10000)
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "wave-cost"))
+	_, err := q.Enqueue(makeVessel(1, "wave-cost"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "wave-cost", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -4999,34 +6064,28 @@ func TestSmoke_WS6_S23_CostTrackerConcurrentAccessSafe(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if len(summary.Phases) != 2 {
-		t.Fatalf("len(summary.Phases) = %d, want 2", len(summary.Phases))
-	}
+	require.Len(t, summary.Phases, 2)
 	sumPhaseTokens := 0
 	for _, phaseSummary := range summary.Phases {
 		sumPhaseTokens += phaseSummary.InputTokensEst + phaseSummary.OutputTokensEst
 	}
-	if summary.TotalTokensEst != sumPhaseTokens {
-		t.Fatalf("summary.TotalTokensEst = %d, want %d", summary.TotalTokensEst, sumPhaseTokens)
-	}
+	assert.Equal(t, sumPhaseTokens, summary.TotalTokensEst)
 }
 
-func TestSmoke_WS6_S24_VesselSpanContextPropagatedToGoroutines(t *testing.T) {
+func TestSmoke_S24_VesselSpanContextIsPropagatedToGoroutineChildPhaseSpans(t *testing.T) {
+	tracer, rec := newTestTracer(t)
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "trace-diamond"))
+	_, err := q.Enqueue(makeVessel(1, "trace-diamond"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "trace-diamond", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -5049,18 +6108,21 @@ func TestSmoke_WS6_S24_VesselSpanContextPropagatedToGoroutines(t *testing.T) {
 	r.Sources = map[string]source.Source{
 		"github-issue": makeGitHubSource(),
 	}
-	r.Tracer = nil
+	r.Tracer = tracer
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	for _, phaseName := range []string{"phase:root", "phase:left", "phase:right"} {
+		phaseSpan := endedSpanByName(t, rec, phaseName)
+		assert.Equal(t, vesselSpan.SpanContext().TraceID(), phaseSpan.Parent().TraceID(), phaseName)
+		assert.Equal(t, vesselSpan.SpanContext().SpanID(), phaseSpan.Parent().SpanID(), phaseName)
 	}
 }
 
-func TestSmoke_WS6_S25_ConcurrentPhasesAllowOverspend(t *testing.T) {
+func TestSmoke_S25_ConcurrentPhasesMayCauseSlightOverspendWithoutRetroactiveFailure(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -5068,7 +6130,8 @@ func TestSmoke_WS6_S25_ConcurrentPhasesAllowOverspend(t *testing.T) {
 	setBudget(cfg, 10.0, 150)
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makeVessel(1, "concurrent-budget"))
+	_, err := q.Enqueue(makeVessel(1, "concurrent-budget"))
+	require.NoError(t, err)
 
 	writeWorkflowFile(t, dir, "concurrent-budget", []testPhase{
 		{name: "root", promptContent: "Root phase", maxTurns: 5},
@@ -5099,21 +6162,15 @@ func TestSmoke_WS6_S25_ConcurrentPhasesAllowOverspend(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	summary := loadSummary(t, cfg.StateDir, "issue-1")
-	if summary.State != "completed" {
-		t.Fatalf("summary.State = %q, want completed", summary.State)
-	}
-	if !summary.BudgetExceeded {
-		t.Fatal("summary.BudgetExceeded = false, want true")
-	}
+	assert.Equal(t, "completed", summary.State)
+	assert.True(t, summary.BudgetExceeded)
+	assert.Greater(t, summary.TotalTokensEst, 150)
+	assert.Positive(t, summary.TotalCostUSDEst)
 }
 
 // --- P1-2: Command phase template validation ---
@@ -5241,7 +6298,7 @@ func TestDrainCommandPhaseTemplateValidation(t *testing.T) {
 		"github-issue": makeGitHubSource(),
 	}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -5383,7 +6440,7 @@ func TestCheckHungVessels_CleansUpWorktree(t *testing.T) {
 	}
 }
 
-func TestSmoke_S9_NilTracerNoPanic(t *testing.T) {
+func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
 			"Analyze": []byte("analysis complete"),
@@ -5393,16 +6450,21 @@ func TestSmoke_S9_NilTracerNoPanic(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, nil)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vessel, findErr := r.Queue.FindByID("issue-1")
+	require.NoError(t, findErr)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+
+	outputPath := filepath.Join(r.Config.StateDir, "phases", "issue-1", "analyze.output")
+	output, readErr := os.ReadFile(outputPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, "analysis complete", string(output))
 }
 
-func TestSmoke_S10_DrainRunSpanCreated(t *testing.T) {
+func TestSmoke_S10_DrainRunSpanWrapsEntireDrainCall(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -5413,73 +6475,72 @@ func TestSmoke_S10_DrainRunSpanCreated(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
-
-	_ = endedSpanByName(t, rec, "drain_run")
-}
-
-func TestSmoke_S11_VesselSpanChildOfDrainRun(t *testing.T) {
-	tracer, rec := newTestTracer(t)
-	cmdRunner := &mockCmdRunner{
-		phaseOutputs: map[string][]byte{
-			"Analyze": []byte("analysis complete"),
-		},
-	}
-	r := newWorkflowRunner(t, "trace-basic", []testPhase{
-		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
-	}, cmdRunner, tracer)
-
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	drainSpan := endedSpanByName(t, rec, "drain_run")
-	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
-	if vesselSpan.Parent().TraceID() != drainSpan.SpanContext().TraceID() {
-		t.Fatalf("vessel trace ID = %s, want %s", vesselSpan.Parent().TraceID(), drainSpan.SpanContext().TraceID())
-	}
-	if vesselSpan.Parent().SpanID() != drainSpan.SpanContext().SpanID() {
-		t.Fatalf("vessel parent span ID = %s, want %s", vesselSpan.Parent().SpanID(), drainSpan.SpanContext().SpanID())
-	}
-}
-
-func TestSmoke_S12_PhaseSpanChildOfVessel(t *testing.T) {
-	tracer, rec := newTestTracer(t)
-	cmdRunner := &mockCmdRunner{
-		phaseOutputs: map[string][]byte{
-			"Analyze": []byte("analysis complete"),
-		},
-	}
-	r := newWorkflowRunner(t, "trace-basic", []testPhase{
-		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
-	}, cmdRunner, tracer)
-
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	drainAttrs := spanAttrMap(drainSpan)
+	assert.Equal(t, strconv.Itoa(r.Config.Concurrency), drainAttrs["xylem.drain.concurrency"])
+	assert.Equal(t, r.Config.Timeout, drainAttrs["xylem.drain.timeout"])
 
 	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
-	if phaseSpan.Parent().SpanID() != vesselSpan.SpanContext().SpanID() {
-		t.Fatalf("phase parent span ID = %s, want %s", phaseSpan.Parent().SpanID(), vesselSpan.SpanContext().SpanID())
-	}
+	assert.False(t, drainSpan.StartTime().After(vesselSpan.StartTime()))
+	assert.False(t, drainSpan.StartTime().After(phaseSpan.StartTime()))
+	assert.False(t, drainSpan.EndTime().Before(vesselSpan.EndTime()))
+	assert.False(t, drainSpan.EndTime().Before(phaseSpan.EndTime()))
 }
 
-func TestSmoke_S13_GateSpanChildOfPhase(t *testing.T) {
+func TestSmoke_S11_VesselSpanIsChildOfDrainRunSpan(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("analysis complete"),
+		},
+	}
+	r := newWorkflowRunner(t, "trace-basic", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
+	}, cmdRunner, tracer)
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	drainSpan := endedSpanByName(t, rec, "drain_run")
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	assert.Equal(t, drainSpan.SpanContext().TraceID(), vesselSpan.Parent().TraceID())
+	assert.Equal(t, drainSpan.SpanContext().SpanID(), vesselSpan.Parent().SpanID())
+
+	vesselAttrs := spanAttrMap(vesselSpan)
+	assert.Equal(t, "issue-1", vesselAttrs["xylem.vessel.id"])
+	assert.Equal(t, "github-issue", vesselAttrs["xylem.vessel.source"])
+	assert.Equal(t, "trace-basic", vesselAttrs["xylem.vessel.workflow"])
+	assert.Equal(t, "https://github.com/owner/repo/issues/1", vesselAttrs["xylem.vessel.ref"])
+}
+
+func TestSmoke_S12_PhaseSpanIsChildOfVesselSpan(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("analysis complete"),
+		},
+	}
+	r := newWorkflowRunner(t, "trace-basic", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
+	}, cmdRunner, tracer)
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	vesselSpan := endedSpanByName(t, rec, "vessel:issue-1")
+	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
+	assert.Equal(t, vesselSpan.SpanContext().TraceID(), phaseSpan.Parent().TraceID())
+	assert.Equal(t, vesselSpan.SpanContext().SpanID(), phaseSpan.Parent().SpanID())
+}
+
+func TestSmoke_S13_GateSpanIsChildOfPhaseSpan(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -5496,22 +6557,22 @@ func TestSmoke_S13_GateSpanChildOfPhase(t *testing.T) {
 		},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
 	gateSpan := endedSpanByName(t, rec, "gate:command")
-	if gateSpan.Parent().SpanID() != phaseSpan.SpanContext().SpanID() {
-		t.Fatalf("gate parent span ID = %s, want %s", gateSpan.Parent().SpanID(), phaseSpan.SpanContext().SpanID())
-	}
+	assert.Equal(t, phaseSpan.SpanContext().TraceID(), gateSpan.Parent().TraceID())
+	assert.Equal(t, phaseSpan.SpanContext().SpanID(), gateSpan.Parent().SpanID())
+
+	gateAttrs := spanAttrMap(gateSpan)
+	assert.Equal(t, "command", gateAttrs["xylem.gate.type"])
+	assert.Equal(t, "true", gateAttrs["xylem.gate.passed"])
+	assert.Equal(t, "1", gateAttrs["xylem.gate.retry_attempt"])
 }
 
-func TestSmoke_S14_PhaseResultAttributesPresent(t *testing.T) {
+func TestSmoke_S14_PhaseSpanGetsResultAttributesAddedAfterExecution(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
@@ -5522,24 +6583,22 @@ func TestSmoke_S14_PhaseResultAttributesPresent(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("DrainResult.Completed = %d, want 1", result.Completed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
 
 	attrs := spanAttrMap(endedSpanByName(t, rec, "phase:analyze"))
-	if attrs["xylem.phase.input_tokens_est"] == "" {
-		t.Fatal("xylem.phase.input_tokens_est missing")
-	}
-	if attrs["xylem.phase.duration_ms"] == "" {
-		t.Fatal("xylem.phase.duration_ms missing")
-	}
+	require.NotEmpty(t, attrs["xylem.phase.input_tokens_est"])
+	require.NotEmpty(t, attrs["xylem.phase.output_tokens_est"])
+	require.NotEmpty(t, attrs["xylem.phase.cost_usd_est"])
+	require.NotEmpty(t, attrs["xylem.phase.duration_ms"])
+
+	costParts := strings.Split(attrs["xylem.phase.cost_usd_est"], ".")
+	require.Len(t, costParts, 2)
+	assert.Len(t, costParts[1], 6)
 }
 
-func TestSmoke_S15_PhaseErrorRecordedOnSpan(t *testing.T) {
+func TestSmoke_S15_PhaseSpanRecordsErrorOnPhaseFailure(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	runErr := errors.New("provider crashed")
 	cmdRunner := &mockCmdRunner{
@@ -5549,24 +6608,16 @@ func TestSmoke_S15_PhaseErrorRecordedOnSpan(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
 
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
-	if !spanHasExceptionEvent(phaseSpan, runErr.Error()) {
-		t.Fatalf("phase span missing exception event for %q", runErr.Error())
-	}
-	if phaseSpan.Status().Code != codes.Error {
-		t.Fatalf("phase span status code = %v, want %v", phaseSpan.Status().Code, codes.Error)
-	}
+	assert.True(t, spanHasExceptionEvent(phaseSpan, runErr.Error()))
+	assert.Equal(t, codes.Error, phaseSpan.Status().Code)
 }
 
-func TestSmoke_S16_PhaseSpanAlwaysEnds(t *testing.T) {
+func TestSmoke_S16_PhaseSpanAlwaysEndsEvenWhenPhaseFails(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseErr: errors.New("provider crashed"),
@@ -5575,19 +6626,18 @@ func TestSmoke_S16_PhaseSpanAlwaysEnds(t *testing.T) {
 		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
-	if len(endedSpansByName(rec, "phase:analyze")) == 0 {
-		t.Fatal("phase span did not end")
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	for _, spanName := range []string{"drain_run", "vessel:issue-1", "phase:analyze"} {
+		spans := endedSpansByName(rec, spanName)
+		require.Len(t, spans, 1)
+		assert.False(t, spans[0].EndTime().IsZero())
 	}
 }
 
-func TestSmoke_WS6S10_PhaseSpanAlwaysEndedOnFailure(t *testing.T) {
+func TestSmoke_S10_PhaseSpanIsAlwaysEndedEvenOnFailureDuringOrchestratedExecution(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		phaseErr: errors.New("orchestrated crash"),
@@ -5597,22 +6647,17 @@ func TestSmoke_WS6S10_PhaseSpanAlwaysEndedOnFailure(t *testing.T) {
 		{name: "implement", promptContent: "Implement {{.PreviousOutputs.analyze}}", maxTurns: 5, dependsOn: []string{"analyze"}},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
-	if len(cmdRunner.phaseCalls) != 1 {
-		t.Fatalf("phaseCalls = %d, want 1", len(cmdRunner.phaseCalls))
-	}
-	if len(endedSpansByName(rec, "phase:analyze")) == 0 {
-		t.Fatal("orchestrated phase span did not end")
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Len(t, cmdRunner.phaseCalls, 1)
+
+	spans := endedSpansByName(rec, "phase:analyze")
+	require.Len(t, spans, 1)
+	assert.False(t, spans[0].EndTime().IsZero())
 }
 
-func TestSmoke_WS6S11_ErrorRecordedBeforeEnd(t *testing.T) {
+func TestSmoke_S11_ErrorIsRecordedOnSpanBeforeEndDuringOrchestratedExecution(t *testing.T) {
 	tracer, rec := newTestTracer(t)
 	runErr := errors.New("orchestrated crash")
 	cmdRunner := &mockCmdRunner{
@@ -5623,21 +6668,15 @@ func TestSmoke_WS6S11_ErrorRecordedBeforeEnd(t *testing.T) {
 		{name: "implement", promptContent: "Implement {{.PreviousOutputs.analyze}}", maxTurns: 5, dependsOn: []string{"analyze"}},
 	}, cmdRunner, tracer)
 
-	result, err := r.Drain(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Failed != 1 {
-		t.Fatalf("DrainResult.Failed = %d, want 1", result.Failed)
-	}
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
 
 	phaseSpan := endedSpanByName(t, rec, "phase:analyze")
-	if !spanHasExceptionEvent(phaseSpan, runErr.Error()) {
-		t.Fatalf("phase span missing exception event for %q", runErr.Error())
-	}
-	if phaseSpan.EndTime().IsZero() {
-		t.Fatal("phase span end time not set")
-	}
+	event, ok := spanExceptionEvent(phaseSpan, runErr.Error())
+	require.True(t, ok)
+	require.False(t, phaseSpan.EndTime().IsZero())
+	assert.False(t, event.Time.After(phaseSpan.EndTime()))
 }
 
 func TestIsRateLimitError(t *testing.T) {
@@ -5716,7 +6755,7 @@ func TestDrainRateLimitRetrySucceeds(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -5756,7 +6795,7 @@ func TestDrainRateLimitRetryExhausted(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -5801,7 +6840,7 @@ func TestDrainNonRateLimitErrorNotRetried(t *testing.T) {
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -5834,7 +6873,7 @@ func TestDrainPromptOnlyRateLimitRetry(t *testing.T) {
 	}
 	r := New(cfg, q, &mockWorktree{}, cmdRunner)
 
-	result, err := r.Drain(context.Background())
+	result, err := r.DrainAndWait(context.Background())
 	if err != nil {
 		t.Fatalf("Drain() error = %v", err)
 	}
@@ -5976,4 +7015,184 @@ func TestResolveTimeout(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunVesselLiveHTTPGatePersistsObservedInSituEvidence(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(401, "live-http-pass")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "live-http-pass", []testPhase{{
+		name:          "implement",
+		promptContent: "Implement the fix",
+		maxTurns:      5,
+		gate: fmt.Sprintf(`      type: live
+      retries: 0
+      evidence:
+        claim: "Smoke check passes against the running service"
+        level: observed_in_situ
+        checker: "xylem live gate"
+        trust_boundary: "running service"
+      live:
+        mode: http
+        http:
+          base_url: %q
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200
+              expect_json:
+                - path: $.status
+                  equals: ok`, server.URL),
+	}})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement the fix": []byte("done"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.LiveGate = &gate.LiveVerifier{HTTPClient: server.Client()}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	final := queueVesselByID(t, q, vessel.ID)
+	assert.Equal(t, queue.StateCompleted, final.State)
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, vessel.ID)
+	require.NoError(t, err)
+	require.Len(t, manifest.Claims, 1)
+	assert.Equal(t, evidence.ObservedInSitu, manifest.Claims[0].Level)
+	assert.Contains(t, manifest.Claims[0].ArtifactPath, "live-gate.json")
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.Equal(t, evidenceManifestRelativePath(vessel.ID), summary.EvidenceManifestPath)
+}
+
+func TestRunVesselLiveHTTPGateFailureFailsVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"degraded"}`))
+	}))
+	defer server.Close()
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(402, "live-http-fail")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "live-http-fail", []testPhase{{
+		name:          "implement",
+		promptContent: "Implement the fix",
+		maxTurns:      5,
+		gate: fmt.Sprintf(`      type: live
+      retries: 0
+      live:
+        mode: http
+        http:
+          base_url: %q
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200
+              expect_json:
+                - path: $.status
+                  equals: ok`, server.URL),
+	}})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement the fix": []byte("done"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.LiveGate = &gate.LiveVerifier{HTTPClient: server.Client()}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+
+	final := queueVesselByID(t, q, vessel.ID)
+	assert.Equal(t, queue.StateFailed, final.State)
+	assert.Contains(t, final.Error, "gate failed")
+	assert.Contains(t, final.GateOutput, "live gate failed")
+}
+
+func TestRunVesselLiveGateEmitsStepSpans(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer server.Close()
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(403, "live-http-trace"))
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "live-http-trace", []testPhase{{
+		name:          "implement",
+		promptContent: "Implement the fix",
+		maxTurns:      5,
+		gate: fmt.Sprintf(`      type: live
+      retries: 0
+      live:
+        mode: http
+        http:
+          base_url: %q
+          steps:
+            - name: health
+              url: /health
+              expect_status: 200`, server.URL),
+	}})
+	withTestWorkingDir(t, dir)
+
+	tracer, rec := newTestTracer(t)
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement the fix": []byte("done"),
+		},
+	})
+	r.Tracer = tracer
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.LiveGate = &gate.LiveVerifier{HTTPClient: server.Client()}
+
+	_, err = r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+
+	gateSpan := endedSpanByName(t, rec, "gate:live")
+	gateAttrs := spanAttrMap(gateSpan)
+	assert.Equal(t, "live", gateAttrs["xylem.gate.type"])
+	assert.Equal(t, "true", gateAttrs["xylem.gate.passed"])
+
+	stepSpan := endedSpanByName(t, rec, "gate_step:health")
+	stepAttrs := spanAttrMap(stepSpan)
+	assert.Equal(t, "health", stepAttrs["xylem.gate.step.name"])
+	assert.Equal(t, "http", stepAttrs["xylem.gate.step.mode"])
+	assert.Equal(t, "true", stepAttrs["xylem.gate.step.passed"])
+	assert.Equal(t, gateSpan.SpanContext().SpanID(), stepSpan.Parent().SpanID())
 }

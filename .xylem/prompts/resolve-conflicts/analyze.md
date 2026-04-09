@@ -10,6 +10,8 @@ Check out the PR branch and attempt a merge from main:
 1. Run `gh pr checkout {{.Issue.Number}}`
 2. Run `git fetch origin main && git merge origin/main --no-commit`
 
+Do not modify, stage, or delete anything under `.xylem/`. The xylem control plane is out of scope for conflict resolution.
+
 If the merge completes with no conflicts, include the exact standalone line `XYLEM_NOOP` in your final output and explain that no conflict resolution is needed.
 
 If there are conflicts:

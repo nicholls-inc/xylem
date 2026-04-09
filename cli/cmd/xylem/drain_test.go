@@ -56,12 +56,16 @@ type recordingSpanExporter struct {
 }
 
 type configurableWorktreeStub struct {
-	patterns []string
+	patterns     []string
+	removedPaths []string
 }
 
 func (w *configurableWorktreeStub) Create(context.Context, string) (string, error) { return "", nil }
 
-func (w *configurableWorktreeStub) Remove(context.Context, string) error { return nil }
+func (w *configurableWorktreeStub) Remove(_ context.Context, worktreePath string) error {
+	w.removedPaths = append(w.removedPaths, worktreePath)
+	return nil
+}
 
 func (w *configurableWorktreeStub) SetProtectedSurfaces(patterns []string) {
 	w.patterns = append([]string(nil), patterns...)
@@ -295,9 +299,8 @@ func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
 	if r.AuditLog == nil {
 		t.Fatal("r.AuditLog = nil, want audit log")
 	}
-	// Tracer is nil when no OTLP endpoint is configured.
-	if r.Tracer != nil {
-		t.Fatal("r.Tracer != nil, want nil when no OTLP endpoint configured")
+	if r.Tracer == nil {
+		t.Fatal("r.Tracer = nil, want stdout tracer when observability is enabled")
 	}
 
 	result := r.Intermediary.Evaluate(intermediary.Intent{
@@ -350,24 +353,50 @@ func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTraci
 	cfg := makeDrainConfig(dir)
 	cfg.Observability.Endpoint = "collector:4317"
 	cfg.Observability.Insecure = true
+	cfg.Claude.Command = "true"
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
+	wt := &configurableWorktreeStub{}
 	logs := withBufferedDefaultLogger(t)
+	worktreePath := filepath.Join(dir, "prompt-worktree")
+	if err := os.MkdirAll(worktreePath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", worktreePath, err)
+	}
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:           "prompt-1",
+		Source:       "manual",
+		Prompt:       "print hello",
+		WorktreePath: worktreePath,
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
 
 	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
 		return nil, errors.New("bridge down")
 	})
 
-	runnerInstance, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
+	runnerInstance, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 
-	result, err := runnerInstance.Drain(context.Background())
-	require.NoError(t, err)
 	require.Nil(t, runnerInstance.Tracer)
-	assert.Equal(t, runner.DrainResult{}, result)
 	assert.Contains(t, logs.String(), "level=WARN")
 	assert.Contains(t, logs.String(), "msg=\"initialize tracer\"")
 	assert.Contains(t, logs.String(), "error=\"bridge down\"")
+
+	result, err := runnerInstance.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	assert.Zero(t, result.Failed)
+	assert.Zero(t, result.Skipped)
+	assert.Zero(t, result.Waiting)
+
+	vessel, findErr := q.FindByID("prompt-1")
+	require.NoError(t, findErr)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+	require.Len(t, wt.removedPaths, 1)
+	assert.Equal(t, worktreePath, wt.removedPaths[0])
 }
 
 func TestSmoke_S30_TracerWiredInDrainGoAfterConfigLoad(t *testing.T) {
@@ -404,8 +433,6 @@ func TestSmoke_S30_TracerWiredInDrainGoAfterConfigLoad(t *testing.T) {
 func TestSmoke_S32_TracerShutdownDeferredInBothDrainAndDaemonPaths(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
-	cfg.Observability.Endpoint = "localhost:4317"
-	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	cmdRunner := newCmdRunner(cfg)
 
@@ -431,7 +458,7 @@ func TestSmoke_S32_TracerShutdownDeferredInBothDrainAndDaemonPaths(t *testing.T)
 	cleanup()
 	assert.Equal(t, 1, exporters[0].shutdownCount())
 
-	daemonResult, err := runDrain(cancelledCtx, cfg, q, worktree.New(dir, cmdRunner))
+	daemonResult, err := runDrain(cancelledCtx, cfg, q, worktree.New(dir, cmdRunner), 0)
 	require.NoError(t, err)
 	assert.Equal(t, runner.DrainResult{}, daemonResult)
 	require.Len(t, exporters, 2)
