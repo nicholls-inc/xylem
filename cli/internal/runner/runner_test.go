@@ -4192,6 +4192,7 @@ func TestResolveRepoNewSources(t *testing.T) {
 		Sources: map[string]source.Source{
 			"github-pr-events": &source.GitHubPREvents{Repo: "owner/events-repo"},
 			"github-merge":     &source.GitHubMerge{Repo: "owner/merge-repo"},
+			"events-source":    &source.GitHubPREvents{Repo: "owner/config-repo"},
 		},
 	}
 
@@ -4209,6 +4210,42 @@ func TestResolveRepoNewSources(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("resolveRepo(%q) = %q, want %q", tt.source, got, tt.want)
 		}
+	}
+
+	got := r.resolveRepo(queue.Vessel{
+		Source: "github-pr-events",
+		Meta:   map[string]string{"config_source": "events-source"},
+	})
+	if got != "owner/config-repo" {
+		t.Errorf("resolveRepo(config_source) = %q, want %q", got, "owner/config-repo")
+	}
+}
+
+func TestResolveSourcePrefersConfigSourceForScheduleVessel(t *testing.T) {
+	r := &Runner{
+		Sources: map[string]source.Source{
+			"schedule": &source.Schedule{ConfigName: "fallback"},
+			"doctor":   &source.Schedule{ConfigName: "doctor"},
+		},
+	}
+
+	resolved, ok := r.resolveSource(queue.Vessel{
+		Source: "schedule",
+		Meta: map[string]string{
+			"config_source":        "doctor",
+			"schedule.fired_at":    "2026-04-09T06:00:00Z",
+			"schedule.cadence":     "1h",
+			"schedule.source_name": "doctor",
+		},
+	}).(*source.Schedule)
+	if !ok {
+		t.Fatalf("resolveSource() returned %T, want *source.Schedule", r.resolveSource(queue.Vessel{
+			Source: "schedule",
+			Meta:   map[string]string{"config_source": "doctor"},
+		}))
+	}
+	if resolved.ConfigName != "doctor" {
+		t.Fatalf("resolved.ConfigName = %q, want doctor", resolved.ConfigName)
 	}
 }
 

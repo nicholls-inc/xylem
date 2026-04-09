@@ -20,7 +20,7 @@ Sources              xylem CLI              Execution
                                             └──────────────────────────┘
 ```
 
-Sources are pluggable. Built-in source types cover GitHub issues (`github`), pull requests (`github-pr`), pull-request events (`github-pr-events`), merged pull requests (`github-merge`), and manual tasks via `xylem enqueue`. xylem handles scheduling, deduplication, concurrency, and worktree isolation across all sources.
+Sources are pluggable. Built-in source types cover GitHub issues (`github`), pull requests (`github-pr`), pull-request events (`github-pr-events`), merged pull requests (`github-merge`), recurring scheduled workflows (`schedule`), and manual tasks via `xylem enqueue`. xylem handles scheduling, deduplication, concurrency, and worktree isolation across all sources.
 
 ## Quick start
 
@@ -65,6 +65,10 @@ sources:
       implement-features:
         labels: [enhancement, low-effort, ready-for-work]
         workflow: implement-feature
+  doc-gardener:
+    type: schedule
+    cadence: "@daily"
+    workflow: doc-garden
 
 concurrency: 2
 max_turns: 50
@@ -88,7 +92,7 @@ daemon:
   drain_interval: "30s"
 ```
 
-This example covers the most common fields. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), recurring harness reviews (`harness.review`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
+This example covers the most common fields. Scheduled sources fire a synthetic vessel whenever their cadence elapses; `cadence` accepts Go durations like `1h`, cron descriptors like `@daily`, and standard cron expressions. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), recurring harness reviews (`harness.review`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
 
 ## Workflows
 

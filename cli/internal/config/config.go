@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cadence"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"gopkg.in/yaml.v3"
@@ -45,13 +46,15 @@ type Config struct {
 }
 
 type SourceConfig struct {
-	Type    string          `yaml:"type"`
-	Repo    string          `yaml:"repo,omitempty"`
-	LLM     string          `yaml:"llm,omitempty"`
-	Model   string          `yaml:"model,omitempty"`
-	Timeout string          `yaml:"timeout,omitempty"`
-	Exclude []string        `yaml:"exclude,omitempty"`
-	Tasks   map[string]Task `yaml:"tasks,omitempty"`
+	Type     string          `yaml:"type"`
+	Repo     string          `yaml:"repo,omitempty"`
+	Cadence  string          `yaml:"cadence,omitempty"`
+	Workflow string          `yaml:"workflow,omitempty"`
+	LLM      string          `yaml:"llm,omitempty"`
+	Model    string          `yaml:"model,omitempty"`
+	Timeout  string          `yaml:"timeout,omitempty"`
+	Exclude  []string        `yaml:"exclude,omitempty"`
+	Tasks    map[string]Task `yaml:"tasks,omitempty"`
 }
 
 type StatusLabels struct {
@@ -314,6 +317,10 @@ func (c *Config) Validate() error {
 			}
 		case "github-merge":
 			if err := validateGitHubMergeSource(name, src); err != nil {
+				return err
+			}
+		case "schedule":
+			if err := validateScheduleSource(name, src); err != nil {
 				return err
 			}
 		case "":
@@ -681,6 +688,19 @@ func validateGitHubMergeSource(name string, src SourceConfig) error {
 		if strings.TrimSpace(task.Workflow) == "" {
 			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
 		}
+	}
+	return nil
+}
+
+func validateScheduleSource(name string, src SourceConfig) error {
+	if strings.TrimSpace(src.Workflow) == "" {
+		return fmt.Errorf("source %q (schedule): workflow is required", name)
+	}
+	if len(src.Tasks) > 0 {
+		return fmt.Errorf("source %q (schedule): tasks are not supported; configure workflow at the source level", name)
+	}
+	if _, err := cadence.Parse(src.Cadence); err != nil {
+		return fmt.Errorf("source %q (schedule): %w", name, err)
 	}
 	return nil
 }
