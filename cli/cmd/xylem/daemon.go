@@ -68,14 +68,13 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	var upgrade upgradeFunc
 	upgradeInterval := time.Duration(0)
 	if cfg.Daemon.AutoUpgrade {
-		execPath, execErr := os.Executable()
-		if execErr != nil {
-			slog.Warn("daemon auto-upgrade skipped: resolve executable path", "error", execErr)
+		target, err := resolveDaemonUpgradeTarget(os.Getwd, os.Executable)
+		if err != nil {
+			slog.Warn("daemon auto-upgrade skipped", "error", err)
 		} else {
-			repoDir := filepath.Dir(filepath.Dir(execPath))
-			selfUpgrade(repoDir, execPath)
+			selfUpgrade(target.repoDir, target.executablePath)
 
-			upgrade = func() { selfUpgrade(repoDir, execPath) }
+			upgrade = func() { selfUpgrade(target.repoDir, target.executablePath) }
 			upgradeInterval = parseUpgradeInterval(cfg.Daemon)
 		}
 	}

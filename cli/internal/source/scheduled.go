@@ -107,6 +107,8 @@ func (s *Scheduled) OnEnqueue(_ context.Context, vessel queue.Vessel) error {
 }
 
 func (s *Scheduled) OnStart(_ context.Context, _ queue.Vessel) error            { return nil }
+func (s *Scheduled) OnWait(_ context.Context, _ queue.Vessel) error             { return nil }
+func (s *Scheduled) OnResume(_ context.Context, _ queue.Vessel) error           { return nil }
 func (s *Scheduled) OnComplete(_ context.Context, _ queue.Vessel) error         { return nil }
 func (s *Scheduled) OnFail(_ context.Context, _ queue.Vessel) error             { return nil }
 func (s *Scheduled) OnTimedOut(_ context.Context, _ queue.Vessel) error         { return nil }

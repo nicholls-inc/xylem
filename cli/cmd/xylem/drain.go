@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"os/signal"
 	"path/filepath"
