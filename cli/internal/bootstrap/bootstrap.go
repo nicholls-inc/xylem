@@ -3,6 +3,8 @@ package bootstrap
 import (
 	"encoding/json"
 	"fmt"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"sort"
@@ -58,6 +60,7 @@ type TechStack struct {
 type EntryPoint struct {
 	Name    string
 	Command string
+	Path    string `json:"path,omitempty"`
 	// Exists indicates the entry point file was found on disk.
 	Exists bool `json:"exists"`
 	Error  string
@@ -142,6 +145,10 @@ var buildToolDefs = []struct {
 	Name       string
 	Commands   map[string]string
 }{
+	{"go.mod", "Go", map[string]string{"build": "go build ./...", "test": "go test ./..."}},
+	{"package.json", "npm", map[string]string{"build": "npm run build", "test": "npm test"}},
+	{"pnpm-lock.yaml", "pnpm", map[string]string{"build": "pnpm build", "test": "pnpm test"}},
+	{"yarn.lock", "yarn", map[string]string{"build": "yarn build", "test": "yarn test"}},
 	{"Makefile", "Make", map[string]string{"build": "make", "test": "make test"}},
 	{"Dockerfile", "Docker", map[string]string{"build": "docker build ."}},
 	{"docker-compose.yml", "Docker Compose", map[string]string{"up": "docker-compose up"}},
@@ -161,8 +168,6 @@ var entryPointDefs = []struct {
 }{
 	{"Makefile", "make", "make"},
 	{"package.json", "npm", "npm start"},
-	{"main.go", "go run", "go run ."},
-	{"cmd/main.go", "go run cmd", "go run ./cmd"},
 	{"manage.py", "django", "python manage.py runserver"},
 	{"app.py", "python app", "python app.py"},
 	{"Cargo.toml", "cargo run", "cargo run"},
@@ -271,29 +276,67 @@ func DetectLanguages(path string) []Language {
 
 // DetectFrameworks checks for framework indicator files at the repo root.
 func DetectFrameworks(path string) []Framework {
-	var frameworks []Framework
-	for _, fi := range frameworkIndicators {
-		target := filepath.Join(path, fi.File)
-		if _, err := os.Stat(target); err == nil {
-			frameworks = append(frameworks, Framework{
+	frameworks := make(map[string]Framework)
+	_ = walkRepoFiles(path, func(relFile, absFile string, _ os.FileInfo) error {
+		base := filepath.Base(relFile)
+		for _, fi := range frameworkIndicators {
+			if base != filepath.Base(fi.File) {
+				continue
+			}
+			addFramework(frameworks, Framework{
 				Name:       fi.Name,
 				Language:   fi.Language,
-				Indicators: []string{fi.Indicator},
+				Indicators: []string{relFile},
 				Confidence: 0.9,
 			})
 		}
+
+		if base == "go.mod" {
+			data, err := os.ReadFile(absFile)
+			if err != nil {
+				return nil
+			}
+			content := string(data)
+			for dep, name := range map[string]string{
+				"github.com/spf13/cobra": "Cobra",
+				"github.com/spf13/viper": "Viper",
+			} {
+				if strings.Contains(content, dep) {
+					addFramework(frameworks, Framework{
+						Name:       name,
+						Language:   "Go",
+						Indicators: []string{fmt.Sprintf("%s:%s", relFile, dep)},
+						Confidence: 0.85,
+					})
+				}
+			}
+		}
+
+		return nil
+	})
+
+	result := make([]Framework, 0, len(frameworks))
+	for _, fw := range frameworks {
+		sort.Strings(fw.Indicators)
+		result = append(result, fw)
 	}
-	return frameworks
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name != result[j].Name {
+			return result[i].Name < result[j].Name
+		}
+		return strings.Join(result[i].Indicators, ",") < strings.Join(result[j].Indicators, ",")
+	})
+	return result
 }
 
-// DetectBuildTools checks for build tool config files at the repo root.
+// DetectBuildTools checks for build tool config files anywhere in the repo tree.
 func DetectBuildTools(path string) []BuildTool {
 	var tools []BuildTool
 	seen := make(map[string]bool)
-	for _, bt := range buildToolDefs {
-		target := filepath.Join(path, bt.ConfigFile)
-		if _, err := os.Stat(target); err == nil {
-			if seen[bt.Name] {
+	_ = walkRepoFiles(path, func(relFile string, _ string, _ os.FileInfo) error {
+		base := filepath.Base(relFile)
+		for _, bt := range buildToolDefs {
+			if base != filepath.Base(bt.ConfigFile) || seen[bt.Name] {
 				continue
 			}
 			seen[bt.Name] = true
@@ -303,28 +346,176 @@ func DetectBuildTools(path string) []BuildTool {
 			}
 			tools = append(tools, BuildTool{
 				Name:       bt.Name,
-				ConfigFile: bt.ConfigFile,
+				ConfigFile: relFile,
 				Commands:   cmds,
 			})
 		}
-	}
+		return nil
+	})
+	sort.Slice(tools, func(i, j int) bool {
+		if tools[i].Name != tools[j].Name {
+			return tools[i].Name < tools[j].Name
+		}
+		return tools[i].ConfigFile < tools[j].ConfigFile
+	})
 	return tools
 }
 
-// DiscoverEntryPoints checks for known entry point files.
+// DiscoverEntryPoints checks for known entry point files and runnable main packages.
 func DiscoverEntryPoints(path string) []EntryPoint {
 	var eps []EntryPoint
-	for _, ep := range entryPointDefs {
-		target := filepath.Join(path, ep.File)
-		if _, err := os.Stat(target); err == nil {
-			eps = append(eps, EntryPoint{
-				Name:    ep.Name,
-				Command: ep.Command,
-				Exists:  true,
-			})
+	seen := make(map[string]bool)
+	_ = walkRepoFiles(path, func(relFile, absFile string, _ os.FileInfo) error {
+		base := filepath.Base(relFile)
+		relDir := repoRel(filepath.Dir(relFile))
+
+		for _, ep := range entryPointDefs {
+			if base != filepath.Base(ep.File) {
+				continue
+			}
+			entry := entryPointFromKnownFile(ep.Name, relDir, relFile)
+			if entry.Path == "" {
+				entry.Path = relDir
+			}
+			key := entry.Name + "|" + entry.Path
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			eps = append(eps, entry)
 		}
-	}
+
+		if base == "main.go" {
+			isMain, err := isMainPackage(absFile)
+			if err != nil || !isMain {
+				return nil
+			}
+			entry := EntryPoint{
+				Name:    "go run",
+				Command: goRunCommand(relDir),
+				Path:    relDir,
+				Exists:  true,
+			}
+			key := entry.Name + "|" + entry.Path
+			if !seen[key] {
+				seen[key] = true
+				eps = append(eps, entry)
+			}
+		}
+		return nil
+	})
+	sort.Slice(eps, func(i, j int) bool {
+		if eps[i].Path != eps[j].Path {
+			return eps[i].Path < eps[j].Path
+		}
+		return eps[i].Name < eps[j].Name
+	})
 	return eps
+}
+
+func addFramework(frameworks map[string]Framework, fw Framework) {
+	if existing, ok := frameworks[fw.Name]; ok {
+		existing.Confidence = maxFloat(existing.Confidence, fw.Confidence)
+		existing.Indicators = appendUniqueStrings(existing.Indicators, fw.Indicators...)
+		frameworks[fw.Name] = existing
+		return
+	}
+	fw.Indicators = appendUniqueStrings(nil, fw.Indicators...)
+	frameworks[fw.Name] = fw
+}
+
+func appendUniqueStrings(dst []string, values ...string) []string {
+	seen := make(map[string]struct{}, len(dst))
+	for _, v := range dst {
+		seen[v] = struct{}{}
+	}
+	for _, v := range values {
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		dst = append(dst, v)
+		seen[v] = struct{}{}
+	}
+	return dst
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func walkRepoFiles(root string, fn func(relFile, absFile string, info os.FileInfo) error) error {
+	return filepath.Walk(root, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if info.IsDir() {
+			if p != root && isSkippableDir(filepath.Base(p)) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return nil
+		}
+		return fn(repoRel(rel), p, info)
+	})
+}
+
+func repoRel(path string) string {
+	if path == "." || path == "" {
+		return "."
+	}
+	return filepath.ToSlash(path)
+}
+
+func entryPointFromKnownFile(name, relDir, relFile string) EntryPoint {
+	switch name {
+	case "make":
+		cmd := "make"
+		path := relDir
+		if relDir != "." {
+			cmd = fmt.Sprintf("make -C %s", relDir)
+		}
+		return EntryPoint{Name: name, Command: cmd, Path: path, Exists: true}
+	case "npm":
+		cmd := "npm start"
+		if relDir != "." {
+			cmd = fmt.Sprintf("npm --prefix %s start", relDir)
+		}
+		return EntryPoint{Name: name, Command: cmd, Path: relDir, Exists: true}
+	case "cargo run":
+		cmd := "cargo run"
+		if relDir != "." {
+			cmd = fmt.Sprintf("cargo run --manifest-path %s/Cargo.toml", relDir)
+		}
+		return EntryPoint{Name: name, Command: cmd, Path: relDir, Exists: true}
+	case "django":
+		return EntryPoint{Name: name, Command: fmt.Sprintf("python %s runserver", relFile), Path: relFile, Exists: true}
+	case "python app":
+		return EntryPoint{Name: name, Command: fmt.Sprintf("python %s", relFile), Path: relFile, Exists: true}
+	default:
+		return EntryPoint{Name: name, Exists: true}
+	}
+}
+
+func goRunCommand(relDir string) string {
+	if relDir == "." {
+		return "go run ."
+	}
+	return "go run ./" + relDir
+}
+
+func isMainPackage(path string) (bool, error) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, path, nil, parser.PackageClauseOnly)
+	if err != nil {
+		return false, err
+	}
+	return file.Name != nil && file.Name.Name == "main", nil
 }
 
 // DetectTechStack determines technologies and their agent-compatibility.
@@ -496,7 +687,7 @@ func scoreBootstrapSelfSufficiency(path string, profile *RepoProfile) (float64, 
 		gaps = append(gaps, "no README found")
 	}
 
-	if anyFileExists(path, []string{"go.mod", "package.json", "requirements.txt", "Cargo.toml", "pyproject.toml", "Gemfile", "pom.xml"}) {
+	if anyRepoFileExists(path, []string{"go.mod", "package.json", "requirements.txt", "Cargo.toml", "pyproject.toml", "Gemfile", "pom.xml"}) {
 		score += 0.3
 	} else {
 		gaps = append(gaps, "no dependency manifest found")
@@ -642,7 +833,7 @@ func scoreCodebaseMap(path string) (float64, []string, bool) {
 		gaps = append(gaps, "no architecture documentation found")
 	}
 
-	if anyDirExists(path, []string{"src", "lib", "internal", "pkg", "cmd"}) {
+	if anyRepoDirExists(path, []string{"src", "lib", "internal", "pkg", "cmd"}) {
 		score += 0.5
 	} else {
 		gaps = append(gaps, "no organized directory structure (src/, lib/, internal/, pkg/, cmd/)")
@@ -986,6 +1177,51 @@ func anyDirExists(base string, dirs []string) bool {
 		}
 	}
 	return false
+}
+
+func anyRepoFileExists(base string, files []string) bool {
+	targets := make(map[string]struct{}, len(files))
+	for _, file := range files {
+		targets[file] = struct{}{}
+	}
+
+	found := false
+	_ = walkRepoFiles(base, func(relFile, _ string, _ os.FileInfo) error {
+		if _, ok := targets[filepath.Base(relFile)]; ok {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
+}
+
+func anyRepoDirExists(base string, dirs []string) bool {
+	targets := make(map[string]struct{}, len(dirs))
+	for _, dir := range dirs {
+		targets[dir] = struct{}{}
+	}
+
+	found := false
+	_ = filepath.Walk(base, func(p string, info os.FileInfo, err error) error {
+		if err != nil {
+			return nil
+		}
+		if !info.IsDir() {
+			return nil
+		}
+		if p != base && isSkippableDir(filepath.Base(p)) {
+			return filepath.SkipDir
+		}
+		if p != base {
+			if _, ok := targets[filepath.Base(p)]; ok {
+				found = true
+				return filepath.SkipAll
+			}
+		}
+		return nil
+	})
+	return found
 }
 
 // anyExists returns true if any of the given repo-relative paths exist as files or directories.

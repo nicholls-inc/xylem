@@ -31,7 +31,7 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || cmd.CommandPath() == "xylem dtu" || strings.HasPrefix(cmd.CommandPath(), "xylem dtu ") {
+			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || cmd.CommandPath() == "xylem dtu" || strings.HasPrefix(cmd.CommandPath(), "xylem dtu ") || cmd.CommandPath() == "xylem bootstrap" || strings.HasPrefix(cmd.CommandPath(), "xylem bootstrap ") {
 				return nil
 			}
 
@@ -81,6 +81,7 @@ func newRootCmd() *cobra.Command {
 
 	cmd.AddCommand(
 		newInitCmd(),
+		newBootstrapCmd(),
 		newDtuCmd(),
 		newShimDispatchCmd(),
 		newScanCmd(),
