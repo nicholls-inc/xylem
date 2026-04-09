@@ -29,6 +29,16 @@ const (
 	PurposeEvaluation Purpose = "evaluation"
 )
 
+// UsageSource identifies where usage telemetry came from.
+type UsageSource string
+
+const (
+	UsageSourceProvider      UsageSource = "provider"
+	UsageSourceEstimated     UsageSource = "estimated"
+	UsageSourceUnavailable   UsageSource = "unavailable"
+	UsageSourceNotApplicable UsageSource = "not_applicable"
+)
+
 // UsageRecord captures a single token-usage event.
 type UsageRecord struct {
 	MissionID    string    `json:"mission_id"`
@@ -60,14 +70,44 @@ type BudgetAlert struct {
 
 // CostReport summarises cost data for a mission.
 type CostReport struct {
-	MissionID    string                `json:"mission_id"`
-	TotalTokens  int                   `json:"total_tokens"`
-	TotalCostUSD float64               `json:"total_cost_usd"`
-	ByRole       map[AgentRole]float64 `json:"by_role"`
-	ByPurpose    map[Purpose]float64   `json:"by_purpose"`
-	ByModel      map[string]float64    `json:"by_model"`
-	RecordCount  int                   `json:"record_count"`
-	GeneratedAt  time.Time             `json:"generated_at"`
+	MissionID              string                `json:"mission_id"`
+	Source                 string                `json:"source,omitempty"`
+	Workflow               string                `json:"workflow,omitempty"`
+	Ref                    string                `json:"ref,omitempty"`
+	State                  string                `json:"state,omitempty"`
+	TotalTokens            int                   `json:"total_tokens"`
+	TotalCostUSD           float64               `json:"total_cost_usd"`
+	TotalDurationMS        int64                 `json:"total_duration_ms,omitempty"`
+	ByRole                 map[AgentRole]float64 `json:"by_role"`
+	ByPurpose              map[Purpose]float64   `json:"by_purpose"`
+	ByModel                map[string]float64    `json:"by_model"`
+	RecordCount            int                   `json:"record_count"`
+	UsageSource            UsageSource           `json:"usage_source,omitempty"`
+	UsageUnavailableReason string                `json:"usage_unavailable_reason,omitempty"`
+	BudgetExceeded         bool                  `json:"budget_exceeded,omitempty"`
+	BudgetWarning          bool                  `json:"budget_warning,omitempty"`
+	BudgetAlertCount       int                   `json:"budget_alert_count,omitempty"`
+	TraceID                string                `json:"trace_id,omitempty"`
+	SpanID                 string                `json:"span_id,omitempty"`
+	EvidenceManifestPath   string                `json:"evidence_manifest_path,omitempty"`
+	Phases                 []PhaseReport         `json:"phases,omitempty"`
+	GeneratedAt            time.Time             `json:"generated_at"`
+}
+
+// PhaseReport captures phase-level latency and cost details for a mission report.
+type PhaseReport struct {
+	Name                   string      `json:"name"`
+	Type                   string      `json:"type"`
+	Provider               string      `json:"provider,omitempty"`
+	Model                  string      `json:"model,omitempty"`
+	DurationMS             int64       `json:"duration_ms"`
+	Status                 string      `json:"status"`
+	InputTokens            int         `json:"input_tokens"`
+	OutputTokens           int         `json:"output_tokens"`
+	TotalTokens            int         `json:"total_tokens"`
+	CostUSD                float64     `json:"cost_usd"`
+	UsageSource            UsageSource `json:"usage_source,omitempty"`
+	UsageUnavailableReason string      `json:"usage_unavailable_reason,omitempty"`
 }
 
 // ModelLadder maps each agent role to a preferred model name.

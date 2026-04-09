@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 )
@@ -27,26 +28,37 @@ type Reporter struct {
 
 // PhaseResult holds the outcome of a single phase for the summary comment.
 type PhaseResult struct {
-	Name     string
-	Duration time.Duration
-	Status   string // "completed", "failed", or "no-op"
+	Name                   string
+	Duration               time.Duration
+	Status                 string // "completed", "failed", or "no-op"
+	Provider               string
+	Model                  string
+	InputTokensEst         int
+	OutputTokensEst        int
+	CostUSDEst             float64
+	UsageSource            cost.UsageSource
+	UsageUnavailableReason string
 }
 
 // PhaseComplete posts a comment on the GitHub issue when a phase completes successfully.
-func (r *Reporter) PhaseComplete(ctx context.Context, issueNum int, phaseName string, duration time.Duration, output string) error {
+func (r *Reporter) PhaseComplete(ctx context.Context, issueNum int, phaseResult PhaseResult, output string) error {
 	span := observability.StartGlobalSpan(ctx, "reporter:phase_complete", observability.ReporterSpanAttributes(observability.ReporterSpanData{
 		Action:    "phase_complete",
 		Repo:      r.Repo,
 		IssueNum:  issueNum,
-		PhaseName: phaseName,
+		PhaseName: phaseResult.Name,
 	}))
 	defer span.End()
 
 	truncated := truncateOutput(output, MaxOutputLen)
+	usageLine := formatPhaseUsageLine(phaseResult)
+	if usageLine != "" {
+		usageLine += "\n\n"
+	}
 
 	body := fmt.Sprintf(
-		"**xylem — phase `%s` completed** (%s)\n\n<details>\n<summary>Phase output (click to expand)</summary>\n\n%s\n\n</details>",
-		phaseName, duration, truncated,
+		"**xylem — phase `%s` completed** (%s)\n\n%s<details>\n<summary>Phase output (click to expand)</summary>\n\n%s\n\n</details>",
+		phaseResult.Name, phaseResult.Duration, usageLine, truncated,
 	)
 
 	if err := postComment(ctx, r.Runner, r.Repo, issueNum, body); err != nil {
@@ -96,16 +108,28 @@ func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []P
 	} else {
 		sb.WriteString("**xylem — all phases completed**\n\n")
 	}
-	sb.WriteString("| Phase | Duration | Status |\n")
-	sb.WriteString("|-------|----------|--------|\n")
+	sb.WriteString("| Phase | Duration | Cost | Tokens | Status |\n")
+	sb.WriteString("|-------|----------|------|--------|--------|\n")
 
 	var total time.Duration
+	var totalTokens int
+	var totalCost float64
+	var usageSource cost.UsageSource
 	for _, p := range phases {
-		fmt.Fprintf(&sb, "| %s | %s | %s |\n", p.Name, p.Duration, p.Status)
+		fmt.Fprintf(&sb, "| %s | %s | %s | %s | %s |\n", p.Name, p.Duration, formatPhaseCostCell(p), formatPhaseTokenCell(p), p.Status)
 		total += p.Duration
+		totalTokens += p.InputTokensEst + p.OutputTokensEst
+		totalCost += p.CostUSDEst
+		if p.UsageSource != "" && p.UsageSource != cost.UsageSourceNotApplicable {
+			usageSource = p.UsageSource
+		}
 	}
 
 	fmt.Fprintf(&sb, "\nTotal: %s", total)
+	if usageSummary := formatAggregateUsageSummary(totalCost, totalTokens, usageSource); usageSummary != "" {
+		sb.WriteString(" — ")
+		sb.WriteString(usageSummary)
+	}
 	if evidenceSection := formatEvidenceSection(manifest); evidenceSection != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(evidenceSection)
@@ -158,4 +182,48 @@ func truncateOutput(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "\n\n(output truncated — full output in .xylem/phases/<id>/<phase>.output)"
+}
+
+func formatPhaseUsageLine(result PhaseResult) string {
+	if result.UsageSource == "" && result.CostUSDEst == 0 && result.InputTokensEst == 0 && result.OutputTokensEst == 0 {
+		return ""
+	}
+	if result.UsageSource == cost.UsageSourceNotApplicable {
+		return "_Usage:_ n/a — non-LLM phase"
+	}
+	if result.UsageSource == cost.UsageSourceUnavailable {
+		reason := result.UsageUnavailableReason
+		if reason == "" {
+			reason = "usage unavailable"
+		}
+		return "_Usage:_ n/a — " + reason
+	}
+	return fmt.Sprintf("_Usage:_ %s, %s", formatPhaseCostCell(result), formatPhaseTokenCell(result))
+}
+
+func formatPhaseCostCell(result PhaseResult) string {
+	if result.UsageSource == "" && result.CostUSDEst == 0 && result.InputTokensEst == 0 && result.OutputTokensEst == 0 {
+		return "—"
+	}
+	if result.UsageSource == cost.UsageSourceNotApplicable || result.UsageSource == cost.UsageSourceUnavailable {
+		return "—"
+	}
+	return fmt.Sprintf("$%.4f", result.CostUSDEst)
+}
+
+func formatPhaseTokenCell(result PhaseResult) string {
+	if result.UsageSource == "" && result.CostUSDEst == 0 && result.InputTokensEst == 0 && result.OutputTokensEst == 0 {
+		return "—"
+	}
+	if result.UsageSource == cost.UsageSourceNotApplicable || result.UsageSource == cost.UsageSourceUnavailable {
+		return "—"
+	}
+	return fmt.Sprintf("%d", result.InputTokensEst+result.OutputTokensEst)
+}
+
+func formatAggregateUsageSummary(totalCost float64, totalTokens int, usageSource cost.UsageSource) string {
+	if usageSource == "" || usageSource == cost.UsageSourceNotApplicable || usageSource == cost.UsageSourceUnavailable {
+		return ""
+	}
+	return fmt.Sprintf("$%.4f, %d tokens (%s)", totalCost, totalTokens, usageSource)
 }

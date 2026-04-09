@@ -40,14 +40,18 @@ type VesselSummary struct {
 
 	Phases []PhaseSummary `json:"phases"`
 
-	TotalInputTokensEst  int     `json:"total_input_tokens_est"`
-	TotalOutputTokensEst int     `json:"total_output_tokens_est"`
-	TotalTokensEst       int     `json:"total_tokens_est"`
-	TotalCostUSDEst      float64 `json:"total_cost_usd_est"`
+	TotalInputTokensEst    int              `json:"total_input_tokens_est"`
+	TotalOutputTokensEst   int              `json:"total_output_tokens_est"`
+	TotalTokensEst         int              `json:"total_tokens_est"`
+	TotalCostUSDEst        float64          `json:"total_cost_usd_est"`
+	UsageSource            cost.UsageSource `json:"usage_source,omitempty"`
+	UsageUnavailableReason string           `json:"usage_unavailable_reason,omitempty"`
 
 	BudgetMaxCostUSD *float64 `json:"budget_max_cost_usd,omitempty"`
 	BudgetMaxTokens  *int     `json:"budget_max_tokens,omitempty"`
 	BudgetExceeded   bool     `json:"budget_exceeded"`
+	BudgetWarning    bool     `json:"budget_warning,omitempty"`
+	BudgetAlertCount int      `json:"budget_alert_count,omitempty"`
 
 	EvidenceManifestPath string           `json:"evidence_manifest_path,omitempty"`
 	CostReportPath       string           `json:"cost_report_path,omitempty"`
@@ -85,18 +89,20 @@ type RecoverySummary struct {
 
 // PhaseSummary records the outcome of a single phase.
 type PhaseSummary struct {
-	Name            string  `json:"name"`
-	Type            string  `json:"type"`
-	Provider        string  `json:"provider,omitempty"`
-	Model           string  `json:"model,omitempty"`
-	DurationMS      int64   `json:"duration_ms"`
-	Status          string  `json:"status"`
-	InputTokensEst  int     `json:"input_tokens_est"`
-	OutputTokensEst int     `json:"output_tokens_est"`
-	CostUSDEst      float64 `json:"cost_usd_est"`
-	GateType        string  `json:"gate_type,omitempty"`
-	GatePassed      *bool   `json:"gate_passed,omitempty"`
-	Error           string  `json:"error,omitempty"`
+	Name                   string           `json:"name"`
+	Type                   string           `json:"type"`
+	Provider               string           `json:"provider,omitempty"`
+	Model                  string           `json:"model,omitempty"`
+	DurationMS             int64            `json:"duration_ms"`
+	Status                 string           `json:"status"`
+	InputTokensEst         int              `json:"input_tokens_est"`
+	OutputTokensEst        int              `json:"output_tokens_est"`
+	CostUSDEst             float64          `json:"cost_usd_est"`
+	UsageSource            cost.UsageSource `json:"usage_source,omitempty"`
+	UsageUnavailableReason string           `json:"usage_unavailable_reason,omitempty"`
+	GateType               string           `json:"gate_type,omitempty"`
+	GatePassed             *bool            `json:"gate_passed,omitempty"`
+	Error                  string           `json:"error,omitempty"`
 }
 
 type vesselRunState struct {
@@ -132,8 +138,8 @@ func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.T
 		return s
 	}
 
+	s.costTracker = cost.NewTracker(cfg.VesselBudget())
 	if budget := cfg.VesselBudget(); budget != nil {
-		s.costTracker = cost.NewTracker(budget)
 		if budget.CostLimitUSD > 0 {
 			v := budget.CostLimitUSD
 			s.budgetMaxCostUSD = &v
@@ -197,9 +203,13 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 	summary.TotalOutputTokensEst += s.extraOutputTokensEst
 	summary.TotalCostUSDEst += s.extraCostUSDEst
 	summary.TotalTokensEst = summary.TotalInputTokensEst + summary.TotalOutputTokensEst
+	summary.UsageSource, summary.UsageUnavailableReason = summarizeUsageSource(summary.Phases, summary.TotalTokensEst, summary.TotalCostUSDEst)
 
 	if s.costTracker != nil {
 		summary.BudgetExceeded = s.costTracker.BudgetExceeded()
+		alerts := s.costTracker.Alerts()
+		summary.BudgetAlertCount = len(alerts)
+		summary.BudgetWarning = hasBudgetWarning(alerts)
 	}
 
 	return summary
@@ -254,6 +264,7 @@ func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceC
 		Status:     status,
 		Error:      errMsg,
 	}
+	summary.UsageSource, summary.UsageUnavailableReason = phaseUsageSource(summary.Type)
 
 	if p.Gate != nil {
 		summary.GateType = p.Gate.Type
@@ -275,6 +286,51 @@ func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceC
 	return summary
 }
 
+func (s *vesselRunState) buildCostReport(summary *VesselSummary) *cost.CostReport {
+	if s == nil || s.costTracker == nil || summary == nil {
+		return nil
+	}
+
+	report := s.costTracker.Report(s.vesselID)
+	report.Source = summary.Source
+	report.Workflow = summary.Workflow
+	report.Ref = summary.Ref
+	report.State = summary.State
+	report.TotalDurationMS = summary.DurationMS
+	report.UsageSource = summary.UsageSource
+	report.UsageUnavailableReason = summary.UsageUnavailableReason
+	if report.RecordCount > 0 && report.UsageSource == cost.UsageSourceNotApplicable {
+		report.UsageSource = cost.UsageSourceEstimated
+		report.UsageUnavailableReason = ""
+	}
+	report.BudgetExceeded = summary.BudgetExceeded
+	report.BudgetWarning = summary.BudgetWarning
+	report.BudgetAlertCount = summary.BudgetAlertCount
+	if summary.Trace != nil {
+		report.TraceID = summary.Trace.TraceID
+		report.SpanID = summary.Trace.SpanID
+	}
+	report.EvidenceManifestPath = summary.EvidenceManifestPath
+	report.Phases = make([]cost.PhaseReport, 0, len(summary.Phases))
+	for _, phase := range summary.Phases {
+		report.Phases = append(report.Phases, cost.PhaseReport{
+			Name:                   phase.Name,
+			Type:                   phase.Type,
+			Provider:               phase.Provider,
+			Model:                  phase.Model,
+			DurationMS:             phase.DurationMS,
+			Status:                 phase.Status,
+			InputTokens:            phase.InputTokensEst,
+			OutputTokens:           phase.OutputTokensEst,
+			TotalTokens:            phase.InputTokensEst + phase.OutputTokensEst,
+			CostUSD:                phase.CostUSDEst,
+			UsageSource:            phase.UsageSource,
+			UsageUnavailableReason: phase.UsageUnavailableReason,
+		})
+	}
+	return report
+}
+
 func phaseTypeLabel(p workflow.Phase) string {
 	if p.Type == "command" {
 		return "command"
@@ -285,6 +341,43 @@ func phaseTypeLabel(p workflow.Phase) string {
 func gatePassedPointer(passed bool) *bool {
 	v := passed
 	return &v
+}
+
+func phaseUsageSource(phaseType string) (cost.UsageSource, string) {
+	switch phaseType {
+	case "prompt":
+		return cost.UsageSourceEstimated, ""
+	default:
+		return cost.UsageSourceNotApplicable, "non-llm phase"
+	}
+}
+
+func summarizeUsageSource(phases []PhaseSummary, totalTokens int, totalCost float64) (cost.UsageSource, string) {
+	if totalTokens > 0 || totalCost > 0 {
+		return cost.UsageSourceEstimated, ""
+	}
+
+	for _, phase := range phases {
+		switch phase.UsageSource {
+		case cost.UsageSourceEstimated, cost.UsageSourceProvider:
+			return phase.UsageSource, ""
+		}
+	}
+
+	if len(phases) == 0 {
+		return cost.UsageSourceNotApplicable, "run did not execute an llm phase"
+	}
+
+	return cost.UsageSourceNotApplicable, "run did not execute an llm phase"
+}
+
+func hasBudgetWarning(alerts []cost.BudgetAlert) bool {
+	for _, alert := range alerts {
+		if alert.Type == "warning" {
+			return true
+		}
+	}
+	return false
 }
 
 func evidenceManifestRelativePath(vesselID string) string {

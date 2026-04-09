@@ -239,6 +239,18 @@ drainLoop:
 					AnomalyCount: len(status.Anomalies),
 					Anomalies:    AnomalyCodes(status.Anomalies),
 				}))
+				if r.Config != nil && r.Config.StateDir != "" {
+					if summary, loadErr := LoadVesselSummary(r.Config.StateDir, j.ID); loadErr == nil && summary != nil {
+						vesselSpan.AddAttributes(observability.VesselCostAttributes(observability.VesselCostData{
+							TotalTokens:            summary.TotalTokensEst,
+							TotalCostUSDEst:        summary.TotalCostUSDEst,
+							UsageSource:            string(summary.UsageSource),
+							UsageUnavailableReason: summary.UsageUnavailableReason,
+							BudgetExceeded:         summary.BudgetExceeded,
+							BudgetWarning:          summary.BudgetWarning,
+						}))
+					}
+				}
 				vesselSpan.AddAttributes(observability.RecoveryAttributes(recoveryAttributesFromMeta(finalVessel.Meta)))
 			}
 
@@ -849,10 +861,26 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			phaseSpanStatus = phaseStatus
 
 			// Report phase completion (non-fatal)
-			phaseResults = append(phaseResults, reporter.PhaseResult{Name: p.Name, Duration: phaseDuration, Status: phaseStatus})
+			phaseReport := reporter.PhaseResult{
+				Name:                   p.Name,
+				Duration:               phaseDuration,
+				Status:                 phaseStatus,
+				Provider:               provider,
+				Model:                  model,
+				InputTokensEst:         inputTokensEst,
+				OutputTokensEst:        outputTokensEst,
+				CostUSDEst:             costUSDEst,
+				UsageSource:            cost.UsageSourceEstimated,
+				UsageUnavailableReason: "",
+			}
+			if p.Type == "command" {
+				phaseReport.UsageSource = cost.UsageSourceNotApplicable
+				phaseReport.UsageUnavailableReason = "non-llm phase"
+			}
+			phaseResults = append(phaseResults, phaseReport)
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post phase-complete comment", vessel.ID,
-					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
+					r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
 			}
 
 			if phaseStatus == "no-op" {
@@ -1042,48 +1070,104 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	cmd, args := buildPromptOnlyCmdArgs(r.Config, prompt)
 	provider := resolveProvider(r.Config, nil, nil, nil)
 	model := resolveModel(r.Config, nil, nil, nil, provider)
+	phaseDef := workflow.Phase{Name: "prompt"}
+	phaseStartedAt := r.runtimeNow()
 	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 	if err != nil {
 		snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
+		if vrs != nil {
+			vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, r.runtimeSince(phaseStartedAt), "failed", nil, snapErr.Error()))
+		}
 		r.failVessel(vessel.ID, snapErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
+		issueNum := r.parseIssueNum(vessel)
+		if issueNum > 0 && r.Reporter != nil {
+			r.logReporterError("post vessel-failed comment", vessel.ID,
+				r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, snapErr.Error(), ""))
 		}
 		return "failed"
 	}
 
 	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
+	phaseDuration := r.runtimeSince(phaseStartedAt)
 	if r.vesselCancelled(ctx, vessel.ID) {
 		return r.cancelVessel(vessel, worktreePath, vrs, nil)
 	}
 	if runErr != nil {
+		if vrs != nil {
+			vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
+		}
 		r.failVessel(vessel.ID, runErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
+		issueNum := r.parseIssueNum(vessel)
+		if issueNum > 0 && r.Reporter != nil {
+			r.logReporterError("post vessel-failed comment", vessel.ID,
+				r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, runErr.Error(), ""))
 		}
 		return "failed"
 	}
 	if checkProtectedSurfaces {
 		if err := r.verifyProtectedSurfaces(vessel, workflow.Phase{Name: "prompt-only"}, worktreePath, beforeSnapshot); err != nil {
+			if vrs != nil {
+				vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
+			}
 			r.failVessel(vessel.ID, err.Error())
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, err.Error(), ""))
 			}
 			return "failed"
 		}
 	}
 	recordedAt := r.runtimeNow()
+	var phaseResults []reporter.PhaseResult
 	if vrs != nil {
-		vrs.recordPromptOnlyUsage(model, prompt, string(output), recordedAt)
+		inputTokensEst, outputTokensEst, costUSDEst := vrs.recordLLMUsage(model, prompt, string(output), recordedAt)
+		phaseSummary := vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "")
+		phaseReport := reporter.PhaseResult{
+			Name:                   phaseDef.Name,
+			Duration:               phaseDuration,
+			Status:                 "completed",
+			Provider:               provider,
+			Model:                  model,
+			InputTokensEst:         inputTokensEst,
+			OutputTokensEst:        outputTokensEst,
+			CostUSDEst:             costUSDEst,
+			UsageSource:            cost.UsageSourceEstimated,
+			UsageUnavailableReason: "",
+		}
 		if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
 			errMsg := fmt.Sprintf("budget exceeded: estimated cost $%.4f, estimated tokens %d",
 				vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
+			phaseSummary.Status = "failed"
+			phaseSummary.Error = errMsg
+			vrs.addPhase(phaseSummary)
 			r.failVessel(vessel.ID, errMsg)
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, errMsg, ""))
+			}
 			return "failed"
 		}
+		vrs.addPhase(phaseSummary)
+		phaseResults = append(phaseResults, phaseReport)
+	}
+	issueNum := r.parseIssueNum(vessel)
+	if issueNum > 0 && r.Reporter != nil && len(phaseResults) > 0 {
+		r.logReporterError("post phase-complete comment", vessel.ID,
+			r.Reporter.PhaseComplete(ctx, issueNum, phaseResults[0], string(output)))
 	}
 
 	if r.vesselCancelled(ctx, vessel.ID) {
@@ -1093,7 +1177,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
 
-	return r.completeVessel(ctx, vessel, worktreePath, nil, vrs, nil)
+	return r.completeVessel(ctx, vessel, worktreePath, phaseResults, vrs, nil)
 }
 
 func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, src source.Source, vrs *vesselRunState, handler BuiltinWorkflowHandler) string {
@@ -1124,10 +1208,12 @@ func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, sr
 	}
 	if vrs != nil {
 		vrs.addPhase(PhaseSummary{
-			Name:       vessel.Workflow,
-			Type:       "builtin",
-			DurationMS: r.runtimeSince(startedAt).Milliseconds(),
-			Status:     "completed",
+			Name:                   vessel.Workflow,
+			Type:                   "builtin",
+			DurationMS:             r.runtimeSince(startedAt).Milliseconds(),
+			Status:                 "completed",
+			UsageSource:            cost.UsageSourceNotApplicable,
+			UsageUnavailableReason: "builtin workflow did not execute an llm phase",
 		})
 	}
 	if r.vesselCancelled(ctx, vessel.ID) {
@@ -1454,9 +1540,10 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 
 	if vrs.costTracker != nil {
 		reportPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, costReportFileName)
+		report := vrs.buildCostReport(summary)
 		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
 			log.Printf("warn: save cost report: %v", fmt.Errorf("create dir: %w", err))
-		} else if err := cost.SaveReport(reportPath, vrs.costTracker.Report(vessel.ID)); err != nil {
+		} else if err := cost.SaveReport(reportPath, report); err != nil {
 			log.Printf("warn: save cost report: %v", err)
 		} else {
 			summary.CostReportPath = costReportRelativePath(vessel.ID)
@@ -2044,10 +2131,26 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		// Report phase completion.
 		issueNum := r.parseIssueNum(vessel)
+		phaseReport := reporter.PhaseResult{
+			Name:                   p.Name,
+			Duration:               phaseDuration,
+			Provider:               provider,
+			Model:                  model,
+			InputTokensEst:         inputTokensEst,
+			OutputTokensEst:        outputTokensEst,
+			CostUSDEst:             costUSDEst,
+			UsageSource:            cost.UsageSourceEstimated,
+			UsageUnavailableReason: "",
+		}
+		if p.Type == "command" {
+			phaseReport.UsageSource = cost.UsageSourceNotApplicable
+			phaseReport.UsageUnavailableReason = "non-llm phase"
+		}
 		if phaseMatchedNoOp(&p, string(output)) {
+			phaseReport.Status = "no-op"
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post phase-complete comment", vessel.ID,
-					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
+					r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
 			}
 			phaseSpanStatus = "no-op"
 			finishCurrentPhaseSpan(nil)
@@ -2060,9 +2163,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 		}
 
+		phaseReport.Status = "completed"
 		if issueNum > 0 && r.Reporter != nil {
 			r.logReporterError("post phase-complete comment", vessel.ID,
-				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
+				r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
 		}
 
 		// Handle gate.
@@ -2381,6 +2485,8 @@ func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *w
 		OutputArtifactPath: outputArtifactPath,
 	}
 	if phaseTypeLabel(p) != "prompt" {
+		data.UsageSource = string(cost.UsageSourceNotApplicable)
+		data.UsageUnavailableReason = "non-llm phase"
 		return data
 	}
 
@@ -2389,6 +2495,7 @@ func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *w
 	data.InputTokensEst = cost.EstimateTokens(renderedPrompt)
 	data.OutputTokensEst = cost.EstimateTokens(output)
 	data.CostUSDEst = cost.EstimateCost(data.InputTokensEst, data.OutputTokensEst, cost.LookupPricing(model))
+	data.UsageSource = string(cost.UsageSourceEstimated)
 	return data
 }
 

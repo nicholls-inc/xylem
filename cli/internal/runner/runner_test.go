@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
@@ -2533,6 +2534,7 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only summary"))
@@ -2546,29 +2548,26 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	summary := loadSummary(t, cfg.StateDir, "prompt-1")
 	assert.Equal(t, "completed", summary.State)
 	assert.Equal(t, "prompt-1", summary.VesselID)
-}
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "prompt", summary.Phases[0].Name)
+	assert.Equal(t, "prompt", summary.Phases[0].Type)
+	assert.Equal(t, "completed", summary.Phases[0].Status)
+	assert.Equal(t, cost.UsageSourceEstimated, summary.Phases[0].UsageSource)
+	assert.Positive(t, summary.Phases[0].InputTokensEst)
+	assert.Positive(t, summary.Phases[0].OutputTokensEst)
+	assert.Positive(t, summary.Phases[0].CostUSDEst)
+	assert.Equal(t, summary.TotalTokensEst, summary.Phases[0].InputTokensEst+summary.Phases[0].OutputTokensEst)
+	assert.Equal(t, summary.TotalCostUSDEst, summary.Phases[0].CostUSDEst)
 
-func TestSmoke_WS6_S18_PromptOnlyVesselSummaryEmptyPhases(t *testing.T) {
-	dir := t.TempDir()
-	cfg := makeTestConfig(dir, 1)
-	cfg.StateDir = filepath.Join(dir, ".xylem")
-
-	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only empty phases"))
-
-	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.DrainAndWait(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
-
-	summary := loadSummary(t, cfg.StateDir, "prompt-1")
-	if len(summary.Phases) != 0 {
-		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
-	}
+	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", "prompt-1", costReportFileName))
+	require.NoError(t, err)
+	require.Len(t, report.Phases, 1)
+	assert.Equal(t, "prompt", report.Phases[0].Name)
+	assert.Equal(t, "prompt", report.Phases[0].Type)
+	assert.Equal(t, "completed", report.Phases[0].Status)
+	assert.Equal(t, cost.UsageSourceEstimated, report.Phases[0].UsageSource)
+	assert.Equal(t, summary.TotalTokensEst, report.Phases[0].TotalTokens)
+	assert.Equal(t, summary.TotalCostUSDEst, report.Phases[0].CostUSD)
 }
 
 func TestDrainCommandGatePasses(t *testing.T) {
