@@ -42,63 +42,74 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	seen := make(map[int]bool)
 
 	for _, task := range g.Tasks {
+		if len(task.Labels) == 0 {
+			continue
+		}
+		// Pass every label for this task in a single `gh pr list` call so
+		// multiple `--label` flags are AND'd together — a task with labels
+		// [needs-conflict-resolution, harness-impl] must only match PRs
+		// carrying BOTH labels, not either one. Querying labels separately
+		// and unioning (the previous behaviour) meant a PR matching only
+		// one label could be routed to the wrong workflow.
+		args := []string{
+			"pr", "list",
+			"--repo", g.Repo,
+			"--state", "open",
+		}
 		for _, label := range task.Labels {
-			args := []string{
-				"pr", "list",
-				"--repo", g.Repo,
-				"--state", "open",
-				"--label", label,
-				"--json", "number,title,body,url,labels,headRefName",
-				"--limit", "20",
-			}
+			args = append(args, "--label", label)
+		}
+		args = append(args,
+			"--json", "number,title,body,url,labels,headRefName",
+			"--limit", "20",
+		)
 
-			out, err := g.CmdRunner.Run(ctx, "gh", args...)
-			if err != nil {
-				return vessels, fmt.Errorf("gh pr list: %w", err)
-			}
+		out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		if err != nil {
+			return vessels, fmt.Errorf("gh pr list: %w", err)
+		}
 
-			var prs []ghPR
-			if err := json.Unmarshal(out, &prs); err != nil {
-				return vessels, fmt.Errorf("parse gh pr list output: %w", err)
-			}
+		var prs []ghPR
+		if err := json.Unmarshal(out, &prs); err != nil {
+			return vessels, fmt.Errorf("parse gh pr list output: %w", err)
+		}
 
-			for _, pr := range prs {
-				if seen[pr.Number] {
-					continue
-				}
-				fingerprint := githubSourceFingerprint(pr.Title, pr.Body, issueLabelNames(pr.Labels))
-				if g.hasExcludedLabel(pr, excludeSet) ||
-					g.Queue.HasRef(pr.URL) ||
-					g.hasMatchingFailedFingerprint(pr.URL, fingerprint) ||
-					g.hasBranch(ctx, pr.Number) {
-					continue
-				}
-				seen[pr.Number] = true
-				meta := map[string]string{
-					"pr_num":                   strconv.Itoa(pr.Number),
-					"pr_title":                 pr.Title,
-					"pr_body":                  pr.Body,
-					"pr_labels":                strings.Join(issueLabelNames(pr.Labels), ","),
-					"source_input_fingerprint": fingerprint,
-				}
-				sl := task.StatusLabels
-				if sl != nil {
-					meta["status_label_queued"] = sl.Queued
-					meta["status_label_running"] = sl.Running
-					meta["status_label_completed"] = sl.Completed
-					meta["status_label_failed"] = sl.Failed
-					meta["status_label_timed_out"] = sl.TimedOut
-				}
-				vessels = append(vessels, queue.Vessel{
-					ID:        fmt.Sprintf("pr-%d", pr.Number),
-					Source:    "github-pr",
-					Ref:       pr.URL,
-					Workflow:  task.Workflow,
-					Meta:      meta,
-					State:     queue.StatePending,
-					CreatedAt: sourceNow(),
-				})
+		for _, pr := range prs {
+			if seen[pr.Number] {
+				continue
 			}
+			fingerprint := githubSourceFingerprint(pr.Title, pr.Body, issueLabelNames(pr.Labels))
+			if g.hasExcludedLabel(pr, excludeSet) ||
+				g.Queue.HasRef(pr.URL) ||
+				g.hasMatchingFailedFingerprint(pr.URL, fingerprint) ||
+				g.hasBranch(ctx, pr.Number) {
+				continue
+			}
+			seen[pr.Number] = true
+			meta := map[string]string{
+				"pr_num":                   strconv.Itoa(pr.Number),
+				"pr_title":                 pr.Title,
+				"pr_body":                  pr.Body,
+				"pr_labels":                strings.Join(issueLabelNames(pr.Labels), ","),
+				"source_input_fingerprint": fingerprint,
+			}
+			sl := task.StatusLabels
+			if sl != nil {
+				meta["status_label_queued"] = sl.Queued
+				meta["status_label_running"] = sl.Running
+				meta["status_label_completed"] = sl.Completed
+				meta["status_label_failed"] = sl.Failed
+				meta["status_label_timed_out"] = sl.TimedOut
+			}
+			vessels = append(vessels, queue.Vessel{
+				ID:        fmt.Sprintf("pr-%d", pr.Number),
+				Source:    "github-pr",
+				Ref:       pr.URL,
+				Workflow:  task.Workflow,
+				Meta:      meta,
+				State:     queue.StatePending,
+				CreatedAt: sourceNow(),
+			})
 		}
 	}
 	return vessels, nil

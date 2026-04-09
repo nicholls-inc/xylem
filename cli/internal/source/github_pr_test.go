@@ -225,6 +225,102 @@ func TestGitHubPRScanDeduplicates(t *testing.T) {
 	}
 }
 
+func TestGitHubPRScanMultiLabelAND(t *testing.T) {
+	// A task with multiple labels must match only PRs carrying ALL of
+	// those labels (AND semantics), so multi-label tasks route to the
+	// correct workflow instead of being stolen by a sibling source that
+	// shares one label in common.
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 143, Title: "needs conflict resolution", Body: "has both labels",
+			URL: "https://github.com/owner/repo/pull/143", HeadRefName: "feat/issue-137",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "needs-conflict-resolution"}, {Name: "harness-impl"}}},
+	}
+	// The single gh call must include BOTH --label flags in order.
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open",
+		"--label", "needs-conflict-resolution", "--label", "harness-impl",
+		"--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+
+	src := &GitHubPR{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"resolve": {
+				Labels:   []string{"needs-conflict-resolution", "harness-impl"},
+				Workflow: "resolve-conflicts",
+			},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].Workflow != "resolve-conflicts" {
+		t.Errorf("expected workflow resolve-conflicts, got %q", vessels[0].Workflow)
+	}
+	if vessels[0].ID != "pr-143" {
+		t.Errorf("expected ID pr-143, got %q", vessels[0].ID)
+	}
+
+	// Exactly one gh pr list call — labels ANDed in a single query, not
+	// fanned out as separate per-label queries that union at the client.
+	var prListCalls int
+	for _, call := range r.calls {
+		if len(call) >= 3 && call[0] == "gh" && call[1] == "pr" && call[2] == "list" {
+			prListCalls++
+		}
+	}
+	if prListCalls != 1 {
+		t.Errorf("expected exactly 1 gh pr list call for AND semantics, got %d", prListCalls)
+	}
+}
+
+func TestGitHubPRScanMultiLabelANDMissingOneLabel(t *testing.T) {
+	// A PR that carries only one of a multi-label task's required labels
+	// must NOT be enqueued. Because the labels are ANDed server-side, the
+	// gh call returns empty and no vessel is produced — even though the
+	// PR has one matching label.
+	dir := t.TempDir()
+	q := queue.New(dir + "/queue.jsonl")
+	r := newMock()
+
+	// gh returns [] for the AND query — PR has harness-impl but not
+	// ready-to-merge, so the server-side filter excludes it.
+	r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open",
+		"--label", "ready-to-merge", "--label", "harness-impl",
+		"--json", "number,title,body,url,labels,headRefName", "--limit", "20")
+
+	src := &GitHubPR{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"merge": {
+				Labels:   []string{"ready-to-merge", "harness-impl"},
+				Workflow: "merge-pr",
+			},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := src.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels (AND semantics require both labels), got %d", len(vessels))
+	}
+}
+
 func TestGitHubPRScanGHFailure(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(dir + "/queue.jsonl")
