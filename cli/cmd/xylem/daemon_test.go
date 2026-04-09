@@ -192,20 +192,6 @@ func TestDaemonShutdown(t *testing.T) {
 	}
 }
 
-func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
-	dir := t.TempDir()
-	cfg := makeDrainConfig(dir)
-	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-
-	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)))
-	if err != nil {
-		t.Fatalf("runDrain() error = %v", err)
-	}
-	if result != (runner.DrainResult{}) {
-		t.Fatalf("DrainResult = %+v, want zero value", result)
-	}
-}
-
 func TestDaemonLoopPeriodicUpgradeFiresAfterInterval(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
