@@ -149,6 +149,7 @@ In addition to issue scanning, xylem supports these GitHub source types:
 - `github-pr` — scans open pull requests by label
 - `github-pr-events` — scans open pull requests for event triggers
 - `github-merge` — scans merged pull requests
+- `schedule` — emits a recurring synthetic vessel on a configured cadence
 
 For `github-pr-events`, tasks use an `on` block instead of `labels`:
 
@@ -169,6 +170,18 @@ sources:
 ```
 
 At least one trigger is required in the `on` block.
+
+For recurring hygiene or entropy-management work, add a scheduled source:
+
+```yaml
+sources:
+  doctor:
+    type: schedule
+    cadence: "@daily"
+    workflow: doctor
+```
+
+`cadence` accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions.
 
 ## Write a HARNESS.md
 

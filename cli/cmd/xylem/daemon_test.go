@@ -229,6 +229,61 @@ func TestDaemonShutdown(t *testing.T) {
 	}
 }
 
+func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    filepath.Join(dir, ".xylem"),
+		Claude:      config.ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]config.SourceConfig{
+			"doctor": {
+				Type:     "schedule",
+				Cadence:  "1h",
+				Workflow: "doctor",
+			},
+		},
+	}
+	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", cfg.StateDir, err)
+	}
+	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	drain := func(ctx context.Context) (runner.DrainResult, error) {
+		vessel, err := q.Dequeue()
+		if err != nil {
+			return runner.DrainResult{}, err
+		}
+		if vessel == nil {
+			return runner.DrainResult{}, nil
+		}
+		if err := q.Update(vessel.ID, queue.StateCompleted, ""); err != nil {
+			return runner.DrainResult{}, err
+		}
+		cancel()
+		return runner.DrainResult{Launched: 1, Completed: 1}, nil
+	}
+
+	err := daemonLoop(ctx, q, nil, func(ctx context.Context) (scanner.ScanResult, error) {
+		return runScan(ctx, cfg, q)
+	}, drain, nil, nil, time.Millisecond, time.Millisecond, 0)
+	require.NoError(t, err)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "schedule", vessels[0].Source)
+	assert.Equal(t, queue.StateCompleted, vessels[0].State)
+	assert.Equal(t, "doctor", vessels[0].Workflow)
+	assert.Equal(t, "1h", vessels[0].Meta["schedule.cadence"])
+	assert.Equal(t, "doctor", vessels[0].Meta["schedule.source_name"])
+	assert.NotEmpty(t, vessels[0].Meta["schedule.fired_at"])
+}
+
 func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
 	oldNewTracer := newTracer
 	defer func() { newTracer = oldNewTracer }()
