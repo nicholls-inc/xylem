@@ -5199,6 +5199,350 @@ func TestVerifyProtectedSurfacesSelfHealsDeletedFileFromDefaultBranch(t *testing
 	}
 }
 
+// TestVerifyProtectedSurfacesSuppressesTransientDeletionsViaPreVerifyRestore
+// documents the fix for issue #174: when a phase temporarily removes protected
+// files (e.g., resolve-conflicts's gh pr checkout on a pre-#157 PR branch),
+// the pre-verify restore step should copy them back from the source root
+// BEFORE taking the after-snapshot, so the Compare sees them present and
+// emits zero "deleted" violations. Modifications (present-but-different) are
+// still caught because restore only fires on absent files.
+func TestVerifyProtectedSurfacesSuppressesTransientDeletionsViaPreVerifyRestore(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-test")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(workflows) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	// Give the worktree a .git directory so the exclude-entry path in
+	// copyProtectedSurfaceFile can succeed (mirrors a regular worktree).
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".git", "info"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree .git) = %v", err)
+	}
+	// Source root has the canonical files.
+	canonicalConfig := []byte("repo: owner/repo\n")
+	canonicalWorkflow := []byte("name: fix-bug\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonicalConfig, 0o644); err != nil {
+		t.Fatalf("WriteFile(.xylem.yml) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem", "workflows", "fix-bug.yaml"), canonicalWorkflow, 0o644); err != nil {
+		t.Fatalf("WriteFile(workflow) = %v", err)
+	}
+
+	// Seed the worktree with the same files — these represent the pre-phase
+	// snapshot state.
+	if err := os.MkdirAll(filepath.Join(worktreeDir, ".xylem", "workflows"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree workflows) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonicalConfig, 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree .xylem.yml) = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml"), canonicalWorkflow, 0o644); err != nil {
+		t.Fatalf("WriteFile(worktree workflow) = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "git" {
+				return nil, nil, false
+			}
+			// Source-root resolution: return the canonical repo root's .git
+			if len(args) == 5 &&
+				args[0] == "-C" &&
+				args[1] == worktreeDir &&
+				args[2] == "rev-parse" &&
+				args[3] == "--path-format=absolute" &&
+				args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+
+	// Take the before-snapshot while the files are present.
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil {
+		t.Fatalf("takeProtectedSurfaceSnapshot() error = %v", err)
+	}
+	if !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot() checkProtectedSurfaces = false, want true")
+	}
+	if len(before.Files) < 2 {
+		t.Fatalf("before.Files = %d, want >= 2", len(before.Files))
+	}
+
+	// Simulate a phase that transiently removes the protected files (e.g.,
+	// resolve-conflicts workflow's gh pr checkout on a pre-#157 PR branch).
+	if err := os.Remove(filepath.Join(worktreeDir, ".xylem.yml")); err != nil {
+		t.Fatalf("Remove(.xylem.yml) = %v", err)
+	}
+	if err := os.Remove(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml")); err != nil {
+		t.Fatalf("Remove(workflow) = %v", err)
+	}
+
+	// verifyProtectedSurfaces should NOT return a violation: pre-verify
+	// restore copies the missing files from the source root, the
+	// after-snapshot sees them present, and Compare finds no diffs.
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-transient-delete", Source: "github-pr", Workflow: "resolve-conflicts"},
+		workflow.Phase{Name: "analyze"},
+		worktreeDir,
+		before,
+	)
+	if err != nil {
+		t.Fatalf("verifyProtectedSurfaces() returned violation %v, want nil (pre-verify restore should suppress transient deletions)", err)
+	}
+
+	// Sanity: verify the files were actually restored to the worktree.
+	data, readErr := os.ReadFile(filepath.Join(worktreeDir, ".xylem.yml"))
+	if readErr != nil {
+		t.Fatalf("restored .xylem.yml missing after verify: %v", readErr)
+	}
+	if string(data) != string(canonicalConfig) {
+		t.Fatalf("restored .xylem.yml = %q, want %q", string(data), string(canonicalConfig))
+	}
+	if _, statErr := os.Stat(filepath.Join(worktreeDir, ".xylem", "workflows", "fix-bug.yaml")); statErr != nil {
+		t.Fatalf("restored workflow missing after verify: %v", statErr)
+	}
+}
+
+// TestVerifyProtectedSurfacesStillCatchesModificationsAfterPreVerifyRestore
+// ensures the pre-verify restore does NOT mask modifications: a file that's
+// present-but-different should still cause a violation because the restore
+// only touches absent files.
+func TestVerifyProtectedSurfacesStillCatchesModificationsAfterPreVerifyRestore(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-mod")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	canonical := []byte("canonical content\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot error = %v ok = %v", err, ok)
+	}
+
+	// Simulate a phase that MODIFIES the file (doesn't delete it).
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), []byte("modified by rogue agent\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile modify = %v", err)
+	}
+
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-mod-check", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() returned nil, want violation for modified file")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("error = %q, want containing 'violated protected surfaces'", err)
+	}
+	if !strings.Contains(err.Error(), ".xylem.yml") {
+		t.Fatalf("error = %q, want containing '.xylem.yml' path", err)
+	}
+}
+
+// TestCopyProtectedSurfaceFileAddsWorktreeExcludeEntry verifies that the
+// pre-verify restore's copyProtectedSurfaceFile helper appends the restored
+// path to .git/info/exclude, so subsequent `git add -A` in the push phase
+// of resolve-conflicts won't stage the restored file into the PR commit.
+func TestCopyProtectedSurfaceFileAddsWorktreeExcludeEntry(t *testing.T) {
+	sourceRoot := t.TempDir()
+	worktreePath := t.TempDir()
+
+	// Source has the canonical file
+	if err := os.MkdirAll(filepath.Join(sourceRoot, ".xylem"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(source .xylem) = %v", err)
+	}
+	canonical := []byte("harness content\n")
+	if err := os.WriteFile(filepath.Join(sourceRoot, ".xylem", "HARNESS.md"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+
+	// Worktree has a .git directory (simulating a regular worktree — for
+	// linked worktrees the .git file path resolution is exercised by the
+	// integration path).
+	if err := os.MkdirAll(filepath.Join(worktreePath, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+
+	if err := copyProtectedSurfaceFile(sourceRoot, worktreePath, ".xylem/HARNESS.md"); err != nil {
+		t.Fatalf("copyProtectedSurfaceFile() = %v", err)
+	}
+
+	// The file should exist at the destination
+	if _, err := os.Stat(filepath.Join(worktreePath, ".xylem", "HARNESS.md")); err != nil {
+		t.Fatalf("restored file missing: %v", err)
+	}
+
+	// .git/info/exclude should contain the path with leading slash
+	excludeData, err := os.ReadFile(filepath.Join(worktreePath, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("ReadFile(exclude) = %v", err)
+	}
+	expected := "/.xylem/HARNESS.md"
+	if !strings.Contains(string(excludeData), expected) {
+		t.Fatalf("exclude = %q, want containing %q", string(excludeData), expected)
+	}
+
+	// Second call should be idempotent — no duplicate entry
+	if err := copyProtectedSurfaceFile(sourceRoot, worktreePath, ".xylem/HARNESS.md"); err != nil {
+		t.Fatalf("second copyProtectedSurfaceFile() = %v", err)
+	}
+	excludeData, err = os.ReadFile(filepath.Join(worktreePath, ".git", "info", "exclude"))
+	if err != nil {
+		t.Fatalf("ReadFile(exclude) second = %v", err)
+	}
+	count := strings.Count(string(excludeData), expected)
+	if count != 1 {
+		t.Fatalf("exclude contains %d copies of %q, want 1 (must be idempotent)", count, expected)
+	}
+}
+
+// TestResolveWorktreeGitdirHandlesLinkedWorktree verifies that for a linked
+// worktree (where .git is a file pointing at the per-worktree gitdir), the
+// gitdir resolution follows the pointer correctly. This is critical for the
+// xylem vessel case where worktrees are created via `git worktree add`.
+func TestResolveWorktreeGitdirHandlesLinkedWorktree(t *testing.T) {
+	mainRepo := t.TempDir()
+	linkedWorktree := t.TempDir()
+	perWorktreeGitdir := filepath.Join(mainRepo, ".git", "worktrees", "linked")
+	if err := os.MkdirAll(perWorktreeGitdir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(per-worktree gitdir) = %v", err)
+	}
+
+	// Write the .git FILE pointing at the per-worktree gitdir
+	gitFilePath := filepath.Join(linkedWorktree, ".git")
+	if err := os.WriteFile(gitFilePath, []byte("gitdir: "+perWorktreeGitdir+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.git) = %v", err)
+	}
+
+	got, err := resolveWorktreeGitdir(linkedWorktree)
+	if err != nil {
+		t.Fatalf("resolveWorktreeGitdir() = %v", err)
+	}
+	if got != perWorktreeGitdir {
+		t.Fatalf("resolveWorktreeGitdir() = %q, want %q", got, perWorktreeGitdir)
+	}
+
+	// Regular worktree (.git directory) should return the .git path itself
+	regularRepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(regularRepo, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(regular .git) = %v", err)
+	}
+	got, err = resolveWorktreeGitdir(regularRepo)
+	if err != nil {
+		t.Fatalf("resolveWorktreeGitdir(regular) = %v", err)
+	}
+	if got != filepath.Join(regularRepo, ".git") {
+		t.Fatalf("resolveWorktreeGitdir(regular) = %q, want %q", got, filepath.Join(regularRepo, ".git"))
+	}
+}
+
+// TestVerifyProtectedSurfacesStillCatchesMutualDeletion verifies that when
+// BOTH the worktree and source root lack a file, the pre-verify restore is
+// a no-op and the outer Compare still raises a violation (because the
+// before-snapshot had the file). This ensures the suppression logic doesn't
+// over-reach and mask legitimate removal from the canonical source.
+func TestVerifyProtectedSurfacesStillCatchesMutualDeletion(t *testing.T) {
+	repoRoot := t.TempDir()
+	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-mutual")
+	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.git) = %v", err)
+	}
+	if err := os.MkdirAll(worktreeDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(worktree) = %v", err)
+	}
+	// Source root + worktree both have the file initially
+	canonical := []byte("before\n")
+	if err := os.WriteFile(filepath.Join(repoRoot, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile source = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worktreeDir, ".xylem.yml"), canonical, 0o644); err != nil {
+		t.Fatalf("WriteFile worktree = %v", err)
+	}
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 5 && args[2] == "rev-parse" && args[4] == "--git-common-dir" {
+				return []byte(filepath.Join(repoRoot, ".git")), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r.AuditLog = auditLog
+
+	// Before snapshot captures the file present
+	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
+	if err != nil || !ok {
+		t.Fatalf("takeProtectedSurfaceSnapshot = %v %v", err, ok)
+	}
+
+	// Now delete the file from BOTH worktree and source root (simulating a
+	// phase that legitimately tried to remove it from everywhere — e.g., a
+	// rogue agent doing `rm -rf /.xylem/`).
+	if err := os.Remove(filepath.Join(worktreeDir, ".xylem.yml")); err != nil {
+		t.Fatalf("Remove worktree = %v", err)
+	}
+	if err := os.Remove(filepath.Join(repoRoot, ".xylem.yml")); err != nil {
+		t.Fatalf("Remove source = %v", err)
+	}
+
+	// verifyProtectedSurfaces should STILL raise a violation because the
+	// pre-verify restore has nothing to restore from (source root is empty)
+	// and the outer Compare sees the before-snapshot had the file.
+	err = r.verifyProtectedSurfaces(
+		queue.Vessel{ID: "issue-mutual-del", Source: "github-issue", Workflow: "fix-bug"},
+		workflow.Phase{Name: "implement"},
+		worktreeDir,
+		before,
+	)
+	if err == nil {
+		t.Fatal("verifyProtectedSurfaces() = nil, want violation for mutual deletion")
+	}
+	if !strings.Contains(err.Error(), "violated protected surfaces") {
+		t.Fatalf("error = %q, want containing 'violated protected surfaces'", err)
+	}
+}
+
 func TestSmoke_WS6_S19_OrchestratedVesselRunStateNoRace(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
