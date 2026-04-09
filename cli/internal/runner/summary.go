@@ -11,6 +11,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
@@ -51,9 +52,15 @@ type VesselSummary struct {
 	CostReportPath       string           `json:"cost_report_path,omitempty"`
 	BudgetAlertsPath     string           `json:"budget_alerts_path,omitempty"`
 	EvalReportPath       string           `json:"eval_report_path,omitempty"`
+	Trace                *TraceArtifacts  `json:"trace,omitempty"`
 	ReviewArtifacts      *ReviewArtifacts `json:"review_artifacts,omitempty"`
 
 	Note string `json:"note"`
+}
+
+type TraceArtifacts struct {
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
 }
 
 type ReviewArtifacts struct {
@@ -95,6 +102,7 @@ type vesselRunState struct {
 	extraInputTokensEst  int
 	extraOutputTokensEst int
 	extraCostUSDEst      float64
+	trace                *TraceArtifacts
 }
 
 func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.Time) *vesselRunState {
@@ -126,6 +134,16 @@ func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.T
 	return s
 }
 
+func (s *vesselRunState) setTraceContext(data observability.TraceContextData) {
+	if data.TraceID == "" && data.SpanID == "" {
+		return
+	}
+	s.trace = &TraceArtifacts{
+		TraceID: data.TraceID,
+		SpanID:  data.SpanID,
+	}
+}
+
 func (s *vesselRunState) addPhase(ps PhaseSummary) {
 	s.phases = append(s.phases, ps)
 }
@@ -152,6 +170,7 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		Phases:           phases,
 		BudgetMaxCostUSD: s.budgetMaxCostUSD,
 		BudgetMaxTokens:  s.budgetMaxTokens,
+		Trace:            s.trace,
 		Note:             summaryDisclaimer,
 	}
 

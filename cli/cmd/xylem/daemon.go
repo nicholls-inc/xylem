@@ -95,6 +95,14 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	defer cleanupDrainRunner()
 	drainRunner.Reporter = buildReporter(cfg, cmdRunner)
 	drainRunner.DrainBudget = drainInterval
+	commandSpan := startCommandSpan(drainRunner.Tracer, ctx, "daemon", false, cfg.StateDir)
+	var commandErr error
+	defer func() {
+		finishCommandSpan(drainRunner.Tracer, commandSpan, commandErr)
+	}()
+	if spanCtx := commandSpan.Context(); spanCtx != nil {
+		ctx = spanCtx
+	}
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
 		return drainRunner.Drain(ctx)
 	}
@@ -109,7 +117,8 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		}
 	}
 
-	return daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+	commandErr = daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+	return commandErr
 }
 
 // parseUpgradeInterval returns the effective periodic upgrade interval. If
@@ -350,8 +359,17 @@ func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *workt
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.DrainBudget = budget
+	commandSpan := startCommandSpan(r.Tracer, ctx, "run-drain", false, cfg.StateDir)
+	var commandErr error
+	defer func() {
+		finishCommandSpan(r.Tracer, commandSpan, commandErr)
+	}()
+	if spanCtx := commandSpan.Context(); spanCtx != nil {
+		ctx = spanCtx
+	}
 	builtInResult, err := runBuiltInScheduledVessels(ctx, cfg, q, cmdRunner)
 	if err != nil {
+		commandErr = err
 		return builtInResult, fmt.Errorf("drain built-in audit vessels: %w", err)
 	}
 	result, err := r.DrainAndWait(ctx)
@@ -359,6 +377,7 @@ func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *workt
 	if err == nil {
 		maybeAutoGenerateHarnessReview(cfg, result)
 	}
+	commandErr = err
 	return result, err
 }
 

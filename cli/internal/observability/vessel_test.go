@@ -44,26 +44,32 @@ func TestSmoke_S2_VesselSpanAttributesOmitsEmptyRef(t *testing.T) {
 	}
 }
 
-func TestSmoke_S3_PhaseSpanAttributesIncludesAllFive(t *testing.T) {
+func TestSmoke_S3_PhaseSpanAttributesIncludesAllFields(t *testing.T) {
 	attrs := PhaseSpanAttributes(PhaseSpanData{
-		Name:     "analyse",
-		Index:    0,
-		Type:     "prompt",
-		Provider: "anthropic",
-		Model:    "claude-sonnet-4-20250514",
+		Name:         "analyse",
+		Index:        0,
+		Type:         "prompt",
+		Workflow:     "fix-bug",
+		Provider:     "anthropic",
+		Model:        "claude-sonnet-4-20250514",
+		RetryAttempt: 2,
+		SandboxMode:  "dangerously-skip-permissions",
 	})
 	got := attrMap(attrs)
 
-	if len(attrs) != 5 {
-		t.Fatalf("expected 5 attributes, got %d", len(attrs))
+	if len(attrs) != 8 {
+		t.Fatalf("expected 8 attributes, got %d", len(attrs))
 	}
 
 	want := map[string]string{
-		"xylem.phase.name":     "analyse",
-		"xylem.phase.index":    "0",
-		"xylem.phase.type":     "prompt",
-		"xylem.phase.provider": "anthropic",
-		"xylem.phase.model":    "claude-sonnet-4-20250514",
+		"xylem.phase.name":          "analyse",
+		"xylem.phase.index":         "0",
+		"xylem.phase.type":          "prompt",
+		"xylem.phase.workflow":      "fix-bug",
+		"xylem.phase.provider":      "anthropic",
+		"xylem.phase.model":         "claude-sonnet-4-20250514",
+		"xylem.phase.retry_attempt": "2",
+		"xylem.phase.sandbox_mode":  "dangerously-skip-permissions",
 	}
 	for key, value := range want {
 		if got[key] != value {
@@ -74,22 +80,26 @@ func TestSmoke_S3_PhaseSpanAttributesIncludesAllFive(t *testing.T) {
 
 func TestSmoke_S4_PhaseResultAttributesFormatsTokensAndCost(t *testing.T) {
 	attrs := PhaseResultAttributes(PhaseResultData{
-		InputTokensEst:  1200,
-		OutputTokensEst: 300,
-		CostUSDEst:      0.0081,
-		DurationMS:      4500,
+		InputTokensEst:     1200,
+		OutputTokensEst:    300,
+		CostUSDEst:         0.0081,
+		DurationMS:         4500,
+		Status:             "completed",
+		OutputArtifactPath: "phases/vessel-1/analyse.output",
 	})
 	got := attrMap(attrs)
 
-	if len(attrs) != 4 {
-		t.Fatalf("expected 4 attributes, got %d", len(attrs))
+	if len(attrs) != 6 {
+		t.Fatalf("expected 6 attributes, got %d", len(attrs))
 	}
 
 	want := map[string]string{
-		"xylem.phase.input_tokens_est":  "1200",
-		"xylem.phase.output_tokens_est": "300",
-		"xylem.phase.cost_usd_est":      "0.008100",
-		"xylem.phase.duration_ms":       "4500",
+		"xylem.phase.input_tokens_est":     "1200",
+		"xylem.phase.output_tokens_est":    "300",
+		"xylem.phase.cost_usd_est":         "0.008100",
+		"xylem.phase.duration_ms":          "4500",
+		"xylem.phase.status":               "completed",
+		"xylem.phase.output_artifact_path": "phases/vessel-1/analyse.output",
 	}
 	for key, value := range want {
 		if got[key] != value {
@@ -194,6 +204,9 @@ func TestPhaseResultAttributesFormatsNegativeDuration(t *testing.T) {
 	}
 	if got["xylem.phase.cost_usd_est"] != "3.500000" {
 		t.Fatalf("xylem.phase.cost_usd_est = %q, want %q", got["xylem.phase.cost_usd_est"], "3.500000")
+	}
+	if got["xylem.phase.status"] != "" {
+		t.Fatalf("xylem.phase.status = %q, want empty string", got["xylem.phase.status"])
 	}
 }
 

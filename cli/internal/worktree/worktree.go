@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 )
 
 // CommandRunner abstracts shell command execution for testing.
@@ -123,8 +124,15 @@ func (m *Manager) DetectDefaultBranch(ctx context.Context) (string, error) {
 // Create creates a git worktree at .claude/worktrees/<branchName> branched from origin/<defaultBranch>.
 // It also copies .claude/ config files (settings.json, settings.local.json, rules/) into the worktree.
 func (m *Manager) Create(ctx context.Context, branchName string) (string, error) {
+	span := observability.StartGlobalSpan(ctx, "worktree:create", observability.WorktreeSpanAttributes(observability.WorktreeSpanData{
+		Action: "create",
+		Branch: branchName,
+	}))
+	defer span.End()
+
 	defaultBranch, err := m.DetectDefaultBranch(ctx)
 	if err != nil {
+		span.RecordError(err)
 		return "", fmt.Errorf("create worktree: %w", err)
 	}
 
@@ -134,6 +142,7 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 	// Fetch the default branch (only if origin exists)
 	if hasOrigin {
 		if _, err := retryGitCmd(ctx, m.Runner, 3, "fetch", "origin", defaultBranch); err != nil {
+			span.RecordError(err)
 			return "", fmt.Errorf("git fetch origin %s: %w", defaultBranch, err)
 		}
 	}
@@ -150,11 +159,13 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 	// if the worktree PATH is already registered or exists on disk.
 	if m.branchForWorktree(ctx, worktreePath) != "" {
 		if _, removeErr := m.Runner.Run(ctx, "git", "worktree", "remove", worktreePath, "--force"); removeErr != nil {
+			span.RecordError(removeErr)
 			return "", fmt.Errorf("remove stale worktree %s: %w", worktreePath, removeErr)
 		}
 	} else if _, err := os.Stat(worktreePath); err == nil {
 		// Directory exists on disk but isn't registered as a git worktree (orphaned).
 		if removeErr := os.RemoveAll(worktreePath); removeErr != nil {
+			span.RecordError(removeErr)
 			return "", fmt.Errorf("remove orphaned worktree dir %s: %w", worktreePath, removeErr)
 		}
 	}
@@ -169,12 +180,14 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 		if _, removeErr := m.Runner.Run(ctx, "git", "worktree", "remove", existingPath, "--force"); removeErr != nil {
 			// Prune may succeed even when remove fails (e.g., path already deleted).
 			if _, pruneErr := m.Runner.Run(ctx, "git", "worktree", "prune"); pruneErr != nil {
+				span.RecordError(removeErr)
 				return "", fmt.Errorf("remove cross-path worktree %s for branch %s: %w", existingPath, branchName, removeErr)
 			}
 		}
 	}
 
 	if _, err := retryGitCmd(ctx, m.Runner, 3, "worktree", "add", worktreePath, "-B", branchName, startPoint); err != nil {
+		span.RecordError(err)
 		return "", fmt.Errorf("git worktree add: %w", err)
 	}
 
@@ -188,6 +201,11 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 	if err := protectXylemSurfaces(worktreePath, m.protectedSurfacePatterns()); err != nil {
 		fmt.Fprintf(os.Stderr, "warn: protect .xylem/ surfaces: %v\n", err)
 	}
+	span.AddAttributes(observability.WorktreeSpanAttributes(observability.WorktreeSpanData{
+		Action: "create",
+		Branch: branchName,
+		Path:   worktreePath,
+	}))
 
 	return worktreePath, nil
 }
@@ -327,17 +345,29 @@ func protectXylemSurfaces(worktreePath string, patterns []string) error {
 // It looks up the branch name from `git worktree list --porcelain` before removal
 // to correctly handle branch names containing path separators (e.g., "fix/issue-42").
 func (m *Manager) Remove(ctx context.Context, worktreePath string) error {
+	span := observability.StartGlobalSpan(ctx, "worktree:remove", observability.WorktreeSpanAttributes(observability.WorktreeSpanData{
+		Action: "remove",
+		Path:   worktreePath,
+	}))
+	defer span.End()
+
 	// Look up the branch name before removing the worktree, because
 	// filepath.Base() would incorrectly truncate "fix/issue-42" to "issue-42".
 	branchName := m.branchForWorktree(ctx, worktreePath)
 
 	if _, err := m.Runner.Run(ctx, "git", "worktree", "remove", worktreePath, "--force"); err != nil {
+		span.RecordError(err)
 		return fmt.Errorf("git worktree remove: %w", err)
 	}
 	// Best-effort branch deletion using the real branch name
 	if branchName != "" {
 		m.Runner.Run(ctx, "git", "branch", "-d", branchName) //nolint:errcheck
 	}
+	span.AddAttributes(observability.WorktreeSpanAttributes(observability.WorktreeSpanData{
+		Action: "remove",
+		Branch: branchName,
+		Path:   worktreePath,
+	}))
 	return nil
 }
 

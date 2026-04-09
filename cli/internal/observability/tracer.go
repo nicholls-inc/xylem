@@ -101,6 +101,7 @@ func newExporter(config TracerConfig) (sdktrace.SpanExporter, error) {
 
 // NewTracerFromProvider wraps an existing TracerProvider. Used in tests.
 func NewTracerFromProvider(provider *sdktrace.TracerProvider) *Tracer {
+	otel.SetTracerProvider(provider)
 	return &Tracer{
 		provider: provider,
 		tracer:   provider.Tracer("xylem"),
@@ -140,6 +141,34 @@ func (sc SpanContext) RecordError(err error) {
 // to child spans.
 func (sc SpanContext) Context() context.Context {
 	return sc.ctx
+}
+
+// TraceContextData captures the IDs needed to link an artifact back to a trace.
+type TraceContextData struct {
+	TraceID string `json:"trace_id,omitempty"`
+	SpanID  string `json:"span_id,omitempty"`
+}
+
+// TraceContextFromContext extracts trace and span IDs from a context.
+func TraceContextFromContext(ctx context.Context) TraceContextData {
+	if ctx == nil {
+		return TraceContextData{}
+	}
+	spanCtx := trace.SpanContextFromContext(ctx)
+	if !spanCtx.IsValid() {
+		return TraceContextData{}
+	}
+	return TraceContextData{
+		TraceID: spanCtx.TraceID().String(),
+		SpanID:  spanCtx.SpanID().String(),
+	}
+}
+
+// StartGlobalSpan starts a span from the globally-registered tracer provider.
+func StartGlobalSpan(ctx context.Context, name string, attrs []SpanAttribute) SpanContext {
+	ctx, span := otel.Tracer("xylem").Start(ctx, name)
+	AttachSpanAttributes(span, attrs)
+	return SpanContext{span: span, ctx: ctx}
 }
 
 // AttachSpanAttributes converts a slice of SpanAttribute into OTel

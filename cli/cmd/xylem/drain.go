@@ -36,28 +36,48 @@ func newDrainCmd() *cobra.Command {
 }
 
 func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun bool) error {
-	if dryRun {
-		return dryRunDrain(cfg, q)
-	}
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	if dryRun {
+		tracer := buildConfiguredTracer(cfg)
+		defer shutdownConfiguredTracer(tracer)
+
+		commandSpan := startCommandSpan(tracer, ctx, "drain", true, cfg.StateDir)
+		var commandErr error
+		defer func() {
+			finishCommandSpan(tracer, commandSpan, commandErr)
+		}()
+
+		commandErr = dryRunDrain(cfg, q)
+		return commandErr
+	}
 
 	cmdRunner := newCmdRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.Reporter = buildReporter(cfg, cmdRunner)
+	commandSpan := startCommandSpan(r.Tracer, ctx, "drain", false, cfg.StateDir)
+	var commandErr error
+	defer func() {
+		finishCommandSpan(r.Tracer, commandSpan, commandErr)
+	}()
+	if spanCtx := commandSpan.Context(); spanCtx != nil {
+		ctx = spanCtx
+	}
 
 	// Check waiting vessels before draining pending ones
 	r.CheckWaitingVessels(ctx)
 
 	builtInResult, err := runBuiltInScheduledVessels(ctx, cfg, q, cmdRunner)
 	if err != nil {
+		commandErr = err
 		return &exitError{code: 2, err: fmt.Errorf("drain built-in audit vessels: %w", err)}
 	}
 
 	result, err := r.DrainAndWait(ctx)
 	if err != nil {
+		commandErr = err
 		return &exitError{code: 2, err: fmt.Errorf("drain error: %w", err)}
 	}
 	addDrainResults(&result, builtInResult)
@@ -67,6 +87,27 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 		return &exitError{code: 1}
 	}
 	return nil
+}
+
+func startCommandSpan(tracer *observability.Tracer, ctx context.Context, name string, dryRun bool, stateDir string) observability.SpanContext {
+	if tracer == nil {
+		return observability.SpanContext{}
+	}
+	return tracer.StartSpan(ctx, "command:"+name, observability.CommandSpanAttributes(observability.CommandSpanData{
+		Name:     name,
+		DryRun:   dryRun,
+		StateDir: stateDir,
+	}))
+}
+
+func finishCommandSpan(tracer *observability.Tracer, span observability.SpanContext, err error) {
+	if tracer == nil {
+		return
+	}
+	if err != nil {
+		span.RecordError(err)
+	}
+	span.End()
 }
 
 func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeManager, cmdRunner *realCmdRunner) (*runner.Runner, func()) {

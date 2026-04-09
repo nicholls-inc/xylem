@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/observability"
 )
 
 // MaxOutputLen is the maximum length of phase output included in comments.
@@ -33,6 +34,14 @@ type PhaseResult struct {
 
 // PhaseComplete posts a comment on the GitHub issue when a phase completes successfully.
 func (r *Reporter) PhaseComplete(ctx context.Context, issueNum int, phaseName string, duration time.Duration, output string) error {
+	span := observability.StartGlobalSpan(ctx, "reporter:phase_complete", observability.ReporterSpanAttributes(observability.ReporterSpanData{
+		Action:    "phase_complete",
+		Repo:      r.Repo,
+		IssueNum:  issueNum,
+		PhaseName: phaseName,
+	}))
+	defer span.End()
+
 	truncated := truncateOutput(output, MaxOutputLen)
 
 	body := fmt.Sprintf(
@@ -41,6 +50,7 @@ func (r *Reporter) PhaseComplete(ctx context.Context, issueNum int, phaseName st
 	)
 
 	if err := postComment(ctx, r.Runner, r.Repo, issueNum, body); err != nil {
+		span.RecordError(err)
 		log.Printf("warn: failed to post phase-complete comment for issue %d: %v", issueNum, err)
 	}
 	return nil
@@ -48,6 +58,14 @@ func (r *Reporter) PhaseComplete(ctx context.Context, issueNum int, phaseName st
 
 // VesselFailed posts a failure comment on the GitHub issue.
 func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName string, errMsg string, gateOutput string) error {
+	span := observability.StartGlobalSpan(ctx, "reporter:vessel_failed", observability.ReporterSpanAttributes(observability.ReporterSpanData{
+		Action:    "vessel_failed",
+		Repo:      r.Repo,
+		IssueNum:  issueNum,
+		PhaseName: phaseName,
+	}))
+	defer span.End()
+
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "**xylem — failed at phase `%s`**\n\n**Error:** %s", phaseName, errMsg)
 
@@ -56,6 +74,7 @@ func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName str
 	}
 
 	if err := postComment(ctx, r.Runner, r.Repo, issueNum, sb.String()); err != nil {
+		span.RecordError(err)
 		log.Printf("warn: failed to post vessel-failed comment for issue %d: %v", issueNum, err)
 	}
 	return nil
@@ -63,6 +82,13 @@ func (r *Reporter) VesselFailed(ctx context.Context, issueNum int, phaseName str
 
 // VesselCompleted posts a summary comment when all phases complete.
 func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []PhaseResult, manifest *evidence.Manifest) error {
+	span := observability.StartGlobalSpan(ctx, "reporter:vessel_completed", observability.ReporterSpanAttributes(observability.ReporterSpanData{
+		Action:   "vessel_completed",
+		Repo:     r.Repo,
+		IssueNum: issueNum,
+	}))
+	defer span.End()
+
 	var sb strings.Builder
 	if workflowCompletedViaNoOp(phases) {
 		sb.WriteString("**xylem — workflow completed early via no-op**\n\n")
@@ -86,6 +112,7 @@ func (r *Reporter) VesselCompleted(ctx context.Context, issueNum int, phases []P
 	}
 
 	if err := postComment(ctx, r.Runner, r.Repo, issueNum, sb.String()); err != nil {
+		span.RecordError(err)
 		log.Printf("warn: failed to post vessel-completed comment for issue %d: %v", issueNum, err)
 	}
 	return nil
@@ -102,9 +129,18 @@ func workflowCompletedViaNoOp(phases []PhaseResult) bool {
 
 // LabelTimeout posts a timeout comment on the GitHub issue.
 func (r *Reporter) LabelTimeout(ctx context.Context, issueNum int, label string, phaseName string, waited time.Duration) error {
+	span := observability.StartGlobalSpan(ctx, "reporter:label_timeout", observability.ReporterSpanAttributes(observability.ReporterSpanData{
+		Action:    "label_timeout",
+		Repo:      r.Repo,
+		IssueNum:  issueNum,
+		PhaseName: phaseName,
+	}))
+	defer span.End()
+
 	body := fmt.Sprintf("xylem — timed out waiting for label `%s` on phase `%s` after %s", label, phaseName, waited)
 
 	if err := postComment(ctx, r.Runner, r.Repo, issueNum, body); err != nil {
+		span.RecordError(err)
 		log.Printf("warn: failed to post label-timeout comment for issue %d: %v", issueNum, err)
 	}
 	return nil
