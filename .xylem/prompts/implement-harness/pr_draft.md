@@ -5,9 +5,13 @@ Your sole deliverable is a file named `pr_draft.json` at the worktree root. If t
 1. Stage and commit all changes with the message: `feat: {{.Issue.Title}}`
    Reference the issue in the commit body: `Implements {{.Issue.URL}}`
 
-2. Push the branch.
+2. Before pushing, run `git fetch origin main && git rebase origin/main`.
 
-3. Write `pr_draft.json` at the worktree root with this exact structure:
+3. After the rebase, rerun `go vet ./... && go build ./cmd/xylem && go test ./...` from `cli/`.
+
+4. Push the rebased branch. If the rebase rewrote commits, use `git push --force-with-lease`.
+
+5. Write `pr_draft.json` at the worktree root with this exact structure:
 
 ```json
 {
