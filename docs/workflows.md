@@ -27,7 +27,9 @@ Workflow (YAML definition)
 
 Each phase produces output that subsequent phases can reference. Gates act as checkpoints -- if a gate fails and retries are exhausted, the vessel is marked as failed. If a gate is a label gate, the vessel enters a `waiting` state until a human applies the required label on GitHub. Live gates also persist step evidence under `.xylem/phases/<vessel-id>/evidence/`.
 
-The built-in workflows scaffolded by `xylem init` use prompt phases. Note: `xylem init` only scaffolds the repository-agnostic workflows `fix-bug` and `implement-feature`; repository-specific workflows such as `implement-harness` are not created by `xylem init` and must be added to your repo's `.xylem/workflows/` tree manually. The workflow format also supports `type: command` phases for deterministic shell steps inside the same execution pipeline.
+The built-in workflows scaffolded by `xylem init` use prompt phases. By default, `xylem init` scaffolds the repository-agnostic workflows `fix-bug` and `implement-feature`. Profile overlays can add repository-specific workflows during init as well; in this repository, the `self-hosting-xylem` profile also scaffolds assets such as `implement-harness` and `continuous-improvement`. The workflow format also supports `type: command` phases for deterministic shell steps inside the same execution pipeline.
+
+In this repository, `continuous-improvement` is a concrete example of mixing both styles: a deterministic `select_focus` command phase picks the next focus area and persists rotation state, then prompt phases analyze, plan, implement, and verify one small scheduled improvement.
 
 ## Workflow YAML format
 

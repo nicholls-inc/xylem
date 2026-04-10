@@ -35,6 +35,7 @@ var expectedCoreWorkflows = []string{
 }
 
 var expectedSelfHostingWorkflows = []string{
+	"continuous-improvement",
 	"diagnose-failures",
 	"implement-harness",
 	"sota-gap-analysis",
