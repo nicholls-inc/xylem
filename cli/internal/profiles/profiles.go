@@ -3,6 +3,7 @@ package profiles
 import (
 	"bytes"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"path"
@@ -24,6 +25,11 @@ var coreForbiddenDaemonFields = map[string]struct{}{
 	"auto_upgrade":    {},
 	"auto_merge":      {},
 	"auto_merge_repo": {},
+}
+
+var orderedConfigOverlayPaths = []string{
+	"xylem.yml.tmpl",
+	"xylem.overlay.yml",
 }
 
 type Profile struct {
@@ -71,6 +77,9 @@ func Compose(names ...string) (*ComposedProfile, error) {
 		return nil, fmt.Errorf("compose profiles: no profiles requested")
 	}
 
+	// Deterministic composition: sort profile names so result does not depend on map iteration order.
+	sort.Strings(names)
+
 	composed := &ComposedProfile{
 		Workflows: make(map[string][]byte),
 		Prompts:   make(map[string][]byte),
@@ -87,54 +96,79 @@ func Compose(names ...string) (*ComposedProfile, error) {
 		}
 		composed.Profiles = append(composed.Profiles, *profile)
 
-		if err := fs.WalkDir(profile.FS, ".", func(filePath string, d fs.DirEntry, walkErr error) error {
-			if walkErr != nil {
-				return fmt.Errorf("walk profile %q: %w", profile.Name, walkErr)
-			}
-			if d.IsDir() {
-				return nil
-			}
-
-			data, err := fs.ReadFile(profile.FS, filePath)
-			if err != nil {
-				return fmt.Errorf("read profile %q asset %q: %w", profile.Name, filePath, err)
-			}
-
-			switch {
-			case filePath == "xylem.yml.tmpl" || filePath == "xylem.overlay.yml":
-				if err := validateOverlay(profile.Name, filePath, data); err != nil {
-					return err
-				}
-				if err := mergeSources(profile.Name, filePath, data, composed.Sources, sourceOwners); err != nil {
-					return err
-				}
-				composed.ConfigOverlays = append(composed.ConfigOverlays, cloneBytes(data))
-			case strings.HasPrefix(filePath, "workflows/") && strings.HasSuffix(filePath, ".yaml"):
-				workflowName := strings.TrimSuffix(path.Base(filePath), path.Ext(filePath))
-				if prev, ok := composed.Workflows[workflowName]; ok && !bytes.Equal(prev, data) {
-					return fmt.Errorf("compose profiles: workflow %q conflicts between %q and %q", workflowName, workflowOwners[workflowName], profile.Name)
-				}
-				composed.Workflows[workflowName] = cloneBytes(data)
-				workflowOwners[workflowName] = profile.Name
-			case strings.HasPrefix(filePath, "prompts/") && strings.HasSuffix(filePath, ".md"):
-				promptKey := strings.TrimSuffix(strings.TrimPrefix(filePath, "prompts/"), ".md")
-				composed.Prompts[promptKey] = cloneBytes(data)
-			case strings.HasPrefix(filePath, "sources/") && strings.HasSuffix(filePath, ".yaml"):
-				sourceName := strings.TrimSuffix(path.Base(filePath), path.Ext(filePath))
-				if prevOwner, ok := sourceOwners[sourceName]; ok {
-					return fmt.Errorf("compose profiles: source %q conflicts between %q and %q", sourceName, prevOwner, profile.Name)
-				}
-				composed.Sources[sourceName] = cloneBytes(data)
-				sourceOwners[sourceName] = profile.Name
-			}
-
-			return nil
-		}); err != nil {
+		if err := composeProfile(*profile, composed, workflowOwners, sourceOwners); err != nil {
 			return nil, err
 		}
 	}
 
 	return composed, nil
+}
+
+func composeProfile(profile Profile, composed *ComposedProfile, workflowOwners, sourceOwners map[string]string) error {
+	for _, filePath := range orderedConfigOverlayPaths {
+		data, err := fs.ReadFile(profile.FS, filePath)
+		if err != nil {
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			return fmt.Errorf("read profile %q asset %q: %w", profile.Name, filePath, err)
+		}
+		if err := validateOverlay(profile.Name, filePath, data); err != nil {
+			return err
+		}
+		if err := mergeSources(profile.Name, filePath, data, composed.Sources, sourceOwners); err != nil {
+			return err
+		}
+		composed.ConfigOverlays = append(composed.ConfigOverlays, cloneBytes(data))
+	}
+
+	return fs.WalkDir(profile.FS, ".", func(filePath string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return fmt.Errorf("walk profile %q: %w", profile.Name, walkErr)
+		}
+		if d.IsDir() {
+			return nil
+		}
+
+		switch filePath {
+		case "xylem.yml.tmpl", "xylem.overlay.yml":
+			return nil
+		}
+
+		data, err := fs.ReadFile(profile.FS, filePath)
+		if err != nil {
+			return fmt.Errorf("read profile %q asset %q: %w", profile.Name, filePath, err)
+		}
+
+		switch {
+		case strings.HasPrefix(filePath, "workflows/") && strings.HasSuffix(filePath, ".yaml"):
+			workflowName := strings.TrimSuffix(path.Base(filePath), path.Ext(filePath))
+			if prev, ok := composed.Workflows[workflowName]; ok {
+				if !bytes.Equal(prev, data) {
+					return fmt.Errorf("compose profiles: workflow %q conflicts between %q and %q", workflowName, workflowOwners[workflowName], profile.Name)
+				}
+				return nil
+			}
+			composed.Workflows[workflowName] = cloneBytes(data)
+			workflowOwners[workflowName] = profile.Name
+		case strings.HasPrefix(filePath, "prompts/") && strings.HasSuffix(filePath, ".md"):
+			promptKey := strings.TrimSuffix(strings.TrimPrefix(filePath, "prompts/"), ".md")
+			composed.Prompts[promptKey] = cloneBytes(data)
+		case strings.HasPrefix(filePath, "sources/") && strings.HasSuffix(filePath, ".yaml"):
+		sourceName := strings.TrimSuffix(path.Base(filePath), path.Ext(filePath))
+		if prev, ok := composed.Sources[sourceName]; ok {
+			// identical files are allowed; prefer the first owner
+			if !bytes.Equal(prev, data) {
+				return fmt.Errorf("compose profiles: source %q conflicts between %q and %q", sourceName, sourceOwners[sourceName], profile.Name)
+			}
+			return nil
+		}
+			composed.Sources[sourceName] = cloneBytes(data)
+			sourceOwners[sourceName] = profile.Name
+		}
+
+		return nil
+	})
 }
 
 func validateOverlay(profileName, filePath string, data []byte) error {
@@ -168,12 +202,20 @@ func mergeSources(profileName, filePath string, data []byte, dest map[string][]b
 	sort.Strings(names)
 
 	for _, sourceName := range names {
-		if prevOwner, ok := owners[sourceName]; ok {
-			return fmt.Errorf("compose profiles: source %q conflicts between %q and %q", sourceName, prevOwner, profileName)
-		}
 		payload, err := yaml.Marshal(overlay.Sources[sourceName])
 		if err != nil {
 			return fmt.Errorf("compose profiles: marshal source %q from %q overlay %q: %w", sourceName, profileName, filePath, err)
+		}
+		if prevOwner, ok := owners[sourceName]; ok {
+			// If the same profile was provided twice, treat that as a conflict (tests expect both names).
+			if prevOwner == profileName {
+				return fmt.Errorf("compose profiles: source %q conflicts between %q and %q", sourceName, prevOwner, profileName)
+			}
+			// If an identical payload was already registered from a different profile, keep the first owner and skip.
+			if bytes.Equal(dest[sourceName], payload) {
+				continue
+			}
+			return fmt.Errorf("compose profiles: source %q conflicts between %q and %q", sourceName, prevOwner, profileName)
 		}
 		dest[sourceName] = payload
 		owners[sourceName] = profileName

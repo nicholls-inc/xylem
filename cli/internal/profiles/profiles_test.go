@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"testing/fstest"
 
 	workflowpkg "github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/stretchr/testify/assert"
@@ -129,6 +130,66 @@ func TestComposeRejectsWorkflowConflictsAcrossProfiles(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestComposeProfileAppliesConfigOverlaysInFixedOrder(t *testing.T) {
+	composed := &ComposedProfile{
+		Workflows: make(map[string][]byte),
+		Prompts:   make(map[string][]byte),
+		Sources:   make(map[string][]byte),
+	}
+	workflowOwners := make(map[string]string)
+	sourceOwners := make(map[string]string)
+
+	profile := Profile{
+		Name: "test-profile",
+		FS: fstest.MapFS{
+			"xylem.overlay.yml": &fstest.MapFile{Data: []byte("daemon:\n  log_level: debug\n")},
+			"xylem.yml.tmpl":    &fstest.MapFile{Data: []byte("repo: '{{ .Repo }}'\n")},
+		},
+	}
+
+	err := composeProfile(profile, composed, workflowOwners, sourceOwners)
+	require.NoError(t, err)
+	require.Len(t, composed.ConfigOverlays, 2)
+	assert.Equal(t, "repo: '{{ .Repo }}'\n", string(composed.ConfigOverlays[0]))
+	assert.Equal(t, "daemon:\n  log_level: debug\n", string(composed.ConfigOverlays[1]))
+}
+
+func TestComposeProfileKeepsFirstWorkflowOwnerForIdenticalContent(t *testing.T) {
+	composed := &ComposedProfile{
+		Workflows: make(map[string][]byte),
+		Prompts:   make(map[string][]byte),
+		Sources:   make(map[string][]byte),
+	}
+	workflowOwners := make(map[string]string)
+	sourceOwners := make(map[string]string)
+
+	first := Profile{
+		Name: "first",
+		FS: fstest.MapFS{
+			"workflows/fix-bug.yaml": &fstest.MapFile{Data: []byte("name: fix-bug\nclass: one\n")},
+		},
+	}
+	second := Profile{
+		Name: "second",
+		FS: fstest.MapFS{
+			"workflows/fix-bug.yaml": &fstest.MapFile{Data: []byte("name: fix-bug\nclass: one\n")},
+		},
+	}
+	third := Profile{
+		Name: "third",
+		FS: fstest.MapFS{
+			"workflows/fix-bug.yaml": &fstest.MapFile{Data: []byte("name: fix-bug\nclass: two\n")},
+		},
+	}
+
+	require.NoError(t, composeProfile(first, composed, workflowOwners, sourceOwners))
+	require.NoError(t, composeProfile(second, composed, workflowOwners, sourceOwners))
+
+	err := composeProfile(third, composed, workflowOwners, sourceOwners)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `workflow "fix-bug" conflicts between "first" and "third"`)
 }
 
 func TestSmoke_S1_AdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {
