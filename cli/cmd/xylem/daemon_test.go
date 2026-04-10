@@ -252,7 +252,7 @@ func daemonSmokeDigest(data []byte) string {
 	return fmt.Sprintf("sha256:%x", sum)
 }
 
-func writeDaemonSmokeWorkflow(t *testing.T, dir, name string, phases map[string]string) string {
+func writeDaemonSmokeWorkflow(t *testing.T, dir, name, analyzePrompt, implementPrompt string) string {
 	t.Helper()
 
 	workflowDir := filepath.Join(dir, ".xylem", "workflows")
@@ -261,9 +261,8 @@ func writeDaemonSmokeWorkflow(t *testing.T, dir, name string, phases map[string]
 	promptDir := filepath.Join(dir, ".xylem", "prompts", name)
 	require.NoError(t, os.MkdirAll(promptDir, 0o755))
 
-	for phaseName, content := range phases {
-		require.NoError(t, os.WriteFile(filepath.Join(promptDir, phaseName+".md"), []byte(content), 0o644))
-	}
+	require.NoError(t, os.WriteFile(filepath.Join(promptDir, "analyze.md"), []byte(analyzePrompt), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(promptDir, "implement.md"), []byte(implementPrompt), 0o644))
 
 	workflow := fmt.Sprintf(`name: %s
 phases:
@@ -484,10 +483,13 @@ func TestSmoke_S5_DaemonReload(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	workflowPath := writeDaemonSmokeWorkflow(t, repoDir, "daemon-reload-smoke", map[string]string{
-		"analyze":   "Analyze using original workflow",
-		"implement": "Implement using original workflow",
-	})
+	workflowPath := writeDaemonSmokeWorkflow(
+		t,
+		repoDir,
+		"daemon-reload-smoke",
+		"Analyze using original workflow",
+		"Implement using original workflow",
+	)
 	originalWorkflow, err := os.ReadFile(workflowPath)
 	require.NoError(t, err)
 
@@ -565,7 +567,8 @@ phases:
 	assert.Equal(t, queue.StateCompleted, vessels[0].State)
 	assert.Equal(t, daemonSmokeDigest(originalWorkflow), vessels[0].WorkflowDigest)
 
-	snapshotPath := filepath.Join(stateDir, "vessels", vessels[0].ID, "workflow.snapshot.yaml")
+	snapshotKey := sha256.Sum256([]byte(vessels[0].ID))
+	snapshotPath := filepath.Join(stateDir, "vessels", fmt.Sprintf("%x", snapshotKey), "workflow.snapshot.yaml")
 	snapshotData, err := os.ReadFile(snapshotPath)
 	require.NoError(t, err)
 	assert.Equal(t, originalWorkflow, snapshotData)

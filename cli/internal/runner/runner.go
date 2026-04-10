@@ -3387,6 +3387,10 @@ func (r *Runner) loadWorkflowForVessel(vessel queue.Vessel) (*workflow.Workflow,
 		return r.loadWorkflow(vessel.Workflow)
 	}
 
+	return r.loadWorkflowSnapshot(vessel)
+}
+
+func (r *Runner) loadWorkflowSnapshot(vessel queue.Vessel) (*workflow.Workflow, error) {
 	snapshotPath := r.workflowSnapshotPath(vessel.ID)
 	data, err := os.ReadFile(snapshotPath)
 	if err != nil {
@@ -3409,16 +3413,48 @@ func (r *Runner) loadWorkflowForVessel(vessel queue.Vessel) (*workflow.Workflow,
 	return wf, nil
 }
 
+func (r *Runner) adoptWorkflowSnapshot(vessel queue.Vessel) (queue.Vessel, *workflow.Workflow, bool, error) {
+	snapshotPath := r.workflowSnapshotPath(vessel.ID)
+	if _, err := os.Stat(snapshotPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return vessel, nil, false, nil
+		}
+		return vessel, nil, false, fmt.Errorf("stat workflow snapshot %q: %w", snapshotPath, err)
+	}
+
+	recovered := vessel
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return vessel, nil, false, fmt.Errorf("read workflow snapshot %q: %w", snapshotPath, err)
+	}
+	recovered.WorkflowDigest = workflowSnapshotDigest(data)
+
+	wf, err := r.loadWorkflowSnapshot(recovered)
+	if err != nil {
+		return vessel, nil, false, err
+	}
+	if err := r.Queue.UpdateVessel(recovered); err != nil {
+		return vessel, nil, false, fmt.Errorf("persist recovered workflow digest: %w", err)
+	}
+
+	return recovered, wf, true, nil
+}
+
 func (r *Runner) prepareWorkflowSnapshot(vessel queue.Vessel) (queue.Vessel, *workflow.Workflow, error) {
 	if strings.TrimSpace(vessel.Workflow) == "" {
 		return vessel, nil, fmt.Errorf("vessel %s has no workflow", vessel.ID)
 	}
 	if strings.TrimSpace(vessel.WorkflowDigest) != "" {
-		wf, err := r.loadWorkflowForVessel(vessel)
+		wf, err := r.loadWorkflowSnapshot(vessel)
 		if err != nil {
 			return vessel, nil, err
 		}
 		return vessel, wf, nil
+	}
+	if recovered, wf, ok, err := r.adoptWorkflowSnapshot(vessel); err != nil {
+		return vessel, nil, err
+	} else if ok {
+		return recovered, wf, nil
 	}
 
 	workflowPath := r.workflowPath(vessel.Workflow)
@@ -3467,7 +3503,7 @@ func (r *Runner) workflowSnapshotDir(vesselID string) string {
 	if r.Config != nil && r.Config.StateDir != "" {
 		stateDir = r.Config.StateDir
 	}
-	return filepath.Join(stateDir, "vessels", vesselID)
+	return filepath.Join(stateDir, "vessels", workflowSnapshotKey(vesselID))
 }
 
 func (r *Runner) workflowPromptSnapshotPath(vesselID string, p workflow.Phase) string {
@@ -3515,6 +3551,11 @@ func (r *Runner) rewriteWorkflowPromptPathsToSnapshots(vesselID string, wf *work
 func workflowSnapshotDigest(data []byte) string {
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("sha256:%x", sum)
+}
+
+func workflowSnapshotKey(vesselID string) string {
+	sum := sha256.Sum256([]byte(vesselID))
+	return fmt.Sprintf("%x", sum)
 }
 
 func (r *Runner) readHarness() string {

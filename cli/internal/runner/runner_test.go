@@ -8214,6 +8214,65 @@ func TestRunnerLoadWorkflowForVesselUsesSnapshottedPromptFiles(t *testing.T) {
 	assert.Equal(t, r.workflowPromptSnapshotPath(updated.ID, wf.Phases[0]), wf.Phases[0].PromptFile)
 }
 
+func TestRunnerPrepareWorkflowSnapshotAdoptsExistingSnapshotBeforeDigestPersist(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(dir, ".xylem"), 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	_, err := q.Enqueue(makeVessel(1, "snapshot-recover"))
+	require.NoError(t, err)
+	writeWorkflowFile(t, dir, "snapshot-recover", []testPhase{
+		{name: "analyze", promptContent: "Analyze using original workflow", maxTurns: 3},
+		{name: "implement", promptContent: "Implement using original workflow", maxTurns: 3},
+	})
+	withTestWorkingDir(t, dir)
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	workflowPath := filepath.Join(dir, ".xylem", "workflows", "snapshot-recover.yaml")
+	originalWorkflow, err := os.ReadFile(workflowPath)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(r.workflowSnapshotPath(vessel.ID)), 0o755))
+	require.NoError(t, os.WriteFile(r.workflowSnapshotPath(vessel.ID), originalWorkflow, 0o644))
+
+	parsed, err := workflow.LoadBytes(originalWorkflow, workflowPath)
+	require.NoError(t, err)
+	require.NoError(t, r.snapshotWorkflowPromptFiles(vessel.ID, parsed))
+
+	reloadedPromptPath := filepath.Join(dir, ".xylem", "prompts", "snapshot-recover", "implement-reloaded.md")
+	require.NoError(t, os.WriteFile(reloadedPromptPath, []byte("Implement using reloaded workflow"), 0o644))
+	reloadedWorkflow := fmt.Sprintf(`name: snapshot-recover
+phases:
+  - name: analyze
+    prompt_file: %s
+    max_turns: 3
+  - name: implement
+    prompt_file: %s
+    max_turns: 3
+`, filepath.Join(dir, ".xylem", "prompts", "snapshot-recover", "analyze.md"), reloadedPromptPath)
+	require.NoError(t, os.WriteFile(workflowPath, []byte(reloadedWorkflow), 0o644))
+
+	updated, wf, err := r.prepareWorkflowSnapshot(*vessel)
+	require.NoError(t, err)
+	require.NotNil(t, wf)
+	assert.Equal(t, workflowSnapshotDigest(originalWorkflow), updated.WorkflowDigest)
+
+	persisted, err := q.FindByID(updated.ID)
+	require.NoError(t, err)
+	require.NotNil(t, persisted)
+	assert.Equal(t, updated.WorkflowDigest, persisted.WorkflowDigest)
+
+	require.Len(t, wf.Phases, 2)
+	implementPromptPath := r.workflowPromptSnapshotPath(updated.ID, wf.Phases[1])
+	assert.Equal(t, implementPromptPath, wf.Phases[1].PromptFile)
+	implementPrompt, err := os.ReadFile(implementPromptPath)
+	require.NoError(t, err)
+	assert.Equal(t, "Implement using original workflow", string(implementPrompt))
+}
+
 func TestRunnerLoadWorkflowForVesselRejectsSnapshotDigestMismatch(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(filepath.Join(dir, ".xylem"), 1)
@@ -8236,4 +8295,17 @@ func TestRunnerLoadWorkflowForVesselRejectsSnapshotDigestMismatch(t *testing.T) 
 	})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "workflow snapshot digest mismatch")
+}
+
+func TestRunnerWorkflowSnapshotDirUsesStableHashedKey(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(filepath.Join(dir, ".xylem"), 1)
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+
+	unsafeID := "../escape/with/slashes"
+	got := r.workflowSnapshotDir(unsafeID)
+
+	assert.NotContains(t, got, unsafeID)
+	assert.Equal(t, filepath.Join(cfg.StateDir, "vessels"), filepath.Dir(got))
+	assert.Len(t, filepath.Base(got), 64)
 }
