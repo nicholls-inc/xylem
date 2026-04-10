@@ -82,6 +82,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(),
 		newBootstrapCmd(),
+		newContinuousSimplicityCmd(),
 		newDtuCmd(),
 		newShimDispatchCmd(),
 		newScanCmd(),

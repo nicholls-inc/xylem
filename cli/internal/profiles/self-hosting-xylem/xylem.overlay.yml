@@ -59,6 +59,15 @@ sources:
       weekly-self-gap-analysis:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
+  continuous-simplicity:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-continuous-simplicity:
+        workflow: continuous-simplicity
+        ref: continuous-simplicity
   harness-post-merge:
     type: github-merge
     repo: "{{ .Repo }}"
