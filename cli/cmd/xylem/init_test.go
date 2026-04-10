@@ -319,8 +319,9 @@ func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
 
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCall("owner/name"): []byte("[]"),
-			adaptRepoCreateCall("owner/name"): []byte("https://github.com/owner/name/issues/12\n"),
+			adaptRepoSearchCallForState("owner/name", "open"):   []byte("[]"),
+			adaptRepoSearchCallForState("owner/name", "closed"): []byte("[]"),
+			adaptRepoCreateCall("owner/name"):                   []byte("https://github.com/owner/name/issues/12\n"),
 		},
 	}
 
@@ -336,7 +337,7 @@ func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
 	assert.Equal(t, "https://github.com/owner/name/issues/12", marker.IssueURL)
 	assert.Equal(t, adaptRepoSeededByInit, marker.SeededBy)
 	assert.Equal(t, 1, marker.ProfileVersion)
-	assert.Len(t, runner.calls, 2)
+	assert.Len(t, runner.calls, 3)
 }
 
 func TestInitSkipsExistingV2Files(t *testing.T) {
