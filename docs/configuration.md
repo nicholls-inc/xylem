@@ -237,6 +237,22 @@ sources:
 ```
 
 The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
+
+`harness-gap-analysis` is a sibling built-in scheduled workflow for xylem self-hosting. It reads existing daemon telemetry (for example `<state_dir>/daemon.log`), current GitHub state, and git drift, then writes `harness-gap-analysis.{json,md}` plus a durable issue-dedup state file under `<state_dir>/<harness.review.output_dir>/`.
+
+```yaml
+sources:
+  harness-gap-analysis:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "4h"
+    tasks:
+      analyze-gaps:
+        workflow: harness-gap-analysis
+        ref: harness-gap-analysis
+```
+
+To opt out, omit or delete the scheduled `harness-gap-analysis` source from your config; no separate feature flag is required.
 ### `status_labels`
 
 When `status_labels` is set, xylem records the configured labels in vessel metadata and applies them during source lifecycle hooks.
@@ -451,7 +467,7 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs. When failed or timed-out runs also have `<state_dir>/phases/<vessel-id>/failure-review.json`, the review loader reconstructs those recovery decisions alongside the existing evidence/cost/eval artifacts.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs. Built-in `harness-gap-analysis` runs do the same for `harness-gap-analysis.{json,md}` while surfacing recurring daemon-operation gaps such as drift, idle backlog episodes, stale conflict labels, and parked failed backlog. When failed or timed-out runs also have `<state_dir>/phases/<vessel-id>/failure-review.json`, the review loader reconstructs those recovery decisions alongside the existing evidence/cost/eval artifacts.
 
 ### Observability settings
 
