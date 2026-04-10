@@ -25,7 +25,7 @@ func runBuiltInScheduledVessels(ctx context.Context, cfg *config.Config, q *queu
 
 	var result runner.DrainResult
 	for _, vessel := range pending {
-		if vessel.Source != "scheduled" || vessel.Workflow != reviewpkg.ContextWeightAuditWorkflow {
+		if vessel.Source != "scheduled" || !isBuiltInScheduledWorkflow(vessel.Workflow) {
 			continue
 		}
 		result.Launched++
@@ -44,13 +44,8 @@ func runBuiltInScheduledVessels(ctx context.Context, cfg *config.Config, q *queu
 		repo := resolveScheduledAuditRepo(cfg, *updated)
 		if strings.TrimSpace(repo) == "" {
 			state = queue.StateFailed
-			errMsg = "context-weight audit requires a source repo for GitHub issue publication"
-		} else if _, err := reviewpkg.RunContextWeightAudit(ctx, cfg.StateDir, repo, cmdRunner, reviewpkg.ContextWeightOptions{
-			LookbackRuns: cfg.HarnessReviewLookbackRuns(),
-			MinSamples:   cfg.HarnessReviewMinSamples(),
-			OutputDir:    cfg.HarnessReviewOutputDir(),
-			Now:          time.Now().UTC(),
-		}); err != nil {
+			errMsg = fmt.Sprintf("%s requires a source repo for GitHub issue publication", vessel.Workflow)
+		} else if err := runBuiltInScheduledWorkflow(ctx, cfg, vessel.Workflow, repo, cmdRunner); err != nil {
 			state = queue.StateFailed
 			errMsg = err.Error()
 		}
@@ -74,6 +69,37 @@ func runBuiltInScheduledVessels(ctx context.Context, cfg *config.Config, q *queu
 		}
 	}
 	return result, nil
+}
+
+func isBuiltInScheduledWorkflow(workflow string) bool {
+	switch workflow {
+	case reviewpkg.ContextWeightAuditWorkflow, reviewpkg.HarnessGapAnalysisWorkflow:
+		return true
+	default:
+		return false
+	}
+}
+
+func runBuiltInScheduledWorkflow(ctx context.Context, cfg *config.Config, workflowName, repo string, cmdRunner auditCommandRunner) error {
+	now := time.Now().UTC()
+	switch workflowName {
+	case reviewpkg.ContextWeightAuditWorkflow:
+		_, err := reviewpkg.RunContextWeightAudit(ctx, cfg.StateDir, repo, cmdRunner, reviewpkg.ContextWeightOptions{
+			LookbackRuns: cfg.HarnessReviewLookbackRuns(),
+			MinSamples:   cfg.HarnessReviewMinSamples(),
+			OutputDir:    cfg.HarnessReviewOutputDir(),
+			Now:          now,
+		})
+		return err
+	case reviewpkg.HarnessGapAnalysisWorkflow:
+		_, err := reviewpkg.RunHarnessGapAnalysis(ctx, cfg.StateDir, repo, cmdRunner, reviewpkg.HarnessGapOptions{
+			OutputDir: cfg.HarnessReviewOutputDir(),
+			Now:       now,
+		})
+		return err
+	default:
+		return fmt.Errorf("unsupported built-in scheduled workflow %q", workflowName)
+	}
 }
 
 func resolveScheduledAuditRepo(cfg *config.Config, vessel queue.Vessel) string {
@@ -114,7 +140,7 @@ func persistBuiltInAuditSummary(cfg *config.Config, vessel queue.Vessel) error {
 		StartedAt:  startedAt,
 		EndedAt:    endedAt,
 		DurationMS: endedAt.Sub(startedAt).Milliseconds(),
-		Note:       "Built-in context-weight audit uses persisted summary artifacts and may open de-duplicated GitHub issues.",
+		Note:       builtInScheduledWorkflowSummaryNote(vessel.Workflow),
 	}
 	if vessel.State == queue.StateFailed {
 		summary.Note = fmt.Sprintf("%s Failure: %s", summary.Note, vessel.Error)
@@ -123,6 +149,15 @@ func persistBuiltInAuditSummary(cfg *config.Config, vessel queue.Vessel) error {
 		return fmt.Errorf("save built-in audit summary for %s: %w", vessel.ID, err)
 	}
 	return nil
+}
+
+func builtInScheduledWorkflowSummaryNote(workflow string) string {
+	switch workflow {
+	case reviewpkg.HarnessGapAnalysisWorkflow:
+		return "Built-in harness-gap analysis uses persisted daemon/GitHub/git telemetry and may open de-duplicated GitHub issues."
+	default:
+		return "Built-in context-weight audit uses persisted summary artifacts and may open de-duplicated GitHub issues."
+	}
 }
 
 func addDrainResults(dst *runner.DrainResult, src runner.DrainResult) {
