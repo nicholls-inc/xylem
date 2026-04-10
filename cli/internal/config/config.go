@@ -59,6 +59,7 @@ const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
 var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
+	Profiles      []string                  `yaml:"profiles,omitempty"`
 	Repo          string                    `yaml:"repo,omitempty"`
 	Sources       map[string]SourceConfig   `yaml:"sources,omitempty"`
 	Tasks         map[string]Task           `yaml:"tasks,omitempty"`

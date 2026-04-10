@@ -1,0 +1,9 @@
+name: refine-issue
+description: "Rewrite issue descriptions with structured template for AI agent consumption"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/refine-issue/analyze.md
+    max_turns: 20
+  - name: refine
+    prompt_file: .xylem/prompts/refine-issue/refine.md
+    max_turns: 20

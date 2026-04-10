@@ -1,7 +1,6 @@
 package profiles
 
 import (
-	"bytes"
 	"embed"
 	"fmt"
 	"io/fs"
@@ -77,7 +76,6 @@ func Compose(names ...string) (*ComposedProfile, error) {
 		Sources:   make(map[string][]byte),
 	}
 
-	workflowOwners := make(map[string]string)
 	sourceOwners := make(map[string]string)
 
 	for _, name := range names {
@@ -111,11 +109,7 @@ func Compose(names ...string) (*ComposedProfile, error) {
 				composed.ConfigOverlays = append(composed.ConfigOverlays, cloneBytes(data))
 			case strings.HasPrefix(filePath, "workflows/") && strings.HasSuffix(filePath, ".yaml"):
 				workflowName := strings.TrimSuffix(path.Base(filePath), path.Ext(filePath))
-				if prev, ok := composed.Workflows[workflowName]; ok && !bytes.Equal(prev, data) {
-					return fmt.Errorf("compose profiles: workflow %q conflicts between %q and %q", workflowName, workflowOwners[workflowName], profile.Name)
-				}
 				composed.Workflows[workflowName] = cloneBytes(data)
-				workflowOwners[workflowName] = profile.Name
 			case strings.HasPrefix(filePath, "prompts/") && strings.HasSuffix(filePath, ".md"):
 				promptKey := strings.TrimSuffix(strings.TrimPrefix(filePath, "prompts/"), ".md")
 				composed.Prompts[promptKey] = cloneBytes(data)

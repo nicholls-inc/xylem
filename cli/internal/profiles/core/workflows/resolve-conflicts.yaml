@@ -1,0 +1,24 @@
+name: resolve-conflicts
+description: "Resolve merge conflicts on a PR branch"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/resolve-conflicts/analyze.md
+    max_turns: 20
+    llm: copilot
+    model: gpt-5.4
+    noop:
+      match: XYLEM_NOOP
+  - name: resolve
+    prompt_file: .xylem/prompts/resolve-conflicts/resolve.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+    gate:
+      type: command
+      run: "git fetch origin main && test \"$(git branch --show-current)\" = \"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\" && git merge-base --is-ancestor origin/main HEAD"
+      retries: 2
+  - name: push
+    prompt_file: .xylem/prompts/resolve-conflicts/push.md
+    max_turns: 10
+    llm: copilot
+    model: gpt-5-mini

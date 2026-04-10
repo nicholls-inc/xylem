@@ -1,43 +1,104 @@
-# xylem configuration
-# Docs: https://github.com/nicholls-inc/claude-code-marketplace/tree/main/xylem
-
 sources:
   bugs:
     type: github
     repo: "{{ .Repo }}"
     exclude: [wontfix, duplicate, in-progress, no-bot]
     tasks:
-      fix-bugs:
+      fix:
         labels: [bug, ready-for-work]
         workflow: fix-bug
-  adapt-repo:
+  adaptation:
     type: github
     repo: "{{ .Repo }}"
     exclude: [wontfix, duplicate, in-progress, no-bot]
     tasks:
-      adapt-repo:
-        labels: [xylem-adapt-repo, ready-for-work]
+      adapt:
+        labels: [xylem-adapt-repo]
         workflow: adapt-repo
-  # features:
-  #   type: github
-  #   repo: "{{ .Repo }}"
-  #   exclude: [wontfix, duplicate, in-progress, no-bot]
-  #   tasks:
-  #     implement-features:
-  #       labels: [enhancement, low-effort, ready-for-work]
-  #       workflow: implement-feature
+  features:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      implement:
+        labels: [enhancement, ready-for-work]
+        workflow: implement-feature
+  triage:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      issues:
+        labels: [needs-triage]
+        workflow: triage
+  refinement:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      issues:
+        labels: [needs-refinement]
+        workflow: refine-issue
+  pr-lifecycle:
+    type: github-pr-events
+    repo: "{{ .Repo }}"
+    exclude: [no-bot]
+    tasks:
+      review-opened:
+        workflow: review-pr
+        on:
+          pr_opened: true
+      review-updated:
+        workflow: review-pr
+        on:
+          pr_head_updated: true
+      respond-to-review:
+        workflow: respond-to-pr-review
+        on:
+          review_submitted: true
+          author_deny:
+            - "github-actions[bot]"
+      fix-checks:
+        workflow: fix-pr-checks
+        on:
+          checks_failed: true
+  merges:
+    type: github-pr
+    repo: "{{ .Repo }}"
+    exclude: [no-bot]
+    tasks:
+      ready:
+        labels: [ready-to-merge]
+        workflow: merge-pr
+  conflicts:
+    type: github-pr
+    repo: "{{ .Repo }}"
+    exclude: [no-bot]
+    tasks:
+      resolve:
+        labels: [needs-conflict-resolution]
+        workflow: resolve-conflicts
+  lessons-hygiene:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
+  context-audit:
+    type: schedule
+    cadence: "@weekly"
+    workflow: context-weight-audit
+  workflow-health:
+    type: schedule
+    cadence: "@weekly"
+    workflow: workflow-health-report
 
 concurrency: 2
 max_turns: 50
 timeout: "30m"
 state_dir: ".xylem"
 
-# Default harness policy denies writes to xylem control files and allows
-# git_push/pr_create so autonomous drains can finish. If you want a strategic
-# human gate before publication, add workflow review steps or
-# harness.policy.rules that require approval for those actions.
+validation:
+  test: "true"
 
-# llm selects the global default LLM provider: "claude" (default) or "copilot"
 llm: claude
 
 claude:
@@ -46,13 +107,3 @@ claude:
   flags: "--bare --dangerously-skip-permissions"
   env:
     ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
-  # allowed_tools:
-  #   - "Bash(gh issue view *)"
-  #   - "Bash(gh pr create *)"
-  #   - "WebFetch"
-
-# copilot:
-#   command: "copilot"
-#   flags: ""
-#   default_model: ""
-#   env: {}

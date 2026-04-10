@@ -4,10 +4,10 @@ Issue: {{.Issue.Title}}
 URL: {{.Issue.URL}}
 
 Read the following inputs before writing anything:
-- .xylem/state/bootstrap/repo-analysis.json
-- .xylem/state/bootstrap/legibility-report.json
-- .xylem.yml
-- AGENTS.md, README.md, and nearby docs when present
+- `.xylem/state/bootstrap/repo-analysis.json`
+- `.xylem/state/bootstrap/legibility-report.json`
+- `.xylem.yml`
+- `AGENTS.md`, `README.md`, and nearby docs when present
 
 Your only allowed write in this phase is `.xylem/state/bootstrap/adapt-plan.json`.
 Do not edit any other file. If no harness changes are needed, print `XYLEM_NOOP` and explain why.

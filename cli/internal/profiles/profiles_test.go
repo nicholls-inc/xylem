@@ -13,16 +13,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadCore(t *testing.T) {
+func TestSmoke_S1_LoadCoreProfileReturnsEmbeddedAssets(t *testing.T) {
+	t.Parallel()
+
 	profile, err := Load("core")
 	require.NoError(t, err)
 
+	require.NotNil(t, profile)
 	assert.Equal(t, "core", profile.Name)
 	assert.Equal(t, 1, profile.Version)
 
-	data, err := fs.ReadFile(profile.FS, "HARNESS.md.tmpl")
+	harnessTemplate, err := fs.ReadFile(profile.FS, "HARNESS.md.tmpl")
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "# Project Overview")
+	assert.Contains(t, string(harnessTemplate), "# Project Overview")
 
 	configTemplate, err := fs.ReadFile(profile.FS, "xylem.yml.tmpl")
 	require.NoError(t, err)
@@ -42,7 +45,9 @@ func TestLoadUnknownProfile(t *testing.T) {
 	assert.Contains(t, err.Error(), "unknown profile")
 }
 
-func TestComposeCoreIncludesSeededAssets(t *testing.T) {
+func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
+	t.Parallel()
+
 	composed, err := Compose("core")
 	require.NoError(t, err)
 
@@ -51,37 +56,38 @@ func TestComposeCoreIncludesSeededAssets(t *testing.T) {
 	assert.Equal(t, "core", composed.Profiles[0].Name)
 	assert.Equal(t, 1, composed.Profiles[0].Version)
 
-	assert.Equal(t, []string{"adapt-repo", "fix-bug", "implement-feature"}, sortedKeys(composed.Workflows))
 	assert.Equal(t, []string{
-		"adapt-repo/apply",
-		"adapt-repo/plan",
-		"adapt-repo/pr",
-		"fix-bug/analyze",
-		"fix-bug/implement",
-		"fix-bug/plan",
-		"fix-bug/pr",
-		"implement-feature/analyze",
-		"implement-feature/implement",
-		"implement-feature/plan",
-		"implement-feature/pr",
-	}, sortedKeys(composed.Prompts))
-	assert.Equal(t, []string{"adapt-repo", "bugs"}, sortedKeys(composed.Sources))
+		"adapt-repo",
+		"context-weight-audit",
+		"fix-bug",
+		"fix-pr-checks",
+		"implement-feature",
+		"lessons",
+		"merge-pr",
+		"refine-issue",
+		"resolve-conflicts",
+		"respond-to-pr-review",
+		"review-pr",
+		"triage",
+		"workflow-health-report",
+	}, sortedKeys(composed.Workflows))
+	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/plan")
+	assert.Contains(t, sortedKeys(composed.Prompts), "workflow-health-report/report")
+	assert.Contains(t, sortedKeys(composed.Sources), "pr-lifecycle")
 	require.Len(t, composed.ConfigOverlays, 1)
-	assert.Contains(t, string(composed.Workflows["adapt-repo"]), `name: adapt-repo`)
-	assert.Contains(t, string(composed.Workflows["adapt-repo"]), `class: harness-maintenance`)
-	assert.Contains(t, string(composed.Workflows["fix-bug"]), `name: fix-bug`)
-	assert.Contains(t, string(composed.Workflows["implement-feature"]), `name: implement-feature`)
-	assert.Contains(t, string(composed.Prompts["adapt-repo/apply"]), "Use the `Edit` tool only")
-	assert.Contains(t, string(composed.Prompts["adapt-repo/plan"]), "schema_version")
-	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "publication boundary")
-	assert.Contains(t, string(composed.Sources["adapt-repo"]), "xylem-adapt-repo")
-	assert.Contains(t, string(composed.Sources["adapt-repo"]), `workflow: adapt-repo`)
+
+	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
+	assert.Contains(t, string(composed.Workflows["implement-feature"]), "name: implement-feature")
+	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "Create a pull request")
 	assert.Contains(t, string(composed.ConfigOverlays[0]), `repo: "{{ .Repo }}"`)
 }
 
-func TestComposeUnknownProfile(t *testing.T) {
+func TestSmoke_S3_ComposeUnknownProfileReturnsClearError(t *testing.T) {
+	t.Parallel()
+
 	composed, err := Compose("nonexistent")
 	require.Error(t, err)
+
 	assert.Nil(t, composed)
 	assert.Contains(t, err.Error(), "nonexistent")
 	assert.Contains(t, err.Error(), "unknown profile")
@@ -103,35 +109,24 @@ func TestComposeRejectsConflictingSourceKeys(t *testing.T) {
 	assert.True(t, strings.Count(err.Error(), `"core"`) >= 2, "expected both conflicting profiles in error: %q", err.Error())
 }
 
-func TestComposeRejectsWorkflowConflictsAcrossProfiles(t *testing.T) {
-	tests := []struct {
-		name     string
-		profiles []string
-	}{
-		{
-			name:     "core first",
-			profiles: []string{"core", "self-hosting-xylem"},
-		},
-		{
-			name:     "self hosting first",
-			profiles: []string{"self-hosting-xylem", "core"},
-		},
-	}
+func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
+	t.Parallel()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			composed, err := Compose(tt.profiles...)
-			require.Error(t, err)
-			assert.Nil(t, composed)
-			assert.Contains(t, err.Error(), `workflow "fix-bug" conflicts`)
-			for _, profileName := range tt.profiles {
-				assert.Contains(t, err.Error(), profileName)
-			}
-		})
-	}
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	assert.Contains(t, sortedKeys(composed.Workflows), "implement-harness")
+	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
+	assert.Contains(t, sortedKeys(composed.Workflows), "unblock-wave")
+	assert.Contains(t, sortedKeys(composed.Workflows), "diagnose-failures")
+	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
+	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
+	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
+	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
+	require.Len(t, composed.ConfigOverlays, 2)
 }
 
-func TestSmoke_S1_AdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {
+func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {
 	t.Parallel()
 
 	profile, err := Load("core")
@@ -165,7 +160,7 @@ func TestSmoke_S1_AdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {
 	require.Len(t, wf.Phases, 7)
 }
 
-func TestSmoke_S2_AdaptRepoPromptAssetsEnforceGuardrails(t *testing.T) {
+func TestAdaptRepoPromptAssetsEnforceGuardrails(t *testing.T) {
 	t.Parallel()
 
 	profile, err := Load("core")

@@ -1,0 +1,12 @@
+name: workflow-health-report
+class: ops
+description: "Summarize weekly workflow health and publish a GitHub issue when needed"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/workflow-health-report/analyze.md
+    max_turns: 20
+    noop:
+      match: XYLEM_NOOP
+  - name: report
+    prompt_file: .xylem/prompts/workflow-health-report/report.md
+    max_turns: 20
