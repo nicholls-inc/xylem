@@ -157,6 +157,9 @@ func TestDequeue(t *testing.T) {
 	if got.StartedAt == nil {
 		t.Fatal("expected StartedAt to be set")
 	}
+	if got.WorkflowClass != "fix-bug" {
+		t.Fatalf("expected workflow class fix-bug, got %q", got.WorkflowClass)
+	}
 }
 
 func TestDequeueEmpty(t *testing.T) {
@@ -167,6 +170,41 @@ func TestDequeueEmpty(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("expected nil vessel, got %+v", *got)
+	}
+}
+
+func TestDequeueMatchingSkipsBlockedPending(t *testing.T) {
+	q, _ := newTestQueue(t)
+	first := testVessel(1)
+	first.Workflow = "implement-feature"
+	second := testVessel(2)
+	second.Workflow = "merge-pr"
+	if _, err := q.Enqueue(first); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	if _, err := q.Enqueue(second); err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+
+	got, err := q.DequeueMatching(func(v Vessel) bool {
+		return v.ConcurrencyClass() == "merge-pr"
+	})
+	if err != nil {
+		t.Fatalf("dequeue matching: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected vessel, got nil")
+	}
+	if got.ID != second.ID {
+		t.Fatalf("Dequeued ID = %q, want %q", got.ID, second.ID)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if vessels[0].State != StatePending {
+		t.Fatalf("first vessel state = %q, want pending", vessels[0].State)
 	}
 }
 

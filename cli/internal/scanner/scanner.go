@@ -75,7 +75,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				vessel.Meta["config_source"] = entry.configName
 			}
 
-			class := vessel.Workflow
+			class := vessel.ConcurrencyClass()
 			decision := s.budgetGate().Check(class)
 			if !decision.Allowed {
 				log.Printf("audit: budget.skipped class=%s vessel_source=%s reason=%s remaining_usd=%.4f", class, vessel.Source, decision.Reason, decision.RemainingUSD)

@@ -195,6 +195,54 @@ claude:
 	}
 }
 
+func TestLoadStructuredConcurrency(t *testing.T) {
+	path := writeConfigFile(t, `repo: owner/name
+tasks:
+  fix-bugs:
+    labels: [bug]
+    workflow: fix-bug
+concurrency:
+  global: 6
+  per_class:
+    implement-feature: 2
+    merge-pr: 3
+claude:
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load returned error: %v", err)
+	}
+
+	if cfg.Concurrency != 6 {
+		t.Fatalf("Concurrency = %d, want 6", cfg.Concurrency)
+	}
+	if got, ok := cfg.ConcurrencyLimit("implement-feature"); !ok || got != 2 {
+		t.Fatalf("ConcurrencyLimit(implement-feature) = (%d, %t), want (2, true)", got, ok)
+	}
+	if got, ok := cfg.ConcurrencyLimit("merge-pr"); !ok || got != 3 {
+		t.Fatalf("ConcurrencyLimit(merge-pr) = (%d, %t), want (3, true)", got, ok)
+	}
+}
+
+func TestLoadStructuredConcurrencyRequiresGlobal(t *testing.T) {
+	path := writeConfigFile(t, `repo: owner/name
+tasks:
+  fix-bugs:
+    labels: [bug]
+    workflow: fix-bug
+concurrency:
+  per_class:
+    implement-feature: 2
+claude:
+  default_model: "claude-sonnet-4-6"
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, "concurrency.global is required when concurrency is a map")
+}
+
 func validConfig() *Config {
 	cfg := &Config{
 		Repo: "owner/name",
