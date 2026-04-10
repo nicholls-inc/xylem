@@ -1,0 +1,44 @@
+name: continuous-improvement
+class: harness-maintenance
+description: "Scheduled self-improvement loop for small, high-signal xylem maintenance changes"
+phases:
+  - name: select_focus
+    type: command
+    run: |
+      set -euo pipefail
+      go run ./cli/cmd/xylem --config .xylem.yml continuous-improvement select \
+        --state .xylem/state/continuous-improvement/state.json \
+        --selection .xylem/state/continuous-improvement/current-selection.json
+  - name: analyze
+    prompt_file: .xylem/prompts/continuous-improvement/analyze.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+    noop:
+      match: XYLEM_NOOP
+  - name: plan
+    prompt_file: .xylem/prompts/continuous-improvement/plan.md
+    max_turns: 30
+    llm: copilot
+    model: gpt-5.4
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/continuous-improvement/implement.md
+    max_turns: 80
+    llm: copilot
+    model: gpt-5.4
+    gate:
+      type: command
+      run: |
+        set -euo pipefail
+        {{if .Validation.Format}}{{.Validation.Format}}{{else}}true{{end}}
+        {{if .Validation.Lint}}{{.Validation.Lint}}{{end}}
+        {{if .Validation.Build}}{{.Validation.Build}}{{end}}
+        {{if .Validation.Test}}{{.Validation.Test}}{{else}}true{{end}}
+      retries: 2
+  - name: verify
+    prompt_file: .xylem/prompts/continuous-improvement/verify.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4

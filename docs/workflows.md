@@ -27,7 +27,9 @@ Workflow (YAML definition)
 
 Each phase produces output that subsequent phases can reference. Gates act as checkpoints -- if a gate fails and retries are exhausted, the vessel is marked as failed. If a gate is a label gate, the vessel enters a `waiting` state until a human applies the required label on GitHub. Live gates also persist step evidence under `.xylem/phases/<vessel-id>/evidence/`.
 
-The built-in workflows scaffolded by `xylem init` are profile-driven. The core profile seeds delivery workflows such as `fix-bug` and `implement-feature`, plus recurring operator workflows such as `lessons`, `context-weight-audit`, `workflow-health-report`, and `security-compliance`. Repo-specific overlays such as `implement-harness` are not part of the base core scaffold and must be added through an overlay profile or checked-in repo assets. The workflow format also supports `type: command` phases for deterministic shell steps inside the same execution pipeline.
+The built-in workflows scaffolded by `xylem init` are profile-driven. The core profile seeds delivery workflows such as `fix-bug` and `implement-feature`, plus recurring operator workflows such as `lessons`, `context-weight-audit`, `workflow-health-report`, and `security-compliance`. Repo-specific overlays such as `implement-harness` and `continuous-improvement` are not part of the base core scaffold and must be added through an overlay profile or checked-in repo assets. The workflow format also supports `type: command` phases for deterministic shell steps inside the same execution pipeline.
+
+In this repository, `continuous-improvement` is a concrete example of mixing both styles: a deterministic `select_focus` command phase picks the next focus area and persists rotation state, then prompt phases analyze, plan, implement, and verify one small scheduled improvement.
 
 ## Workflow YAML format
 
@@ -722,6 +724,73 @@ sources:
     type: schedule
     cadence: "@daily"
     workflow: security-compliance
+```
+
+### continuous-improvement (repo-specific)
+
+Runs a scheduled self-hosting maintenance loop in 5 phases. The first phase is deterministic: it rotates through repo-specific, standard, and revisit focus buckets, persists durable state, and emits a focus brief for the later prompt phases.
+
+```yaml
+name: continuous-improvement
+class: harness-maintenance
+description: "Scheduled self-improvement loop for small, high-signal xylem maintenance changes"
+phases:
+  - name: select_focus
+    type: command
+    run: |
+      set -euo pipefail
+      go run ./cli/cmd/xylem --config .xylem.yml continuous-improvement select \
+        --state .xylem/state/continuous-improvement/state.json \
+        --selection .xylem/state/continuous-improvement/current-selection.json
+  - name: analyze
+    prompt_file: .xylem/prompts/continuous-improvement/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: plan
+    prompt_file: .xylem/prompts/continuous-improvement/plan.md
+    max_turns: 30
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/continuous-improvement/implement.md
+    max_turns: 80
+    gate:
+      type: command
+      run: |
+        set -euo pipefail
+        {{if .Validation.Format}}{{.Validation.Format}}{{else}}true{{end}}
+        {{if .Validation.Lint}}{{.Validation.Lint}}{{end}}
+        {{if .Validation.Build}}{{.Validation.Build}}{{end}}
+        {{if .Validation.Test}}{{.Validation.Test}}{{else}}true{{end}}
+      retries: 2
+  - name: verify
+    prompt_file: .xylem/prompts/continuous-improvement/verify.md
+    max_turns: 40
+```
+
+**Phase flow:**
+
+1. **select_focus** -- Runs `xylem continuous-improvement select`, applies the 60/30/10 weighting across repo-specific, standard, and revisit buckets, persists durable state under `.xylem/state/continuous-improvement/`, and prints the markdown brief consumed by later phases.
+2. **analyze** -- Reads the focus brief plus the codebase, then chooses one small, mergeable improvement inside that slice. It can exit early with `XYLEM_NOOP` when the selected area has nothing safe and worthwhile to ship.
+3. **plan** -- Converts the selected improvement into a file-by-file implementation plan and test strategy, again allowing `XYLEM_NOOP` if the analysis already established that the run should skip publication.
+4. **implement** -- Makes the focused change and passes a command gate that reuses the repo's configured format/lint/build/test validation commands.
+5. **verify** -- Rechecks that the diff still matches the selected focus, then commits, pushes, and opens the scheduled maintenance PR.
+
+**Rotation strategy:** The selector keeps a durable history in `.xylem/state/continuous-improvement/state.json`, chooses repo-specific focus areas for 6 of every 10 runs, standard categories for 3 of every 10 runs, and a revisit slot for the 10th run. Candidate focus areas are part of the checked-in helper so the schedule can rotate predictably without needing a triggering GitHub issue.
+
+**Configuration example:**
+
+```yaml
+sources:
+  continuous-improvement:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@daily"
+    tasks:
+      daily-rotation:
+        workflow: continuous-improvement
+        ref: continuous-improvement
 ```
 
 ### implement-harness (repo-specific)
