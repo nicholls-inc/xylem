@@ -380,10 +380,8 @@ func (g *GitHubPR) retryCandidate(base queue.Vessel, prURL, fingerprint, workflo
 			return nil, false, loadErr
 		}
 		if !found {
-			if latest.Meta["source_input_fingerprint"] != fingerprint {
-				return nil, false, nil
-			}
-			return nil, true, nil
+			retry, blocked := retryCandidateWithoutArtifact(base, *latest, g.Queue, sourceNow())
+			return retry, blocked, nil
 		}
 		base.Meta = applyCurrentRemediationMeta(base.Meta, artifact, g.currentHarnessDigest(), g.currentWorkflowDigest(base.Workflow))
 		decision := retryDecision(artifact, latest.Meta, base.Meta, sourceNow())

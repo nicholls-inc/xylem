@@ -551,7 +551,7 @@ func TestSmoke_S6_GitHubPRScanBlocksNonTransientRecoveryClasses(t *testing.T) {
 	assert.Empty(t, vessels)
 }
 
-func TestSmoke_S7_GitHubPRScanKeepsLegacyBlockingWhenRecoveryArtifactMissing(t *testing.T) {
+func TestSmoke_S7_GitHubPRScanRetriesAfterCooldownWhenRecoveryArtifactMissing(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(dir + "/queue.jsonl")
 	r := newMock()
@@ -583,6 +583,12 @@ func TestSmoke_S7_GitHubPRScanKeepsLegacyBlockingWhenRecoveryArtifactMissing(t *
 	require.NoError(t, err)
 	require.NoError(t, q.Update("pr-10-review-pr", queue.StateFailed, "temporary network outage"))
 
+	failed, err := q.FindByID("pr-10-review-pr")
+	require.NoError(t, err)
+	endedAt := time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown)
+	failed.EndedAt = &endedAt
+	require.NoError(t, q.UpdateVessel(*failed))
+
 	src := &GitHubPR{
 		Repo:      "owner/repo",
 		Tasks:     map[string]GitHubTask{"review": {Labels: []string{"review-me"}, Workflow: "review-pr"}},
@@ -593,7 +599,10 @@ func TestSmoke_S7_GitHubPRScanKeepsLegacyBlockingWhenRecoveryArtifactMissing(t *
 
 	vessels, err := src.Scan(context.Background())
 	require.NoError(t, err)
-	assert.Empty(t, vessels)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "pr-10-review-pr-retry-1", vessels[0].ID)
+	assert.Equal(t, "pr-10-review-pr", vessels[0].RetryOf)
+	assert.Equal(t, "cooldown", vessels[0].Meta[recovery.MetaUnlockedBy])
 }
 
 func TestGitHubPRScanRetriesWhenOnlyWorkflowDigestChanges(t *testing.T) {
