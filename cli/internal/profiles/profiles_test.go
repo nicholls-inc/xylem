@@ -122,10 +122,14 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
 	assert.Contains(t, sortedKeys(composed.Workflows), "unblock-wave")
 	assert.Contains(t, sortedKeys(composed.Workflows), "diagnose-failures")
+	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-refactoring")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-refactoring/analyze")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
+	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactor-semantic")
+	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactor-file-diet")
 	require.Len(t, composed.ConfigOverlays, 2)
 }
 

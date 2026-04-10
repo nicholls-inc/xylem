@@ -107,6 +107,7 @@ type SourceConfig struct {
 	Schedule string          `yaml:"schedule,omitempty"`
 	Cadence  string          `yaml:"cadence,omitempty"`
 	Workflow string          `yaml:"workflow,omitempty"`
+	Params   map[string]any  `yaml:"params,omitempty"`
 	LLM      string          `yaml:"llm,omitempty"`
 	Model    string          `yaml:"model,omitempty"`
 	Timeout  string          `yaml:"timeout,omitempty"`
@@ -155,6 +156,7 @@ type Task struct {
 	Workflow        string           `yaml:"workflow"`
 	Tier            string           `yaml:"tier,omitempty"`
 	Ref             string           `yaml:"ref,omitempty"`
+	Params          map[string]any   `yaml:"params,omitempty"`
 	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
 	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
 	On              *PREventsConfig  `yaml:"on,omitempty"`

@@ -59,6 +59,39 @@ sources:
       weekly-self-gap-analysis:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
+  continuous-refactor-semantic:
+    type: schedule
+    repo: "{{ .Repo }}"
+    cadence: "@weekly"
+    workflow: continuous-refactoring
+    params:
+      mode: semantic_refactor
+      source_dirs:
+        - cli
+      file_extensions:
+        - .go
+      exclude_patterns:
+        - "**/*_test.go"
+        - "cli/internal/dtu/testdata/**"
+        - "cli/internal/worktree/.claude/**"
+      max_issues_per_run: 3
+  continuous-refactor-file-diet:
+    type: schedule
+    repo: "{{ .Repo }}"
+    cadence: "0 7 * * 1-5"
+    workflow: continuous-refactoring
+    params:
+      mode: file_diet
+      source_dirs:
+        - cli
+      file_extensions:
+        - .go
+      exclude_patterns:
+        - "**/*_test.go"
+        - "cli/internal/dtu/testdata/**"
+        - "cli/internal/worktree/.claude/**"
+      loc_threshold: 500
+      max_issues_per_run: 1
   harness-post-merge:
     type: github-merge
     repo: "{{ .Repo }}"

@@ -195,6 +195,31 @@ claude:
 	}
 }
 
+func TestLoadScheduleSourceParams(t *testing.T) {
+	path := writeConfigFile(t, `sources:
+  continuous-refactor-file-diet:
+    type: schedule
+    repo: owner/name
+    cadence: "0 7 * * 1-5"
+    workflow: continuous-refactoring
+    params:
+      mode: file_diet
+      source_dirs: [cli]
+      loc_threshold: 500
+claude:
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	src, ok := cfg.Sources["continuous-refactor-file-diet"]
+	require.True(t, ok)
+	assert.Equal(t, "file_diet", src.Params["mode"])
+	assert.Equal(t, []any{"cli"}, src.Params["source_dirs"])
+	assert.Equal(t, 500, src.Params["loc_threshold"])
+}
+
 func validConfig() *Config {
 	cfg := &Config{
 		Repo: "owner/name",

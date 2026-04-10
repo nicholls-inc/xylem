@@ -1,0 +1,100 @@
+name: continuous-refactoring
+description: "Recurring semantic refactor and file-diet issue generation"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/continuous-refactoring/analyze.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+  - name: propose
+    prompt_file: .xylem/prompts/continuous-refactoring/propose.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+  - name: dedupe_refactor
+    type: command
+    noop:
+      match: XYLEM_NOOP
+    run: |
+      set -euo pipefail
+
+      mode='{{index .Source.Params "mode"}}'
+      if [ "$mode" != "semantic_refactor" ]; then
+        echo "Skipping semantic refactor dedupe for mode $mode."
+        exit 0
+      fi
+
+      existing_count=$(gh issue list \
+        --repo {{.Repo.Slug}} \
+        --state open \
+        --label refactor \
+        --search '"[refactor]" in:title' \
+        --json number \
+        --limit 1 \
+        --jq 'length')
+      if [ "$existing_count" != "0" ]; then
+        echo "Open [refactor] issue already exists; skipping this run."
+        echo "XYLEM_NOOP"
+        exit 0
+      fi
+
+      echo "No open [refactor] issue found."
+  - name: create_refactor_issue
+    prompt_file: .xylem/prompts/continuous-refactoring/create_refactor_issue.md
+    max_turns: 30
+    llm: copilot
+    model: gpt-5.4
+  - name: measure
+    prompt_file: .xylem/prompts/continuous-refactoring/measure.md
+    max_turns: 30
+    llm: copilot
+    model: gpt-5.4
+  - name: split_plan
+    prompt_file: .xylem/prompts/continuous-refactoring/split_plan.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+  - name: dedupe_file_diet
+    type: command
+    noop:
+      match: XYLEM_NOOP
+    run: |
+      set -euo pipefail
+
+      mode='{{index .Source.Params "mode"}}'
+      if [ "$mode" != "file_diet" ]; then
+        echo "Skipping file-diet dedupe for mode $mode."
+        exit 0
+      fi
+
+      split_plan=$(cat <<'XYLEM_SPLIT_PLAN'
+      {{index .PreviousOutputs "split_plan"}}
+      XYLEM_SPLIT_PLAN
+      )
+      target_file=$(printf '%s\n' "$split_plan" | sed -n 's/^Target file: //p' | head -n1)
+      if [ -z "$target_file" ]; then
+        echo "No file-diet target declared by split_plan; nothing to file."
+        echo "XYLEM_NOOP"
+        exit 0
+      fi
+
+      existing_count=$(gh issue list \
+        --repo {{.Repo.Slug}} \
+        --state open \
+        --label file-diet \
+        --search "\"[file-diet] $target_file\" in:title" \
+        --json number \
+        --limit 1 \
+        --jq 'length')
+      if [ "$existing_count" != "0" ]; then
+        echo "Open [file-diet] issue already exists for $target_file; skipping this run."
+        echo "XYLEM_NOOP"
+        exit 0
+      fi
+
+      echo "No open [file-diet] issue found for $target_file."
+  - name: file_issue
+    prompt_file: .xylem/prompts/continuous-refactoring/file_issue.md
+    max_turns: 30
+    llm: copilot
+    model: gpt-5.4

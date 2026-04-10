@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestScheduledScanEnqueuesOnePerWindow(t *testing.T) {
@@ -65,4 +67,32 @@ func TestScheduleWindow(t *testing.T) {
 	if start.After(time.Date(2026, 4, 9, 10, 27, 0, 0, time.UTC)) {
 		t.Fatalf("start = %s, want start at or before now", start)
 	}
+}
+
+func TestScheduledScanEncodesTaskParamsIntoVesselMeta(t *testing.T) {
+	t.Parallel()
+
+	src := &Scheduled{
+		Repo:     "owner/repo",
+		Schedule: "@weekly",
+		Queue:    queue.New(filepath.Join(t.TempDir(), "queue.jsonl")),
+		Tasks: map[string]ScheduledTask{
+			"semantic": {
+				Workflow: "continuous-refactoring",
+				Params: map[string]any{
+					"mode":               "semantic_refactor",
+					"max_issues_per_run": 3,
+				},
+			},
+		},
+	}
+
+	vessels, err := src.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+
+	decoded, err := DecodeTaskParams(vessels[0].Meta[TaskParamsMetaKey])
+	require.NoError(t, err)
+	assert.Equal(t, "semantic_refactor", decoded["mode"])
+	assert.Equal(t, float64(3), decoded["max_issues_per_run"])
 }

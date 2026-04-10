@@ -621,7 +621,14 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			phaseStart := r.runtimeNow()
 
 			// Build template data
-			td := r.buildTemplateData(vessel, issueData, p.Name, i, previousOutputs, gateResult)
+			td, err := r.buildTemplateData(vessel, issueData, p.Name, i, previousOutputs, gateResult)
+			if err != nil {
+				r.failVessel(vessel.ID, fmt.Sprintf("build template data for phase %s: %v", p.Name, err))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				return "failed"
+			}
 
 			var output []byte
 			var runErr error
@@ -1382,9 +1389,11 @@ func waitedDuration(since *time.Time, now time.Time) time.Duration {
 	return now.Sub(*since)
 }
 
-func (r *Runner) watchVesselCancellation(parent context.Context, vesselID string) (context.Context, context.CancelCauseFunc) {
+func (r *Runner) watchVesselCancellation(parent context.Context, vesselID string) (context.Context, func(error)) {
 	ctx, cancel := context.WithCancelCause(parent)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		ticker := time.NewTicker(vesselCancelPollInterval)
 		defer ticker.Stop()
 		for {
@@ -1403,7 +1412,10 @@ func (r *Runner) watchVesselCancellation(parent context.Context, vesselID string
 			}
 		}
 	}()
-	return ctx, cancel
+	return ctx, func(cause error) {
+		cancel(cause)
+		<-done
+	}
 }
 
 func (r *Runner) isVesselCancelled(vesselID string) (bool, error) {
@@ -1914,7 +1926,14 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
 		phaseStart := r.runtimeNow()
 
-		td := r.buildTemplateData(vessel, issueData, p.Name, phaseIdx, previousOutputs, gateResult)
+		td, err := r.buildTemplateData(vessel, issueData, p.Name, phaseIdx, previousOutputs, gateResult)
+		if err != nil {
+			r.failVessel(vessel.ID, fmt.Sprintf("build template data for phase %s: %v", p.Name, err))
+			if err := src.OnFail(ctx, vessel); err != nil {
+				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
+			return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
+		}
 
 		var output []byte
 		var runErr error
@@ -3679,6 +3698,8 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 		return s.Repo
 	case *source.GitHubMerge:
 		return s.Repo
+	case *source.Schedule:
+		return s.Repo
 	case *source.Scheduled:
 		return s.Repo
 	default:
@@ -3693,7 +3714,7 @@ func (r *Runner) resolveDefaultBranch() string {
 	return "main"
 }
 
-func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string) phase.TemplateData {
+func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string) (phase.TemplateData, error) {
 	sourceName := vessel.Source
 	if configSource := r.sourceConfigNameFromMeta(vessel); configSource != "" {
 		sourceName = configSource
@@ -3707,6 +3728,10 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			Build:  strings.TrimSpace(r.Config.Validation.Build),
 			Test:   strings.TrimSpace(r.Config.Validation.Test),
 		}
+	}
+	sourceParams, err := source.DecodeTaskParams(vessel.Meta[source.TaskParamsMetaKey])
+	if err != nil {
+		return phase.TemplateData{}, fmt.Errorf("decode task params for vessel %s: %w", vessel.ID, err)
 	}
 	return phase.TemplateData{
 		Issue: issueData,
@@ -3727,11 +3752,12 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			DefaultBranch: r.resolveDefaultBranch(),
 		},
 		Source: phase.SourceData{
-			Name: sourceName,
-			Repo: repoSlug,
+			Name:   sourceName,
+			Repo:   repoSlug,
+			Params: sourceParams,
 		},
 		Validation: validation,
-	}
+	}, nil
 }
 
 func vesselLabel(v queue.Vessel) string {

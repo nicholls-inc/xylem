@@ -19,6 +19,7 @@ type ScheduledTask struct {
 	Workflow string
 	Ref      string
 	Tier     string
+	Params   map[string]any
 }
 
 type Scheduled struct {
@@ -88,6 +89,14 @@ func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
 		}
 		if refName := strings.TrimSpace(task.Ref); refName != "" {
 			meta["schedule_ref"] = refName
+		}
+		if encodedParams, err := EncodeTaskParams(task.Params); err != nil {
+			if s.ConfigName != "" {
+				return nil, fmt.Errorf("scheduled source %q: encode params for task %q: %w", s.ConfigName, taskName, err)
+			}
+			return nil, fmt.Errorf("encode scheduled params for task %q: %w", taskName, err)
+		} else if encodedParams != "" {
+			meta[TaskParamsMetaKey] = encodedParams
 		}
 
 		vessels = append(vessels, queue.Vessel{

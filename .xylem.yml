@@ -143,6 +143,41 @@ sources:
         workflow: harness-gap-analysis
         ref: harness-gap-analysis
 
+  continuous-refactor-semantic:
+    type: schedule
+    repo: nicholls-inc/xylem
+    cadence: "@weekly"
+    workflow: continuous-refactoring
+    params:
+      mode: semantic_refactor
+      source_dirs:
+        - cli
+      file_extensions:
+        - .go
+      exclude_patterns:
+        - "**/*_test.go"
+        - "cli/internal/dtu/testdata/**"
+        - "cli/internal/worktree/.claude/**"
+      max_issues_per_run: 3
+
+  continuous-refactor-file-diet:
+    type: schedule
+    repo: nicholls-inc/xylem
+    cadence: "0 7 * * 1-5"
+    workflow: continuous-refactoring
+    params:
+      mode: file_diet
+      source_dirs:
+        - cli
+      file_extensions:
+        - .go
+      exclude_patterns:
+        - "**/*_test.go"
+        - "cli/internal/dtu/testdata/**"
+        - "cli/internal/worktree/.claude/**"
+      loc_threshold: 500
+      max_issues_per_run: 1
+
   # Post-merge wave dependency unblocking
   # NOTE: github-merge has no label filtering. The unblock-wave prompt
   # guards with XYLEM_NOOP for non-harness merges.

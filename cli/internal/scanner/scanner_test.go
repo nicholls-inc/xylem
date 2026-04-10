@@ -424,6 +424,39 @@ func TestScanScheduleSource(t *testing.T) {
 	}
 }
 
+func TestBuildSourcesScheduleCarriesRepoAndParams(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]config.SourceConfig{
+			"continuous-refactor-file-diet": {
+				Type:     "schedule",
+				Repo:     "owner/repo",
+				Cadence:  "@weekly",
+				Workflow: "continuous-refactoring",
+				Params: map[string]any{
+					"mode":               "file_diet",
+					"max_issues_per_run": 1,
+				},
+			},
+		},
+	}
+	s := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), newMock())
+
+	entries := s.buildSources()
+	require.Len(t, entries, 1)
+
+	scheduleSource, ok := entries[0].src.(*source.Schedule)
+	require.True(t, ok)
+	assert.Equal(t, "owner/repo", scheduleSource.Repo)
+	assert.Equal(t, "file_diet", scheduleSource.Params["mode"])
+	assert.Equal(t, 1, scheduleSource.Params["max_issues_per_run"])
+}
+
 func TestScanMultipleScheduleSourcesKeepConfigNamesDistinct(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{

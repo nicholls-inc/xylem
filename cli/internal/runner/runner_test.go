@@ -4933,12 +4933,68 @@ func TestSmoke_S4_BuildTemplateDataExposesRepoAndValidation(t *testing.T) {
 			"schedule.source_name": "security-compliance",
 		},
 	}
-	td := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "")
+	td, err := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "")
+	require.NoError(t, err)
 
 	rendered, err := renderCommandTemplate("merge", "command", "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} && echo {{.Source.Name}} {{.Source.Repo}} {{.Repo.DefaultBranch}} {{.Validation.Format}} {{.Validation.Lint}} {{.Validation.Build}} {{.Validation.Test}} {{.Vessel.Ref}} {{index .Vessel.Meta \"schedule.source_name\"}}", td)
 	require.NoError(t, err)
 	assert.Contains(t, rendered, "gh pr merge 42 --repo owner/config-repo")
 	assert.Contains(t, rendered, "echo harness-merge owner/config-repo trunk fmt ./... lint ./... build ./... test ./... https://github.com/owner/config-repo/pull/42 security-compliance")
+}
+
+func TestSmoke_S5_BuildTemplateDataExposesScheduledTaskParams(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.Sources["continuous-refactor-file-diet"] = config.SourceConfig{
+		Type:     "schedule",
+		Repo:     "owner/config-repo",
+		Cadence:  "@weekly",
+		Workflow: "continuous-refactoring",
+	}
+	r := &Runner{
+		Config: cfg,
+		Sources: map[string]source.Source{
+			"continuous-refactor-file-diet": &source.Schedule{Repo: "owner/config-repo"},
+		},
+	}
+
+	encoded, err := source.EncodeTaskParams(map[string]any{
+		"mode":          "file_diet",
+		"loc_threshold": 500,
+	})
+	require.NoError(t, err)
+
+	td, err := r.buildTemplateData(queue.Vessel{
+		ID:     "schedule-1",
+		Source: "schedule",
+		Meta: map[string]string{
+			"config_source":          "continuous-refactor-file-diet",
+			source.TaskParamsMetaKey: encoded,
+		},
+	}, phase.IssueData{}, "measure", 0, nil, "")
+	require.NoError(t, err)
+	assert.Equal(t, "continuous-refactor-file-diet", td.Source.Name)
+	assert.Equal(t, "owner/config-repo", td.Source.Repo)
+	assert.Equal(t, "owner/config-repo", td.Repo.Slug)
+	assert.Equal(t, "file_diet", td.Source.Params["mode"])
+	assert.Equal(t, float64(500), td.Source.Params["loc_threshold"])
+}
+
+func TestBuildTemplateDataRejectsMalformedTaskParams(t *testing.T) {
+	t.Parallel()
+
+	r := &Runner{}
+	_, err := r.buildTemplateData(queue.Vessel{
+		ID:     "schedule-1",
+		Source: "schedule",
+		Meta: map[string]string{
+			source.TaskParamsMetaKey: "{not-json",
+		},
+	}, phase.IssueData{}, "measure", 0, nil, "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode task params")
 }
 
 func TestResolveSourcePrefersConfigSource(t *testing.T) {

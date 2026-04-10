@@ -418,3 +418,34 @@ func TestScheduleScanReadsLegacyStateFile(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, vessels)
 }
+
+func TestSmoke_S3_ScheduleSourceCarriesConfiguredParamsIntoVesselMeta(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, time.April, 9, 6, 45, 12, 0, time.UTC)
+	s := &Schedule{
+		ConfigName: "continuous-refactor",
+		Cadence:    "@weekly",
+		Workflow:   "continuous-refactoring",
+		Params: map[string]any{
+			"mode":          "file_diet",
+			"loc_threshold": 500,
+		},
+		StateDir: t.TempDir(),
+		Queue:    queue.New(filepath.Join(t.TempDir(), "queue.jsonl")),
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	vessels, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+
+	decoded, err := DecodeTaskParams(vessels[0].Meta[TaskParamsMetaKey])
+	require.NoError(t, err)
+	assert.Equal(t, "continuous-refactor", vessels[0].Meta["schedule.source_name"])
+	assert.Equal(t, "@weekly", vessels[0].Meta["schedule.cadence"])
+	assert.Equal(t, "file_diet", decoded["mode"])
+	assert.Equal(t, float64(500), decoded["loc_threshold"])
+}

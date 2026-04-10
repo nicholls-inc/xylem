@@ -124,6 +124,19 @@ func TestRenderPrompt(t *testing.T) {
 			want: "Gate: all checks passed",
 		},
 		{
+			name:     "renders source params",
+			template: "Mode: {{index .Source.Params \"mode\"}} Threshold: {{index .Source.Params \"loc_threshold\"}}",
+			data: TemplateData{
+				Source: SourceData{
+					Params: map[string]any{
+						"mode":          "file_diet",
+						"loc_threshold": 500,
+					},
+				},
+			},
+			want: "Mode: file_diet Threshold: 500",
+		},
+		{
 			name:     "renders vessel ID and source",
 			template: "Vessel: {{.Vessel.ID}} from {{.Vessel.Source}}",
 			data: TemplateData{

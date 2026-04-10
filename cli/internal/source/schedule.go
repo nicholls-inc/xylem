@@ -19,8 +19,10 @@ const legacyScheduleStateFileName = "schedule-state.json"
 
 type Schedule struct {
 	ConfigName string
+	Repo       string
 	Cadence    string
 	Workflow   string
+	Params     map[string]any
 	StateDir   string
 	Queue      *queue.Queue
 	Now        func() time.Time
@@ -67,7 +69,10 @@ func (s *Schedule) Scan(_ context.Context) ([]queue.Vessel, error) {
 		return nil, nil
 	}
 
-	vessel := s.buildVessel(firedAt, spec.Raw())
+	vessel, err := s.buildVessel(firedAt, spec.Raw())
+	if err != nil {
+		return nil, fmt.Errorf("schedule source %q: build vessel: %w", s.ConfigName, err)
+	}
 	if s.Queue != nil && s.Queue.HasRefAny(vessel.Ref) {
 		return nil, nil
 	}
@@ -116,7 +121,7 @@ func ValidateCadence(expr string) error {
 	return err
 }
 
-func (s *Schedule) buildVessel(firedAt time.Time, rawCadence string) queue.Vessel {
+func (s *Schedule) buildVessel(firedAt time.Time, rawCadence string) (queue.Vessel, error) {
 	firedAt = firedAt.UTC().Truncate(time.Second)
 	idTime := firedAt.Format("20060102t150405z")
 	refTime := firedAt.Format(time.RFC3339)
@@ -124,22 +129,28 @@ func (s *Schedule) buildVessel(firedAt time.Time, rawCadence string) queue.Vesse
 	if configName == "" {
 		configName = "schedule"
 	}
+	meta := map[string]string{
+		"schedule.cadence":     rawCadence,
+		"schedule.fired_at":    refTime,
+		"schedule.source_name": configName,
+		"schedule_cadence":     rawCadence,
+		"schedule_fired_at":    refTime,
+		"schedule_name":        configName,
+	}
+	if encodedParams, err := EncodeTaskParams(s.Params); err != nil {
+		return queue.Vessel{}, fmt.Errorf("encode params: %w", err)
+	} else if encodedParams != "" {
+		meta[TaskParamsMetaKey] = encodedParams
+	}
 	return queue.Vessel{
-		ID:       fmt.Sprintf("schedule-%s-%s", scheduleSlug(configName), idTime),
-		Source:   s.Name(),
-		Ref:      fmt.Sprintf("schedule://%s/%s", configName, refTime),
-		Workflow: s.Workflow,
-		Meta: map[string]string{
-			"schedule.cadence":     rawCadence,
-			"schedule.fired_at":    refTime,
-			"schedule.source_name": configName,
-			"schedule_cadence":     rawCadence,
-			"schedule_fired_at":    refTime,
-			"schedule_name":        configName,
-		},
+		ID:        fmt.Sprintf("schedule-%s-%s", scheduleSlug(configName), idTime),
+		Source:    s.Name(),
+		Ref:       fmt.Sprintf("schedule://%s/%s", configName, refTime),
+		Workflow:  s.Workflow,
+		Meta:      meta,
 		State:     queue.StatePending,
 		CreatedAt: firedAt,
-	}
+	}, nil
 }
 
 func (s *Schedule) loadLastFiredAt() (*time.Time, error) {

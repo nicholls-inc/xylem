@@ -58,8 +58,9 @@ type RepoData struct {
 
 // SourceData describes the configured source that produced the vessel.
 type SourceData struct {
-	Name string
-	Repo string
+	Name   string
+	Repo   string
+	Params map[string]any
 }
 
 // ValidationData describes optional repo-specific validation commands.

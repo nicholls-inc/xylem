@@ -36,6 +36,7 @@ var expectedCoreWorkflows = []string{
 }
 
 var expectedSelfHostingWorkflows = []string{
+	"continuous-refactoring",
 	"diagnose-failures",
 	"implement-harness",
 	"sota-gap-analysis",
@@ -571,6 +572,8 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
 	assert.Contains(t, cfg.Sources, "harness-impl")
 	assert.Contains(t, cfg.Sources, "harness-pr-lifecycle")
+	assert.Contains(t, cfg.Sources, "continuous-refactor-semantic")
+	assert.Contains(t, cfg.Sources, "continuous-refactor-file-diet")
 	require.NoError(t, cfg.Validate())
 }
 

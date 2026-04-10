@@ -3,6 +3,7 @@ package scanner
 import (
 	"context"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"time"
@@ -213,8 +214,10 @@ func (s *Scanner) buildSources() []sourceEntry {
 			entries = append(entries, sourceEntry{
 				src: &source.Schedule{
 					ConfigName: name,
+					Repo:       srcCfg.Repo,
 					Cadence:    srcCfg.Cadence,
 					Workflow:   srcCfg.Workflow,
+					Params:     maps.Clone(srcCfg.Params),
 					StateDir:   s.Config.StateDir,
 					Queue:      s.Queue,
 				},
@@ -277,6 +280,7 @@ func convertScheduledTasks(cfgTasks map[string]config.Task) map[string]source.Sc
 			Workflow: t.Workflow,
 			Ref:      t.Ref,
 			Tier:     t.Tier,
+			Params:   maps.Clone(t.Params),
 		}
 	}
 	return tasks
