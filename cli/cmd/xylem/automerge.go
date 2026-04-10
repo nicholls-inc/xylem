@@ -79,12 +79,11 @@ func isReviewerNotCollaborator(err error) bool {
 
 // prSummary is a minimal projection of `gh pr list` / `gh pr view` output.
 type prSummary struct {
-	Number            int       `json:"number"`
-	HeadRefName       string    `json:"headRefName"`
-	Mergeable         string    `json:"mergeable"`
-	State             string    `json:"state"`
-	ReviewDecision    string    `json:"reviewDecision"`
-	AutoMergeRequest  *struct{} `json:"autoMergeRequest"`
+	Number            int    `json:"number"`
+	HeadRefName       string `json:"headRefName"`
+	Mergeable         string `json:"mergeable"`
+	State             string `json:"state"`
+	ReviewDecision    string `json:"reviewDecision"`
 	StatusCheckRollup []struct {
 		Conclusion string `json:"conclusion"`
 		Status     string `json:"status"`
@@ -98,9 +97,6 @@ type prSummary struct {
 		} `json:"author"`
 		State string `json:"state"`
 	} `json:"latestReviews"`
-	ReviewThreads []struct {
-		IsResolved bool `json:"isResolved"`
-	} `json:"reviewThreads"`
 	Labels []struct {
 		Name string `json:"name"`
 	} `json:"labels"`
@@ -129,15 +125,14 @@ func (p prSummary) hasLabels(names ...string) bool {
 type autoMergeAction int
 
 const (
-	actionSkip                 autoMergeAction = iota // not a merge-ready xylem PR, or skip for other reasons
-	actionRequestReview                               // request copilot review, then continue with admin merge
-	actionWaitForChecks                               // CI still running
-	actionWaitForMergeable                            // unknown mergeable state (github computing)
-	actionRouteConflict                               // conflicts — add labels so resolve-conflicts workflow picks it up
-	actionAddressReview                               // changes requested; another workflow handles
-	actionWaitForReviewThreads                        // unresolved review threads remain
-	actionBlockedOptOut                               // explicit no-auto-admin-merge label
-	actionAdminMerge                                  // merge immediately with admin bypass
+	actionSkip             autoMergeAction = iota // not a merge-ready xylem PR, or skip for other reasons
+	actionRequestReview                           // request copilot review, then continue with admin merge
+	actionWaitForChecks                           // CI still running
+	actionWaitForMergeable                        // unknown mergeable state (github computing)
+	actionRouteConflict                           // conflicts — add labels so resolve-conflicts workflow picks it up
+	actionAddressReview                           // changes requested; another workflow handles
+	actionBlockedOptOut                           // explicit no-auto-admin-merge label
+	actionAdminMerge                              // merge immediately with admin bypass
 )
 
 // decideAutoMergeAction returns the action to take for a given PR. It does
@@ -147,15 +142,14 @@ const (
 // Decision order:
 // 1. Non-xylem branch or not merge-ready → skip
 // 2. Closed/merged → skip
-// 3. Conflicts + missing resolve-conflicts labels → add labels (routeConflict)
-// 4. Conflicts + labels already present → wait (workflow handles)
-// 5. Unknown mergeable state → wait (github computing)
-// 6. CI failing/running → wait (fix-pr-checks handles failures)
-// 7. Changes requested → wait (respond-to-pr-review handles)
-// 8. Explicit no-auto-admin-merge label → stay blocked
-// 9. Unresolved review threads → wait
-// 10. No copilot review requested or submitted → request review, then admin-merge
-// 11. Otherwise admin-merge immediately
+// 3. Explicit no-auto-admin-merge label → stay blocked
+// 4. Conflicts + missing resolve-conflicts labels → add labels (routeConflict)
+// 5. Conflicts + labels already present → wait (workflow handles)
+// 6. Unknown mergeable state → wait (github computing)
+// 7. CI failing/running → wait (fix-pr-checks handles failures)
+// 8. Changes requested → wait (respond-to-pr-review handles)
+// 9. No copilot review requested or submitted → request review, then admin-merge
+// 10. Otherwise admin-merge immediately
 func decideAutoMergeAction(pr prSummary, settings autoMergeSettings) autoMergeAction {
 	if !isMergeReadyPR(pr, settings) {
 		return actionSkip
@@ -186,9 +180,6 @@ func decideAutoMergeAction(pr prSummary, settings autoMergeSettings) autoMergeAc
 	if pr.ReviewDecision == "CHANGES_REQUESTED" {
 		return actionAddressReview
 	}
-	if hasUnresolvedReviewThreads(pr) {
-		return actionWaitForReviewThreads
-	}
 	if settings.reviewer != "" && !reviewRequestedOrSubmitted(pr, settings.reviewer) {
 		return actionRequestReview
 	}
@@ -198,15 +189,6 @@ func decideAutoMergeAction(pr prSummary, settings autoMergeSettings) autoMergeAc
 func isMergeReadyPR(pr prSummary, settings autoMergeSettings) bool {
 	return settings.branchPattern.MatchString(pr.HeadRefName) &&
 		pr.hasLabels(settings.labels...)
-}
-
-func hasUnresolvedReviewThreads(pr prSummary) bool {
-	for _, thread := range pr.ReviewThreads {
-		if !thread.IsResolved {
-			return true
-		}
-	}
-	return false
 }
 
 // reviewRequestedOrSubmitted returns true if the configured reviewer has either
@@ -348,10 +330,6 @@ func autoMergeXylemPRs(ctx context.Context, dc config.DaemonConfig) {
 			slog.Info("daemon auto-merge waiting for review follow-up",
 				"repo", repo,
 				"pr", pr.Number)
-		case actionWaitForReviewThreads:
-			slog.Info("daemon auto-merge waiting for unresolved review threads",
-				"repo", repo,
-				"pr", pr.Number)
 		case actionBlockedOptOut:
 			slog.Info("daemon auto-merge blocked by opt-out label",
 				"repo", repo,
@@ -401,7 +379,7 @@ func listOpenPRs(ctx context.Context, repo string) ([]prSummary, error) {
 func getPRSummary(ctx context.Context, repo string, number int) (prSummary, error) {
 	args := []string{
 		"pr", "view", strconv.Itoa(number),
-		"--json", "number,headRefName,mergeable,state,reviewDecision,autoMergeRequest,statusCheckRollup,reviewRequests,latestReviews,reviewThreads,labels",
+		"--json", "number,headRefName,mergeable,state,reviewDecision,statusCheckRollup,reviewRequests,latestReviews,labels",
 	}
 	if repo != "" {
 		args = append(args, "--repo", repo)

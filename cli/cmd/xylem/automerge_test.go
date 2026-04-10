@@ -165,31 +165,6 @@ func TestNewAutoMergeSettingsCustomizesLabelsPatternAndReviewer(t *testing.T) {
 	assert.False(t, settings.branchPattern.MatchString("feat/issue-1-1"))
 }
 
-func TestHasUnresolvedReviewThreads(t *testing.T) {
-	tests := []struct {
-		name    string
-		threads []struct {
-			IsResolved bool `json:"isResolved"`
-		}
-		want bool
-	}{
-		{name: "no threads", want: false},
-		{name: "all resolved", threads: []struct {
-			IsResolved bool `json:"isResolved"`
-		}{{IsResolved: true}, {IsResolved: true}}, want: false},
-		{name: "unresolved present", threads: []struct {
-			IsResolved bool `json:"isResolved"`
-		}{{IsResolved: true}, {IsResolved: false}}, want: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			pr := prSummary{ReviewThreads: tt.threads}
-			assert.Equal(t, tt.want, hasUnresolvedReviewThreads(pr))
-		})
-	}
-}
-
 func TestAllChecksGreen(t *testing.T) {
 	mkcheck := func(conclusion, status string) struct {
 		Conclusion string `json:"conclusion"`
@@ -323,17 +298,6 @@ func TestDecideAutoMergeAction(t *testing.T) {
 				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "CHANGES_REQUESTED",
 			},
 			want: actionAddressReview,
-		},
-		{
-			name: "xylem PR with unresolved review threads waits",
-			pr: prSummary{
-				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
-				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "REVIEW_REQUIRED",
-				ReviewThreads: []struct {
-					IsResolved bool `json:"isResolved"`
-				}{{IsResolved: false}},
-			},
-			want: actionWaitForReviewThreads,
 		},
 		{
 			name: "xylem PR without review requests asks for copilot review first",
@@ -499,9 +463,6 @@ func TestSmoke_S9_AutoAdminMergeWithinOneDaemonTick(t *testing.T) {
 			Conclusion string `json:"conclusion"`
 			Status     string `json:"status"`
 		}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
-		ReviewThreads: []struct {
-			IsResolved bool `json:"isResolved"`
-		}{{IsResolved: true}},
 	}
 
 	listOpenPRsFn = func(context.Context, string) ([]prSummary, error) {
