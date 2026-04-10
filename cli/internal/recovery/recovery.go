@@ -594,15 +594,16 @@ func NextRetryVessel(base, parent queue.Vessel, artifact *Artifact, q *queue.Que
 	meta = ApplyRemediationState(meta, RemediationStateFromMeta(meta))
 
 	retry := queue.Vessel{
-		ID:        RetryID(parent.ID, q),
-		Source:    firstNonEmpty(base.Source, parent.Source),
-		Ref:       firstNonEmpty(base.Ref, parent.Ref),
-		Workflow:  firstNonEmpty(base.Workflow, parent.Workflow),
-		Prompt:    firstNonEmpty(base.Prompt, parent.Prompt),
-		Meta:      meta,
-		State:     queue.StatePending,
-		CreatedAt: createdAt.UTC(),
-		RetryOf:   parent.ID,
+		ID:             RetryID(parent.ID, q),
+		Source:         firstNonEmpty(base.Source, parent.Source),
+		Ref:            firstNonEmpty(base.Ref, parent.Ref),
+		Workflow:       firstNonEmpty(base.Workflow, parent.Workflow),
+		WorkflowDigest: "",
+		Prompt:         firstNonEmpty(base.Prompt, parent.Prompt),
+		Meta:           meta,
+		State:          queue.StatePending,
+		CreatedAt:      createdAt.UTC(),
+		RetryOf:        parent.ID,
 	}
 	retry.FailedPhase = parent.FailedPhase
 	retry.GateOutput = parent.GateOutput

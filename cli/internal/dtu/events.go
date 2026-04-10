@@ -189,22 +189,23 @@ type VesselEvent struct {
 
 // VesselSnapshot is a condensed view of queue.Vessel fields relevant to DTU replay.
 type VesselSnapshot struct {
-	State        string `json:"state,omitempty"`
-	Source       string `json:"source,omitempty"`
-	Ref          string `json:"ref,omitempty"`
-	Workflow     string `json:"workflow,omitempty"`
-	Error        string `json:"error,omitempty"`
-	CreatedAt    string `json:"created_at,omitempty"`
-	StartedAt    string `json:"started_at,omitempty"`
-	EndedAt      string `json:"ended_at,omitempty"`
-	CurrentPhase int    `json:"current_phase,omitempty"`
-	GateRetries  int    `json:"gate_retries,omitempty"`
-	WaitingSince string `json:"waiting_since,omitempty"`
-	WaitingFor   string `json:"waiting_for,omitempty"`
-	WorktreePath string `json:"worktree_path,omitempty"`
-	FailedPhase  string `json:"failed_phase,omitempty"`
-	GateOutput   string `json:"gate_output,omitempty"`
-	RetryOf      string `json:"retry_of,omitempty"`
+	State          string `json:"state,omitempty"`
+	Source         string `json:"source,omitempty"`
+	Ref            string `json:"ref,omitempty"`
+	Workflow       string `json:"workflow,omitempty"`
+	WorkflowDigest string `json:"workflow_digest,omitempty"`
+	Error          string `json:"error,omitempty"`
+	CreatedAt      string `json:"created_at,omitempty"`
+	StartedAt      string `json:"started_at,omitempty"`
+	EndedAt        string `json:"ended_at,omitempty"`
+	CurrentPhase   int    `json:"current_phase,omitempty"`
+	GateRetries    int    `json:"gate_retries,omitempty"`
+	WaitingSince   string `json:"waiting_since,omitempty"`
+	WaitingFor     string `json:"waiting_for,omitempty"`
+	WorktreePath   string `json:"worktree_path,omitempty"`
+	FailedPhase    string `json:"failed_phase,omitempty"`
+	GateOutput     string `json:"gate_output,omitempty"`
+	RetryOf        string `json:"retry_of,omitempty"`
 }
 
 // RecordEvent appends a structured DTU event while holding the store lock.

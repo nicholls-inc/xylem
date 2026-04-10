@@ -2535,6 +2535,133 @@ func TestRunVessel_BuiltinWorkflowCompletesWithoutLoadingWorkflowFile(t *testing
 	assert.Equal(t, "completed", summary.Phases[0].Status)
 }
 
+func TestSmoke_S6_WorkflowDigestSnapshotPopulatedAtLaunch(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{{
+		name:          "analyze",
+		promptContent: "do the thing",
+		maxTurns:      1,
+	}})
+	withTestWorkingDir(t, dir)
+
+	workflowPath := filepath.Join(dir, ".xylem", "workflows", "fix-bug.yaml")
+	_, expectedDigest, err := workflow.LoadWithDigest(workflowPath)
+	require.NoError(t, err)
+
+	originalWorkflow, err := os.ReadFile(workflowPath)
+	require.NoError(t, err)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	v := makeVessel(1, "fix-bug")
+	v.WorkflowDigest = "wf-stale-scan-digest"
+	_, err = q.Enqueue(v)
+	require.NoError(t, err)
+
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(dirPath, prompt, name string, args ...string) ([]byte, error, bool) {
+			mutated := append([]byte("description: mutated during run\n"), originalWorkflow...)
+			require.NoError(t, os.WriteFile(workflowPath, mutated, 0o644))
+			return nil, errors.New("phase boom"), true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+
+	outcome := r.runVessel(context.Background(), *dequeued)
+	assert.Equal(t, "failed", outcome)
+
+	final := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, final.State)
+	assert.Equal(t, expectedDigest, final.WorkflowDigest)
+	assert.Equal(t, expectedDigest, final.Meta[recovery.MetaWorkflowDigest])
+	assert.NotEqual(t, "wf-stale-scan-digest", final.WorkflowDigest)
+	assert.NotEqual(t, recovery.DigestFile(workflowPath, "wf"), final.WorkflowDigest)
+
+	snapshotPath := filepath.Join(cfg.StateDir, "phases", final.ID, workflowSnapshotDirName, final.Workflow+".yaml")
+	snapshotBytes, err := os.ReadFile(snapshotPath)
+	require.NoError(t, err)
+	assert.Equal(t, originalWorkflow, snapshotBytes)
+
+	artifact, err := recovery.Load(filepath.Join(cfg.StateDir, "phases", final.ID, "failure-review.json"))
+	require.NoError(t, err)
+	assert.Equal(t, expectedDigest, artifact.WorkflowDigest)
+}
+
+func TestSmoke_S7_WaitingVesselResumesAgainstFrozenWorkflowSnapshot(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	workflowPath := filepath.Join(dir, ".xylem", "workflows", "fix-bug.yaml")
+	_, expectedDigest, err := workflow.LoadWithDigest(workflowPath)
+	require.NoError(t, err)
+
+	labelViewJSON := `{"labels":[{"name":"plan-approved"}]}`
+	cmdRunner := &mockCmdRunner{
+		outputData: []byte(labelViewJSON),
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	first, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, first.Waiting)
+
+	waiting, err := q.FindByID("issue-1")
+	require.NoError(t, err)
+	require.Equal(t, queue.StateWaiting, waiting.State)
+	require.Equal(t, expectedDigest, waiting.WorkflowDigest)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create mutated plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "mutated", promptContent: "Mutated after approval", maxTurns: 10},
+	})
+
+	r.CheckWaitingVessels(context.Background())
+
+	second, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, second.Completed)
+
+	done, err := q.FindByID("issue-1")
+	require.NoError(t, err)
+	require.Equal(t, queue.StateCompleted, done.State)
+	require.Equal(t, expectedDigest, done.WorkflowDigest)
+	require.Len(t, cmdRunner.phaseCalls, 2)
+	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Implement after approval")
+	assert.NotContains(t, cmdRunner.phaseCalls[1].prompt, "Mutated after approval")
+
+	snapshotPath := filepath.Join(cfg.StateDir, "phases", done.ID, workflowSnapshotDirName, done.Workflow+".yaml")
+	_, snapshotDigest, err := workflow.LoadWithDigest(snapshotPath)
+	require.NoError(t, err)
+	assert.Equal(t, expectedDigest, snapshotDigest)
+}
+
 func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)

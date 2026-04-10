@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -171,26 +172,39 @@ type LiveCommandAssertGate struct {
 
 // Load reads and validates a workflow definition YAML file at path.
 func Load(path string) (*Workflow, error) {
+	s, _, err := LoadWithDigest(path)
+	return s, err
+}
+
+// LoadWithDigest reads and validates a workflow definition YAML file at path
+// and returns the workflow digest for the exact bytes that were loaded.
+func LoadWithDigest(path string) (*Workflow, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read workflow file %q: %w", path, err)
+		return nil, "", fmt.Errorf("read workflow file %q: %w", path, err)
 	}
+	digest := digestWorkflowData(data)
 
 	var raw workflowYAML
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse workflow yaml %q: %w", path, err)
+		return nil, "", fmt.Errorf("parse workflow yaml %q: %w", path, err)
 	}
 
 	s, err := workflowFromYAML(raw)
 	if err != nil {
-		return nil, fmt.Errorf("parse workflow yaml %q: %w", path, err)
+		return nil, "", fmt.Errorf("parse workflow yaml %q: %w", path, err)
 	}
 
 	if err := s.Validate(path); err != nil {
-		return nil, fmt.Errorf("validate workflow %q: %w", path, err)
+		return nil, "", fmt.Errorf("validate workflow %q: %w", path, err)
 	}
 
-	return s, nil
+	return s, digest, nil
+}
+
+func digestWorkflowData(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("wf-%x", sum)
 }
 
 // Validate checks that the workflow definition is well-formed. workflowFilePath is
