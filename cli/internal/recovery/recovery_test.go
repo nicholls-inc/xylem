@@ -549,14 +549,15 @@ func TestSmoke_S10_NextRetryVesselPreservesRecoveryLineageMetadata(t *testing.T)
 	q := queue.New(filepath.Join(t.TempDir(), "queue.jsonl"))
 	now := time.Date(2026, time.April, 9, 18, 11, 0, 0, time.UTC)
 	parent := queue.Vessel{
-		ID:          "issue-42",
-		Source:      "github-issue",
-		Ref:         "https://github.com/owner/repo/issues/42",
-		Workflow:    "fix-bug",
-		State:       queue.StateFailed,
-		Error:       "temporary failure from upstream 503",
-		FailedPhase: "verify",
-		GateOutput:  "503 Service Unavailable",
+		ID:             "issue-42",
+		Source:         "github-issue",
+		Ref:            "https://github.com/owner/repo/issues/42",
+		Workflow:       "fix-bug",
+		WorkflowDigest: "wf-launch-snapshot",
+		State:          queue.StateFailed,
+		Error:          "temporary failure from upstream 503",
+		FailedPhase:    "verify",
+		GateOutput:     "503 Service Unavailable",
 		Meta: map[string]string{
 			"issue_num":                "42",
 			"source_input_fingerprint": "src-fingerprint",
@@ -577,10 +578,11 @@ func TestSmoke_S10_NextRetryVesselPreservesRecoveryLineageMetadata(t *testing.T)
 	})
 
 	retry := NextRetryVessel(queue.Vessel{
-		ID:       parent.ID,
-		Source:   parent.Source,
-		Ref:      parent.Ref,
-		Workflow: parent.Workflow,
+		ID:             parent.ID,
+		Source:         parent.Source,
+		Ref:            parent.Ref,
+		Workflow:       parent.Workflow,
+		WorkflowDigest: parent.WorkflowDigest,
 		Meta: map[string]string{
 			"issue_num":                "42",
 			"source_input_fingerprint": "src-fingerprint",
@@ -604,6 +606,7 @@ func TestSmoke_S10_NextRetryVesselPreservesRecoveryLineageMetadata(t *testing.T)
 	assert.Equal(t, artifact.FailureFingerprint, retry.Meta[MetaFailureFingerprint])
 	assert.NotEmpty(t, retry.Meta[MetaRemediationFingerprint])
 	assert.Equal(t, "updated title", retry.Meta["issue_title"])
+	assert.Empty(t, retry.WorkflowDigest)
 }
 
 func TestSaveRejectsUnsafeVesselID(t *testing.T) {

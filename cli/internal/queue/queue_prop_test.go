@@ -49,3 +49,44 @@ func TestPropQueueRoundTripsTier(t *testing.T) {
 		}
 	})
 }
+
+func TestPropQueueRoundTripsWorkflowDigest(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		dir, err := os.MkdirTemp("", "queue-workflow-digest-prop-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(dir)
+
+		q := New(filepath.Join(dir, "queue.jsonl"))
+		digest := rapid.StringMatching(`wf-[0-9a-f]{8,64}`).Draw(t, "workflow_digest")
+		vessel := Vessel{
+			ID:             "issue-1",
+			Source:         "github-issue",
+			Ref:            "https://github.com/example/repo/issues/1",
+			Workflow:       "fix-bug",
+			WorkflowDigest: digest,
+			State:          StatePending,
+			CreatedAt:      time.Now().UTC(),
+		}
+
+		enqueued, err := q.Enqueue(vessel)
+		if err != nil {
+			t.Fatalf("Enqueue() error = %v", err)
+		}
+		if !enqueued {
+			t.Fatal("expected vessel to be enqueued")
+		}
+
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("List() error = %v", err)
+		}
+		if len(vessels) != 1 {
+			t.Fatalf("len(vessels) = %d, want 1", len(vessels))
+		}
+		if vessels[0].WorkflowDigest != digest {
+			t.Fatalf("WorkflowDigest = %q, want %q", vessels[0].WorkflowDigest, digest)
+		}
+	})
+}

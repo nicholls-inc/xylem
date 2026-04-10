@@ -64,19 +64,20 @@ func (s VesselState) IsTerminal() bool {
 }
 
 type Vessel struct {
-	ID            string            `json:"id"`
-	Source        string            `json:"source"`
-	Ref           string            `json:"ref,omitempty"`
-	Workflow      string            `json:"workflow,omitempty"`
-	WorkflowClass string            `json:"workflow_class,omitempty"`
-	Tier          string            `json:"tier,omitempty"`
-	Prompt        string            `json:"prompt,omitempty"`
-	Meta          map[string]string `json:"meta,omitempty"`
-	State         VesselState       `json:"state"`
-	CreatedAt     time.Time         `json:"created_at"`
-	StartedAt     *time.Time        `json:"started_at,omitempty"`
-	EndedAt       *time.Time        `json:"ended_at,omitempty"`
-	Error         string            `json:"error,omitempty"`
+	ID             string            `json:"id"`
+	Source         string            `json:"source"`
+	Ref            string            `json:"ref,omitempty"`
+	Workflow       string            `json:"workflow,omitempty"`
+	WorkflowDigest string            `json:"workflow_digest,omitempty"`
+	WorkflowClass  string            `json:"workflow_class,omitempty"`
+	Tier           string            `json:"tier,omitempty"`
+	Prompt         string            `json:"prompt,omitempty"`
+	Meta           map[string]string `json:"meta,omitempty"`
+	State          VesselState       `json:"state"`
+	CreatedAt      time.Time         `json:"created_at"`
+	StartedAt      *time.Time        `json:"started_at,omitempty"`
+	EndedAt        *time.Time        `json:"ended_at,omitempty"`
+	Error          string            `json:"error,omitempty"`
 
 	// v2 phase-based execution fields
 	CurrentPhase int               `json:"current_phase,omitempty"`
@@ -658,22 +659,23 @@ func buildVesselSnapshot(vessel *Vessel) *dtu.VesselSnapshot {
 		return nil
 	}
 	return &dtu.VesselSnapshot{
-		State:        string(vessel.State),
-		Source:       vessel.Source,
-		Ref:          vessel.Ref,
-		Workflow:     vessel.Workflow,
-		Error:        vessel.Error,
-		CreatedAt:    formatVesselTime(&vessel.CreatedAt),
-		StartedAt:    formatVesselTime(vessel.StartedAt),
-		EndedAt:      formatVesselTime(vessel.EndedAt),
-		CurrentPhase: vessel.CurrentPhase,
-		GateRetries:  vessel.GateRetries,
-		WaitingSince: formatVesselTime(vessel.WaitingSince),
-		WaitingFor:   vessel.WaitingFor,
-		WorktreePath: vessel.WorktreePath,
-		FailedPhase:  vessel.FailedPhase,
-		GateOutput:   vessel.GateOutput,
-		RetryOf:      vessel.RetryOf,
+		State:          string(vessel.State),
+		Source:         vessel.Source,
+		Ref:            vessel.Ref,
+		Workflow:       vessel.Workflow,
+		WorkflowDigest: vessel.WorkflowDigest,
+		Error:          vessel.Error,
+		CreatedAt:      formatVesselTime(&vessel.CreatedAt),
+		StartedAt:      formatVesselTime(vessel.StartedAt),
+		EndedAt:        formatVesselTime(vessel.EndedAt),
+		CurrentPhase:   vessel.CurrentPhase,
+		GateRetries:    vessel.GateRetries,
+		WaitingSince:   formatVesselTime(vessel.WaitingSince),
+		WaitingFor:     vessel.WaitingFor,
+		WorktreePath:   vessel.WorktreePath,
+		FailedPhase:    vessel.FailedPhase,
+		GateOutput:     vessel.GateOutput,
+		RetryOf:        vessel.RetryOf,
 	}
 }
 

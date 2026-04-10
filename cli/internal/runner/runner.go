@@ -41,6 +41,8 @@ var errVesselCancelled = errors.New("vessel cancelled")
 
 const vesselCancelPollInterval = 25 * time.Millisecond
 
+const workflowSnapshotDirName = "workflow"
+
 // CommandRunner abstracts subprocess execution for testing.
 type CommandRunner interface {
 	RunOutput(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -491,7 +493,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 		if vessel.WaitingSince != nil {
 			timeoutDur := 24 * time.Hour // default
 			if vessel.Workflow != "" {
-				if s, loadErr := r.loadWorkflow(vessel.Workflow); loadErr == nil {
+				if s, _, loadErr := r.loadWorkflow(vessel.Workflow); loadErr == nil {
 					if int(vessel.CurrentPhase) > 0 && int(vessel.CurrentPhase) <= len(s.Phases) {
 						prevPhase := s.Phases[vessel.CurrentPhase-1]
 						if prevPhase.Gate != nil && prevPhase.Gate.Timeout != "" {
@@ -624,17 +626,17 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		return r.runBuiltinWorkflow(ctx, vessel, src, vrs, builtin)
 	}
 
-	worktreePath, ok := r.ensureWorktree(ctx, &vessel, src)
-	if !ok {
-		return "failed"
-	}
-
-	sk, err := r.loadWorkflow(vessel.Workflow)
+	sk, _, err := r.loadVesselWorkflow(&vessel)
 	if err != nil {
 		r.failVessel(vessel.ID, fmt.Sprintf("load workflow: %v", err))
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 		}
+		return "failed"
+	}
+
+	worktreePath, ok := r.ensureWorktree(ctx, &vessel, src)
+	if !ok {
 		return "failed"
 	}
 
@@ -1575,17 +1577,18 @@ func (r *Runner) failUpdatedVessel(vessel *queue.Vessel, errMsg string) {
 	vessel.Error = errMsg
 	vessel.EndedAt = &now
 	vessel.Meta = recovery.ApplyToMeta(vessel.Meta, recovery.Build(recovery.Input{
-		VesselID:    vessel.ID,
-		Source:      vessel.Source,
-		Workflow:    vessel.Workflow,
-		Ref:         vessel.Ref,
-		State:       queue.StateFailed,
-		FailedPhase: vessel.FailedPhase,
-		Error:       errMsg,
-		GateOutput:  vessel.GateOutput,
-		RetryOf:     vessel.RetryOf,
-		Meta:        vessel.Meta,
-		CreatedAt:   now,
+		VesselID:       vessel.ID,
+		Source:         vessel.Source,
+		Workflow:       vessel.Workflow,
+		Ref:            vessel.Ref,
+		State:          queue.StateFailed,
+		FailedPhase:    vessel.FailedPhase,
+		Error:          errMsg,
+		GateOutput:     vessel.GateOutput,
+		RetryOf:        vessel.RetryOf,
+		WorkflowDigest: vessel.WorkflowDigest,
+		Meta:           vessel.Meta,
+		CreatedAt:      now,
 	}))
 	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
 		if r.cancelledTransition(vessel.ID, updateErr) {
@@ -1605,18 +1608,19 @@ func (r *Runner) annotateRecoveryMetadata(id string, state queue.VesselState, er
 		return
 	}
 	current.Meta = recovery.ApplyToMeta(current.Meta, recovery.Build(recovery.Input{
-		VesselID:    current.ID,
-		Source:      current.Source,
-		Workflow:    current.Workflow,
-		Ref:         current.Ref,
-		State:       state,
-		FailedPhase: current.FailedPhase,
-		Error:       errMsg,
-		GateOutput:  current.GateOutput,
-		RetryOf:     current.RetryOf,
-		Meta:        current.Meta,
-		Trace:       trace,
-		CreatedAt:   r.runtimeNow(),
+		VesselID:       current.ID,
+		Source:         current.Source,
+		Workflow:       current.Workflow,
+		Ref:            current.Ref,
+		State:          state,
+		FailedPhase:    current.FailedPhase,
+		Error:          errMsg,
+		GateOutput:     current.GateOutput,
+		RetryOf:        current.RetryOf,
+		WorkflowDigest: current.WorkflowDigest,
+		Meta:           current.Meta,
+		Trace:          trace,
+		CreatedAt:      r.runtimeNow(),
 	}))
 	if updateErr := r.Queue.UpdateVessel(*current); updateErr != nil {
 		log.Printf("warn: annotate recovery metadata for vessel %s: %v", id, updateErr)
@@ -1716,18 +1720,19 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 
 	if state == string(queue.StateFailed) || state == string(queue.StateTimedOut) {
 		seedArtifact := recovery.Build(recovery.Input{
-			VesselID:    artifactVessel.ID,
-			Source:      artifactVessel.Source,
-			Workflow:    artifactVessel.Workflow,
-			Ref:         artifactVessel.Ref,
-			State:       artifactVessel.State,
-			FailedPhase: artifactVessel.FailedPhase,
-			Error:       artifactVessel.Error,
-			GateOutput:  artifactVessel.GateOutput,
-			RetryOf:     artifactVessel.RetryOf,
-			Meta:        artifactVessel.Meta,
-			Trace:       traceContextPointer(vrs.trace),
-			CreatedAt:   now,
+			VesselID:       artifactVessel.ID,
+			Source:         artifactVessel.Source,
+			Workflow:       artifactVessel.Workflow,
+			Ref:            artifactVessel.Ref,
+			State:          artifactVessel.State,
+			FailedPhase:    artifactVessel.FailedPhase,
+			Error:          artifactVessel.Error,
+			GateOutput:     artifactVessel.GateOutput,
+			RetryOf:        artifactVessel.RetryOf,
+			WorkflowDigest: artifactVessel.WorkflowDigest,
+			Meta:           artifactVessel.Meta,
+			Trace:          traceContextPointer(vrs.trace),
+			CreatedAt:      now,
 		})
 		reviewArtifact := recovery.Build(recovery.Input{
 			VesselID:             artifactVessel.ID,
@@ -1739,6 +1744,7 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 			Error:                artifactVessel.Error,
 			GateOutput:           artifactVessel.GateOutput,
 			RetryOf:              artifactVessel.RetryOf,
+			WorkflowDigest:       artifactVessel.WorkflowDigest,
 			Meta:                 artifactVessel.Meta,
 			Trace:                traceContextPointer(vrs.trace),
 			CreatedAt:            now,
@@ -3148,7 +3154,7 @@ func (r *Runner) workflowProtectedWritePolicy(vessel queue.Vessel, violations []
 		return protectedSurfaceWorkflowPolicy{}, nil
 	}
 
-	sk, err := r.loadWorkflow(vessel.Workflow)
+	sk, _, err := r.loadWorkflow(vessel.Workflow)
 	if err != nil {
 		return protectedSurfaceWorkflowPolicy{}, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
 	}
@@ -3583,9 +3589,97 @@ func (r *Runner) sourceConfigNameFromMeta(v queue.Vessel) string {
 	return v.Meta["config_source"]
 }
 
-func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, error) {
+func (r *Runner) snapshotWorkflowDigest(vessel *queue.Vessel, digest string) error {
+	if vessel == nil {
+		return nil
+	}
+	vessel.WorkflowDigest = strings.TrimSpace(digest)
+	state := recovery.RemediationStateFromMeta(vessel.Meta)
+	state.WorkflowDigest = vessel.WorkflowDigest
+	vessel.Meta = recovery.ApplyRemediationState(vessel.Meta, state)
+	if r.Queue == nil {
+		return nil
+	}
+	if err := r.Queue.UpdateVessel(*vessel); err != nil {
+		return fmt.Errorf("persist workflow digest snapshot: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) loadVesselWorkflow(vessel *queue.Vessel) (*workflow.Workflow, string, error) {
+	if vessel == nil {
+		return nil, "", fmt.Errorf("vessel must not be nil")
+	}
+
+	storedDigest := strings.TrimSpace(vessel.WorkflowDigest)
+	snapshotPath := r.workflowSnapshotPath(vessel.ID, vessel.Workflow)
+	if storedDigest != "" && snapshotPath != "" {
+		snapshot, snapshotDigest, err := r.loadWorkflowFromSnapshot(snapshotPath)
+		if err == nil {
+			if snapshotDigest != storedDigest {
+				return nil, "", fmt.Errorf("workflow snapshot digest mismatch for vessel %s: stored=%s snapshot=%s", vessel.ID, storedDigest, snapshotDigest)
+			}
+			return snapshot, snapshotDigest, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, "", err
+		}
+	}
+
+	livePath := filepath.Join(".xylem", "workflows", vessel.Workflow+".yaml")
+	sk, liveDigest, err := workflow.LoadWithDigest(livePath)
+	if err != nil {
+		return nil, "", err
+	}
+	if storedDigest != "" && vessel.CurrentPhase > 0 && storedDigest != liveDigest {
+		return nil, "", fmt.Errorf("workflow snapshot missing for vessel %s: stored digest %s no longer matches live workflow %s", vessel.ID, storedDigest, liveDigest)
+	}
+	if snapshotPath != "" {
+		if err := r.writeWorkflowSnapshot(livePath, snapshotPath); err != nil {
+			return nil, "", err
+		}
+	}
+	if err := r.snapshotWorkflowDigest(vessel, liveDigest); err != nil {
+		return nil, "", fmt.Errorf("persist workflow snapshot: %w", err)
+	}
+	return sk, liveDigest, nil
+}
+
+func (r *Runner) loadWorkflowFromSnapshot(path string) (*workflow.Workflow, string, error) {
+	if _, err := os.Stat(path); err != nil {
+		return nil, "", err
+	}
+	sk, digest, err := workflow.LoadWithDigest(path)
+	if err != nil {
+		return nil, "", fmt.Errorf("load workflow snapshot %q: %w", path, err)
+	}
+	return sk, digest, nil
+}
+
+func (r *Runner) writeWorkflowSnapshot(srcPath, snapshotPath string) error {
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		return fmt.Errorf("read workflow source %q: %w", srcPath, err)
+	}
+	if err := os.MkdirAll(filepath.Dir(snapshotPath), 0o755); err != nil {
+		return fmt.Errorf("create workflow snapshot dir %q: %w", filepath.Dir(snapshotPath), err)
+	}
+	if err := os.WriteFile(snapshotPath, data, 0o644); err != nil {
+		return fmt.Errorf("write workflow snapshot %q: %w", snapshotPath, err)
+	}
+	return nil
+}
+
+func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, string, error) {
 	path := filepath.Join(".xylem", "workflows", name+".yaml")
-	return workflow.Load(path)
+	return workflow.LoadWithDigest(path)
+}
+
+func (r *Runner) workflowSnapshotPath(vesselID, workflowName string) string {
+	if r == nil || r.Config == nil || r.Config.StateDir == "" || strings.TrimSpace(vesselID) == "" || strings.TrimSpace(workflowName) == "" {
+		return ""
+	}
+	return filepath.Join(r.Config.StateDir, "phases", vesselID, workflowSnapshotDirName, workflowName+".yaml")
 }
 
 func (r *Runner) readHarness() string {
