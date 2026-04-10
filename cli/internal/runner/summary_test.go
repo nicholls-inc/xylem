@@ -152,7 +152,7 @@ func TestSummarizeUsageSourceHandlesMissingUsageScenarios(t *testing.T) {
 	t.Run("non llm phases", func(t *testing.T) {
 		source, reason := summarizeUsageSource([]PhaseSummary{
 			{Name: "verify", Type: "command", UsageSource: cost.UsageSourceNotApplicable, UsageUnavailableReason: "non-llm phase"},
-		}, 0, 0)
+		}, 0, 0, 0)
 
 		assert.Equal(t, cost.UsageSourceNotApplicable, source)
 		assert.Equal(t, "run did not execute an llm phase", reason)
@@ -162,9 +162,16 @@ func TestSummarizeUsageSourceHandlesMissingUsageScenarios(t *testing.T) {
 		source, reason := summarizeUsageSource([]PhaseSummary{
 			{Name: "verify", Type: "command", UsageSource: cost.UsageSourceNotApplicable, UsageUnavailableReason: "non-llm phase"},
 			{Name: "implement", Type: "prompt", UsageSource: cost.UsageSourceProvider},
-		}, 0, 0)
+		}, 0, 0, 0)
 
 		assert.Equal(t, cost.UsageSourceProvider, source)
+		assert.Empty(t, reason)
+	})
+
+	t.Run("tracker records without totals still report estimated usage", func(t *testing.T) {
+		source, reason := summarizeUsageSource(nil, 0, 0, 1)
+
+		assert.Equal(t, cost.UsageSourceEstimated, source)
 		assert.Empty(t, reason)
 	})
 }
@@ -379,6 +386,11 @@ func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testin
 	summary := loadSummary(t, cfg.StateDir, vessel.ID)
 	assert.Equal(t, costReportRelativePath(vessel.ID), summary.CostReportPath)
 	assert.Equal(t, budgetAlertsRelativePath(vessel.ID), summary.BudgetAlertsPath)
+	assert.Equal(t, 1000, summary.TotalInputTokensEst)
+	assert.Equal(t, 1000, summary.TotalOutputTokensEst)
+	assert.Equal(t, 2000, summary.TotalTokensEst)
+	assert.InDelta(t, 0.6, summary.TotalCostUSDEst, 1e-9)
+	assert.Equal(t, cost.UsageSourceEstimated, summary.UsageSource)
 	require.NotNil(t, summary.ReviewArtifacts)
 	assert.Equal(t, summary.CostReportPath, summary.ReviewArtifacts.CostReport)
 	assert.Equal(t, summary.BudgetAlertsPath, summary.ReviewArtifacts.BudgetAlerts)
@@ -393,6 +405,30 @@ func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testin
 	assert.JSONEq(t, "[]", string(alertsData))
 	assert.Zero(t, summary.BudgetAlertCount)
 	assert.False(t, summary.BudgetWarning)
+}
+
+func TestBuildSummaryUsesTrackerTotalsWhenPhaseTotalsAreUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	startedAt := time.Date(2026, time.April, 8, 20, 32, 0, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-tracker-only-summary", "github", "fix-bug", startedAt)
+	vrs := newVesselRunState(cfg, vessel, startedAt)
+	require.NotNil(t, vrs.costTracker)
+
+	err := vrs.costTracker.Record(cost.UsageRecord{
+		MissionID: vessel.ID,
+		Model:     "claude-sonnet-4-6",
+		Timestamp: startedAt.Add(time.Second),
+	})
+	require.NoError(t, err)
+
+	summary := vrs.buildSummary("completed", startedAt.Add(2*time.Second))
+	assert.Zero(t, summary.TotalInputTokensEst)
+	assert.Zero(t, summary.TotalOutputTokensEst)
+	assert.Zero(t, summary.TotalTokensEst)
+	assert.Zero(t, summary.TotalCostUSDEst)
+	assert.Equal(t, cost.UsageSourceEstimated, summary.UsageSource)
+	assert.Empty(t, summary.UsageUnavailableReason)
 }
 
 func TestPersistRunArtifactsSummarizesBudgetWarnings(t *testing.T) {

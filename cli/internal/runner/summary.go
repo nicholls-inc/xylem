@@ -202,15 +202,27 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 	summary.TotalInputTokensEst += s.extraInputTokensEst
 	summary.TotalOutputTokensEst += s.extraOutputTokensEst
 	summary.TotalCostUSDEst += s.extraCostUSDEst
-	summary.TotalTokensEst = summary.TotalInputTokensEst + summary.TotalOutputTokensEst
-	summary.UsageSource, summary.UsageUnavailableReason = summarizeUsageSource(summary.Phases, summary.TotalTokensEst, summary.TotalCostUSDEst)
+	recordCount := 0
 
 	if s.costTracker != nil {
+		recordCount = s.costTracker.RecordCount()
+		if recordCount > 0 {
+			summary.TotalInputTokensEst = s.costTracker.TotalInputTokens()
+			summary.TotalOutputTokensEst = s.costTracker.TotalOutputTokens()
+			summary.TotalCostUSDEst = s.costTracker.TotalCost()
+		}
 		summary.BudgetExceeded = s.costTracker.BudgetExceeded()
 		alerts := s.costTracker.Alerts()
 		summary.BudgetAlertCount = len(alerts)
 		summary.BudgetWarning = hasBudgetWarning(alerts)
 	}
+	summary.TotalTokensEst = summary.TotalInputTokensEst + summary.TotalOutputTokensEst
+	summary.UsageSource, summary.UsageUnavailableReason = summarizeUsageSource(
+		summary.Phases,
+		summary.TotalTokensEst,
+		summary.TotalCostUSDEst,
+		recordCount,
+	)
 
 	return summary
 }
@@ -352,8 +364,8 @@ func phaseUsageSource(phaseType string) (cost.UsageSource, string) {
 	}
 }
 
-func summarizeUsageSource(phases []PhaseSummary, totalTokens int, totalCost float64) (cost.UsageSource, string) {
-	if totalTokens > 0 || totalCost > 0 {
+func summarizeUsageSource(phases []PhaseSummary, totalTokens int, totalCost float64, recordCount int) (cost.UsageSource, string) {
+	if totalTokens > 0 || totalCost > 0 || recordCount > 0 {
 		return cost.UsageSourceEstimated, ""
 	}
 

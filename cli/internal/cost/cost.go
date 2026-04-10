@@ -138,6 +138,8 @@ type Tracker struct {
 	alerts      []BudgetAlert
 	exceeded    bool
 	totalCost   float64
+	totalInput  int
+	totalOutput int
 	totalTokens int
 }
 
@@ -184,6 +186,8 @@ func (t *Tracker) Record(record UsageRecord) error {
 
 	t.records = append(t.records, record)
 	t.totalCost += record.CostUSD
+	t.totalInput += record.InputTokens
+	t.totalOutput += record.OutputTokens
 	t.totalTokens += record.InputTokens + record.OutputTokens
 
 	if t.budget == nil {
@@ -250,6 +254,27 @@ func (t *Tracker) TotalTokens() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.totalTokens
+}
+
+// TotalInputTokens returns the sum of input tokens across all records.
+func (t *Tracker) TotalInputTokens() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.totalInput
+}
+
+// TotalOutputTokens returns the sum of output tokens across all records.
+func (t *Tracker) TotalOutputTokens() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.totalOutput
+}
+
+// RecordCount returns the number of usage records tracked so far.
+func (t *Tracker) RecordCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return len(t.records)
 }
 
 // CostByRole returns cost totals grouped by agent role.
