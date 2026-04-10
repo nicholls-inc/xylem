@@ -331,6 +331,16 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// ResolveStateDir rebases a relative state_dir under root.
+func ResolveStateDir(root, stateDir string) string {
+	root = strings.TrimSpace(root)
+	stateDir = strings.TrimSpace(stateDir)
+	if root == "" || stateDir == "" || filepath.IsAbs(stateDir) {
+		return stateDir
+	}
+	return filepath.Join(root, stateDir)
+}
+
 // normalize migrates legacy top-level Repo/Tasks/Exclude into the Sources map.
 func (c *Config) normalize() {
 	if c.Repo != "" && len(c.Sources) == 0 && len(c.Tasks) > 0 {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -31,16 +32,46 @@ Checks performed:
   - Fleet health summary (failure rate, timeout rate)
 
 Use --fix to automatically remediate safe issues (e.g., reap zombie vessels).
-Use --json for machine-readable output.`,
+Use --json for machine-readable output.
+Use --root to inspect another checkout or daemon root.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			fix, _ := cmd.Flags().GetBool("fix")
 			jsonMode, _ := cmd.Flags().GetBool("json")
-			return cmdDoctor(deps.cfg, deps.q, deps.wt, fix, jsonMode)
+			root, _ := cmd.Flags().GetString("root")
+			scopedDeps, err := doctorDepsForRoot(deps, root)
+			if err != nil {
+				return err
+			}
+			return cmdDoctor(scopedDeps.cfg, scopedDeps.q, scopedDeps.wt, fix, jsonMode)
 		},
 	}
 	cmd.Flags().Bool("fix", false, "Automatically remediate safe issues")
 	cmd.Flags().Bool("json", false, "Output as JSON")
+	cmd.Flags().String("root", "", "Run checks against the xylem state rooted at this directory")
 	return cmd
+}
+
+func doctorDepsForRoot(base *appDeps, root string) (*appDeps, error) {
+	if base == nil || base.cfg == nil {
+		return nil, fmt.Errorf("doctor dependencies not initialized")
+	}
+	root = strings.TrimSpace(root)
+	if root == "" {
+		return base, nil
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return nil, fmt.Errorf("resolve doctor root %q: %w", root, err)
+	}
+	cfg := *base.cfg
+	cfg.StateDir = config.ResolveStateDir(absRoot, cfg.StateDir)
+	wt := worktree.New(absRoot, &realCmdRunner{})
+	wt.DefaultBranch = cfg.DefaultBranch
+	return &appDeps{
+		cfg: &cfg,
+		q:   queue.New(filepath.Join(cfg.StateDir, "queue.jsonl")),
+		wt:  wt,
+	}, nil
 }
 
 // doctorCheck represents a single diagnostic finding.
