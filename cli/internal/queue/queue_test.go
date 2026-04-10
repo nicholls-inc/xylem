@@ -561,11 +561,35 @@ func TestEnqueueIdempotentDuplicateRef(t *testing.T) {
 }
 
 func TestEnqueueAfterTerminalState(t *testing.T) {
+	// Completed vessels block re-enqueue (prevents scanner re-scan loop).
+	t.Run("after completed blocks re-enqueue", func(t *testing.T) {
+		q, _ := newTestQueue(t)
+		vessel := testVessel(42)
+		if _, err := q.Enqueue(vessel); err != nil {
+			t.Fatalf("enqueue: %v", err)
+		}
+		if err := q.Update(vessel.ID, StateRunning, ""); err != nil {
+			t.Fatalf("update to running: %v", err)
+		}
+		if err := q.Update(vessel.ID, StateCompleted, ""); err != nil {
+			t.Fatalf("update to completed: %v", err)
+		}
+		vessel2 := testVessel(42)
+		vessel2.ID = "issue-42-retry"
+		enqueued, err := q.Enqueue(vessel2)
+		if err != nil {
+			t.Fatalf("re-enqueue: %v", err)
+		}
+		if enqueued {
+			t.Fatal("expected re-enqueue to be blocked after completed state")
+		}
+	})
+
+	// Failed, cancelled, and timed_out vessels allow re-enqueue.
 	tests := []struct {
 		name        string
 		transitions []VesselState
 	}{
-		{"after completed", []VesselState{StateRunning, StateCompleted}},
 		{"after failed", []VesselState{StateRunning, StateFailed}},
 		{"after cancelled", []VesselState{StateCancelled}},
 		{"after timed_out", []VesselState{StateRunning, StateWaiting, StateTimedOut}},
@@ -584,8 +608,7 @@ func TestEnqueueAfterTerminalState(t *testing.T) {
 				}
 			}
 
-			// Re-enqueue with the same ref should succeed since the original
-			// vessel is in a terminal state.
+			// Re-enqueue should succeed for non-completed terminal states.
 			vessel2 := testVessel(42)
 			vessel2.ID = "issue-42-retry"
 			enqueued, err := q.Enqueue(vessel2)
@@ -1642,16 +1665,28 @@ func helperCompleteVessel(t *testing.T, q *Queue, id string) {
 	}
 }
 
-// helperEnqueueCompleteThenReenqueue creates a queue with two records for the
-// same vessel ID: the first completed, the second pending.
-func helperEnqueueCompleteThenReenqueue(t *testing.T) (*Queue, Vessel) {
+// helperFailVessel transitions the first pending vessel through pending -> running -> failed.
+func helperFailVessel(t *testing.T, q *Queue, id string) {
+	t.Helper()
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update(id, StateFailed, "test failure"); err != nil {
+		t.Fatalf("update to failed: %v", err)
+	}
+}
+
+// helperEnqueueFailThenReenqueue creates a queue with two records for the
+// same vessel ID: the first failed, the second pending (failed vessels allow
+// re-enqueue; completed vessels do not).
+func helperEnqueueFailThenReenqueue(t *testing.T) (*Queue, Vessel) {
 	t.Helper()
 	q, _ := newTestQueue(t)
 	vessel := testVessel(42)
 	if _, err := q.Enqueue(vessel); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	helperCompleteVessel(t, q, vessel.ID)
+	helperFailVessel(t, q, vessel.ID)
 	if _, err := q.Enqueue(testVessel(42)); err != nil {
 		t.Fatalf("re-enqueue: %v", err)
 	}
@@ -1660,7 +1695,7 @@ func helperEnqueueCompleteThenReenqueue(t *testing.T) (*Queue, Vessel) {
 
 func TestDuplicateID(t *testing.T) {
 	t.Run("Update", func(t *testing.T) {
-		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+		q, vessel := helperEnqueueFailThenReenqueue(t)
 
 		// Dequeue the re-enqueued vessel (now running).
 		got, err := q.Dequeue()
@@ -1671,8 +1706,8 @@ func TestDuplicateID(t *testing.T) {
 			t.Fatal("expected vessel from dequeue")
 		}
 
-		// Update should target the re-enqueued (running) vessel, not the old completed one.
-		if err := q.Update(vessel.ID, StateFailed, "err"); err != nil {
+		// Update should target the re-enqueued (running) vessel, not the old failed one.
+		if err := q.Update(vessel.ID, StateCompleted, ""); err != nil {
 			t.Fatalf("update: %v", err)
 		}
 
@@ -1683,16 +1718,16 @@ func TestDuplicateID(t *testing.T) {
 		if len(vessels) != 2 {
 			t.Fatalf("expected 2 vessels, got %d", len(vessels))
 		}
-		if vessels[0].State != StateCompleted {
-			t.Fatalf("expected first record (old) to be completed, got %s", vessels[0].State)
+		if vessels[0].State != StateFailed {
+			t.Fatalf("expected first record (old) to be failed, got %s", vessels[0].State)
 		}
-		if vessels[1].State != StateFailed {
-			t.Fatalf("expected second record (re-enqueued) to be failed, got %s", vessels[1].State)
+		if vessels[1].State != StateCompleted {
+			t.Fatalf("expected second record (re-enqueued) to be completed, got %s", vessels[1].State)
 		}
 	})
 
 	t.Run("UpdateVessel", func(t *testing.T) {
-		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+		q, vessel := helperEnqueueFailThenReenqueue(t)
 
 		found, err := q.FindByID(vessel.ID)
 		if err != nil {
@@ -1712,8 +1747,8 @@ func TestDuplicateID(t *testing.T) {
 		if len(vessels) != 2 {
 			t.Fatalf("expected 2 vessels, got %d", len(vessels))
 		}
-		if vessels[0].State != StateCompleted {
-			t.Fatalf("expected first record to remain completed, got %s", vessels[0].State)
+		if vessels[0].State != StateFailed {
+			t.Fatalf("expected first record to remain failed, got %s", vessels[0].State)
 		}
 		if vessels[0].WorktreePath != "" {
 			t.Fatalf("expected first record WorktreePath empty, got %q", vessels[0].WorktreePath)
@@ -1727,7 +1762,7 @@ func TestDuplicateID(t *testing.T) {
 	})
 
 	t.Run("FindByID", func(t *testing.T) {
-		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+		q, vessel := helperEnqueueFailThenReenqueue(t)
 
 		got, err := q.FindByID(vessel.ID)
 		if err != nil {
@@ -1739,7 +1774,7 @@ func TestDuplicateID(t *testing.T) {
 	})
 
 	t.Run("Cancel", func(t *testing.T) {
-		q, vessel := helperEnqueueCompleteThenReenqueue(t)
+		q, vessel := helperEnqueueFailThenReenqueue(t)
 
 		if err := q.Cancel(vessel.ID); err != nil {
 			t.Fatalf("cancel: %v", err)
@@ -1752,8 +1787,8 @@ func TestDuplicateID(t *testing.T) {
 		if len(vessels) != 2 {
 			t.Fatalf("expected 2 vessels, got %d", len(vessels))
 		}
-		if vessels[0].State != StateCompleted {
-			t.Fatalf("expected first record (old) to remain completed, got %s", vessels[0].State)
+		if vessels[0].State != StateFailed {
+			t.Fatalf("expected first record (old) to remain failed, got %s", vessels[0].State)
 		}
 		if vessels[1].State != StateCancelled {
 			t.Fatalf("expected second record (re-enqueued) to be cancelled, got %s", vessels[1].State)
@@ -1792,15 +1827,15 @@ func TestCompact(t *testing.T) {
 	t.Run("removes stale terminal records", func(t *testing.T) {
 		q, path := newTestQueue(t)
 
-		// Enqueue 3 vessels, complete 2, then re-enqueue them.
+		// Enqueue 3 vessels, fail 2, then re-enqueue them.
 		for _, id := range []int{1, 2, 3} {
 			if _, err := q.Enqueue(testVessel(id)); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
 		}
-		// Complete vessel 1 and 2.
+		// Fail vessel 1 and 2 (failed vessels allow re-enqueue).
 		for _, id := range []int{1, 2} {
-			helperCompleteVessel(t, q, fmt.Sprintf("issue-%d", id))
+			helperFailVessel(t, q, fmt.Sprintf("issue-%d", id))
 		}
 		// Re-enqueue vessel 1 and 2.
 		for _, id := range []int{1, 2} {
@@ -1809,7 +1844,7 @@ func TestCompact(t *testing.T) {
 			}
 		}
 
-		// Before compaction: 5 records (completed-1, completed-2, pending-3, pending-1, pending-2).
+		// Before compaction: 5 records (failed-1, failed-2, pending-3, pending-1, pending-2).
 		linesBefore := readNonEmptyLines(t, path)
 		if len(linesBefore) != 5 {
 			t.Fatalf("expected 5 records before compaction, got %d", len(linesBefore))
@@ -1868,11 +1903,11 @@ func TestCompact(t *testing.T) {
 	t.Run("retains latest terminal record per ID", func(t *testing.T) {
 		q, _ := newTestQueue(t)
 
-		// Enqueue a vessel, complete it, re-enqueue, fail it.
+		// Enqueue a vessel, fail it, re-enqueue, fail again.
 		if _, err := q.Enqueue(testVessel(20)); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
-		helperCompleteVessel(t, q, "issue-20")
+		helperFailVessel(t, q, "issue-20")
 		if _, err := q.Enqueue(testVessel(20)); err != nil {
 			t.Fatalf("re-enqueue: %v", err)
 		}
@@ -1954,11 +1989,11 @@ func TestCompact(t *testing.T) {
 func TestCompactDryRun(t *testing.T) {
 	q, path := newTestQueue(t)
 
-	// Enqueue, complete, and re-enqueue a vessel.
+	// Enqueue, fail, and re-enqueue a vessel (failed vessels allow re-enqueue).
 	if _, err := q.Enqueue(testVessel(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
-	helperCompleteVessel(t, q, "issue-1")
+	helperFailVessel(t, q, "issue-1")
 	if _, err := q.Enqueue(testVessel(1)); err != nil {
 		t.Fatalf("re-enqueue: %v", err)
 	}
