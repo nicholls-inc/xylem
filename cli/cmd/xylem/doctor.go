@@ -263,25 +263,11 @@ func checkStaleWorktrees(wt *worktree.Manager, q *queue.Queue, report *doctorRep
 		report.add("worktrees", "ok", "No xylem worktrees")
 		return
 	}
-
-	// Build set of worktree paths for non-terminal vessels
-	vessels, err := q.List()
+	pruner := runner.New(nil, q, wt, nil)
+	stale, err := pruner.FindStaleWorktrees(ctx)
 	if err != nil {
-		report.add("worktrees", "warn", fmt.Sprintf("Failed to list vessels for worktree check: %v", err))
+		report.add("worktrees", "warn", fmt.Sprintf("Failed to identify stale worktrees: %v", err))
 		return
-	}
-	activeWorktrees := make(map[string]bool)
-	for _, v := range vessels {
-		if !v.State.IsTerminal() && v.WorktreePath != "" {
-			activeWorktrees[v.WorktreePath] = true
-		}
-	}
-
-	var stale []worktree.WorktreeInfo
-	for _, t := range trees {
-		if !activeWorktrees[t.Path] {
-			stale = append(stale, t)
-		}
 	}
 
 	if len(stale) == 0 {

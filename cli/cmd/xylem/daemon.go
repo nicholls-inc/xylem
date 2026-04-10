@@ -153,6 +153,9 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		stallChecks = daemonChecksFromFindings(findings, daemonNow())
 		drainRunner.CheckWaitingVessels(ctx)
 		drainRunner.CheckHungVessels(ctx)
+		if removed := drainRunner.PruneStaleWorktrees(ctx); removed > 0 {
+			slog.Info("daemon pruned stale worktrees", "removed", removed)
+		}
 		// Cancel pending vessels whose PRs are already merged/closed,
 		// freeing concurrency slots for real work.
 		drainRunner.CancelStalePRVessels(ctx)

@@ -740,6 +740,71 @@ func TestSmoke_S39_DaemonAutoUpgradeProceedsAfterCancelledVesselDropsInFlight(t 
 	assert.Zero(t, tracker.InFlightCount())
 }
 
+func TestSmoke_S48_DaemonHealthTickPrunesOnlyStaleXylemWorktrees(t *testing.T) {
+	repoRoot := t.TempDir()
+	stateDir := filepath.Join(repoRoot, ".xylem")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+	q := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:           "issue-1",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+		WorktreePath: filepath.Join(".claude", "worktrees", "fix", "issue-1"),
+	})
+	require.NoError(t, err)
+
+	activePath := filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-1")
+	stalePath := filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-2")
+	daemonRootPath := filepath.Join(repoRoot, ".daemon-root", "issue-3")
+	porcelain := strings.Join([]string{
+		"worktree " + repoRoot,
+		"HEAD aaa",
+		"branch refs/heads/main",
+		"",
+		"worktree " + activePath,
+		"HEAD bbb",
+		"branch refs/heads/fix/issue-1",
+		"",
+		"worktree " + stalePath,
+		"HEAD ccc",
+		"branch refs/heads/fix/issue-2",
+		"",
+		"worktree " + daemonRootPath,
+		"HEAD ddd",
+		"branch refs/heads/daemon/issue-3",
+		"",
+	}, "\n")
+
+	cmdRunner := &mockCleanupRunner{porcelain: porcelain}
+	pruneRunner := runner.New(nil, q, worktree.New(repoRoot, cmdRunner), nil)
+	var checkCalls atomic.Int32
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	err = daemonLoop(ctx, q, nil, noopScan, noopDrain, func(ctx context.Context) {
+		checkCalls.Add(1)
+		if pruneRunner.PruneStaleWorktrees(ctx) > 0 {
+			cancel()
+		}
+	}, nil, nil, time.Hour, time.Hour, 0)
+	require.NoError(t, err)
+
+	assert.GreaterOrEqual(t, checkCalls.Load(), int32(1))
+	require.Len(t, cmdRunner.removeCalls, 1)
+	assert.Contains(t, cmdRunner.removeCalls[0], stalePath)
+	assert.NotContains(t, cmdRunner.removeCalls[0], activePath)
+	assert.NotContains(t, cmdRunner.removeCalls[0], daemonRootPath)
+
+	vessel, err := q.FindByID("issue-1")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StatePending, vessel.State)
+	assert.Equal(t, filepath.Join(".claude", "worktrees", "fix", "issue-1"), vessel.WorktreePath)
+}
+
 // TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow verifies the
 // overdue path: when upgrade has been pending for upgradeInterval*3 without
 // firing (because in-flight vessels kept in_flight > 0 continuously), new

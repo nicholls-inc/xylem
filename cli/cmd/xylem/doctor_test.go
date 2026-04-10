@@ -56,6 +56,17 @@ func captureDoctorStdout(t *testing.T, fn func()) string {
 	return string(data)
 }
 
+func requireDoctorCheck(t *testing.T, report *doctorReport, name string) doctorCheck {
+	t.Helper()
+	for _, check := range report.Checks {
+		if check.Name == name {
+			return check
+		}
+	}
+	t.Fatalf("expected doctor check %q in %#v", name, report.Checks)
+	return doctorCheck{}
+}
+
 func TestDoctorDetectsZombieVessels(t *testing.T) {
 	dir := t.TempDir()
 	qPath := filepath.Join(dir, "queue.jsonl")
@@ -199,9 +210,66 @@ func TestDoctorQueueHealth(t *testing.T) {
 	report := &doctorReport{}
 	checkQueueHealth(q, report)
 
-	if report.Summary.Fail > 0 {
-		t.Error("expected no failures for healthy queue")
+	if report.Summary != (struct {
+		OK   int `json:"ok"`
+		Warn int `json:"warn"`
+		Fail int `json:"fail"`
+	}{OK: 2}) {
+		t.Fatalf("summary = %#v, want 2 ok / 0 warn / 0 fail", report.Summary)
 	}
+
+	queueCheck := requireDoctorCheck(t, report, "queue")
+	if queueCheck.Status != "ok" {
+		t.Fatalf("queue status = %q, want ok", queueCheck.Status)
+	}
+	if queueCheck.Message != "1 vessel(s) in queue" {
+		t.Fatalf("queue message = %q, want %q", queueCheck.Message, "1 vessel(s) in queue")
+	}
+
+	compactionCheck := requireDoctorCheck(t, report, "queue_compaction")
+	if compactionCheck.Status != "ok" {
+		t.Fatalf("queue_compaction status = %q, want ok", compactionCheck.Status)
+	}
+	if compactionCheck.Message != "Queue is compact" {
+		t.Fatalf("queue_compaction message = %q, want %q", compactionCheck.Message, "Queue is compact")
+	}
+}
+
+func TestDoctorStaleWorktreesTreatsRelativeQueuePathAsActive(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:           "issue-1",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+		WorktreePath: filepath.Join(".claude", "worktrees", "fix", "issue-1"),
+	}); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	porcelain := "worktree " + filepath.Join(dir, ".claude", "worktrees", "fix", "issue-1") + "\nHEAD abc123\nbranch refs/heads/fix/issue-1\n\n"
+	runner := &mockCleanupRunner{porcelain: porcelain}
+	wt := worktree.New(dir, runner)
+	report := &doctorReport{}
+
+	checkStaleWorktrees(wt, q, report, false)
+
+	for _, check := range report.Checks {
+		if check.Name != "worktrees" {
+			continue
+		}
+		if check.Status != "ok" {
+			t.Fatalf("worktrees status = %q, want ok", check.Status)
+		}
+		if check.Message != "1 worktree(s), all active" {
+			t.Fatalf("worktrees message = %q, want %q", check.Message, "1 worktree(s), all active")
+		}
+		return
+	}
+
+	t.Fatal("expected worktrees check")
 }
 
 func TestDoctorReportTracksSummaryAndFixedChecks(t *testing.T) {
@@ -224,6 +292,46 @@ func TestDoctorReportTracksSummaryAndFixedChecks(t *testing.T) {
 	}
 	if got := report.Checks[2]; !got.Fixed || got.Status != "ok" || got.Name != "test_fix" {
 		t.Fatalf("fixed check = %#v, want fixed ok check named test_fix", got)
+	}
+}
+
+func TestDoctorJSONOutput(t *testing.T) {
+	report := &doctorReport{}
+	report.add("test_check", "ok", "All good")
+	report.add("test_warn", "warn", "Minor issue")
+	report.addFixed("test_fixed", "Auto-fixed")
+
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var decoded doctorReport
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.Summary != (struct {
+		OK   int `json:"ok"`
+		Warn int `json:"warn"`
+		Fail int `json:"fail"`
+	}{OK: 2, Warn: 1}) {
+		t.Fatalf("summary = %#v, want 2 ok / 1 warn / 0 fail", decoded.Summary)
+	}
+
+	okCheck := requireDoctorCheck(t, &decoded, "test_check")
+	if okCheck.Fixed {
+		t.Fatalf("test_check.Fixed = true, want false")
+	}
+
+	fixedCheck := requireDoctorCheck(t, &decoded, "test_fixed")
+	if fixedCheck.Status != "ok" {
+		t.Fatalf("test_fixed status = %q, want ok", fixedCheck.Status)
+	}
+	if !fixedCheck.Fixed {
+		t.Fatalf("test_fixed.Fixed = false, want true")
+	}
+	if fixedCheck.Message != "Auto-fixed" {
+		t.Fatalf("test_fixed message = %q, want %q", fixedCheck.Message, "Auto-fixed")
 	}
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
 
@@ -72,25 +73,15 @@ func cleanupWorktrees(wt *worktree.Manager, q *queue.Queue, dryRun bool) error {
 		fmt.Println("No xylem worktrees found.")
 		return nil
 	}
-
-	// Build set of worktree paths for active vessels so we don't kill
-	// running work.
-	activeWorktrees := make(map[string]bool)
-	if vessels, listErr := q.List(); listErr == nil {
-		for _, v := range vessels {
-			if !v.State.IsTerminal() && v.WorktreePath != "" {
-				activeWorktrees[v.WorktreePath] = true
-			}
-		}
+	pruner := runner.New(nil, q, wt, nil)
+	stale, err := pruner.FindStaleWorktrees(ctx)
+	if err != nil {
+		return fmt.Errorf("find stale worktrees: %w", err)
 	}
 
 	removed := 0
-	skipped := 0
-	for _, t := range trees {
-		if activeWorktrees[t.Path] {
-			skipped++
-			continue
-		}
+	skipped := len(trees) - len(stale)
+	for _, t := range stale {
 		if dryRun {
 			fmt.Printf("Would remove: %s\n", t.Path)
 			removed++

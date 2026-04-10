@@ -60,29 +60,18 @@ func testCleanupConfig(t *testing.T) (*config.Config, *queue.Queue) {
 }
 
 func TestCleanupNoWorktrees(t *testing.T) {
-	tests := []struct {
-		name   string
-		dryRun bool
-	}{
-		{"actual", false},
-		{"dry-run", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			dir := t.TempDir()
-			cfg := &config.Config{StateDir: filepath.Join(dir, ".xylem")}
-			q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
-			wt := worktree.New(dir, &emptyWorktreeRunner{})
+	dir := t.TempDir()
+	cfg := &config.Config{StateDir: filepath.Join(dir, ".xylem")}
+	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
+	wt := worktree.New(dir, &emptyWorktreeRunner{})
 
-			var err error
-			out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, tt.dryRun) })
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if !strings.Contains(out, "No xylem worktrees") {
-				t.Errorf("expected empty message, got: %s", out)
-			}
-		})
+	var err error
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := strings.TrimSpace(out); got != "No xylem worktrees found." {
+		t.Fatalf("cleanup output = %q, want %q", got, "No xylem worktrees found.")
 	}
 }
 
@@ -160,6 +149,48 @@ func TestCleanupActualRemoval(t *testing.T) {
 	}
 	if len(r.removeCalls) > 0 && !strings.Contains(r.removeCalls[0], "issue-5-test") {
 		t.Errorf("expected remove call for issue-5-test worktree, got: %s", r.removeCalls[0])
+	}
+}
+
+func TestCleanupSkipsActiveWorktreeWhenQueuePathIsRelative(t *testing.T) {
+	porcelain := strings.Join([]string{
+		"worktree /repo",
+		"HEAD aaa",
+		"branch refs/heads/main",
+		"",
+		"worktree /repo/.claude/worktrees/fix/issue-1-bug",
+		"HEAD bbb",
+		"branch refs/heads/fix/issue-1-bug",
+		"",
+	}, "\n")
+
+	r := &mockCleanupRunner{porcelain: porcelain}
+	wt := worktree.New("/repo", r)
+	cfg, q := testCleanupConfig(t)
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:           "issue-1",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+		WorktreePath: filepath.Join(".claude", "worktrees", "fix", "issue-1-bug"),
+	}); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+
+	var err error
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, true) })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(out, "Skipped 1 active vessel worktree(s)") {
+		t.Fatalf("expected active worktree to be skipped, got: %s", out)
+	}
+	if !strings.Contains(out, "0 worktree(s) would be removed") {
+		t.Fatalf("expected zero removals, got: %s", out)
+	}
+	if len(r.removeCalls) != 0 {
+		t.Fatalf("expected no remove calls, got %d", len(r.removeCalls))
 	}
 }
 
