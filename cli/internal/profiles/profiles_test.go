@@ -351,14 +351,14 @@ func selfHostingPromptAssetPaths() []string {
 }
 
 func repoAssetPath(profileAssetPath string) string {
-	parts := strings.Split(profileAssetPath, string(filepath.Separator))
+	parts := strings.Split(profileAssetPath, "/")
 	switch parts[0] {
 	case "workflows":
-		return filepath.Join("..", "..", "..", ".xylem", profileAssetPath)
+		return filepath.Join("..", "..", "..", ".xylem", filepath.Join(parts...))
 	case "prompts":
-		return filepath.Join("..", "..", "..", ".xylem", profileAssetPath)
+		return filepath.Join("..", "..", "..", ".xylem", filepath.Join(parts...))
 	default:
-		return filepath.Join("..", "..", "..", ".xylem", profileAssetPath)
+		return filepath.Join("..", "..", "..", ".xylem", filepath.Join(parts...))
 	}
 }
 

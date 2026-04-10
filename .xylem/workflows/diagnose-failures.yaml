@@ -4,7 +4,7 @@ phases:
   - name: diagnose
     prompt_file: .xylem/prompts/diagnose-failures/diagnose.md
     max_turns: 20
-  - name: create-issues
+  - name: create_issues
     prompt_file: .xylem/prompts/diagnose-failures/create-issues.md
     max_turns: 20
   - name: refine
