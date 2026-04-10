@@ -102,6 +102,7 @@ func newRootCmd() *cobra.Command {
 		newResumeCmd(),
 		newCancelCmd(),
 		newCleanupCmd(),
+		newDoctorCmd(),
 		newDaemonCmd(),
 		newRetryCmd(),
 		newVisualizeCmd(),
