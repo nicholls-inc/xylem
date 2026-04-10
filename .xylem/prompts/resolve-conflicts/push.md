@@ -6,10 +6,9 @@ URL: {{.Issue.URL}}
 ## Resolution
 {{.PreviousOutputs.resolve}}
 
-Commit and push the resolved conflicts:
+Push the already-completed merge resolution:
 
 ```
-git add -A && git commit -m "fix: resolve merge conflicts on #{{.Issue.Number}}"
 git push
 ```
 

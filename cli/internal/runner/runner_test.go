@@ -4657,6 +4657,54 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 	}
 }
 
+func assertCommandPhaseOutputAvailableToNextPrompt(t *testing.T, workflowName string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, workflowName))
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, workflowName, []testPhase{
+		{name: "merge_main", phaseType: "command", run: "git merge origin/main --no-commit --no-ff"},
+		{name: "analyze", promptContent: "Merge output: {{.PreviousOutputs.merge_main}}", maxTurns: 10},
+	})
+
+	withTestWorkingDir(t, dir)
+
+	const mergeOutput = "Auto-merging cli/internal/runner/runner.go\nCONFLICT (content): Merge conflict in cli/internal/runner/runner.go\n"
+	var sawInterpolatedMergeOutput bool
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte(mergeOutput),
+		runPhaseHook: func(_ string, prompt string, _ string, _ ...string) ([]byte, error, bool) {
+			sawInterpolatedMergeOutput = strings.Contains(prompt, "Merge output: "+mergeOutput)
+			return []byte("analyzed conflicts"), nil, true
+		},
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	require.Len(t, cmdRunner.phaseCalls, 1)
+	assert.True(t, sawInterpolatedMergeOutput, "prompt = %q, want command phase output", cmdRunner.phaseCalls[0].prompt)
+}
+
+func TestDrainCommandPhaseOutputAvailableToNextPrompt(t *testing.T) {
+	assertCommandPhaseOutputAvailableToNextPrompt(t, "fix-bug")
+}
+
+func TestSmoke_S8_ResolveConflictsDeterministicMergeOutputFeedsAnalysisPrompt(t *testing.T) {
+	assertCommandPhaseOutputAvailableToNextPrompt(t, "resolve-conflicts")
+}
+
 func TestDrainCommandPhaseWithNoOp(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
