@@ -789,6 +789,12 @@ phases:
     run: |
       set -euo pipefail
 
+      git fetch origin main
+      if ! git merge-base --is-ancestor origin/main HEAD; then
+        echo "ERROR: branch is behind origin/main; rebase before creating the PR"
+        exit 1
+      fi
+
       DRAFT_FILE="pr_draft.json"
       if [ ! -f "$DRAFT_FILE" ]; then
         echo "ERROR: pr_draft.json not found in worktree root"
@@ -811,10 +817,11 @@ phases:
         --repo nicholls-inc/xylem \
         --title "$TITLE" \
         --body "$BODY" \
-        --label "harness-impl"
+        --label "harness-impl" \
+        --label "ready-to-merge"
 ```
 
-Unlike the scaffolded `pr` prompt phases above, this repo-specific `pr_create` step is a deterministic command phase: it validates `pr_draft.json`, appends `Fixes #{{.Issue.Number}}` so GitHub auto-closes the issue, and targets `nicholls-inc/xylem` explicitly.
+Unlike the scaffolded `pr` prompt phases above, this repo-specific `pr_create` step is a deterministic command phase: it refuses to create the PR if the branch has fallen behind `origin/main`, validates `pr_draft.json`, appends `Fixes #{{.Issue.Number}}` so GitHub auto-closes the issue, targets `nicholls-inc/xylem` explicitly, and applies both `harness-impl` and `ready-to-merge` at PR creation so the merge workflow can pick the PR up immediately once checks are green.
 
 **Phase flow:**
 
