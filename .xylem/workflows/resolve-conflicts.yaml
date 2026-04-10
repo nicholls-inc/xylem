@@ -34,13 +34,9 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/resolve-conflicts/analyze.md
     max_turns: 20
-    llm: copilot
-    model: gpt-5.4
   - name: resolve
     prompt_file: .xylem/prompts/resolve-conflicts/resolve.md
     max_turns: 40
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: |
@@ -56,5 +52,3 @@ phases:
   - name: push
     prompt_file: .xylem/prompts/resolve-conflicts/push.md
     max_turns: 10
-    llm: copilot
-    model: gpt-5-mini

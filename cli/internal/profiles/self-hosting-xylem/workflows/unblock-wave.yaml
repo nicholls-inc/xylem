@@ -4,7 +4,5 @@ phases:
   - name: check_deps
     prompt_file: .xylem/prompts/unblock-wave/check_deps.md
     max_turns: 20
-    llm: copilot
-    model: gpt-5-mini
     noop:
       match: XYLEM_NOOP

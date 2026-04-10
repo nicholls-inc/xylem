@@ -345,6 +345,12 @@ func protectXylemSurfaces(worktreePath string, patterns []string) error {
 // It looks up the branch name from `git worktree list --porcelain` before removal
 // to correctly handle branch names containing path separators (e.g., "fix/issue-42").
 func (m *Manager) Remove(ctx context.Context, worktreePath string) error {
+	// Safety: never remove the daemon root worktree.
+	if strings.HasSuffix(filepath.ToSlash(worktreePath), ".daemon-root") ||
+		strings.Contains(filepath.ToSlash(worktreePath), ".daemon-root/") {
+		return fmt.Errorf("refusing to remove daemon root worktree: %s", worktreePath)
+	}
+
 	span := observability.StartGlobalSpan(ctx, "worktree:remove", observability.WorktreeSpanAttributes(observability.WorktreeSpanData{
 		Action: "remove",
 		Path:   worktreePath,

@@ -4,19 +4,14 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/implement-harness/analyze.md
     max_turns: 30
-    llm: copilot
-    model: gpt-5.4
     noop:
       match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/implement-harness/plan.md
     max_turns: 30
-    llm: copilot
   - name: implement
     prompt_file: .xylem/prompts/implement-harness/implement.md
     max_turns: 80
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
@@ -24,7 +19,6 @@ phases:
   - name: verify
     prompt_file: .xylem/prompts/implement-harness/verify.md
     max_turns: 80
-    llm: copilot
     gate:
       type: command
       run: "cd cli && go test ./..."
@@ -32,8 +26,6 @@ phases:
   - name: test_critic
     prompt_file: .xylem/prompts/implement-harness/test_critic.md
     max_turns: 30
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: "cd cli && go test ./..."
@@ -41,8 +33,6 @@ phases:
   - name: smoke
     prompt_file: .xylem/prompts/implement-harness/smoke.md
     max_turns: 60
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: "cd cli && go test ./..."
@@ -50,8 +40,6 @@ phases:
   - name: pr_draft
     prompt_file: .xylem/prompts/implement-harness/pr_draft.md
     max_turns: 15
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: |

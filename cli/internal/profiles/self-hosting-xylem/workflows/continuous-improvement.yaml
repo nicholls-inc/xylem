@@ -13,22 +13,16 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/continuous-improvement/analyze.md
     max_turns: 40
-    llm: copilot
-    model: gpt-5.4
     noop:
       match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/continuous-improvement/plan.md
     max_turns: 30
-    llm: copilot
-    model: gpt-5.4
     noop:
       match: XYLEM_NOOP
   - name: implement
     prompt_file: .xylem/prompts/continuous-improvement/implement.md
     max_turns: 80
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: |
@@ -41,5 +35,3 @@ phases:
   - name: verify
     prompt_file: .xylem/prompts/continuous-improvement/verify.md
     max_turns: 40
-    llm: copilot
-    model: gpt-5.4

@@ -13,13 +13,9 @@ phases:
   - name: simplify
     prompt_file: .xylem/prompts/continuous-simplicity/simplify.md
     max_turns: 40
-    llm: copilot
-    model: gpt-5.4
   - name: dedup
     prompt_file: .xylem/prompts/continuous-simplicity/dedup.md
     max_turns: 50
-    llm: copilot
-    model: gpt-5.4
   - name: plan_prs
     type: command
     run: |
@@ -32,8 +28,6 @@ phases:
   - name: apply
     prompt_file: .xylem/prompts/continuous-simplicity/apply.md
     max_turns: 80
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: |

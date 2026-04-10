@@ -33,8 +33,6 @@ sources:
     repo: nicholls-inc/xylem
     exclude:
       [wontfix, duplicate, in-progress, no-bot, needs-refinement, xylem-failed]
-    llm: copilot
-    model: gpt-5-mini
     tasks:
       triage-issues:
         labels: [needs-triage]
@@ -199,8 +197,8 @@ timeout: "45m"
 state_dir: ".xylem"
 
 # llm selects the global default LLM provider: "claude" (default) or "copilot"
-llm: copilot
-model: gpt-5.4
+llm: claude
+model: claude-sonnet-4-6
 
 claude:
   command: "claude"
