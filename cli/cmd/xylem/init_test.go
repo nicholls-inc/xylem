@@ -41,6 +41,7 @@ var expectedSelfHostingWorkflows = []string{
 	"audit",
 	"continuous-improvement",
 	"continuous-simplicity",
+	"continuous-style",
 	"diagnose-failures",
 	"implement-harness",
 	"metrics-collector",
@@ -682,6 +683,7 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	sort.Strings(expectedWorkflows)
 	assert.Equal(t, expectedWorkflows, scaffoldedWorkflowNames(t, dir))
 	assert.Contains(t, output, "Created .xylem/workflows/continuous-simplicity.yaml")
+	assert.Contains(t, output, "Created .xylem/workflows/continuous-style.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/implement-harness.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/unblock-wave.yaml")
 
