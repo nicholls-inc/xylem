@@ -18,15 +18,17 @@ import (
 type ScheduledTask struct {
 	Workflow string
 	Ref      string
+	Tier     string
 }
 
 type Scheduled struct {
-	Repo       string
-	StateDir   string
-	ConfigName string
-	Schedule   string
-	Tasks      map[string]ScheduledTask
-	Queue      *queue.Queue
+	Repo        string
+	StateDir    string
+	ConfigName  string
+	Schedule    string
+	Tasks       map[string]ScheduledTask
+	DefaultTier string
+	Queue       *queue.Queue
 }
 
 type scheduleState struct {
@@ -93,6 +95,7 @@ func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
 			Source:    s.Name(),
 			Ref:       ref,
 			Workflow:  task.Workflow,
+			Tier:      ResolveTaskTier(task.Tier, s.DefaultTier),
 			Meta:      meta,
 			State:     queue.StatePending,
 			CreatedAt: now,

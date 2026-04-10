@@ -19,6 +19,7 @@ type GitHubPR struct {
 	Tasks                  map[string]GitHubTask
 	Exclude                []string
 	StateDir               string
+	DefaultTier            string
 	Queue                  *queue.Queue
 	CmdRunner              CommandRunner
 	HarnessDigestResolver  func() string
@@ -116,6 +117,7 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					Source:   "github-pr",
 					Ref:      prWorkflowRef(pr.URL, task.Workflow),
 					Workflow: task.Workflow,
+					Tier:     ResolveTaskTier(task.Tier, g.DefaultTier),
 					Meta: map[string]string{
 						"pr_num":                   strconv.Itoa(pr.Number),
 						"pr_title":                 pr.Title,

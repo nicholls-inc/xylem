@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"strings"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -34,6 +35,7 @@ func GitHubTaskFromConfig(t config.Task) GitHubTask {
 	task := GitHubTask{
 		Labels:   t.Labels,
 		Workflow: t.Workflow,
+		Tier:     strings.TrimSpace(t.Tier),
 	}
 	if t.StatusLabels != nil {
 		task.StatusLabels = &StatusLabels{
@@ -51,6 +53,16 @@ func GitHubTaskFromConfig(t config.Task) GitHubTask {
 		}
 	}
 	return task
+}
+
+func ResolveTaskTier(taskTier, defaultTier string) string {
+	if tier := strings.TrimSpace(taskTier); tier != "" {
+		return tier
+	}
+	if tier := strings.TrimSpace(defaultTier); tier != "" {
+		return tier
+	}
+	return config.DefaultLLMRoutingTier
 }
 
 // ResolveRunningLabel returns the running status label for a vessel,

@@ -25,6 +25,7 @@ type Workflow struct {
 	Class                         policy.Class `yaml:"class,omitempty"`
 	LLM                           *string      `yaml:"llm,omitempty"`
 	Model                         *string      `yaml:"model,omitempty"`
+	Tier                          *string      `yaml:"tier,omitempty"`
 	AllowAdditiveProtectedWrites  bool         `yaml:"allow_additive_protected_writes,omitempty"`
 	AllowCanonicalProtectedWrites bool         `yaml:"allow_canonical_protected_writes,omitempty"`
 	Phases                        []Phase      `yaml:"phases"`
@@ -40,6 +41,7 @@ type workflowYAML struct {
 	Class                         *string `yaml:"class,omitempty"`
 	LLM                           *string `yaml:"llm,omitempty"`
 	Model                         *string `yaml:"model,omitempty"`
+	Tier                          *string `yaml:"tier,omitempty"`
 	AllowAdditiveProtectedWrites  *bool   `yaml:"allow_additive_protected_writes,omitempty"`
 	AllowCanonicalProtectedWrites *bool   `yaml:"allow_canonical_protected_writes,omitempty"`
 	Phases                        []Phase `yaml:"phases"`
@@ -63,6 +65,7 @@ type Phase struct {
 	MaxTurns     int      `yaml:"max_turns"`
 	LLM          *string  `yaml:"llm,omitempty"`
 	Model        *string  `yaml:"model,omitempty"`
+	Tier         *string  `yaml:"tier,omitempty"`
 	NoOp         *NoOp    `yaml:"noop,omitempty"`
 	Gate         *Gate    `yaml:"gate,omitempty"`
 	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
@@ -314,6 +317,7 @@ func workflowFromYAML(raw workflowYAML) (*Workflow, error) {
 		Description: raw.Description,
 		LLM:         raw.LLM,
 		Model:       raw.Model,
+		Tier:        raw.Tier,
 		Phases:      raw.Phases,
 	}
 
