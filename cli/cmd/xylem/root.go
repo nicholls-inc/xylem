@@ -36,14 +36,16 @@ func newRootCmd() *cobra.Command {
 				return nil
 			}
 
-			// visualize (and its subcommands) and review are read-only commands
-			// that only parse config, workflow YAML, and local state; they
-			// don't shell out to git or gh. continuous-improvement select is
-			// another local-only helper used by a command phase.
+			// visualize (and its subcommands), review, and daemon stop are
+			// local-only commands that only parse config, workflow YAML, and
+			// local state; they don't shell out to git or gh.
+			// continuous-improvement select is another local-only helper used
+			// by a command phase.
 			skipTooling := cmd.Name() == "visualize" ||
 				strings.HasPrefix(commandPath, "xylem visualize") ||
 				cmd.Name() == "review" ||
-				commandPath == "xylem continuous-improvement select"
+				commandPath == "xylem continuous-improvement select" ||
+				commandPath == "xylem daemon stop"
 
 			if !skipTooling {
 				if _, err := exec.LookPath("git"); err != nil {
@@ -104,6 +106,7 @@ func newRootCmd() *cobra.Command {
 		newCleanupCmd(),
 		newDoctorCmd(),
 		newDaemonCmd(),
+		newDaemonSupervisorCmd(),
 		newRetryCmd(),
 		newVisualizeCmd(),
 		newVersionCmd(),

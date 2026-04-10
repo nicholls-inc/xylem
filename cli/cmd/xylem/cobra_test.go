@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -37,7 +38,7 @@ func TestCobraSubcommandRegistration(t *testing.T) {
 		hidden[sub.Name()] = sub.Hidden
 	}
 
-	expected := []string{"init", "bootstrap", "continuous-improvement", "continuous-simplicity", "dtu", "shim-dispatch", "scan", "drain", "review", "gap-report", "lessons", "status", "pause", "resume", "cancel", "cleanup", "doctor", "enqueue", "daemon", "retry", "visualize", "version"}
+	expected := []string{"init", "bootstrap", "continuous-improvement", "continuous-simplicity", "dtu", "shim-dispatch", "scan", "drain", "review", "gap-report", "lessons", "status", "pause", "resume", "cancel", "cleanup", "doctor", "enqueue", "daemon", "daemon-supervisor", "retry", "visualize", "version"}
 	for _, name := range expected {
 		if !names[name] {
 			t.Errorf("expected subcommand %q to be registered", name)
@@ -67,5 +68,41 @@ func TestCobraStatusJsonFlag(t *testing.T) {
 	trimmed := strings.TrimSpace(out)
 	if trimmed != "[]" {
 		t.Errorf("expected '[]' for --json empty status, got: %q", trimmed)
+	}
+}
+
+func TestCobraDaemonStopBypassesToolingChecks(t *testing.T) {
+	t.Setenv("PATH", "")
+
+	dir := t.TempDir()
+	origWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd(): %v", err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("Chdir(%q): %v", dir, err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(origWD); err != nil {
+			t.Fatalf("restore cwd: %v", err)
+		}
+	})
+
+	configPath := filepath.Join(dir, ".xylem.yml")
+	if err := cmdInit(configPath, false); err != nil {
+		t.Fatalf("cmdInit(%q): %v", configPath, err)
+	}
+
+	cmd := newRootCmd()
+	cmd.SetArgs([]string{"--config", configPath, "daemon", "stop"})
+
+	out := captureStdout(func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	if strings.TrimSpace(out) != "Daemon not running." {
+		t.Fatalf("output = %q, want %q", out, "Daemon not running.\n")
 	}
 }

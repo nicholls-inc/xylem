@@ -483,8 +483,41 @@ xylem daemon
 # Run as a background process
 xylem daemon &
 
+# Stop a foreground or supervised daemon cleanly
+xylem daemon stop
+
 # With systemd, launchd, or similar process managers
 # See "Common Patterns" below for a systemd unit example
+```
+
+---
+
+## xylem daemon-supervisor
+
+Restart `xylem daemon` after unexpected exits.
+
+### Usage
+
+```
+xylem daemon-supervisor
+```
+
+### Behavior
+
+1. Acquires a singleton supervisor PID lock at `<state_dir>/daemon-supervisor.pid`.
+2. Loads environment overrides from `.daemon-root/.env` before each daemon start.
+3. Starts `xylem daemon` with the active `--config` path.
+4. If the daemon exits without a matching `xylem daemon stop` request, logs the restart count, waits 10 seconds, and starts it again.
+5. `xylem daemon stop` writes `<state_dir>/daemon-supervisor.stop`, signals the daemon, and prevents the next restart.
+
+### Examples
+
+```bash
+# Keep the daemon alive and reload .daemon-root/.env on every restart
+xylem daemon-supervisor
+
+# Stop a supervised daemon without triggering the restart loop
+xylem daemon stop
 ```
 
 ---
@@ -904,7 +937,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=/path/to/repo
-ExecStart=/usr/local/bin/xylem daemon
+ExecStart=/usr/local/bin/xylem daemon-supervisor
 Restart=on-failure
 RestartSec=10
 
@@ -925,7 +958,7 @@ WantedBy=multi-user.target
   <key>ProgramArguments</key>
   <array>
     <string>/usr/local/bin/xylem</string>
-    <string>daemon</string>
+    <string>daemon-supervisor</string>
   </array>
   <key>WorkingDirectory</key>
   <string>/path/to/repo</string>
@@ -938,6 +971,8 @@ WantedBy=multi-user.target
 </dict>
 </plist>
 ```
+
+Place API keys in `/path/to/repo/.daemon-root/.env` so the supervisor reloads them before every daemon restart. Use `xylem daemon stop` for a clean shutdown that does not bounce back via KeepAlive.
 
 ## Vessel States
 
