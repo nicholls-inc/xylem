@@ -2209,92 +2209,6 @@ func TestSmoke_S38_ScheduledSourceRejectsInvalidSchedule(t *testing.T) {
 	assert.Contains(t, err.Error(), "schedule is invalid")
 }
 
-func TestScheduleSourceAllowsContinuousRefactoringFields(t *testing.T) {
-	cfg := validConfig()
-	cfg.Sources = map[string]SourceConfig{
-		"continuous-refactoring-semantic": {
-			Type:            "schedule",
-			Repo:            "owner/repo",
-			Cadence:         "0 9 * * 1",
-			Workflow:        "continuous-refactoring",
-			SourceDirs:      []string{"cli/internal", "cli/cmd/xylem"},
-			FileExtensions:  []string{".go"},
-			LOCThreshold:    80,
-			MaxIssuesPerRun: 2,
-			ExcludePatterns: []string{"**/*_test.go", ".xylem/**"},
-		},
-	}
-
-	err := cfg.Validate()
-	require.NoError(t, err)
-
-	sourceCfg := cfg.Sources["continuous-refactoring-semantic"]
-	assert.Equal(t, "owner/repo", sourceCfg.Repo)
-	assert.Equal(t, []string{"cli/internal", "cli/cmd/xylem"}, sourceCfg.SourceDirs)
-	assert.Equal(t, []string{".go"}, sourceCfg.FileExtensions)
-	assert.Equal(t, 80, sourceCfg.LOCThreshold)
-	assert.Equal(t, 2, sourceCfg.MaxIssuesPerRun)
-	assert.Equal(t, []string{"**/*_test.go", ".xylem/**"}, sourceCfg.ExcludePatterns)
-}
-
-func TestContinuousRefactoringFieldsRejectInvalidValues(t *testing.T) {
-	cfg := validConfig()
-	cfg.Sources = map[string]SourceConfig{
-		"continuous-refactoring-semantic": {
-			Type:            "schedule",
-			Repo:            "owner/repo",
-			Cadence:         "0 9 * * 1",
-			Workflow:        "continuous-refactoring",
-			FileExtensions:  []string{"go"},
-			MaxIssuesPerRun: -1,
-		},
-	}
-
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "file_extensions[0] must start with")
-}
-
-func TestContinuousRefactoringFieldsRejectSourceDirsOutsideRepoRoot(t *testing.T) {
-	tests := []struct {
-		name string
-		dir  string
-		want string
-	}{
-		{
-			name: "parent escape",
-			dir:  "../outside",
-			want: "source_dirs[0] must stay within repo root",
-		},
-		{
-			name: "absolute path",
-			dir:  filepath.Join(string(filepath.Separator), "tmp", "outside"),
-			want: "source_dirs[0] must be relative",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := validConfig()
-			cfg.Sources = map[string]SourceConfig{
-				"continuous-refactoring-semantic": {
-					Type:            "schedule",
-					Repo:            "owner/repo",
-					Cadence:         "0 9 * * 1",
-					Workflow:        "continuous-refactoring",
-					SourceDirs:      []string{tt.dir},
-					FileExtensions:  []string{".go"},
-					MaxIssuesPerRun: 1,
-				},
-			}
-
-			err := cfg.Validate()
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.want)
-		})
-	}
-}
-
 func TestSmoke_S39_LegacyProvidersNormalizeWithPreferredProviderFirst(t *testing.T) {
 	path := writeConfigFile(t, `sources:
   github:
@@ -2775,4 +2689,46 @@ func TestSourceTimeoutEmptyInheritsGlobal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected valid config with no source timeout (inherits global), got: %v", err)
 	}
+}
+
+func TestTelemetryDefaultsWhenAbsent(t *testing.T) {
+	cfg := Config{}
+	assert.True(t, cfg.TelemetryEnabled())
+	assert.Equal(t, "nicholls-inc/xylem", cfg.TelemetryTargetRepo())
+	assert.False(t, cfg.Telemetry.Extended)
+}
+
+func TestTelemetryLoadsFromConfig(t *testing.T) {
+	path := writeSmokeConfigFile(t, `telemetry:
+  enabled: false
+  target_repo: "myorg/myrepo"
+  extended: true
+`)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	assert.False(t, cfg.TelemetryEnabled())
+	assert.Equal(t, "myorg/myrepo", cfg.TelemetryTargetRepo())
+	assert.True(t, cfg.Telemetry.Extended)
+}
+
+func TestTelemetryEnvOverridesConfig(t *testing.T) {
+	cfg := Config{}
+	assert.True(t, cfg.TelemetryEnabled())
+
+	t.Setenv("XYLEM_TELEMETRY", "off")
+	assert.False(t, cfg.TelemetryEnabled())
+
+	t.Setenv("XYLEM_TELEMETRY", "on")
+	assert.True(t, cfg.TelemetryEnabled())
+}
+
+func TestTelemetryInvalidTargetRepoRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `telemetry:
+  target_repo: "not-a-valid-repo"
+`)
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "telemetry.target_repo")
 }

@@ -23,7 +23,7 @@ func TestSmoke_S1_LoadCoreProfileReturnsEmbeddedAssets(t *testing.T) {
 
 	require.NotNil(t, profile)
 	assert.Equal(t, "core", profile.Name)
-	assert.Equal(t, 1, profile.Version)
+	assert.Equal(t, 2, profile.Version)
 
 	harnessTemplate, err := fs.ReadFile(profile.FS, "HARNESS.md.tmpl")
 	require.NoError(t, err)
@@ -56,12 +56,12 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	require.NotNil(t, composed)
 	require.Len(t, composed.Profiles, 1)
 	assert.Equal(t, "core", composed.Profiles[0].Name)
-	assert.Equal(t, 1, composed.Profiles[0].Version)
+	assert.Equal(t, 2, composed.Profiles[0].Version)
 
 	assert.Equal(t, []string{
 		"adapt-repo",
-		"auto-triage-issues",
 		"context-weight-audit",
+		"field-report",
 		"fix-bug",
 		"fix-pr-checks",
 		"implement-feature",
@@ -77,67 +77,20 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	}, sortedKeys(composed.Workflows))
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/pr")
-	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/apply")
-	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/classify")
-	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/discover")
 	assert.Contains(t, sortedKeys(composed.Prompts), "security-compliance/synthesize")
 	assert.Contains(t, sortedKeys(composed.Prompts), "workflow-health-report/report")
-	assert.Contains(t, sortedKeys(composed.Sources), "auto-triage-issues")
 	assert.Contains(t, sortedKeys(composed.Sources), "pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "security-compliance")
+	assert.Contains(t, sortedKeys(composed.Sources), "field-report")
 	require.Len(t, composed.ConfigOverlays, 1)
 
 	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
 	assert.Contains(t, string(composed.Workflows["implement-feature"]), "name: implement-feature")
-	assert.Contains(t, string(composed.Workflows["auto-triage-issues"]), "name: auto-triage-issues")
 	assert.Contains(t, string(composed.Prompts["adapt-repo/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "Create a pull request")
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["implement-feature/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.ConfigOverlays[0]), `repo: "{{ .Repo }}"`)
-}
-
-func TestSmoke_S2_CoreProfileScaffoldsAutoTriageScheduledWorkflow(t *testing.T) {
-	t.Parallel()
-
-	composed, err := Compose("core")
-	require.NoError(t, err)
-
-	var source config.SourceConfig
-	require.NoError(t, yaml.Unmarshal(composed.Sources["auto-triage-issues"], &source))
-	assert.Equal(t, "scheduled", source.Type)
-	assert.Equal(t, "{{ .Repo }}", source.Repo)
-	assert.Equal(t, "6h", source.Schedule)
-	require.Contains(t, source.Tasks, "unlabeled-issues")
-	assert.Equal(t, "auto-triage-issues", source.Tasks["unlabeled-issues"].Workflow)
-	assert.Equal(t, "auto-triage-issues", source.Tasks["unlabeled-issues"].Ref)
-
-	var wf workflowpkg.Workflow
-	require.NoError(t, yaml.Unmarshal(composed.Workflows["auto-triage-issues"], &wf))
-	assert.Equal(t, "auto-triage-issues", wf.Name)
-	assert.Equal(t, workflowpkg.ClassOps, wf.Class)
-	require.Len(t, wf.Phases, 3)
-	assert.Equal(t, "discover", wf.Phases[0].Name)
-	require.NotNil(t, wf.Phases[0].NoOp)
-	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
-	assert.Equal(t, ".xylem/prompts/auto-triage-issues/classify.md", wf.Phases[1].PromptFile)
-	require.NotNil(t, wf.Phases[1].Gate)
-	assert.Equal(t, "command", wf.Phases[1].Gate.Type)
-	assert.Contains(t, wf.Phases[1].Gate.Run, "gh label list --repo")
-	assert.Contains(t, wf.Phases[1].Gate.Run, "classification output validated")
-	assert.Equal(t, ".xylem/prompts/auto-triage-issues/apply.md", wf.Phases[2].PromptFile)
-
-	discoverPrompt := string(composed.Prompts["auto-triage-issues/discover"])
-	assert.Contains(t, discoverPrompt, "Find up to 10 currently open GitHub issues that have no labels")
-	assert.Contains(t, discoverPrompt, "output the exact standalone line `XYLEM_NOOP`")
-
-	classifyPrompt := string(composed.Prompts["auto-triage-issues/classify"])
-	assert.Contains(t, classifyPrompt, "Only propose labels that appear in `available_labels`")
-	assert.Contains(t, classifyPrompt, "If confidence is below `0.80`, prefer `needs-triage`")
-
-	applyPrompt := string(composed.Prompts["auto-triage-issues/apply"])
-	assert.Contains(t, applyPrompt, "re-checking current issue state before each edit")
-	assert.Contains(t, applyPrompt, "RUN_STATUS: CHANGES-APPLIED | NO-CHANGES | PARTIAL | BLOCKED")
 }
 
 func TestSmoke_S3_ComposeUnknownProfileReturnsClearError(t *testing.T) {
@@ -174,34 +127,30 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, sortedKeys(composed.Workflows), "implement-harness")
-	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-refactoring")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-improvement")
-	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-style")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
 	assert.Contains(t, sortedKeys(composed.Workflows), "unblock-wave")
 	assert.Contains(t, sortedKeys(composed.Workflows), "diagnose-failures")
+	assert.Contains(t, sortedKeys(composed.Workflows), "initiative-tracker")
+	assert.Contains(t, sortedKeys(composed.Workflows), "ingest-field-reports")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
-	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/report")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
-	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactoring-semantic")
-	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactoring-file-diet")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
-	assert.Contains(t, sortedKeys(composed.Sources), "continuous-style")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
+	assert.Contains(t, sortedKeys(composed.Sources), "initiative-tracker")
+	assert.Contains(t, sortedKeys(composed.Sources), "ingest-field-reports")
 	require.Len(t, composed.ConfigOverlays, 2)
+
+	assert.Contains(t, sortedKeys(composed.Scripts), "post-discussion.sh")
 
 	implementHarnessWorkflow := string(composed.Workflows["implement-harness"])
 	assert.Contains(t, implementHarnessWorkflow, `--repo nicholls-inc/xylem`)
 	assert.Contains(t, implementHarnessWorkflow, `--label "harness-impl"`)
 	assert.Contains(t, implementHarnessWorkflow, `--label "ready-to-merge"`)
-
-	continuousRefactoringWorkflow := string(composed.Workflows["continuous-refactoring"])
-	assert.Contains(t, continuousRefactoringWorkflow, "continuous-refactoring inspect")
-	assert.Contains(t, continuousRefactoringWorkflow, "continuous-refactoring open-issues")
 }
 
 func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkflow(t *testing.T) {
@@ -239,76 +188,6 @@ func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkf
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/implement")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
-}
-
-func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousStyleScheduledWorkflow(t *testing.T) {
-	t.Parallel()
-
-	composed, err := Compose("core", "self-hosting-xylem")
-	require.NoError(t, err)
-
-	var source config.SourceConfig
-	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-style"], &source))
-	assert.Equal(t, "scheduled", source.Type)
-	assert.Equal(t, "{{ .Repo }}", source.Repo)
-	assert.Equal(t, "@daily", source.Schedule)
-	require.Contains(t, source.Tasks, "daily-continuous-style")
-	assert.Equal(t, "continuous-style", source.Tasks["daily-continuous-style"].Workflow)
-	assert.Equal(t, "continuous-style", source.Tasks["daily-continuous-style"].Ref)
-
-	var wf workflowpkg.Workflow
-	require.NoError(t, yaml.Unmarshal(composed.Workflows["continuous-style"], &wf))
-	assert.Equal(t, "continuous-style", wf.Name)
-	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
-	require.Len(t, wf.Phases, 5)
-	assert.Equal(t, "ingest", wf.Phases[0].Name)
-	assert.Equal(t, ".xylem/prompts/continuous-style/ingest.md", wf.Phases[0].PromptFile)
-	assert.Equal(t, ".xylem/prompts/continuous-style/report.md", wf.Phases[2].PromptFile)
-	assert.Equal(t, "command", wf.Phases[3].Type)
-	assert.Contains(t, wf.Phases[3].Run, "continuous-style file-issues")
-	assert.Contains(t, wf.Phases[3].Run, "--repo {{ .Repo.Slug }}")
-	assert.Equal(t, "command", wf.Phases[4].Type)
-	assert.Contains(t, wf.Phases[4].Run, "continuous-style post-summary")
-	assert.Contains(t, wf.Phases[4].Run, "--repo {{ .Repo.Slug }}")
-
-	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/ingest")
-	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/survey")
-	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/report")
-}
-
-func TestSelfHostingProfileScaffoldsContinuousRefactoringSchedules(t *testing.T) {
-	t.Parallel()
-
-	composed, err := Compose("core", "self-hosting-xylem")
-	require.NoError(t, err)
-
-	var semanticSource config.SourceConfig
-	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-refactoring-semantic"], &semanticSource))
-	assert.Equal(t, "schedule", semanticSource.Type)
-	assert.Equal(t, "{{ .Repo }}", semanticSource.Repo)
-	assert.Equal(t, "0 9 * * 1", semanticSource.Cadence)
-	assert.Equal(t, "continuous-refactoring", semanticSource.Workflow)
-	assert.Equal(t, []string{"cli/cmd/xylem", "cli/internal"}, semanticSource.SourceDirs)
-	assert.Equal(t, []string{".go"}, semanticSource.FileExtensions)
-	assert.Equal(t, 80, semanticSource.LOCThreshold)
-	assert.Equal(t, 2, semanticSource.MaxIssuesPerRun)
-
-	var fileDietSource config.SourceConfig
-	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-refactoring-file-diet"], &fileDietSource))
-	assert.Equal(t, "0 9 * * 1-5", fileDietSource.Cadence)
-	assert.Equal(t, 250, fileDietSource.LOCThreshold)
-	assert.Equal(t, 1, fileDietSource.MaxIssuesPerRun)
-
-	var wf workflowpkg.Workflow
-	require.NoError(t, yaml.Unmarshal(composed.Workflows["continuous-refactoring"], &wf))
-	assert.Equal(t, "continuous-refactoring", wf.Name)
-	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
-	require.Len(t, wf.Phases, 2)
-	assert.Equal(t, "inspect", wf.Phases[0].Name)
-	assert.Equal(t, "command", wf.Phases[0].Type)
-	assert.Contains(t, wf.Phases[0].Run, "continuous-refactoring inspect")
-	assert.Equal(t, "open_issues", wf.Phases[1].Name)
-	assert.Contains(t, wf.Phases[1].Run, "--mode {{if eq .Source.Name \"continuous-refactoring-file-diet\"}}file-diet{{else}}semantic{{end}}")
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

@@ -11,6 +11,14 @@ import (
 )
 
 const DefaultTrackingIssueTitle = "[sota-gap] Weekly tracking"
+const DefaultTrackingDiscussionTitle = "[sota-gap] Weekly tracking"
+
+type DiscussionRef struct {
+	NodeID  string `json:"node_id"`
+	Title   string `json:"title"`
+	URL     string `json:"url"`
+	Created bool   `json:"created"`
+}
 
 type CommandRunner interface {
 	RunOutput(ctx context.Context, name string, args ...string) ([]byte, error)
@@ -147,6 +155,185 @@ func PostSummary(ctx context.Context, runner CommandRunner, repo string, trackin
 	body := strings.Join(lines, "\n")
 	if _, err := runner.RunOutput(ctx, "gh", "issue", "comment", strconv.Itoa(trackingIssue), "--repo", repo, "--body", body); err != nil {
 		return fmt.Errorf("post tracking summary comment: %w", err)
+	}
+	return nil
+}
+
+func EnsureTrackingDiscussion(ctx context.Context, runner CommandRunner, owner, repo, categoryName, title string) (DiscussionRef, error) {
+	if runner == nil {
+		return DiscussionRef{}, fmt.Errorf("runner is required")
+	}
+	if strings.TrimSpace(title) == "" {
+		title = DefaultTrackingDiscussionTitle
+	}
+
+	// Resolve repo ID and category ID.
+	resolveQuery := `query($owner: String!, $repo: String!) {
+  repository(owner: $owner, name: $repo) {
+    id
+    discussionCategories(first: 25) { nodes { id, name } }
+  }
+}`
+	resolveOut, err := runner.RunOutput(ctx, "gh", "api", "graphql",
+		"-f", "query="+resolveQuery,
+		"-f", "owner="+owner,
+		"-f", "repo="+repo)
+	if err != nil {
+		return DiscussionRef{}, fmt.Errorf("resolve repo %s/%s: %w", owner, repo, err)
+	}
+
+	var resolveResp struct {
+		Data struct {
+			Repository struct {
+				ID                   string `json:"id"`
+				DiscussionCategories struct {
+					Nodes []struct {
+						ID   string `json:"id"`
+						Name string `json:"name"`
+					} `json:"nodes"`
+				} `json:"discussionCategories"`
+			} `json:"repository"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(resolveOut, &resolveResp); err != nil {
+		return DiscussionRef{}, fmt.Errorf("parse resolve response: %w", err)
+	}
+
+	repoID := resolveResp.Data.Repository.ID
+	if repoID == "" {
+		return DiscussionRef{}, fmt.Errorf("could not resolve repository %s/%s", owner, repo)
+	}
+
+	var categoryID string
+	for _, cat := range resolveResp.Data.Repository.DiscussionCategories.Nodes {
+		if cat.Name == categoryName {
+			categoryID = cat.ID
+			break
+		}
+	}
+	if categoryID == "" {
+		return DiscussionRef{}, fmt.Errorf("discussion category %q not found in %s/%s", categoryName, owner, repo)
+	}
+
+	// Search for existing discussion by title prefix.
+	searchQuery := `query($repoId: ID!, $catId: ID!) {
+  node(id: $repoId) {
+    ... on Repository {
+      discussions(first: 20, categoryId: $catId, orderBy: {field: CREATED_AT, direction: DESC}) {
+        nodes { id, title, url }
+      }
+    }
+  }
+}`
+	searchOut, err := runner.RunOutput(ctx, "gh", "api", "graphql",
+		"-f", "query="+searchQuery,
+		"-f", "repoId="+repoID,
+		"-f", "catId="+categoryID)
+	if err != nil {
+		return DiscussionRef{}, fmt.Errorf("search discussions: %w", err)
+	}
+
+	var searchResp struct {
+		Data struct {
+			Node struct {
+				Discussions struct {
+					Nodes []struct {
+						ID    string `json:"id"`
+						Title string `json:"title"`
+						URL   string `json:"url"`
+					} `json:"nodes"`
+				} `json:"discussions"`
+			} `json:"node"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(searchOut, &searchResp); err != nil {
+		return DiscussionRef{}, fmt.Errorf("parse discussion search: %w", err)
+	}
+
+	for _, d := range searchResp.Data.Node.Discussions.Nodes {
+		if strings.HasPrefix(d.Title, title) {
+			return DiscussionRef{NodeID: d.ID, Title: d.Title, URL: d.URL, Created: false}, nil
+		}
+	}
+
+	// Create a new discussion.
+	createMutation := `mutation($repoId: ID!, $catId: ID!, $title: String!, $body: String!) {
+  createDiscussion(input: {repositoryId: $repoId, title: $title, body: $body, categoryId: $catId}) {
+    discussion { id, title, url }
+  }
+}`
+	body := "Weekly SoTA self-gap-analysis summaries land here so operators can track whether xylem is converging on the harness reference docs."
+	createOut, err := runner.RunOutput(ctx, "gh", "api", "graphql",
+		"-f", "query="+createMutation,
+		"-f", "repoId="+repoID,
+		"-f", "catId="+categoryID,
+		"-f", "title="+title,
+		"-f", "body="+body)
+	if err != nil {
+		return DiscussionRef{}, fmt.Errorf("create tracking discussion: %w", err)
+	}
+
+	var createResp struct {
+		Data struct {
+			CreateDiscussion struct {
+				Discussion struct {
+					ID    string `json:"id"`
+					Title string `json:"title"`
+					URL   string `json:"url"`
+				} `json:"discussion"`
+			} `json:"createDiscussion"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(createOut, &createResp); err != nil {
+		return DiscussionRef{}, fmt.Errorf("parse create discussion response: %w", err)
+	}
+
+	d := createResp.Data.CreateDiscussion.Discussion
+	return DiscussionRef{NodeID: d.ID, Title: d.Title, URL: d.URL, Created: true}, nil
+}
+
+func PostDiscussionSummary(ctx context.Context, runner CommandRunner, discussionNodeID string, delta *Delta, filed *FileResult, report string) error {
+	if runner == nil {
+		return fmt.Errorf("runner is required")
+	}
+	if delta == nil {
+		return fmt.Errorf("delta is required")
+	}
+
+	var lines []string
+	lines = append(lines, "**xylem — weekly SoTA gap analysis**")
+	lines = append(lines, "")
+	lines = append(lines, fmt.Sprintf("- Current status counts: wired=%d, dormant=%d, not-implemented=%d",
+		delta.Current.Counts[StatusWired], delta.Current.Counts[StatusDormant], delta.Current.Counts[StatusNotImplemented]))
+	lines = append(lines, fmt.Sprintf("- Improvements since last snapshot: %d", len(delta.Improvements)))
+	lines = append(lines, fmt.Sprintf("- New gaps this run: %d", len(delta.NewGaps)))
+	if filed != nil && len(filed.Created) > 0 {
+		lines = append(lines, "- Filed issues:")
+		for _, item := range filed.Created {
+			lines = append(lines, fmt.Sprintf("  - %s (#%d)", item.Title, item.Number))
+		}
+	}
+	if filed != nil && len(filed.Existing) > 0 {
+		lines = append(lines, "- Existing open gap issues already covered:")
+		for _, item := range filed.Existing {
+			lines = append(lines, fmt.Sprintf("  - %s (#%d)", item.Title, item.Number))
+		}
+	}
+	if trimmed := strings.TrimSpace(report); trimmed != "" {
+		lines = append(lines, "", "<details>", "<summary>Gap report excerpt</summary>", "", trimmed, "", "</details>")
+	}
+	body := strings.Join(lines, "\n")
+
+	commentMutation := `mutation($discussionId: ID!, $body: String!) {
+  addDiscussionComment(input: {discussionId: $discussionId, body: $body}) {
+    comment { url }
+  }
+}`
+	if _, err := runner.RunOutput(ctx, "gh", "api", "graphql",
+		"-f", "query="+commentMutation,
+		"-f", "discussionId="+discussionNodeID,
+		"-f", "body="+body); err != nil {
+		return fmt.Errorf("post discussion summary comment: %w", err)
 	}
 	return nil
 }

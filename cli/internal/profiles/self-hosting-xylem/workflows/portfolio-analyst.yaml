@@ -32,13 +32,10 @@ phases:
       fi
       BODY=$(cat "$REPORT")
       DATE=$(date -u +%Y-%m-%d)
-      EXISTING=$(gh issue list --repo nicholls-inc/xylem --search "[portfolio] Weekly tracking" --json number --jq 'length')
-      if [ "$EXISTING" -gt 0 ]; then
-        NUMBER=$(gh issue list --repo nicholls-inc/xylem --search "[portfolio] Weekly tracking" --json number --jq '.[0].number')
-        gh issue comment "$NUMBER" --repo nicholls-inc/xylem --body "$BODY"
-      else
-        gh issue create --repo nicholls-inc/xylem \
-          --title "[portfolio] Weekly tracking ${DATE}" \
-          --body "$BODY" \
-          --label harness-impl
-      fi
+      .xylem/scripts/post-discussion.sh \
+        --owner nicholls-inc \
+        --repo xylem \
+        --category Reports \
+        --title "[portfolio] Weekly tracking ${DATE}" \
+        --title-search "[portfolio] Weekly tracking" \
+        --body "$BODY"

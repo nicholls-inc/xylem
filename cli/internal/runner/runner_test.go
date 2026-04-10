@@ -5319,38 +5319,6 @@ func TestResolveSourcePrefersConfigSource(t *testing.T) {
 	}
 }
 
-func TestBuildTemplateDataIncludesExtendedSourceConfigFields(t *testing.T) {
-	cfg := makeTestConfig(t.TempDir(), 1)
-	cfg.Sources["continuous-refactoring-semantic"] = config.SourceConfig{
-		Type:            "schedule",
-		Repo:            "owner/config-repo",
-		Cadence:         "0 9 * * 1",
-		Workflow:        "continuous-refactoring",
-		SourceDirs:      []string{"cli/internal"},
-		FileExtensions:  []string{".go"},
-		LOCThreshold:    80,
-		MaxIssuesPerRun: 2,
-		ExcludePatterns: []string{"**/*_test.go"},
-	}
-	r := &Runner{Config: cfg}
-
-	td := r.buildTemplateData(queue.Vessel{
-		Source: "schedule",
-		Meta:   map[string]string{"config_source": "continuous-refactoring-semantic"},
-	}, phase.IssueData{}, "inspect", 0, nil, "")
-
-	assert.Equal(t, "continuous-refactoring-semantic", td.Source.Name)
-	assert.Equal(t, "owner/config-repo", td.Source.Repo)
-	assert.Equal(t, "schedule", td.Source.Type)
-	assert.Equal(t, "continuous-refactoring", td.Source.Workflow)
-	assert.Equal(t, "0 9 * * 1", td.Source.Cadence)
-	assert.Equal(t, []string{"cli/internal"}, td.Source.SourceDirs)
-	assert.Equal(t, []string{".go"}, td.Source.FileExtensions)
-	assert.Equal(t, 80, td.Source.LOCThreshold)
-	assert.Equal(t, 2, td.Source.MaxIssuesPerRun)
-	assert.Equal(t, []string{"**/*_test.go"}, td.Source.ExcludePatterns)
-}
-
 // --- Orchestrated (parallel) execution tests ---
 
 func TestDrainOrchestratedDiamondWorkflow(t *testing.T) {

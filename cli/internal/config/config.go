@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"os"
-	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -83,6 +82,7 @@ type Config struct {
 	Harness             HarnessConfig             `yaml:"harness,omitempty"`
 	Observability       ObservabilityConfig       `yaml:"observability,omitempty"`
 	Cost                CostConfig                `yaml:"cost,omitempty"`
+	Telemetry           TelemetryConfig           `yaml:"telemetry,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -104,21 +104,16 @@ type TierRouting struct {
 }
 
 type SourceConfig struct {
-	Type            string          `yaml:"type"`
-	Repo            string          `yaml:"repo,omitempty"`
-	Schedule        string          `yaml:"schedule,omitempty"`
-	Cadence         string          `yaml:"cadence,omitempty"`
-	Workflow        string          `yaml:"workflow,omitempty"`
-	LLM             string          `yaml:"llm,omitempty"`
-	Model           string          `yaml:"model,omitempty"`
-	Timeout         string          `yaml:"timeout,omitempty"`
-	Exclude         []string        `yaml:"exclude,omitempty"`
-	Tasks           map[string]Task `yaml:"tasks,omitempty"`
-	SourceDirs      []string        `yaml:"source_dirs,omitempty"`
-	FileExtensions  []string        `yaml:"file_extensions,omitempty"`
-	LOCThreshold    int             `yaml:"loc_threshold,omitempty"`
-	MaxIssuesPerRun int             `yaml:"max_issues_per_run,omitempty"`
-	ExcludePatterns []string        `yaml:"exclude_patterns,omitempty"`
+	Type     string          `yaml:"type"`
+	Repo     string          `yaml:"repo,omitempty"`
+	Schedule string          `yaml:"schedule,omitempty"`
+	Cadence  string          `yaml:"cadence,omitempty"`
+	Workflow string          `yaml:"workflow,omitempty"`
+	LLM      string          `yaml:"llm,omitempty"`
+	Model    string          `yaml:"model,omitempty"`
+	Timeout  string          `yaml:"timeout,omitempty"`
+	Exclude  []string        `yaml:"exclude,omitempty"`
+	Tasks    map[string]Task `yaml:"tasks,omitempty"`
 }
 
 type StatusLabels struct {
@@ -261,6 +256,12 @@ type ObservabilityConfig struct {
 	Endpoint   string  `yaml:"endpoint,omitempty"`
 	Insecure   bool    `yaml:"insecure,omitempty"`
 	SampleRate float64 `yaml:"sample_rate,omitempty"`
+}
+
+type TelemetryConfig struct {
+	Enabled    *bool  `yaml:"enabled,omitempty"`
+	TargetRepo string `yaml:"target_repo,omitempty"`
+	Extended   bool   `yaml:"extended,omitempty"`
 }
 
 type CostConfig struct {
@@ -473,10 +474,6 @@ func (c *Config) Validate() error {
 			}
 		}
 
-		if err := validateContinuousRefactoringFields(name, src); err != nil {
-			return err
-		}
-
 		switch src.Type {
 		case "github", "github-pr":
 			if err := validateGitHubSource(name, src); err != nil {
@@ -531,6 +528,9 @@ func (c *Config) Validate() error {
 		return err
 	}
 	if err := c.validateCost(); err != nil {
+		return err
+	}
+	if err := c.validateTelemetry(); err != nil {
 		return err
 	}
 
@@ -681,6 +681,33 @@ func (c *Config) ObservabilitySampleRate() float64 {
 		return 1.0
 	}
 	return c.Observability.SampleRate
+}
+
+// TelemetryEnabled returns whether field-report telemetry is active.
+// Defaults to true (opt-out). The XYLEM_TELEMETRY env var overrides the
+// config value: "off" or "false" disables telemetry regardless of config.
+func (c *Config) TelemetryEnabled() bool {
+	if env := strings.TrimSpace(os.Getenv("XYLEM_TELEMETRY")); env != "" {
+		switch strings.ToLower(env) {
+		case "off", "false", "0", "no":
+			return false
+		case "on", "true", "1", "yes":
+			return true
+		}
+	}
+	if c.Telemetry.Enabled == nil {
+		return true
+	}
+	return *c.Telemetry.Enabled
+}
+
+// TelemetryTargetRepo returns the GitHub repo where field reports are filed.
+// Defaults to "nicholls-inc/xylem".
+func (c *Config) TelemetryTargetRepo() string {
+	if repo := strings.TrimSpace(c.Telemetry.TargetRepo); repo != "" {
+		return repo
+	}
+	return "nicholls-inc/xylem"
 }
 
 func parseConcurrencyNode(root *yaml.Node) (parsedConcurrency, error) {
@@ -896,6 +923,16 @@ func (c *Config) validateCost() error {
 	}
 	if c.Cost.Budget.MaxTokens < 0 {
 		return fmt.Errorf("cost.budget.max_tokens must be non-negative")
+	}
+	return nil
+}
+
+func (c *Config) validateTelemetry() error {
+	if repo := strings.TrimSpace(c.Telemetry.TargetRepo); repo != "" {
+		parts := strings.Split(repo, "/")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return fmt.Errorf("telemetry.target_repo must be in owner/name format")
+		}
 	}
 	return nil
 }
@@ -1235,12 +1272,6 @@ func parseScheduleValue(value string) (time.Duration, error) {
 	return interval, nil
 }
 func validateScheduleSource(name string, src SourceConfig) error {
-	if repo := strings.TrimSpace(src.Repo); repo != "" {
-		parts := strings.Split(repo, "/")
-		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
-			return fmt.Errorf("source %q (schedule): repo must be in owner/name format", name)
-		}
-	}
 	if strings.TrimSpace(src.Workflow) == "" {
 		return fmt.Errorf("source %q (schedule): workflow is required", name)
 	}
@@ -1251,55 +1282,4 @@ func validateScheduleSource(name string, src SourceConfig) error {
 		return fmt.Errorf("source %q (schedule): cadence is invalid: %w", name, err)
 	}
 	return nil
-}
-
-func validateContinuousRefactoringFields(name string, src SourceConfig) error {
-	for i, dir := range src.SourceDirs {
-		trimmed := strings.TrimSpace(dir)
-		if trimmed == "" {
-			return fmt.Errorf("source %q: source_dirs[%d] must be non-empty", name, i)
-		}
-		if filepath.IsAbs(trimmed) {
-			return fmt.Errorf("source %q: source_dirs[%d] must be relative", name, i)
-		}
-		if !isPathWithinRoot(trimmed) {
-			return fmt.Errorf("source %q: source_dirs[%d] must stay within repo root", name, i)
-		}
-	}
-	for i, ext := range src.FileExtensions {
-		trimmed := strings.TrimSpace(ext)
-		if trimmed == "" {
-			return fmt.Errorf("source %q: file_extensions[%d] must be non-empty", name, i)
-		}
-		if !strings.HasPrefix(trimmed, ".") {
-			return fmt.Errorf("source %q: file_extensions[%d] must start with \".\"", name, i)
-		}
-	}
-	if src.LOCThreshold < 0 {
-		return fmt.Errorf("source %q: loc_threshold must be greater than or equal to 0", name)
-	}
-	if src.MaxIssuesPerRun < 0 {
-		return fmt.Errorf("source %q: max_issues_per_run must be greater than or equal to 0", name)
-	}
-	for i, pattern := range src.ExcludePatterns {
-		if strings.TrimSpace(pattern) == "" {
-			return fmt.Errorf("source %q: exclude_patterns[%d] must be non-empty", name, i)
-		}
-		if err := validateDoublestarPattern(pattern); err != nil {
-			return fmt.Errorf("source %q: exclude_patterns[%d] invalid glob %q: %w", name, i, pattern, err)
-		}
-	}
-	return nil
-}
-
-func validateDoublestarPattern(pattern string) error {
-	normalized := strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(pattern)), "**", "*")
-	_, err := path.Match(normalized, "test")
-	return err
-}
-
-func isPathWithinRoot(value string) bool {
-	cleaned := filepath.Clean(value)
-	parentPrefix := ".." + string(filepath.Separator)
-	return cleaned != ".." && !strings.HasPrefix(cleaned, parentPrefix)
 }

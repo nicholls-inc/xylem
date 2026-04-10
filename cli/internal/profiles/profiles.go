@@ -15,8 +15,8 @@ import (
 var profileFS embed.FS
 
 var profileVersions = map[string]int{
-	"core":               1,
-	"self-hosting-xylem": 1,
+	"core":               2,
+	"self-hosting-xylem": 2,
 }
 
 var coreForbiddenDaemonFields = map[string]struct{}{
@@ -35,6 +35,7 @@ type ComposedProfile struct {
 	Profiles       []Profile
 	Workflows      map[string][]byte
 	Prompts        map[string][]byte
+	Scripts        map[string][]byte
 	Sources        map[string][]byte
 	ConfigOverlays [][]byte
 }
@@ -73,6 +74,7 @@ func Compose(names ...string) (*ComposedProfile, error) {
 	composed := &ComposedProfile{
 		Workflows: make(map[string][]byte),
 		Prompts:   make(map[string][]byte),
+		Scripts:   make(map[string][]byte),
 		Sources:   make(map[string][]byte),
 	}
 
@@ -113,6 +115,9 @@ func Compose(names ...string) (*ComposedProfile, error) {
 			case strings.HasPrefix(filePath, "prompts/") && strings.HasSuffix(filePath, ".md"):
 				promptKey := strings.TrimSuffix(strings.TrimPrefix(filePath, "prompts/"), ".md")
 				composed.Prompts[promptKey] = cloneBytes(data)
+			case strings.HasPrefix(filePath, "scripts/"):
+				scriptKey := strings.TrimPrefix(filePath, "scripts/")
+				composed.Scripts[scriptKey] = cloneBytes(data)
 			case strings.HasPrefix(filePath, "sources/") && strings.HasSuffix(filePath, ".yaml"):
 				sourceName := strings.TrimSuffix(path.Base(filePath), path.Ext(filePath))
 				if prevOwner, ok := sourceOwners[sourceName]; ok {

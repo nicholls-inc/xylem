@@ -27,5 +27,6 @@ cli/xylem
 !cli/internal/dtu/testdata/**/.xylem/
 !cli/internal/dtu/testdata/**/.xylem/**
 field-reports/
+.daemon-root/
 .claude/worktrees/
 .copilot-worktrees/

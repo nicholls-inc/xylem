@@ -4018,8 +4018,6 @@ func (r *Runner) resolveDefaultBranch() string {
 
 func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string) phase.TemplateData {
 	sourceName := vessel.Source
-	sourceData := phase.SourceData{}
-	sourceCfg := r.sourceConfigFromMeta(vessel)
 	if configSource := r.sourceConfigNameFromMeta(vessel); configSource != "" {
 		sourceName = configSource
 	}
@@ -4033,28 +4031,6 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			Test:   strings.TrimSpace(r.Config.Validation.Test),
 		}
 	}
-	if sourceCfg != nil {
-		sourceData = phase.SourceData{
-			Name:            sourceName,
-			Repo:            strings.TrimSpace(sourceCfg.Repo),
-			Type:            strings.TrimSpace(sourceCfg.Type),
-			Workflow:        strings.TrimSpace(sourceCfg.Workflow),
-			Schedule:        strings.TrimSpace(sourceCfg.Schedule),
-			Cadence:         strings.TrimSpace(sourceCfg.Cadence),
-			SourceDirs:      append([]string(nil), sourceCfg.SourceDirs...),
-			FileExtensions:  append([]string(nil), sourceCfg.FileExtensions...),
-			LOCThreshold:    sourceCfg.LOCThreshold,
-			MaxIssuesPerRun: sourceCfg.MaxIssuesPerRun,
-			ExcludePatterns: append([]string(nil), sourceCfg.ExcludePatterns...),
-		}
-	}
-	if strings.TrimSpace(sourceData.Name) == "" {
-		sourceData.Name = sourceName
-	}
-	if strings.TrimSpace(sourceData.Repo) == "" {
-		sourceData.Repo = repoSlug
-	}
-
 	return phase.TemplateData{
 		Issue: issueData,
 		Phase: phase.PhaseData{
@@ -4073,7 +4049,10 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			Slug:          repoSlug,
 			DefaultBranch: r.resolveDefaultBranch(),
 		},
-		Source:     sourceData,
+		Source: phase.SourceData{
+			Name: sourceName,
+			Repo: repoSlug,
+		},
 		Validation: validation,
 	}
 }

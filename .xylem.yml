@@ -151,16 +151,6 @@ sources:
         workflow: continuous-improvement
         ref: continuous-improvement
 
-  continuous-style:
-    type: scheduled
-    repo: nicholls-inc/xylem
-    schedule: "@daily"
-    timeout: "60m"
-    tasks:
-      daily-continuous-style:
-        workflow: continuous-style
-        ref: continuous-style
-
   harness-gap-analysis:
     type: scheduled
     repo: nicholls-inc/xylem

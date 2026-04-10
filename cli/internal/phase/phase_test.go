@@ -183,24 +183,6 @@ func TestRenderPrompt(t *testing.T) {
 			},
 			want: "Issue #7: Add caching layer\nURL: https://github.com/org/repo/issues/7\nPhase: implement (2)\nVessel: issue-7\nPrevious: Step 1: Add Redis. Step 2: Wire it up.\nGate: tests pass",
 		},
-		{
-			name:     "renders extended source config fields",
-			template: "{{.Source.Name}}|{{.Source.Type}}|{{.Source.Workflow}}|{{.Source.Cadence}}|{{.Source.LOCThreshold}}|{{.Source.MaxIssuesPerRun}}|{{index .Source.SourceDirs 0}}|{{index .Source.FileExtensions 0}}|{{index .Source.ExcludePatterns 0}}",
-			data: TemplateData{
-				Source: SourceData{
-					Name:            "continuous-refactoring-semantic",
-					Type:            "schedule",
-					Workflow:        "continuous-refactoring",
-					Cadence:         "0 9 * * 1",
-					SourceDirs:      []string{"cli/internal"},
-					FileExtensions:  []string{".go"},
-					LOCThreshold:    80,
-					MaxIssuesPerRun: 2,
-					ExcludePatterns: []string{"**/*_test.go"},
-				},
-			},
-			want: "continuous-refactoring-semantic|schedule|continuous-refactoring|0 9 * * 1|80|2|cli/internal|.go|**/*_test.go",
-		},
 	}
 
 	for _, tt := range tests {

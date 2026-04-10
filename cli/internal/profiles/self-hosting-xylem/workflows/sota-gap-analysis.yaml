@@ -42,7 +42,9 @@ phases:
         --delta ../.xylem/state/sota-gap-delta.json \
         --filed ../.xylem/state/sota-gap-filed-issues.json \
         --report ../.xylem/state/sota-gap-report.md \
-        --tracking-title "[sota-gap] Weekly tracking"
+        --tracking-title "[sota-gap] Weekly tracking" \
+        --mode discussion \
+        --category Reports
   - name: guard
     type: command
     run: |

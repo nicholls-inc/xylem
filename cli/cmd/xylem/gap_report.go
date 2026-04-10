@@ -102,10 +102,10 @@ func newGapReportFileIssuesCmd() *cobra.Command {
 }
 
 func newGapReportPostSummaryCmd() *cobra.Command {
-	var deltaPath, filedPath, reportPath, repo, trackingTitle string
+	var deltaPath, filedPath, reportPath, repo, trackingTitle, mode, categoryName string
 	cmd := &cobra.Command{
 		Use:   "post-summary",
-		Short: "Ensure a tracking issue exists and post a weekly summary comment",
+		Short: "Ensure a tracking discussion (or issue) exists and post a weekly summary comment",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			delta, err := loadDelta(deltaPath)
 			if err != nil {
@@ -119,14 +119,37 @@ func newGapReportPostSummaryCmd() *cobra.Command {
 			if err != nil {
 				return fmt.Errorf("read report %q: %w", reportPath, err)
 			}
-			tracking, err := gapreport.EnsureTrackingIssue(context.Background(), &realCmdRunner{}, repo, trackingTitle)
-			if err != nil {
-				return err
+
+			parts := strings.SplitN(repo, "/", 2)
+			if len(parts) != 2 {
+				return fmt.Errorf("invalid repo slug %q (expected owner/name)", repo)
 			}
-			if err := gapreport.PostSummary(context.Background(), &realCmdRunner{}, repo, tracking.Number, delta, filed, string(reportBytes)); err != nil {
-				return err
+
+			ctx := context.Background()
+			runner := &realCmdRunner{}
+
+			switch mode {
+			case "discussion":
+				tracking, err := gapreport.EnsureTrackingDiscussion(ctx, runner, parts[0], parts[1], categoryName, trackingTitle)
+				if err != nil {
+					return err
+				}
+				if err := gapreport.PostDiscussionSummary(ctx, runner, tracking.NodeID, delta, filed, string(reportBytes)); err != nil {
+					return err
+				}
+				fmt.Printf("Posted summary to discussion %s\n", tracking.URL)
+			case "issue":
+				tracking, err := gapreport.EnsureTrackingIssue(ctx, runner, repo, trackingTitle)
+				if err != nil {
+					return err
+				}
+				if err := gapreport.PostSummary(ctx, runner, repo, tracking.Number, delta, filed, string(reportBytes)); err != nil {
+					return err
+				}
+				fmt.Printf("Posted summary to issue #%d\n", tracking.Number)
+			default:
+				return fmt.Errorf("invalid --mode %q (valid values: discussion, issue)", mode)
 			}
-			fmt.Printf("Posted summary to issue #%d\n", tracking.Number)
 			return nil
 		},
 	}
@@ -134,7 +157,9 @@ func newGapReportPostSummaryCmd() *cobra.Command {
 	cmd.Flags().StringVar(&filedPath, "filed", "", "Path to filed-issues JSON")
 	cmd.Flags().StringVar(&reportPath, "report", "", "Path to markdown gap report")
 	cmd.Flags().StringVar(&repo, "repo", "", "GitHub repository slug (owner/name)")
-	cmd.Flags().StringVar(&trackingTitle, "tracking-title", gapreport.DefaultTrackingIssueTitle, "Tracking issue title")
+	cmd.Flags().StringVar(&trackingTitle, "tracking-title", gapreport.DefaultTrackingDiscussionTitle, "Tracking discussion/issue title")
+	cmd.Flags().StringVar(&mode, "mode", "discussion", "Post target: discussion or issue")
+	cmd.Flags().StringVar(&categoryName, "category", "Reports", "Discussion category name (used when --mode=discussion)")
 	cmd.MarkFlagRequired("delta")  //nolint:errcheck
 	cmd.MarkFlagRequired("filed")  //nolint:errcheck
 	cmd.MarkFlagRequired("report") //nolint:errcheck

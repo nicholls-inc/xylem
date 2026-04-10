@@ -21,8 +21,8 @@ import (
 
 var expectedCoreWorkflows = []string{
 	"adapt-repo",
-	"auto-triage-issues",
 	"context-weight-audit",
+	"field-report",
 	"fix-bug",
 	"fix-pr-checks",
 	"implement-feature",
@@ -39,12 +39,12 @@ var expectedCoreWorkflows = []string{
 
 var expectedSelfHostingWorkflows = []string{
 	"audit",
-	"continuous-refactoring",
 	"continuous-improvement",
 	"continuous-simplicity",
-	"continuous-style",
 	"diagnose-failures",
 	"implement-harness",
+	"ingest-field-reports",
+	"initiative-tracker",
 	"metrics-collector",
 	"portfolio-analyst",
 	"sota-gap-analysis",
@@ -407,9 +407,6 @@ func TestInitCreatesV2Files(t *testing.T) {
 		".xylem/profile.lock",
 		".xylem/prompts/adapt-repo/apply.md",
 		".xylem/prompts/adapt-repo/plan.md",
-		".xylem/prompts/auto-triage-issues/classify.md",
-		".xylem/prompts/auto-triage-issues/discover.md",
-		".xylem/prompts/auto-triage-issues/apply.md",
 		".xylem/prompts/security-compliance/synthesize.md",
 		".xylem/prompts/workflow-health-report/analyze.md",
 	}
@@ -456,7 +453,7 @@ func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
 	assert.Equal(t, 12, marker.IssueNumber)
 	assert.Equal(t, "https://github.com/owner/name/issues/12", marker.IssueURL)
 	assert.Equal(t, adaptRepoSeededByInit, marker.SeededBy)
-	assert.Equal(t, 1, marker.ProfileVersion)
+	assert.Equal(t, 2, marker.ProfileVersion)
 	assert.Len(t, runner.calls, 3)
 }
 
@@ -556,7 +553,6 @@ func TestInitScaffoldConfigV2Format(t *testing.T) {
 	assert.Contains(t, content, "profiles:")
 	assert.Contains(t, content, "workflow-health-report")
 	assert.Contains(t, content, "security-compliance")
-	assert.Contains(t, content, "auto-triage-issues")
 	assert.NotContains(t, content, "template:")
 }
 
@@ -636,7 +632,6 @@ func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
 
 	assert.Contains(t, output, "Created "+configPath)
 	assert.Contains(t, output, "Created .xylem/profile.lock")
-	assert.Contains(t, output, "Created .xylem/workflows/auto-triage-issues.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/context-weight-audit.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/workflow-health-report.yaml")
 
@@ -656,12 +651,12 @@ func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core"}, cfg.Profiles)
 	assert.Contains(t, cfg.Sources, "adaptation")
-	assert.Contains(t, cfg.Sources, "auto-triage-issues")
 	assert.Contains(t, cfg.Sources, "pr-lifecycle")
 	assert.Contains(t, cfg.Sources, "lessons-hygiene")
 	assert.Contains(t, cfg.Sources, "context-audit")
 	assert.Contains(t, cfg.Sources, "security-compliance")
 	assert.Contains(t, cfg.Sources, "workflow-health")
+	assert.Contains(t, cfg.Sources, "field-report")
 	require.NoError(t, cfg.Validate())
 }
 
@@ -684,7 +679,6 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	sort.Strings(expectedWorkflows)
 	assert.Equal(t, expectedWorkflows, scaffoldedWorkflowNames(t, dir))
 	assert.Contains(t, output, "Created .xylem/workflows/continuous-simplicity.yaml")
-	assert.Contains(t, output, "Created .xylem/workflows/continuous-style.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/implement-harness.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/unblock-wave.yaml")
 

@@ -77,49 +77,6 @@ sources:
       daily-rotation:
         workflow: continuous-improvement
         ref: continuous-improvement
-  continuous-style:
-    type: scheduled
-    repo: "{{ .Repo }}"
-    schedule: "@daily"
-    timeout: "60m"
-    tasks:
-      daily-continuous-style:
-        workflow: continuous-style
-        ref: continuous-style
-  continuous-refactoring-semantic:
-    type: schedule
-    repo: "{{ .Repo }}"
-    cadence: "0 9 * * 1"
-    workflow: continuous-refactoring
-    timeout: "90m"
-    source_dirs:
-      - cli/cmd/xylem
-      - cli/internal
-    file_extensions:
-      - .go
-    loc_threshold: 80
-    max_issues_per_run: 2
-    exclude_patterns:
-      - "**/*_test.go"
-      - "**/testdata/**"
-      - ".xylem/**"
-  continuous-refactoring-file-diet:
-    type: schedule
-    repo: "{{ .Repo }}"
-    cadence: "0 9 * * 1-5"
-    workflow: continuous-refactoring
-    timeout: "90m"
-    source_dirs:
-      - cli/cmd/xylem
-      - cli/internal
-    file_extensions:
-      - .go
-    loc_threshold: 250
-    max_issues_per_run: 1
-    exclude_patterns:
-      - "**/*_test.go"
-      - "**/testdata/**"
-      - ".xylem/**"
   metrics-collector:
     type: scheduled
     repo: "{{ .Repo }}"
@@ -149,6 +106,26 @@ sources:
       daily-audit:
         workflow: audit
         ref: audit
+
+  initiative-tracker:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@weekly"
+    timeout: "60m"
+    tasks:
+      weekly-initiative-status:
+        workflow: initiative-tracker
+        ref: initiative-tracker
+
+  ingest-field-reports:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@weekly"
+    timeout: "60m"
+    tasks:
+      weekly-field-ingest:
+        workflow: ingest-field-reports
+        ref: ingest-field-reports
 
   harness-post-merge:
     type: github-merge

@@ -225,6 +225,16 @@ func syncProfileAssets(stateDir string, composed *profiles.ComposedProfile, forc
 		}
 	}
 
+	for _, name := range sortedKeys(composed.Scripts) {
+		scriptPath := filepath.Join(stateDir, "scripts", filepath.FromSlash(name))
+		if err := writeFileIfNeeded(scriptPath, composed.Scripts[name], force); err != nil {
+			return fmt.Errorf("sync script %q: %w", name, err)
+		}
+		if err := os.Chmod(scriptPath, 0o755); err != nil {
+			return fmt.Errorf("chmod script %q: %w", name, err)
+		}
+	}
+
 	return nil
 }
 

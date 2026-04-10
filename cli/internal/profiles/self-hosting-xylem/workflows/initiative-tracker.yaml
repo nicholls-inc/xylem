@@ -1,0 +1,60 @@
+name: initiative-tracker
+class: ops
+description: "Scan open issues by label, group into initiatives, and post structured status to GitHub Discussions"
+phases:
+  - name: collect
+    type: command
+    noop:
+      match: XYLEM_NOOP
+    run: |
+      set -euo pipefail
+      mkdir -p .xylem/state/initiative
+
+      # Collect issues by key labels.
+      for LABEL in harness-impl enhancement bug ready-for-work; do
+        gh issue list --repo nicholls-inc/xylem \
+          --label "$LABEL" --state open \
+          --json number,title,labels,updatedAt,assignees \
+          --limit 100 > ".xylem/state/initiative/${LABEL}-issues.json"
+      done
+
+      # Collect wave labels dynamically.
+      gh label list --repo nicholls-inc/xylem --json name \
+        --jq '.[] | select(.name | startswith("wave-")) | .name' \
+        > .xylem/state/initiative/wave-labels.txt || true
+      while IFS= read -r WAVE; do
+        [ -z "$WAVE" ] && continue
+        gh issue list --repo nicholls-inc/xylem \
+          --label "$WAVE" --state open \
+          --json number,title,labels,updatedAt,assignees \
+          --limit 100 > ".xylem/state/initiative/${WAVE}-issues.json"
+      done < .xylem/state/initiative/wave-labels.txt
+
+      # Check if any issues were found.
+      TOTAL=$(cat .xylem/state/initiative/*-issues.json 2>/dev/null | jq -s 'map(length) | add // 0')
+      if [ "$TOTAL" -eq 0 ]; then
+        echo "XYLEM_NOOP: no open issues found"
+      else
+        echo "Collected ${TOTAL} open issues across all labels"
+      fi
+  - name: analyze
+    prompt_file: .xylem/prompts/initiative-tracker/analyze.md
+    max_turns: 30
+  - name: post
+    type: command
+    run: |
+      set -euo pipefail
+      REPORT=".xylem/state/initiative/initiative-report.md"
+      if [ ! -f "$REPORT" ]; then
+        echo "No initiative report to post"
+        exit 0
+      fi
+      BODY=$(cat "$REPORT")
+      DATE=$(date -u +%Y-%m-%d)
+      .xylem/scripts/post-discussion.sh \
+        --owner nicholls-inc \
+        --repo xylem \
+        --category Initiatives \
+        --title "[initiative] Status update — ${DATE}" \
+        --title-search "[initiative] Status update" \
+        --body "$BODY"

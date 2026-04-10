@@ -10,3 +10,24 @@ phases:
   - name: report
     prompt_file: .xylem/prompts/workflow-health-report/report.md
     max_turns: 20
+  - name: post
+    type: command
+    run: |
+      set -euo pipefail
+      REPORT=".xylem/state/workflow-health-report.md"
+      if [ ! -f "$REPORT" ]; then
+        echo "No health report to post"
+        exit 0
+      fi
+      BODY=$(cat "$REPORT")
+      DATE=$(date -u +%Y-%m-%d)
+      SLUG="{{.Repo.Slug}}"
+      OWNER="${SLUG%%/*}"
+      NAME="${SLUG##*/}"
+      .xylem/scripts/post-discussion.sh \
+        --owner "$OWNER" \
+        --repo "$NAME" \
+        --category Reports \
+        --title "[health] Weekly workflow health — ${DATE}" \
+        --title-search "[health] Weekly workflow health" \
+        --body "$BODY"
