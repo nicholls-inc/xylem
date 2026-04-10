@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -44,6 +46,15 @@ type CommandRunner interface {
 	RunOutput(ctx context.Context, name string, args ...string) ([]byte, error)
 	RunProcess(ctx context.Context, dir string, name string, args ...string) error
 	RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error)
+}
+
+type PhaseProcessObserver interface {
+	ProcessStarted(pid int)
+	ProcessExited(pid int)
+}
+
+type PhaseProcessRunner interface {
+	RunPhaseObserved(ctx context.Context, dir string, stdin io.Reader, observer PhaseProcessObserver, name string, args ...string) ([]byte, error)
 }
 
 // WorktreeManager abstracts worktree lifecycle for testing.
@@ -103,6 +114,23 @@ type Runner struct {
 
 	resultMu sync.Mutex
 	result   DrainResult
+
+	processMu sync.Mutex
+	processes map[string]trackedProcess
+}
+
+type trackedProcess struct {
+	PID       int
+	PhaseName string
+	Exited    bool
+}
+
+type StallFinding struct {
+	Code     string
+	Level    string
+	VesselID string
+	Phase    string
+	Message  string
 }
 
 // New creates a Runner.
@@ -112,12 +140,13 @@ func New(cfg *config.Config, q *queue.Queue, wt WorktreeManager, r CommandRunner
 		concurrency = cfg.Concurrency
 	}
 	return &Runner{
-		Config:   cfg,
-		Queue:    q,
-		Worktree: wt,
-		Runner:   r,
-		LiveGate: gate.NewLiveVerifier(),
-		sem:      make(chan struct{}, concurrency),
+		Config:    cfg,
+		Queue:     q,
+		Worktree:  wt,
+		Runner:    r,
+		LiveGate:  gate.NewLiveVerifier(),
+		sem:       make(chan struct{}, concurrency),
+		processes: make(map[string]trackedProcess),
 	}
 }
 
@@ -473,6 +502,8 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 }
 
 func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome string) {
+	defer r.clearTrackedProcess(vessel.ID)
+
 	// Look up source for this vessel
 	src := r.resolveSourceForVessel(vessel)
 
@@ -677,6 +708,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
+				outputPath := filepath.Join(phasesDir, p.Name+".output")
+				if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+					log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+				}
 				cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
 				output = []byte(cmdOut)
 				runErr = cmdErr
@@ -745,7 +780,11 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if phaseStdin != nil {
 					stdinContent = rendered
 				}
-				output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+				outputPath := filepath.Join(phasesDir, p.Name+".output")
+				if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+					log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+				}
+				output, runErr = r.runPhaseWithRateLimitRetry(ctx, vessel.ID, p.Name, worktreePath, stdinContent, cmd, args)
 			}
 
 			if r.vesselCancelled(ctx, vessel.ID) {
@@ -1078,7 +1117,11 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		return "failed"
 	}
 
-	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
+	outputPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, "prompt.output")
+	if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+		log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+	}
+	output, runErr := r.runPhaseWithRateLimitRetry(ctx, vessel.ID, "prompt", worktreePath, prompt, cmd, args)
 	phaseDuration := r.runtimeSince(phaseStartedAt)
 	if r.vesselCancelled(ctx, vessel.ID) {
 		return r.cancelVessel(vessel, worktreePath, vrs, nil)
@@ -1852,6 +1895,9 @@ type gateExecutionResult struct {
 // gate evaluation and retries. It returns the outcome without mutating the
 // vessel's queue state directly (the caller handles that).
 func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *workflow.Workflow, phaseIdx int, previousOutputs map[string]string, issueData phase.IssueData, harnessContent, worktreePath string, src source.Source, vrs *vesselRunState, enforceBudget bool) singlePhaseResult {
+	if vessel.Meta != nil {
+		vessel.Meta = maps.Clone(vessel.Meta)
+	}
 	p := wf.Phases[phaseIdx]
 	gateResult := ""
 	gateRetries := 0
@@ -1953,6 +1999,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
+			outputPath := filepath.Join(phasesDir, p.Name+".output")
+			if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+				log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+			}
 			cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
 			output = []byte(cmdOut)
 			runErr = cmdErr
@@ -2020,7 +2070,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if phaseStdin != nil {
 				stdinContent = rendered
 			}
-			output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+			outputPath := filepath.Join(phasesDir, p.Name+".output")
+			if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+				log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+			}
+			output, runErr = r.runPhaseWithRateLimitRetry(ctx, vessel.ID, p.Name, worktreePath, stdinContent, cmd, args)
 		}
 
 		if r.vesselCancelled(ctx, vessel.ID) {
@@ -3457,6 +3511,142 @@ func (r *Runner) rebuildPreviousOutputs(vesselID string, sk *workflow.Workflow) 
 	return outputs
 }
 
+func (r *Runner) touchPhaseActivity(path string) error {
+	now := r.runtimeNow()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create activity dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE, 0o644)
+	if err != nil {
+		return fmt.Errorf("open activity file: %w", err)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		return fmt.Errorf("close activity file: %w", closeErr)
+	}
+	if err := os.Chtimes(path, now, now); err != nil {
+		return fmt.Errorf("update activity mtime: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) latestPhaseActivity(vesselID string) (string, time.Time, error) {
+	phasesDir := filepath.Join(r.Config.StateDir, "phases", vesselID)
+	entries, err := os.ReadDir(phasesDir)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	var (
+		latestPhase string
+		latestTime  time.Time
+	)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".output") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		if latestPhase == "" || info.ModTime().After(latestTime) {
+			latestPhase = strings.TrimSuffix(entry.Name(), ".output")
+			latestTime = info.ModTime()
+		}
+	}
+	if latestPhase == "" {
+		return "", time.Time{}, os.ErrNotExist
+	}
+	return latestPhase, latestTime, nil
+}
+
+func (r *Runner) markProcessStarted(vesselID, phaseName string, pid int) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	r.processes[vesselID] = trackedProcess{PID: pid, PhaseName: phaseName}
+}
+
+func (r *Runner) markProcessExited(vesselID string, pid int) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	current, ok := r.processes[vesselID]
+	if !ok || current.PID != pid {
+		return
+	}
+	current.Exited = true
+	r.processes[vesselID] = current
+}
+
+func (r *Runner) clearTrackedProcess(vesselID string) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	delete(r.processes, vesselID)
+}
+
+func (r *Runner) trackedProcess(vesselID string) (trackedProcess, bool) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	proc, ok := r.processes[vesselID]
+	return proc, ok
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+func stopProcess(pid int, sleep func(context.Context, time.Duration) error) error {
+	if pid <= 0 {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find process %d: %w", pid, err)
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("sigterm process %d: %w", pid, err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return nil
+		}
+		if sleep != nil {
+			if err := sleep(context.Background(), 250*time.Millisecond); err != nil {
+				break
+			}
+		} else {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	if !processAlive(pid) {
+		return nil
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("sigkill process %d: %w", pid, err)
+	}
+	return nil
+}
+
+type vesselProcessObserver struct {
+	r         *Runner
+	vesselID  string
+	phaseName string
+}
+
+func (o vesselProcessObserver) ProcessStarted(pid int) {
+	o.r.markProcessStarted(o.vesselID, o.phaseName, pid)
+}
+
+func (o vesselProcessObserver) ProcessExited(pid int) {
+	o.r.markProcessExited(o.vesselID, pid)
+}
+
 func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 	if vessel.Meta == nil {
 		return 0
@@ -3654,6 +3844,100 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 	}
 }
 
+func (r *Runner) CheckStalledVessels(ctx context.Context) []StallFinding {
+	threshold := r.Config.Daemon.StallMonitor.PhaseStallThreshold
+	if threshold == "" {
+		return nil
+	}
+	stallThreshold, err := time.ParseDuration(threshold)
+	if err != nil {
+		log.Printf("warn: parse phase stall threshold: %v", err)
+		return nil
+	}
+
+	running, err := r.Queue.ListByState(queue.StateRunning)
+	if err != nil {
+		log.Printf("warn: list running vessels for stall check: %v", err)
+		return nil
+	}
+
+	findings := make([]StallFinding, 0)
+	for _, vessel := range running {
+		if r.Config.Daemon.StallMonitor.OrphanCheckEnabled {
+			proc, ok := r.trackedProcess(vessel.ID)
+			if ok && (proc.Exited || !processAlive(proc.PID)) {
+				msg := "vessel orphaned (no live subprocess)"
+				log.Printf("warn: %s for vessel %s", msg, vessel.ID)
+				if r.timeoutRunningVessel(ctx, vessel, msg) {
+					findings = append(findings, StallFinding{
+						Code:     "orphaned_subprocess",
+						Level:    "critical",
+						VesselID: vessel.ID,
+						Message:  msg,
+					})
+				}
+				continue
+			}
+		}
+
+		phaseName, modifiedAt, err := r.latestPhaseActivity(vessel.ID)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				log.Printf("warn: inspect phase activity for vessel %s: %v", vessel.ID, err)
+			}
+			continue
+		}
+		staleFor := r.runtimeSince(modifiedAt)
+		if staleFor <= stallThreshold {
+			continue
+		}
+
+		if proc, ok := r.trackedProcess(vessel.ID); ok && !proc.Exited && processAlive(proc.PID) {
+			if err := stopProcess(proc.PID, r.runtimeSleep); err != nil {
+				log.Printf("warn: stop stalled process for vessel %s: %v", vessel.ID, err)
+			}
+		}
+		msg := fmt.Sprintf("phase stalled: no output for %s", staleFor.Truncate(time.Second))
+		log.Printf("warn: %s for vessel %s (phase=%s)", msg, vessel.ID, phaseName)
+		if r.timeoutRunningVessel(ctx, vessel, msg) {
+			findings = append(findings, StallFinding{
+				Code:     "phase_stalled",
+				Level:    "critical",
+				VesselID: vessel.ID,
+				Phase:    phaseName,
+				Message:  fmt.Sprintf("Vessel %s phase-stalled (%s no output on %s)", vessel.ID, staleFor.Truncate(time.Second), phaseName),
+			})
+		}
+	}
+	return findings
+}
+
+func (r *Runner) timeoutRunningVessel(ctx context.Context, vessel queue.Vessel, errMsg string) bool {
+	r.clearTrackedProcess(vessel.ID)
+	if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, errMsg); updateErr != nil {
+		log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
+		return false
+	}
+
+	timeoutSpan := r.startWaitTransitionSpan(ctx, vessel, "timed_out", waitedDuration(vessel.StartedAt, r.runtimeNow()))
+	vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
+	vrs.setTraceContext(observability.TraceContextFromContext(timeoutSpan.Context()))
+	r.annotateRecoveryMetadata(vessel.ID, queue.StateTimedOut, errMsg, traceContextPointer(vrs.trace))
+	src := r.resolveSourceForVessel(vessel)
+	if err := src.OnTimedOut(ctx, vessel); err != nil {
+		log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
+	}
+	r.persistRunArtifacts(vessel, string(queue.StateTimedOut), vrs, nil, r.runtimeNow())
+	if r.Tracer != nil {
+		if current, findErr := r.Queue.FindByID(vessel.ID); findErr == nil && current != nil {
+			timeoutSpan.AddAttributes(observability.RecoveryAttributes(recoveryAttributesFromMeta(current.Meta)))
+		}
+	}
+	r.finishWaitTransitionSpan(timeoutSpan, nil)
+	r.removeWorktree(ctx, vessel.WorktreePath, vessel.ID)
+	return true
+}
+
 func (r *Runner) runtimeNow() time.Time {
 	now, err := dtu.RuntimeNow()
 	if err != nil {
@@ -3740,14 +4024,26 @@ func isRateLimitError(err error) bool {
 // stdinContent is re-wrapped in a fresh strings.Reader for each attempt;
 // pass "" for nil stdin.
 func (r *Runner) runPhaseWithRateLimitRetry(
-	ctx context.Context, dir, stdinContent, cmd string, args []string,
+	ctx context.Context, vesselID, phaseName, dir, stdinContent, cmd string, args []string,
 ) ([]byte, error) {
 	for attempt := 0; attempt <= rateLimitMaxRetries; attempt++ {
 		var stdin io.Reader
 		if stdinContent != "" {
 			stdin = strings.NewReader(stdinContent)
 		}
-		output, err := r.Runner.RunPhase(ctx, dir, stdin, cmd, args...)
+		var (
+			output []byte
+			err    error
+		)
+		if observedRunner, ok := r.Runner.(PhaseProcessRunner); ok {
+			output, err = observedRunner.RunPhaseObserved(ctx, dir, stdin, vesselProcessObserver{
+				r:         r,
+				vesselID:  vesselID,
+				phaseName: phaseName,
+			}, cmd, args...)
+		} else {
+			output, err = r.Runner.RunPhase(ctx, dir, stdin, cmd, args...)
+		}
 		if err == nil || !isRateLimitError(err) {
 			return output, err
 		}

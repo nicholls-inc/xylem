@@ -185,9 +185,10 @@ type ValidationConfig struct {
 }
 
 type DaemonConfig struct {
-	ScanInterval  string `yaml:"scan_interval,omitempty"`
-	DrainInterval string `yaml:"drain_interval,omitempty"`
-	AutoUpgrade   bool   `yaml:"auto_upgrade,omitempty"`
+	ScanInterval  string             `yaml:"scan_interval,omitempty"`
+	DrainInterval string             `yaml:"drain_interval,omitempty"`
+	StallMonitor  StallMonitorConfig `yaml:"stall_monitor,omitempty"`
+	AutoUpgrade   bool               `yaml:"auto_upgrade,omitempty"`
 	// UpgradeInterval controls how often the daemon re-runs the
 	// auto_upgrade check while the loop is running. Only meaningful when
 	// AutoUpgrade is true. Defaults to 5m. Accepts any Go duration string.
@@ -209,6 +210,12 @@ type DaemonConfig struct {
 	// AutoMergeReviewer is the GitHub login to request before enabling
 	// auto-merge. Defaults to empty, which skips reviewer requests.
 	AutoMergeReviewer string `yaml:"auto_merge_reviewer,omitempty"`
+}
+
+type StallMonitorConfig struct {
+	PhaseStallThreshold  string `yaml:"phase_stall_threshold,omitempty"`
+	ScannerIdleThreshold string `yaml:"scanner_idle_threshold,omitempty"`
+	OrphanCheckEnabled   bool   `yaml:"orphan_check_enabled,omitempty"`
 }
 
 type HarnessConfig struct {
@@ -279,6 +286,11 @@ func Load(path string) (*Config, error) {
 		Daemon: DaemonConfig{
 			ScanInterval:  "60s",
 			DrainInterval: "30s",
+			StallMonitor: StallMonitorConfig{
+				PhaseStallThreshold:  "10m",
+				ScannerIdleThreshold: "5m",
+				OrphanCheckEnabled:   true,
+			},
 		},
 	}
 
@@ -370,6 +382,16 @@ func (c *Config) Validate() error {
 	if c.Daemon.DrainInterval != "" {
 		if _, err := time.ParseDuration(c.Daemon.DrainInterval); err != nil {
 			return fmt.Errorf("daemon.drain_interval must be a valid duration: %w", err)
+		}
+	}
+	if c.Daemon.StallMonitor.PhaseStallThreshold != "" {
+		if _, err := time.ParseDuration(c.Daemon.StallMonitor.PhaseStallThreshold); err != nil {
+			return fmt.Errorf("daemon.stall_monitor.phase_stall_threshold must be a valid duration: %w", err)
+		}
+	}
+	if c.Daemon.StallMonitor.ScannerIdleThreshold != "" {
+		if _, err := time.ParseDuration(c.Daemon.StallMonitor.ScannerIdleThreshold); err != nil {
+			return fmt.Errorf("daemon.stall_monitor.scanner_idle_threshold must be a valid duration: %w", err)
 		}
 	}
 	if strings.TrimSpace(c.Daemon.AutoMergeBranchPattern) != "" {

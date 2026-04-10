@@ -151,6 +151,47 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	return vessels, nil
 }
 
+func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
+	excludeSet := make(map[string]bool, len(g.Exclude))
+	for _, ex := range g.Exclude {
+		excludeSet[ex] = true
+	}
+
+	seen := make(map[int]struct{})
+	count := 0
+	for _, task := range g.Tasks {
+		for _, label := range task.Labels {
+			args := []string{
+				"search", "issues",
+				"--repo", g.Repo,
+				"--state", "open",
+				"--json", "number,title,body,url,labels",
+				"--limit", "20",
+				"--label", label,
+			}
+
+			out, err := g.CmdRunner.Run(ctx, "gh", args...)
+			if err != nil {
+				return 0, fmt.Errorf("gh search issues: %w", err)
+			}
+
+			var issues []ghIssue
+			if err := json.Unmarshal(out, &issues); err != nil {
+				return 0, fmt.Errorf("parse gh search output: %w", err)
+			}
+
+			for _, issue := range issues {
+				if _, ok := seen[issue.Number]; ok || g.hasExcludedLabel(issue, excludeSet) {
+					continue
+				}
+				seen[issue.Number] = struct{}{}
+				count++
+			}
+		}
+	}
+	return count, nil
+}
+
 func (g *GitHub) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
 	g.applyIssueLabels(ctx, vessel.Meta["issue_num"],
 		[]string{vessel.Meta["status_label_queued"]}, nil)

@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/daemonhealth"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
@@ -91,8 +92,47 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	startedAt := daemonNow()
+	lastActivityAt := startedAt
+	lastUpgradeAt := startedAt
+	idleThreshold := 5 * time.Minute
+	if cfg.Daemon.StallMonitor.ScannerIdleThreshold != "" {
+		if parsed, err := time.ParseDuration(cfg.Daemon.StallMonitor.ScannerIdleThreshold); err == nil {
+			idleThreshold = parsed
+		}
+	}
+	var backlogCount int
+	var stallChecks []daemonhealth.Check
+	scanRunner := newCmdRunner(cfg)
 	scan := func(ctx context.Context) (scanner.ScanResult, error) {
-		return runScan(ctx, cfg, q)
+		s := scanner.New(cfg, q, scanRunner)
+		result, err := s.Scan(ctx)
+		if err != nil {
+			return result, err
+		}
+		if result.Added > 0 {
+			lastActivityAt = daemonNow()
+			backlogCount = 0
+			return result, nil
+		}
+		if !daemonQueueIdle(q) {
+			backlogCount = 0
+			return result, nil
+		}
+		count, err := s.BacklogCount(ctx)
+		if err != nil {
+			slog.Warn("daemon backlog check failed", "error", err)
+			backlogCount = 0
+			return result, nil
+		}
+		backlogCount = count
+		if count > 0 {
+			idleFor := daemonNow().Sub(lastActivityAt)
+			if idleFor > idleThreshold {
+				slog.Warn("daemon idle with backlog", "count", count, "idle_for", idleFor)
+			}
+		}
+		return result, nil
 	}
 	cmdRunner := newCmdRunner(cfg)
 	drainRunner, cleanupDrainRunner := buildDrainRunner(cfg, q, wt, cmdRunner)
@@ -111,6 +151,8 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		return drainRunner.Drain(ctx)
 	}
 	check := func(ctx context.Context) {
+		findings := drainRunner.CheckStalledVessels(ctx)
+		stallChecks = daemonChecksFromFindings(findings, daemonNow())
 		drainRunner.CheckWaitingVessels(ctx)
 		drainRunner.CheckHungVessels(ctx)
 		// Auto-merge: best-effort request copilot review on merge-ready
@@ -121,7 +163,32 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		}
 	}
 
-	commandErr = daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, scanInterval, drainInterval, upgradeInterval)
+	tickHook := func(now time.Time, state daemonTickState) {
+		if !state.LastUpgrade.IsZero() {
+			lastUpgradeAt = state.LastUpgrade
+		}
+		counts := daemonQueueCounts(q)
+		if counts.pending > 0 || counts.running > 0 || counts.waiting > 0 || state.InFlight > 0 {
+			lastActivityAt = now
+		}
+		checks := append([]daemonhealth.Check(nil), stallChecks...)
+		if check := daemonBacklogHealthCheck(now, lastActivityAt, idleThreshold, backlogCount, counts); check != nil {
+			checks = append(checks, *check)
+		}
+		snapshot := daemonhealth.Snapshot{
+			PID:           os.Getpid(),
+			StartedAt:     startedAt.UTC(),
+			UpdatedAt:     now.UTC(),
+			Binary:        buildInfo(),
+			LastUpgradeAt: lastUpgradeAt.UTC(),
+			Checks:        checks,
+		}
+		if err := daemonhealth.Save(cfg.StateDir, snapshot); err != nil {
+			slog.Warn("daemon save health failed", "error", err)
+		}
+	}
+
+	commandErr = daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, tickHook, scanInterval, drainInterval, upgradeInterval)
 	return commandErr
 }
 
@@ -170,12 +237,19 @@ type inFlightTracker interface {
 // checkFunc runs periodic vessel health checks (waiting vessel label checks,
 // hung vessel timeouts). May be nil if no checks are needed.
 type checkFunc func(ctx context.Context)
+type tickFunc func(now time.Time, state daemonTickState)
 
 // upgradeFunc runs a self-upgrade attempt. If it succeeds with a binary
 // change, it calls exec() and never returns. If it returns, either the
 // binary was unchanged or the upgrade failed; the daemon continues normally.
 // May be nil to disable periodic upgrades.
 type upgradeFunc func()
+
+type daemonTickState struct {
+	LastUpgrade time.Time
+	InFlight    int
+	Draining    bool
+}
 
 // defaultUpgradeInterval is how often the daemon checks for a new binary.
 // Five minutes balances fast activation of newly-merged fixes against
@@ -216,7 +290,7 @@ const upgradeOverdueMultiplier = 3
 //     Once in_flight reaches zero, the normal path fires.
 //
 // Pass nil/zero upgrade/upgradeInterval to disable.
-func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
+func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, tick tickFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	tickInterval := scanInterval
 	if drainInterval < tickInterval {
 		tickInterval = drainInterval
@@ -283,6 +357,7 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 		upgradeOverdue := upgradeReady && upgradeElapsed >= upgradeInterval*time.Duration(upgradeOverdueMultiplier)
 		inFlight := trackerInFlightCount(tracker)
 		drainIdle := atomic.LoadInt32(&draining) == 0
+		drainingNow := !drainIdle
 
 		if upgradePending && drainIdle && inFlight == 0 {
 			// Normal path: daemon is fully idle and upgrade is due.
@@ -328,6 +403,13 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 		}
 
 		logTickSummary(q)
+		if tick != nil {
+			tick(now, daemonTickState{
+				LastUpgrade: lastUpgrade,
+				InFlight:    inFlight,
+				Draining:    drainingNow,
+			})
+		}
 
 		select {
 		case <-ctx.Done():
@@ -406,6 +488,68 @@ func logTickSummary(q *queue.Queue) {
 		"running", counts[queue.StateRunning],
 		"completed", counts[queue.StateCompleted],
 		"failed", counts[queue.StateFailed])
+}
+
+type daemonQueueSnapshot struct {
+	pending int
+	running int
+	waiting int
+}
+
+func daemonQueueCounts(q *queue.Queue) daemonQueueSnapshot {
+	vessels, err := q.List()
+	if err != nil {
+		return daemonQueueSnapshot{}
+	}
+	var snapshot daemonQueueSnapshot
+	for _, vessel := range vessels {
+		switch vessel.State {
+		case queue.StatePending:
+			snapshot.pending++
+		case queue.StateRunning:
+			snapshot.running++
+		case queue.StateWaiting:
+			snapshot.waiting++
+		}
+	}
+	return snapshot
+}
+
+func daemonQueueIdle(q *queue.Queue) bool {
+	counts := daemonQueueCounts(q)
+	return counts.pending == 0 && counts.running == 0
+}
+
+func daemonChecksFromFindings(findings []runner.StallFinding, now time.Time) []daemonhealth.Check {
+	checks := make([]daemonhealth.Check, 0, len(findings))
+	for _, finding := range findings {
+		level := daemonhealth.LevelCritical
+		if finding.Level == "warning" {
+			level = daemonhealth.LevelWarning
+		}
+		checks = append(checks, daemonhealth.Check{
+			Code:      finding.Code,
+			Level:     level,
+			Message:   finding.Message,
+			UpdatedAt: now.UTC(),
+		})
+	}
+	return checks
+}
+
+func daemonBacklogHealthCheck(now, lastActivityAt time.Time, idleThreshold time.Duration, backlogCount int, counts daemonQueueSnapshot) *daemonhealth.Check {
+	if backlogCount == 0 || counts.pending != 0 || counts.running != 0 {
+		return nil
+	}
+	if now.Sub(lastActivityAt) <= idleThreshold {
+		return nil
+	}
+	return &daemonhealth.Check{
+		Code:      "idle_with_backlog",
+		Level:     daemonhealth.LevelWarning,
+		Message:   fmt.Sprintf("Daemon idle with %d backlog items on GitHub", backlogCount),
+		UpdatedAt: now.UTC(),
+	}
 }
 
 // reconcileStaleVessels transitions ALL running vessels to timed_out. The

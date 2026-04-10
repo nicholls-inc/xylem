@@ -143,15 +143,6 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				if g.hasExcludedLabel(pr, excludeSet) {
 					continue
 				}
-				// resolve-conflicts workflow is only meaningful for PRs in a
-				// CONFLICTING merge state. When GitHub reports MERGEABLE, the
-				// label is stale (conflicts were resolved outside this
-				// workflow, e.g., via manual push or rebase) — strip it so
-				// the next scan does not re-match, breaking what would
-				// otherwise be an infinite enqueue loop. When GitHub reports
-				// UNKNOWN (empty or literal), skip the vessel but preserve
-				// the label so a subsequent scan can re-evaluate once the
-				// merge state has been computed.
 				if task.Workflow == resolveConflictsWorkflow && pr.Mergeable != ghMergeableConflicting {
 					if pr.Mergeable == ghMergeableMergeable {
 						g.stripTaskLabels(ctx, pr.Number, task.Labels)
@@ -178,6 +169,51 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 		}
 	}
 	return vessels, nil
+}
+
+func (g *GitHubPR) BacklogCount(ctx context.Context) (int, error) {
+	excludeSet := make(map[string]bool, len(g.Exclude))
+	for _, ex := range g.Exclude {
+		excludeSet[ex] = true
+	}
+
+	seen := make(map[prWorkflowSeenKey]struct{})
+	count := 0
+	for _, task := range g.Tasks {
+		for _, label := range task.Labels {
+			args := []string{
+				"pr", "list",
+				"--repo", g.Repo,
+				"--state", "open",
+				"--label", label,
+				"--json", "number,title,body,url,labels,headRefName,mergeable",
+				"--limit", "20",
+			}
+
+			out, err := g.CmdRunner.Run(ctx, "gh", args...)
+			if err != nil {
+				return 0, fmt.Errorf("gh pr list: %w", err)
+			}
+
+			var prs []ghPR
+			if err := json.Unmarshal(out, &prs); err != nil {
+				return 0, fmt.Errorf("parse gh pr list output: %w", err)
+			}
+
+			for _, pr := range prs {
+				key := prWorkflowSeenKey{prNum: pr.Number, workflow: task.Workflow}
+				if _, ok := seen[key]; ok || g.hasExcludedLabel(pr, excludeSet) {
+					continue
+				}
+				if task.Workflow == resolveConflictsWorkflow && pr.Mergeable != ghMergeableConflicting {
+					continue
+				}
+				seen[key] = struct{}{}
+				count++
+			}
+		}
+	}
+	return count, nil
 }
 
 func (g *GitHubPR) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
