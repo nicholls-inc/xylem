@@ -46,6 +46,36 @@ func TestPropComposeCoreReturnsIndependentBytes(t *testing.T) {
 	})
 }
 
+func TestPropComposeCoreKeepsSecurityComplianceBundlePresent(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		composed, err := Compose("core")
+		if err != nil {
+			t.Fatalf("Compose(core) error = %v", err)
+		}
+
+		checks := []assetRef{
+			{name: "workflow:security-compliance", data: composed.Workflows["security-compliance"]},
+			{name: "prompt:security-compliance/scan_secrets", data: composed.Prompts["security-compliance/scan_secrets"]},
+			{name: "prompt:security-compliance/synthesize", data: composed.Prompts["security-compliance/synthesize"]},
+			{name: "source:security-compliance", data: composed.Sources["security-compliance"]},
+		}
+		check := checks[rapid.IntRange(0, len(checks)-1).Draw(t, "checkIndex")]
+		if len(check.data) == 0 {
+			t.Fatalf("%s missing or empty", check.name)
+		}
+
+		expectedFragment := map[string]string{
+			"workflow:security-compliance":            "name: security-compliance",
+			"prompt:security-compliance/scan_secrets": "RESULT: CLEAN | FINDINGS | TOOLING-GAP",
+			"prompt:security-compliance/synthesize":   "ISSUES_CREATED:",
+			"source:security-compliance":              "workflow: security-compliance",
+		}[check.name]
+		if !strings.Contains(string(check.data), expectedFragment) {
+			t.Fatalf("%s = %q, want fragment %q", check.name, string(check.data), expectedFragment)
+		}
+	})
+}
+
 type assetRef struct {
 	name string
 	data []byte

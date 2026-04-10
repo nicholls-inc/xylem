@@ -68,12 +68,15 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 		"resolve-conflicts",
 		"respond-to-pr-review",
 		"review-pr",
+		"security-compliance",
 		"triage",
 		"workflow-health-report",
 	}, sortedKeys(composed.Workflows))
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/plan")
+	assert.Contains(t, sortedKeys(composed.Prompts), "security-compliance/synthesize")
 	assert.Contains(t, sortedKeys(composed.Prompts), "workflow-health-report/report")
 	assert.Contains(t, sortedKeys(composed.Sources), "pr-lifecycle")
+	assert.Contains(t, sortedKeys(composed.Sources), "security-compliance")
 	require.Len(t, composed.ConfigOverlays, 1)
 
 	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
@@ -187,6 +190,124 @@ func TestAdaptRepoPromptAssetsEnforceGuardrails(t *testing.T) {
 	assert.Contains(t, string(prPrompt), "Inline every `planned_changes` entry from `adapt-plan.json`.")
 	assert.Contains(t, string(prPrompt), "Inline every `skipped` entry from `adapt-plan.json`.")
 	assert.Contains(t, string(prPrompt), "remain PR-gated")
+}
+
+func TestSmoke_S4_SecurityComplianceWorkflowBundleIsSeededInCoreProfile(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	require.NotNil(t, composed)
+	workflowAsset, ok := composed.Workflows["security-compliance"]
+	require.True(t, ok)
+	assert.Contains(t, string(workflowAsset), "name: security-compliance")
+	assert.Contains(t, string(workflowAsset), "class: ops")
+
+	scanPrompt, ok := composed.Prompts["security-compliance/scan_secrets"]
+	require.True(t, ok)
+	assert.Contains(t, string(scanPrompt), "RESULT: CLEAN | FINDINGS | TOOLING-GAP")
+
+	synthesizePrompt, ok := composed.Prompts["security-compliance/synthesize"]
+	require.True(t, ok)
+	assert.Contains(t, string(synthesizePrompt), "ISSUES_CREATED:")
+
+	sourceAsset, ok := composed.Sources["security-compliance"]
+	require.True(t, ok)
+	assert.Contains(t, string(sourceAsset), "type: schedule")
+	assert.Contains(t, string(sourceAsset), "cadence: '@daily'")
+	assert.Contains(t, string(sourceAsset), "workflow: security-compliance")
+}
+
+func TestSmoke_S5_SecurityComplianceWorkflowParsesAsFourPhaseAudit(t *testing.T) {
+	profile, err := Load("core")
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(oldWd))
+	})
+
+	for _, name := range []string{"scan_secrets.md", "static_analysis.md", "dependency_audit.md", "synthesize.md"} {
+		data, readErr := fs.ReadFile(profile.FS, filepath.Join("prompts", "security-compliance", name))
+		require.NoError(t, readErr)
+		target := filepath.Join(dir, ".xylem", "prompts", "security-compliance", name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+		require.NoError(t, os.WriteFile(target, data, 0o644))
+	}
+
+	workflowData, err := fs.ReadFile(profile.FS, filepath.Join("workflows", "security-compliance.yaml"))
+	require.NoError(t, err)
+	workflowPath := filepath.Join(dir, "security-compliance.yaml")
+	require.NoError(t, os.WriteFile(workflowPath, workflowData, 0o644))
+
+	wf, err := workflowpkg.Load(workflowPath)
+	require.NoError(t, err)
+	assert.Equal(t, "security-compliance", wf.Name)
+	assert.Equal(t, workflowpkg.ClassOps, wf.Class)
+	require.Len(t, wf.Phases, 4)
+	assert.Equal(t, "scan_secrets", wf.Phases[0].Name)
+	assert.Equal(t, "static_analysis", wf.Phases[1].Name)
+	assert.Equal(t, "dependency_audit", wf.Phases[2].Name)
+	assert.Equal(t, "synthesize", wf.Phases[3].Name)
+	for i := 0; i < 3; i++ {
+		require.NotNil(t, wf.Phases[i].Gate)
+		assert.Equal(t, "command", wf.Phases[i].Gate.Type)
+		assert.Contains(t, wf.Phases[i].Gate.Run, "test -s")
+		assert.Contains(t, wf.Phases[i].Gate.Run, "grep -q '^RESULT:'")
+		assert.Contains(t, wf.Phases[i].Gate.Run, "grep -q '^SEVERITY:'")
+		assert.Contains(t, wf.Phases[i].Gate.Run, "grep -q '^TOOLS_RUN:'")
+		assert.Contains(t, wf.Phases[i].Gate.Run, "grep -q '^SUMMARY:'")
+		assert.Contains(t, wf.Phases[i].Gate.Run, "grep -q '^FINDINGS:'")
+	}
+	assert.Nil(t, wf.Phases[3].Gate)
+}
+
+func TestSmoke_S6_SecurityComplianceScheduledSourceUsesDailyCadence(t *testing.T) {
+	t.Parallel()
+
+	profile, err := Load("core")
+	require.NoError(t, err)
+
+	configTemplate, err := fs.ReadFile(profile.FS, "xylem.yml.tmpl")
+	require.NoError(t, err)
+
+	assert.Contains(t, string(configTemplate), "security-compliance:\n    type: schedule\n    cadence: \"@daily\"\n    workflow: security-compliance")
+}
+
+func TestSmoke_S7_SecurityCompliancePromptsDocumentReportingContract(t *testing.T) {
+	t.Parallel()
+
+	profile, err := Load("core")
+	require.NoError(t, err)
+
+	synthesizePrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "security-compliance", "synthesize.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(synthesizePrompt), "create or update GitHub issues labeled `security`")
+	assert.Contains(t, string(synthesizePrompt), "REPORT_STATUS:")
+	assert.Contains(t, string(synthesizePrompt), "ISSUES_CREATED:")
+	assert.Contains(t, string(synthesizePrompt), "SLA_STATUS:")
+	assert.Contains(t, string(synthesizePrompt), "ACTION_ITEMS:")
+
+	scanPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "security-compliance", "scan_secrets.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(scanPrompt), "Stay read-only")
+	assert.Contains(t, string(scanPrompt), "RESULT: CLEAN | FINDINGS | TOOLING-GAP")
+	assert.Contains(t, string(scanPrompt), "SEVERITY: NONE | LOW | MEDIUM | HIGH | CRITICAL")
+	assert.Contains(t, string(scanPrompt), "TOOLS_RUN:")
+
+	staticPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "security-compliance", "static_analysis.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(staticPrompt), "RESULT: CLEAN | FINDINGS | TOOLING-GAP")
+	assert.Contains(t, string(staticPrompt), "FOLLOW_UP:")
+
+	dependencyPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "security-compliance", "dependency_audit.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(dependencyPrompt), "RESULT: CLEAN | FINDINGS | TOOLING-GAP")
+	assert.Contains(t, string(dependencyPrompt), "open `security`-labeled issues")
 }
 
 func sortedKeys[V any](m map[string]V) []string {

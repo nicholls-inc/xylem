@@ -45,7 +45,9 @@ type PhaseData struct {
 // VesselData identifies the vessel (work item) being processed.
 type VesselData struct {
 	ID     string
+	Ref    string
 	Source string
+	Meta   map[string]string
 }
 
 // RepoData describes repository-level template metadata for the vessel.
@@ -86,6 +88,13 @@ func prepareData(data TemplateData) TemplateData {
 		out.PreviousOutputs = make(map[string]string, len(data.PreviousOutputs))
 		for k, v := range data.PreviousOutputs {
 			out.PreviousOutputs[k] = TruncateOutput(v, MaxPreviousOutputLen)
+		}
+	}
+
+	if data.Vessel.Meta != nil {
+		out.Vessel.Meta = make(map[string]string, len(data.Vessel.Meta))
+		for k, v := range data.Vessel.Meta {
+			out.Vessel.Meta[k] = v
 		}
 	}
 

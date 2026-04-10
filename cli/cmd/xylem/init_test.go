@@ -30,6 +30,7 @@ var expectedCoreWorkflows = []string{
 	"resolve-conflicts",
 	"respond-to-pr-review",
 	"review-pr",
+	"security-compliance",
 	"triage",
 	"workflow-health-report",
 }
@@ -288,6 +289,7 @@ func TestInitCreatesV2Files(t *testing.T) {
 		".xylem/profile.lock",
 		".xylem/prompts/adapt-repo/apply.md",
 		".xylem/prompts/adapt-repo/plan.md",
+		".xylem/prompts/security-compliance/synthesize.md",
 		".xylem/prompts/workflow-health-report/analyze.md",
 	}
 	for _, workflowName := range expectedCoreWorkflows {
@@ -431,6 +433,7 @@ func TestInitScaffoldConfigV2Format(t *testing.T) {
 	}
 	assert.Contains(t, content, "profiles:")
 	assert.Contains(t, content, "workflow-health-report")
+	assert.Contains(t, content, "security-compliance")
 	assert.NotContains(t, content, "template:")
 }
 
@@ -532,6 +535,7 @@ func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
 	assert.Contains(t, cfg.Sources, "pr-lifecycle")
 	assert.Contains(t, cfg.Sources, "lessons-hygiene")
 	assert.Contains(t, cfg.Sources, "context-audit")
+	assert.Contains(t, cfg.Sources, "security-compliance")
 	assert.Contains(t, cfg.Sources, "workflow-health")
 	require.NoError(t, cfg.Validate())
 }
