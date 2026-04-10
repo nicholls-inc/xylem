@@ -145,6 +145,10 @@ func TestExecuteGHPRSurfacesUsedByXylem(t *testing.T) {
 	t.Parallel()
 
 	state := sampleState()
+	state.Repositories[0].PullRequests[0].Mergeable = "MERGEABLE"
+	state.Repositories[0].PullRequests[0].ReviewDecision = "APPROVED"
+	state.Repositories[0].PullRequests[0].ReviewRequests = []string{"copilot-pull-request-reviewer"}
+	state.Repositories[0].PullRequests[0].ReviewThreads = []dtu.ReviewThread{{IsResolved: true}, {IsResolved: false}}
 	store, stateDir := testStore(t, state)
 	env := envForStore(store, stateDir, state.UniverseID)
 
@@ -164,6 +168,28 @@ func TestExecuteGHPRSurfacesUsedByXylem(t *testing.T) {
 	}
 	if strings.TrimSpace(viewOut.String()) != "abc12345deadbeef" {
 		t.Fatalf("pr view output = %q", viewOut.String())
+	}
+
+	var richViewOut, richViewErr bytes.Buffer
+	code = Execute(context.Background(), "gh", []string{
+		"pr", "view", "10", "--repo", "owner/repo",
+		"--json", "state,mergeable,reviewDecision,statusCheckRollup,reviewRequests,reviewThreads",
+	}, nil, &richViewOut, &richViewErr, env)
+	if code != 0 {
+		t.Fatalf("pr view rich code = %d, stderr = %q", code, richViewErr.String())
+	}
+	rich := richViewOut.String()
+	for _, want := range []string{
+		`"state":"OPEN"`,
+		`"mergeable":"MERGEABLE"`,
+		`"reviewDecision":"APPROVED"`,
+		`"login":"copilot-pull-request-reviewer"`,
+		`"isResolved":false`,
+		`"status":"COMPLETED"`,
+	} {
+		if !strings.Contains(rich, want) {
+			t.Fatalf("rich pr view output = %s, want substring %q", rich, want)
+		}
 	}
 
 	var checksOut, checksErr bytes.Buffer
@@ -264,6 +290,45 @@ func TestExecuteGHPRMergeUpdatesStateAndGitVisibility(t *testing.T) {
 	if strings.Contains(headOut.String(), "fix/issue-1-bug-one") {
 		t.Fatalf("git ls-remote head output = %q, want deleted head branch to disappear", headOut.String())
 	}
+}
+
+func TestExecuteGHPRAdminMergeBypassesPendingChecks(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Repositories[0].Branches = []dtu.Branch{
+		{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+		{Name: "fix/issue-1-bug-one", SHA: "abc12345deadbeef"},
+	}
+	store, stateDir := testStore(t, state)
+	env := envForStore(store, stateDir, state.UniverseID)
+
+	var mergeOut, mergeErr bytes.Buffer
+	code := Execute(
+		context.Background(),
+		"gh",
+		[]string{"pr", "merge", "10", "--repo", "owner/repo", "--delete-branch", "--squash", "--admin"},
+		nil,
+		&mergeOut,
+		&mergeErr,
+		env,
+	)
+	require.Zero(t, code, "stderr = %q", mergeErr.String())
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	repo := loaded.RepositoryBySlug("owner/repo")
+	require.NotNil(t, repo)
+	pr := repo.PullRequestByNumber(10)
+	require.NotNil(t, pr)
+	assert.Equal(t, dtu.PullRequestStateMerged, pr.State)
+	assert.True(t, pr.Merged)
+	assert.False(t, pr.AutoMergeEnabled)
+	assert.False(t, pr.AutoMergeDeleteBranch)
+	main := repo.BranchByName("main")
+	require.NotNil(t, main)
+	assert.Equal(t, pr.HeadSHA, main.SHA)
+	assert.Nil(t, repo.BranchByName(pr.HeadBranch))
 }
 
 func TestSmoke_S2_GHPRMergeWithAutoQueuesUntilChecksPass(t *testing.T) {

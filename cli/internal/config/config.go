@@ -19,6 +19,7 @@ const minTimeout = 30 * time.Second
 
 const DefaultAuditLogPath = "audit.jsonl"
 const DefaultLLMRoutingTier = "med"
+const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
 
 // DefaultProtectedSurfaces is the default list of paths that xylem's
 // runtime verifier treats as off-limits to vessel modifications.
@@ -191,10 +192,10 @@ type DaemonConfig struct {
 	// auto_upgrade check while the loop is running. Only meaningful when
 	// AutoUpgrade is true. Defaults to 5m. Accepts any Go duration string.
 	UpgradeInterval string `yaml:"upgrade_interval,omitempty"`
-	// AutoMerge enables the automatic copilot review cycle + GitHub
-	// auto-merge for merge-ready xylem-authored PRs. The daemon only acts
-	// on PRs labeled ready-to-merge + harness-impl whose branches match
-	// feat/issue-*, fix/issue-*, or chore/issue-*.
+	// AutoMerge enables the daemon's automatic reviewer-request +
+	// admin-merge loop for merge-ready harness PRs. Only PRs matching the
+	// configured labels and branch pattern are eligible, and the
+	// no-auto-admin-merge label always opts a PR out.
 	AutoMerge bool `yaml:"auto_merge,omitempty"`
 	// AutoMergeRepo is the GitHub repo slug (owner/name) for auto-merge.
 	// If empty, gh CLI uses the current directory's origin remote.
@@ -506,6 +507,10 @@ func (d DaemonConfig) EffectiveAutoMergeBranchPattern() string {
 
 func (d DaemonConfig) EffectiveAutoMergeReviewer() string {
 	return strings.TrimSpace(d.AutoMergeReviewer)
+}
+
+func (d DaemonConfig) EffectiveAutoAdminMergeOptOutLabel() string {
+	return DefaultAutoAdminMergeOptOutLabel
 }
 
 // CleanupAfterDuration returns the parsed cleanup_after duration, defaulting to
