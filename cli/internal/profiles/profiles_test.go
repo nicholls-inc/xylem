@@ -174,6 +174,7 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, sortedKeys(composed.Workflows), "implement-harness")
+	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-refactoring")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
@@ -183,6 +184,8 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
+	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactoring-semantic")
+	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactoring-file-diet")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
@@ -192,6 +195,10 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, implementHarnessWorkflow, `--repo nicholls-inc/xylem`)
 	assert.Contains(t, implementHarnessWorkflow, `--label "harness-impl"`)
 	assert.Contains(t, implementHarnessWorkflow, `--label "ready-to-merge"`)
+
+	continuousRefactoringWorkflow := string(composed.Workflows["continuous-refactoring"])
+	assert.Contains(t, continuousRefactoringWorkflow, "continuous-refactoring inspect")
+	assert.Contains(t, continuousRefactoringWorkflow, "continuous-refactoring open-issues")
 }
 
 func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkflow(t *testing.T) {
@@ -229,6 +236,41 @@ func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkf
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/implement")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
+}
+
+func TestSelfHostingProfileScaffoldsContinuousRefactoringSchedules(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	var semanticSource config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-refactoring-semantic"], &semanticSource))
+	assert.Equal(t, "schedule", semanticSource.Type)
+	assert.Equal(t, "{{ .Repo }}", semanticSource.Repo)
+	assert.Equal(t, "0 9 * * 1", semanticSource.Cadence)
+	assert.Equal(t, "continuous-refactoring", semanticSource.Workflow)
+	assert.Equal(t, []string{"cli/cmd/xylem", "cli/internal"}, semanticSource.SourceDirs)
+	assert.Equal(t, []string{".go"}, semanticSource.FileExtensions)
+	assert.Equal(t, 80, semanticSource.LOCThreshold)
+	assert.Equal(t, 2, semanticSource.MaxIssuesPerRun)
+
+	var fileDietSource config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-refactoring-file-diet"], &fileDietSource))
+	assert.Equal(t, "0 9 * * 1-5", fileDietSource.Cadence)
+	assert.Equal(t, 250, fileDietSource.LOCThreshold)
+	assert.Equal(t, 1, fileDietSource.MaxIssuesPerRun)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["continuous-refactoring"], &wf))
+	assert.Equal(t, "continuous-refactoring", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 2)
+	assert.Equal(t, "inspect", wf.Phases[0].Name)
+	assert.Equal(t, "command", wf.Phases[0].Type)
+	assert.Contains(t, wf.Phases[0].Run, "continuous-refactoring inspect")
+	assert.Equal(t, "open_issues", wf.Phases[1].Name)
+	assert.Contains(t, wf.Phases[1].Run, "--mode {{if eq .Source.Name \"continuous-refactoring-file-diet\"}}file-diet{{else}}semantic{{end}}")
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

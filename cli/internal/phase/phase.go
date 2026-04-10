@@ -58,8 +58,17 @@ type RepoData struct {
 
 // SourceData describes the configured source that produced the vessel.
 type SourceData struct {
-	Name string
-	Repo string
+	Name            string
+	Repo            string
+	Type            string
+	Workflow        string
+	Schedule        string
+	Cadence         string
+	SourceDirs      []string
+	FileExtensions  []string
+	LOCThreshold    int
+	MaxIssuesPerRun int
+	ExcludePatterns []string
 }
 
 // ValidationData describes optional repo-specific validation commands.

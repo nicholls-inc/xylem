@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -103,16 +104,21 @@ type TierRouting struct {
 }
 
 type SourceConfig struct {
-	Type     string          `yaml:"type"`
-	Repo     string          `yaml:"repo,omitempty"`
-	Schedule string          `yaml:"schedule,omitempty"`
-	Cadence  string          `yaml:"cadence,omitempty"`
-	Workflow string          `yaml:"workflow,omitempty"`
-	LLM      string          `yaml:"llm,omitempty"`
-	Model    string          `yaml:"model,omitempty"`
-	Timeout  string          `yaml:"timeout,omitempty"`
-	Exclude  []string        `yaml:"exclude,omitempty"`
-	Tasks    map[string]Task `yaml:"tasks,omitempty"`
+	Type            string          `yaml:"type"`
+	Repo            string          `yaml:"repo,omitempty"`
+	Schedule        string          `yaml:"schedule,omitempty"`
+	Cadence         string          `yaml:"cadence,omitempty"`
+	Workflow        string          `yaml:"workflow,omitempty"`
+	LLM             string          `yaml:"llm,omitempty"`
+	Model           string          `yaml:"model,omitempty"`
+	Timeout         string          `yaml:"timeout,omitempty"`
+	Exclude         []string        `yaml:"exclude,omitempty"`
+	Tasks           map[string]Task `yaml:"tasks,omitempty"`
+	SourceDirs      []string        `yaml:"source_dirs,omitempty"`
+	FileExtensions  []string        `yaml:"file_extensions,omitempty"`
+	LOCThreshold    int             `yaml:"loc_threshold,omitempty"`
+	MaxIssuesPerRun int             `yaml:"max_issues_per_run,omitempty"`
+	ExcludePatterns []string        `yaml:"exclude_patterns,omitempty"`
 }
 
 type StatusLabels struct {
@@ -465,6 +471,10 @@ func (c *Config) Validate() error {
 			if dur < minTimeout {
 				return fmt.Errorf("source %q: timeout must be at least %s", name, minTimeout)
 			}
+		}
+
+		if err := validateContinuousRefactoringFields(name, src); err != nil {
+			return err
 		}
 
 		switch src.Type {
@@ -1225,6 +1235,12 @@ func parseScheduleValue(value string) (time.Duration, error) {
 	return interval, nil
 }
 func validateScheduleSource(name string, src SourceConfig) error {
+	if repo := strings.TrimSpace(src.Repo); repo != "" {
+		parts := strings.Split(repo, "/")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return fmt.Errorf("source %q (schedule): repo must be in owner/name format", name)
+		}
+	}
 	if strings.TrimSpace(src.Workflow) == "" {
 		return fmt.Errorf("source %q (schedule): workflow is required", name)
 	}
@@ -1235,4 +1251,55 @@ func validateScheduleSource(name string, src SourceConfig) error {
 		return fmt.Errorf("source %q (schedule): cadence is invalid: %w", name, err)
 	}
 	return nil
+}
+
+func validateContinuousRefactoringFields(name string, src SourceConfig) error {
+	for i, dir := range src.SourceDirs {
+		trimmed := strings.TrimSpace(dir)
+		if trimmed == "" {
+			return fmt.Errorf("source %q: source_dirs[%d] must be non-empty", name, i)
+		}
+		if filepath.IsAbs(trimmed) {
+			return fmt.Errorf("source %q: source_dirs[%d] must be relative", name, i)
+		}
+		if !isPathWithinRoot(trimmed) {
+			return fmt.Errorf("source %q: source_dirs[%d] must stay within repo root", name, i)
+		}
+	}
+	for i, ext := range src.FileExtensions {
+		trimmed := strings.TrimSpace(ext)
+		if trimmed == "" {
+			return fmt.Errorf("source %q: file_extensions[%d] must be non-empty", name, i)
+		}
+		if !strings.HasPrefix(trimmed, ".") {
+			return fmt.Errorf("source %q: file_extensions[%d] must start with \".\"", name, i)
+		}
+	}
+	if src.LOCThreshold < 0 {
+		return fmt.Errorf("source %q: loc_threshold must be greater than or equal to 0", name)
+	}
+	if src.MaxIssuesPerRun < 0 {
+		return fmt.Errorf("source %q: max_issues_per_run must be greater than or equal to 0", name)
+	}
+	for i, pattern := range src.ExcludePatterns {
+		if strings.TrimSpace(pattern) == "" {
+			return fmt.Errorf("source %q: exclude_patterns[%d] must be non-empty", name, i)
+		}
+		if err := validateDoublestarPattern(pattern); err != nil {
+			return fmt.Errorf("source %q: exclude_patterns[%d] invalid glob %q: %w", name, i, pattern, err)
+		}
+	}
+	return nil
+}
+
+func validateDoublestarPattern(pattern string) error {
+	normalized := strings.ReplaceAll(filepath.ToSlash(strings.TrimSpace(pattern)), "**", "*")
+	_, err := path.Match(normalized, "test")
+	return err
+}
+
+func isPathWithinRoot(value string) bool {
+	cleaned := filepath.Clean(value)
+	parentPrefix := ".." + string(filepath.Separator)
+	return cleaned != ".." && !strings.HasPrefix(cleaned, parentPrefix)
 }
