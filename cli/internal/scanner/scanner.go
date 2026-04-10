@@ -145,12 +145,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			tasks := convertTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHub{
-					Repo:      srcCfg.Repo,
-					Tasks:     tasks,
-					Exclude:   srcCfg.Exclude,
-					StateDir:  s.Config.StateDir,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       tasks,
+					Exclude:     srcCfg.Exclude,
+					StateDir:    s.Config.StateDir,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -158,12 +159,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			tasks := convertTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubPR{
-					Repo:      srcCfg.Repo,
-					Tasks:     tasks,
-					Exclude:   srcCfg.Exclude,
-					StateDir:  s.Config.StateDir,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       tasks,
+					Exclude:     srcCfg.Exclude,
+					StateDir:    s.Config.StateDir,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -171,12 +173,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			prEventsTasks := convertPREventsTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubPREvents{
-					Repo:      srcCfg.Repo,
-					Tasks:     prEventsTasks,
-					Exclude:   srcCfg.Exclude,
-					StateDir:  s.Config.StateDir,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       prEventsTasks,
+					Exclude:     srcCfg.Exclude,
+					StateDir:    s.Config.StateDir,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -184,10 +187,11 @@ func (s *Scanner) buildSources() []sourceEntry {
 			mergeTasks := convertMergeTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubMerge{
-					Repo:      srcCfg.Repo,
-					Tasks:     mergeTasks,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       mergeTasks,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -195,12 +199,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			scheduledTasks := convertScheduledTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.Scheduled{
-					Repo:       srcCfg.Repo,
-					StateDir:   s.Config.StateDir,
-					ConfigName: name,
-					Schedule:   srcCfg.Schedule,
-					Tasks:      scheduledTasks,
-					Queue:      s.Queue,
+					Repo:        srcCfg.Repo,
+					StateDir:    s.Config.StateDir,
+					ConfigName:  name,
+					Schedule:    srcCfg.Schedule,
+					Tasks:       scheduledTasks,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
 				},
 				configName: name,
 			})
@@ -233,6 +238,7 @@ func convertPREventsTasks(cfgTasks map[string]config.Task) map[string]source.PRE
 	for name, t := range cfgTasks {
 		task := source.PREventsTask{
 			Workflow: t.Workflow,
+			Tier:     t.Tier,
 		}
 		if t.On != nil {
 			task.Labels = t.On.Labels
@@ -258,6 +264,7 @@ func convertMergeTasks(cfgTasks map[string]config.Task) map[string]source.MergeT
 	for name, t := range cfgTasks {
 		tasks[name] = source.MergeTask{
 			Workflow: t.Workflow,
+			Tier:     t.Tier,
 		}
 	}
 	return tasks
@@ -269,6 +276,7 @@ func convertScheduledTasks(cfgTasks map[string]config.Task) map[string]source.Sc
 		tasks[name] = source.ScheduledTask{
 			Workflow: t.Workflow,
 			Ref:      t.Ref,
+			Tier:     t.Tier,
 		}
 	}
 	return tasks

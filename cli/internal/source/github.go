@@ -22,6 +22,7 @@ import (
 type GitHubTask struct {
 	Labels          []string
 	Workflow        string
+	Tier            string
 	StatusLabels    *StatusLabels
 	LabelGateLabels *LabelGateLabels
 }
@@ -32,6 +33,7 @@ type GitHub struct {
 	Tasks                  map[string]GitHubTask
 	Exclude                []string
 	StateDir               string
+	DefaultTier            string
 	Queue                  *queue.Queue
 	CmdRunner              CommandRunner
 	HarnessDigestResolver  func() string
@@ -119,6 +121,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					Source:    "github-issue",
 					Ref:       issue.URL,
 					Workflow:  task.Workflow,
+					Tier:      ResolveTaskTier(task.Tier, g.DefaultTier),
 					Meta:      baseMeta,
 					State:     queue.StatePending,
 					CreatedAt: sourceNow(),

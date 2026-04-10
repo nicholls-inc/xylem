@@ -305,6 +305,52 @@ func TestScanBuildsScheduledSource(t *testing.T) {
 	}
 }
 
+func TestSmoke_S4_ScannerSetsVesselTierFromTaskOrDefault(t *testing.T) {
+	tests := []struct {
+		name        string
+		taskTier    string
+		defaultTier string
+		wantTier    string
+	}{
+		{name: "task tier wins", taskTier: "high", defaultTier: "low", wantTier: "high"},
+		{name: "falls back to routing default", taskTier: "", defaultTier: "low", wantTier: "low"},
+		{name: "falls back to med when default missing", taskTier: "", defaultTier: "", wantTier: config.DefaultLLMRoutingTier},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := makeConfig(dir)
+			cfg.LLMRouting.DefaultTier = tt.defaultTier
+			cfg.Sources["github"] = config.SourceConfig{
+				Type: "github",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug", Tier: tt.taskTier},
+				},
+			}
+			q := queue.New(filepath.Join(dir, "queue.jsonl"))
+			r := newMock()
+			issues := []ghIssue{
+				{Number: 1, Title: "fix null response", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "bug"}}},
+			}
+			r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+
+			s := New(cfg, q, r)
+			result, err := s.Scan(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, 1, result.Added)
+
+			vessels, err := q.List()
+			require.NoError(t, err)
+			require.Len(t, vessels, 1)
+			assert.Equal(t, tt.wantTier, vessels[0].Tier)
+		})
+	}
+}
+
 func TestScanExistingPR(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeConfig(dir)
