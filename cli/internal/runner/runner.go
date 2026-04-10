@@ -3414,14 +3414,58 @@ func (r *Runner) readHarness() string {
 	return string(data)
 }
 
+// githubIssueURLRe matches GitHub issue URLs and captures owner/repo and number.
+var githubIssueURLRe = regexp.MustCompile(`^https?://github\.com/([^/]+/[^/]+)/issues/(\d+)`)
+
+// githubPRURLRe matches GitHub pull request URLs and captures owner/repo and number.
+var githubPRURLRe = regexp.MustCompile(`^https?://github\.com/([^/]+/[^/]+)/pull/(\d+)`)
+
 func (r *Runner) fetchIssueData(ctx context.Context, vessel *queue.Vessel) phase.IssueData {
 	switch vessel.Source {
 	case "github-issue":
 		return r.fetchGitHubData(ctx, vessel, "issue", "issue")
 	case "github-pr", "github-pr-events", "github-merge":
 		return r.fetchGitHubData(ctx, vessel, "pr", "pr")
+	case "manual":
+		return r.fetchManualIssueData(ctx, vessel)
 	default:
 		return phase.IssueData{}
+	}
+}
+
+// fetchManualIssueData hydrates issue data for manual vessels whose ref
+// matches a GitHub issue or PR URL pattern.
+func (r *Runner) fetchManualIssueData(ctx context.Context, vessel *queue.Vessel) phase.IssueData {
+	if vessel.Ref == "" {
+		return phase.IssueData{}
+	}
+
+	if m := githubIssueURLRe.FindStringSubmatch(vessel.Ref); m != nil {
+		repo, numStr := m[1], m[2]
+		r.hydrateManualMeta(vessel, "issue_num", numStr, repo)
+		return r.fetchGitHubData(ctx, vessel, "issue", "issue")
+	}
+
+	if m := githubPRURLRe.FindStringSubmatch(vessel.Ref); m != nil {
+		repo, numStr := m[1], m[2]
+		r.hydrateManualMeta(vessel, "pr_num", numStr, repo)
+		return r.fetchGitHubData(ctx, vessel, "pr", "pr")
+	}
+
+	return phase.IssueData{}
+}
+
+// hydrateManualMeta sets the issue/PR number and source_repo in the vessel's
+// Meta map so that parseIssueNum and resolveRepo can find them.
+func (r *Runner) hydrateManualMeta(vessel *queue.Vessel, numKey, numStr, repo string) {
+	if vessel.Meta == nil {
+		vessel.Meta = make(map[string]string)
+	}
+	if vessel.Meta[numKey] == "" {
+		vessel.Meta[numKey] = numStr
+	}
+	if vessel.Meta["source_repo"] == "" {
+		vessel.Meta["source_repo"] = repo
 	}
 }
 
@@ -3682,6 +3726,9 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 	case *source.Scheduled:
 		return s.Repo
 	default:
+		if vessel.Meta != nil && vessel.Meta["source_repo"] != "" {
+			return vessel.Meta["source_repo"]
+		}
 		return ""
 	}
 }

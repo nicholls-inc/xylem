@@ -7092,6 +7092,181 @@ func TestValidateIssueDataForWorkflow_NilWorkflow(t *testing.T) {
 	}
 }
 
+func TestGitHubIssueURLRegex(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantOK  bool
+		wantNum string
+	}{
+		{"standard issue URL", "https://github.com/owner/repo/issues/42", true, "42"},
+		{"http issue URL", "http://github.com/owner/repo/issues/1", true, "1"},
+		{"PR URL does not match issue regex", "https://github.com/owner/repo/pull/42", false, ""},
+		{"non-GitHub URL", "https://example.com/issues/42", false, ""},
+		{"no number", "https://github.com/owner/repo/issues/", false, ""},
+		{"issue URL with trailing path", "https://github.com/owner/repo/issues/42#comment", true, "42"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := githubIssueURLRe.FindStringSubmatch(tt.url)
+			if tt.wantOK {
+				require.NotNil(t, m, "expected match for %s", tt.url)
+				assert.Equal(t, tt.wantNum, m[2])
+			} else {
+				assert.Nil(t, m, "expected no match for %s", tt.url)
+			}
+		})
+	}
+}
+
+func TestGitHubPRURLRegex(t *testing.T) {
+	tests := []struct {
+		name    string
+		url     string
+		wantOK  bool
+		wantNum string
+	}{
+		{"standard PR URL", "https://github.com/owner/repo/pull/99", true, "99"},
+		{"issue URL does not match PR regex", "https://github.com/owner/repo/issues/42", false, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := githubPRURLRe.FindStringSubmatch(tt.url)
+			if tt.wantOK {
+				require.NotNil(t, m, "expected match for %s", tt.url)
+				assert.Equal(t, tt.wantNum, m[2])
+			} else {
+				assert.Nil(t, m, "expected no match for %s", tt.url)
+			}
+		})
+	}
+}
+
+func TestFetchManualIssueData_GitHubIssueRef(t *testing.T) {
+	issueJSON := `{"title":"Fix the bug","body":"Something is broken","url":"https://github.com/nicholls-inc/xylem/issues/230","labels":[{"name":"bug"}]}`
+	cmdRunner := &mockCmdRunner{
+		outputData: []byte(issueJSON),
+	}
+	r := &Runner{
+		Runner: cmdRunner,
+		Sources: map[string]source.Source{
+			"manual": &source.Manual{},
+		},
+	}
+
+	vessel := queue.Vessel{
+		ID:     "issue-230-fresh",
+		Source: "manual",
+		Ref:    "https://github.com/nicholls-inc/xylem/issues/230",
+	}
+
+	data := r.fetchIssueData(context.Background(), &vessel)
+
+	assert.Equal(t, 230, data.Number)
+	assert.Equal(t, "Fix the bug", data.Title)
+	assert.Equal(t, "Something is broken", data.Body)
+	assert.Contains(t, data.Labels, "bug")
+
+	// Verify meta was hydrated
+	assert.Equal(t, "230", vessel.Meta["issue_num"])
+	assert.Equal(t, "nicholls-inc/xylem", vessel.Meta["source_repo"])
+}
+
+func TestFetchManualIssueData_GitHubPRRef(t *testing.T) {
+	prJSON := `{"title":"Add feature","body":"New feature","url":"https://github.com/owner/repo/pull/55","labels":[]}`
+	cmdRunner := &mockCmdRunner{
+		outputData: []byte(prJSON),
+	}
+	r := &Runner{
+		Runner: cmdRunner,
+		Sources: map[string]source.Source{
+			"manual": &source.Manual{},
+		},
+	}
+
+	vessel := queue.Vessel{
+		ID:     "pr-55",
+		Source: "manual",
+		Ref:    "https://github.com/owner/repo/pull/55",
+	}
+
+	data := r.fetchIssueData(context.Background(), &vessel)
+
+	assert.Equal(t, 55, data.Number)
+	assert.Equal(t, "Add feature", data.Title)
+	assert.Equal(t, "55", vessel.Meta["pr_num"])
+	assert.Equal(t, "owner/repo", vessel.Meta["source_repo"])
+}
+
+func TestFetchManualIssueData_NonGitHubRef(t *testing.T) {
+	r := &Runner{
+		Runner:  &mockCmdRunner{},
+		Sources: map[string]source.Source{"manual": &source.Manual{}},
+	}
+
+	vessel := queue.Vessel{
+		ID:     "task-1",
+		Source: "manual",
+		Ref:    "just a description",
+	}
+
+	data := r.fetchIssueData(context.Background(), &vessel)
+	assert.Equal(t, 0, data.Number)
+	assert.Empty(t, data.Title)
+}
+
+func TestFetchManualIssueData_EmptyRef(t *testing.T) {
+	r := &Runner{
+		Runner:  &mockCmdRunner{},
+		Sources: map[string]source.Source{"manual": &source.Manual{}},
+	}
+
+	vessel := queue.Vessel{
+		ID:     "task-2",
+		Source: "manual",
+		Ref:    "",
+	}
+
+	data := r.fetchIssueData(context.Background(), &vessel)
+	assert.Equal(t, 0, data.Number)
+}
+
+func TestResolveRepo_ManualWithSourceRepo(t *testing.T) {
+	r := &Runner{
+		Sources: map[string]source.Source{"manual": &source.Manual{}},
+	}
+
+	vessel := queue.Vessel{
+		Source: "manual",
+		Meta:   map[string]string{"source_repo": "nicholls-inc/xylem"},
+	}
+	got := r.resolveRepo(vessel)
+	assert.Equal(t, "nicholls-inc/xylem", got)
+}
+
+func TestResolveRepo_ManualWithoutSourceRepo(t *testing.T) {
+	r := &Runner{
+		Sources: map[string]source.Source{"manual": &source.Manual{}},
+	}
+
+	vessel := queue.Vessel{Source: "manual"}
+	got := r.resolveRepo(vessel)
+	assert.Equal(t, "", got)
+}
+
+func TestHydrateManualMeta_DoesNotOverwrite(t *testing.T) {
+	r := &Runner{}
+	vessel := &queue.Vessel{
+		Meta: map[string]string{
+			"issue_num":   "99",
+			"source_repo": "existing/repo",
+		},
+	}
+	r.hydrateManualMeta(vessel, "issue_num", "230", "new/repo")
+	assert.Equal(t, "99", vessel.Meta["issue_num"])
+	assert.Equal(t, "existing/repo", vessel.Meta["source_repo"])
+}
+
 func TestDrainCommandPhaseTemplateValidation(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
