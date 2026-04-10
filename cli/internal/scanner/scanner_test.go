@@ -16,6 +16,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/review"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/stretchr/testify/assert"
@@ -606,6 +607,59 @@ func TestScanReenqueuesChangedFailedIssue(t *testing.T) {
 	if vessels[1].Meta["source_input_fingerprint"] == oldFingerprint {
 		t.Fatal("expected updated fingerprint for changed issue input")
 	}
+}
+
+func TestScanRetriesUnchangedFailedIssueAfterCooldownWithoutRecoveryArtifact(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 1, Title: "same title", Body: "same body", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	for _, prefix := range []string{"fix", "feat"} {
+		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
+	}
+
+	fingerprint := scanFingerprint("same title", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Ref:      "https://github.com/owner/repo/issues/1",
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "1",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-1", queue.StateFailed, "boom"))
+
+	failed, err := q.FindByID("issue-1")
+	require.NoError(t, err)
+	endedAt := time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown)
+	failed.EndedAt = &endedAt
+	require.NoError(t, q.UpdateVessel(*failed))
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Added)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 2)
+	assert.Equal(t, "issue-1", vessels[1].RetryOf)
+	assert.Equal(t, "cooldown", vessels[1].Meta[recovery.MetaUnlockedBy])
 }
 
 func TestScanPRFalsePositiveIgnored(t *testing.T) {

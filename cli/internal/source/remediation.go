@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 )
 
@@ -62,4 +63,36 @@ func retryDecision(artifact *recovery.Artifact, previousMeta, currentMeta map[st
 	comparison.RemediationEpoch = stored.RemediationEpoch
 	comparison.RemediationFP = stored.RemediationFP
 	return recovery.RetryReadyWithRemediation(&comparison, recovery.RemediationStateFromMeta(currentMeta), now)
+}
+
+func retryCandidateWithoutArtifact(base, latest queue.Vessel, q *queue.Queue, now time.Time) (*queue.Vessel, bool) {
+	if strings.TrimSpace(latest.Meta["source_input_fingerprint"]) != strings.TrimSpace(base.Meta["source_input_fingerprint"]) {
+		return nil, false
+	}
+	if !legacyRetryCooldownElapsed(latest, now) {
+		return nil, true
+	}
+	retry := recovery.NextRetryVessel(base, latest, nil, q, now, "cooldown")
+	return &retry, false
+}
+
+func legacyRetryCooldownElapsed(vessel queue.Vessel, now time.Time) bool {
+	anchor := legacyRetryCooldownAnchor(vessel)
+	if anchor.IsZero() {
+		return true
+	}
+	return !now.UTC().Before(anchor.Add(recovery.DefaultRetryCooldown))
+}
+
+func legacyRetryCooldownAnchor(vessel queue.Vessel) time.Time {
+	if vessel.EndedAt != nil && !vessel.EndedAt.IsZero() {
+		return vessel.EndedAt.UTC()
+	}
+	if vessel.StartedAt != nil && !vessel.StartedAt.IsZero() {
+		return vessel.StartedAt.UTC()
+	}
+	if !vessel.CreatedAt.IsZero() {
+		return vessel.CreatedAt.UTC()
+	}
+	return time.Time{}
 }
