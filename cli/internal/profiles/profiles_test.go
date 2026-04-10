@@ -112,21 +112,46 @@ func TestComposeRejectsConflictingSourceKeys(t *testing.T) {
 	assert.True(t, strings.Count(err.Error(), `"core"`) >= 2, "expected both conflicting profiles in error: %q", err.Error())
 }
 
-func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
+func TestSmoke_S4_ComposeCoreAndSelfHostingXylemIncludesAutoTriageOverlayAssets(t *testing.T) {
 	t.Parallel()
 
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
+	assert.Contains(t, sortedKeys(composed.Workflows), "auto-triage-issues")
 	assert.Contains(t, sortedKeys(composed.Workflows), "implement-harness")
 	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
 	assert.Contains(t, sortedKeys(composed.Workflows), "unblock-wave")
 	assert.Contains(t, sortedKeys(composed.Workflows), "diagnose-failures")
+	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/discover")
+	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/classify")
+	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/apply")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
+	assert.Contains(t, sortedKeys(composed.Sources), "auto-triage")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
 	require.Len(t, composed.ConfigOverlays, 2)
+
+	assert.Contains(t, string(composed.Workflows["auto-triage-issues"]), "name: auto-triage-issues")
+	assert.Contains(t, string(composed.Prompts["auto-triage-issues/discover"]), "gh api graphql")
+	assert.Contains(t, string(composed.Prompts["auto-triage-issues/discover"]), "authorAssociation")
+	assert.Contains(t, string(composed.Prompts["auto-triage-issues/classify"]), "Output JSON only.")
+	assert.Contains(t, string(composed.Prompts["auto-triage-issues/apply"]), "gh issue edit")
+
+	foundAutoTriageOverlay := false
+	for _, overlay := range composed.ConfigOverlays {
+		overlayText := string(overlay)
+		if !strings.Contains(overlayText, "auto-triage:") {
+			continue
+		}
+
+		foundAutoTriageOverlay = true
+		assert.Contains(t, overlayText, `schedule: "6h"`)
+		assert.Contains(t, overlayText, "workflow: auto-triage-issues")
+		assert.Contains(t, overlayText, "ref: auto-triage-issues")
+	}
+	assert.True(t, foundAutoTriageOverlay, "expected self-hosting overlay to define auto-triage source")
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

@@ -1,0 +1,57 @@
+name: auto-triage-issues
+description: "Recurring batch labeling for open unlabeled issues"
+phases:
+  - name: discover
+    prompt_file: .xylem/prompts/auto-triage-issues/discover.md
+    max_turns: 20
+    llm: copilot
+    model: gpt-5.4
+    noop:
+      match: XYLEM_NOOP
+  - name: classify
+    prompt_file: .xylem/prompts/auto-triage-issues/classify.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+    gate:
+      type: command
+      run: |
+        set -euo pipefail
+
+        plan=".xylem/phases/{{.Vessel.ID}}/classify.output"
+        test -s "$plan"
+
+        jq -e '.issues | type == "array"' "$plan" >/dev/null
+        jq -e '
+          all(.issues[]?;
+            (.number | type == "number") and
+            (.title | type == "string") and
+            (.url | type == "string") and
+            (.labels | type == "array" and length > 0) and
+            (all(.labels[]; type == "string" and length > 0)) and
+            (.confidence | type == "number") and
+            (.fallback | type == "boolean") and
+            (.rationale | type == "string")
+          )
+        ' "$plan" >/dev/null
+
+        repo_labels=$(mktemp)
+        proposed_labels=$(mktemp)
+        missing_labels=$(mktemp)
+        trap 'rm -f "$repo_labels" "$proposed_labels" "$missing_labels"' EXIT
+
+        gh label list --repo {{.Repo.Slug}} --limit 200 --json name --jq '.[].name' | sort -u > "$repo_labels"
+        jq -r '.issues[].labels[]' "$plan" | sort -u > "$proposed_labels"
+
+        comm -23 "$proposed_labels" "$repo_labels" > "$missing_labels"
+        if [ -s "$missing_labels" ]; then
+          echo "ERROR: classify plan proposed labels that do not exist in {{.Repo.Slug}}:"
+          cat "$missing_labels"
+          exit 1
+        fi
+      retries: 1
+  - name: apply
+    prompt_file: .xylem/prompts/auto-triage-issues/apply.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4

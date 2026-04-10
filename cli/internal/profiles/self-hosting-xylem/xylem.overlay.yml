@@ -59,6 +59,15 @@ sources:
       weekly-self-gap-analysis:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
+  auto-triage:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "6h"
+    timeout: "45m"
+    tasks:
+      triage-unlabeled-issues:
+        workflow: auto-triage-issues
+        ref: auto-triage-issues
   harness-post-merge:
     type: github-merge
     repo: "{{ .Repo }}"

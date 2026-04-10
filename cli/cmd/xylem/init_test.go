@@ -36,6 +36,7 @@ var expectedCoreWorkflows = []string{
 }
 
 var expectedSelfHostingWorkflows = []string{
+	"auto-triage-issues",
 	"diagnose-failures",
 	"implement-harness",
 	"sota-gap-analysis",
@@ -481,6 +482,9 @@ func TestInitProfileCoreAndSelfHostingXylem(t *testing.T) {
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
+	if _, ok := cfg.Sources["auto-triage"]; !ok {
+		t.Fatal("expected auto-triage source from self-hosting overlay")
+	}
 	if _, ok := cfg.Sources["harness-impl"]; !ok {
 		t.Fatal("expected harness-impl source from self-hosting overlay")
 	}
@@ -558,17 +562,45 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	expectedWorkflows := append(append([]string{}, expectedCoreWorkflows...), expectedSelfHostingWorkflows...)
 	sort.Strings(expectedWorkflows)
 	assert.Equal(t, expectedWorkflows, scaffoldedWorkflowNames(t, dir))
+	assert.Contains(t, output, "Created .xylem/workflows/auto-triage-issues.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/implement-harness.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/unblock-wave.yaml")
+
+	autoTriageWorkflow, err := os.ReadFile(filepath.Join(dir, ".xylem", "workflows", "auto-triage-issues.yaml"))
+	require.NoError(t, err)
+	assert.Contains(t, string(autoTriageWorkflow), "name: auto-triage-issues")
+	assert.Contains(t, string(autoTriageWorkflow), "prompt_file: .xylem/prompts/auto-triage-issues/discover.md")
+	assert.Contains(t, string(autoTriageWorkflow), "gh label list --repo {{.Repo.Slug}}")
+
+	discoverPrompt, err := os.ReadFile(filepath.Join(dir, ".xylem", "prompts", "auto-triage-issues", "discover.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(discoverPrompt), "gh api graphql")
+	assert.Contains(t, string(discoverPrompt), "authorAssociation")
+
+	classifyPrompt, err := os.ReadFile(filepath.Join(dir, ".xylem", "prompts", "auto-triage-issues", "classify.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(classifyPrompt), "Output JSON only.")
+	assert.Contains(t, string(classifyPrompt), "needs-triage")
+
+	applyPrompt, err := os.ReadFile(filepath.Join(dir, ".xylem", "prompts", "auto-triage-issues", "apply.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(applyPrompt), "gh issue edit")
+	assert.Contains(t, string(applyPrompt), "summary")
 
 	lockData, err := os.ReadFile(filepath.Join(dir, ".xylem", "profile.lock"))
 	require.NoError(t, err)
 	assert.Contains(t, string(lockData), "name: core")
 	assert.Contains(t, string(lockData), "name: self-hosting-xylem")
 
+	configData, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(configData), "auto-triage:")
+	assert.Contains(t, string(configData), "workflow: auto-triage-issues")
+
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
+	assert.Contains(t, cfg.Sources, "auto-triage")
 	assert.Contains(t, cfg.Sources, "harness-impl")
 	assert.Contains(t, cfg.Sources, "harness-pr-lifecycle")
 	require.NoError(t, cfg.Validate())

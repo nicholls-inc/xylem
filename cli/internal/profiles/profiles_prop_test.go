@@ -1,6 +1,7 @@
 package profiles
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -76,6 +77,62 @@ func TestPropComposeCoreKeepsSecurityComplianceBundlePresent(t *testing.T) {
 	})
 }
 
+func TestPropComposeCoreAndSelfHostingRetainsAutoTriageAssets(t *testing.T) {
+	t.Parallel()
+
+	rapid.Check(t, func(t *rapid.T) {
+		composed, err := Compose("core", "self-hosting-xylem")
+		if err != nil {
+			t.Fatalf("Compose(core, self-hosting-xylem) error = %v", err)
+		}
+
+		stable, err := Compose("core", "self-hosting-xylem")
+		if err != nil {
+			t.Fatalf("Compose(core, self-hosting-xylem) stable call error = %v", err)
+		}
+
+		expected, err := autoTriageAssetSnapshot(stable)
+		if err != nil {
+			t.Fatalf("snapshot stable auto-triage assets: %v", err)
+		}
+
+		candidates := make([]assetRef, 0, len(expected))
+		for _, asset := range composedAssets(composed) {
+			if _, ok := expected[asset.name]; ok {
+				candidates = append(candidates, asset)
+			}
+		}
+		if len(candidates) == 0 {
+			t.Fatal("no auto-triage assets available for mutation")
+		}
+
+		asset := candidates[rapid.IntRange(0, len(candidates)-1).Draw(t, "assetIndex")]
+		byteIndex := rapid.IntRange(0, len(asset.data)-1).Draw(t, "byteIndex")
+		asset.data[byteIndex] ^= 0xff
+		if bytes.Equal(asset.data, expected[asset.name]) {
+			t.Fatalf("mutating %s did not change its bytes", asset.name)
+		}
+
+		fresh, err := Compose("core", "self-hosting-xylem")
+		if err != nil {
+			t.Fatalf("Compose(core, self-hosting-xylem) fresh call error = %v", err)
+		}
+
+		got, err := autoTriageAssetSnapshot(fresh)
+		if err != nil {
+			t.Fatalf("snapshot fresh auto-triage assets: %v", err)
+		}
+		if len(got) != len(expected) {
+			t.Fatalf("fresh snapshot count mismatch: got %d, want %d", len(got), len(expected))
+		}
+		for name, want := range expected {
+			if !bytes.Equal(got[name], want) {
+				t.Fatalf("fresh asset %s mismatch after mutating %s", name, asset.name)
+			}
+		}
+	})
+}
+
 type assetRef struct {
 	name string
 	data []byte
@@ -120,4 +177,51 @@ func composedAssets(composed *ComposedProfile) []assetRef {
 		assets = append(assets, assetRef{name: fmt.Sprintf("overlay:%d", i), data: overlay})
 	}
 	return assets
+}
+
+func autoTriageAssetSnapshot(composed *ComposedProfile) (map[string][]byte, error) {
+	if composed == nil {
+		return nil, fmt.Errorf("composed profile is nil")
+	}
+
+	snapshot := make(map[string][]byte, 5)
+	requiredAssets := []struct {
+		name string
+		data []byte
+		ok   bool
+	}{
+		{name: "workflow:auto-triage-issues", data: composed.Workflows["auto-triage-issues"], ok: composed.Workflows["auto-triage-issues"] != nil},
+		{name: "prompt:auto-triage-issues/discover", data: composed.Prompts["auto-triage-issues/discover"], ok: composed.Prompts["auto-triage-issues/discover"] != nil},
+		{name: "prompt:auto-triage-issues/classify", data: composed.Prompts["auto-triage-issues/classify"], ok: composed.Prompts["auto-triage-issues/classify"] != nil},
+		{name: "prompt:auto-triage-issues/apply", data: composed.Prompts["auto-triage-issues/apply"], ok: composed.Prompts["auto-triage-issues/apply"] != nil},
+		{name: "source:auto-triage", data: composed.Sources["auto-triage"], ok: composed.Sources["auto-triage"] != nil},
+	}
+	for _, asset := range requiredAssets {
+		if !asset.ok {
+			return nil, fmt.Errorf("missing %s", asset.name)
+		}
+		if len(asset.data) == 0 {
+			return nil, fmt.Errorf("%s is empty", asset.name)
+		}
+		snapshot[asset.name] = append([]byte(nil), asset.data...)
+	}
+
+	overlayMatches := 0
+	for i, overlay := range composed.ConfigOverlays {
+		if !bytes.Contains(overlay, []byte("auto-triage:")) {
+			continue
+		}
+
+		name := fmt.Sprintf("overlay:%d", i)
+		if len(overlay) == 0 {
+			return nil, fmt.Errorf("%s is empty", name)
+		}
+		snapshot[name] = append([]byte(nil), overlay...)
+		overlayMatches++
+	}
+	if overlayMatches != 1 {
+		return nil, fmt.Errorf("expected 1 auto-triage overlay, got %d", overlayMatches)
+	}
+
+	return snapshot, nil
 }
