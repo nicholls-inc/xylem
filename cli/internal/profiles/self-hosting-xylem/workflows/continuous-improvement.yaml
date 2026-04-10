@@ -6,9 +6,10 @@ phases:
     type: command
     run: |
       set -euo pipefail
-      go run ./cli/cmd/xylem --config .xylem.yml continuous-improvement select \
-        --state .xylem/state/continuous-improvement/state.json \
-        --selection .xylem/state/continuous-improvement/current-selection.json
+      cd cli
+      go run ./cmd/xylem --config ../.xylem.yml continuous-improvement select \
+        --state ../.xylem/state/continuous-improvement/state.json \
+        --selection ../.xylem/state/continuous-improvement/current-selection.json
   - name: analyze
     prompt_file: .xylem/prompts/continuous-improvement/analyze.md
     max_turns: 40
