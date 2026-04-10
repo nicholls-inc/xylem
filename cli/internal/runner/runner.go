@@ -107,16 +107,19 @@ type Runner struct {
 	// newly available capacity and blocks idle-only work such as upgrades.
 	DrainBudget time.Duration
 
-	sem      chan struct{}
-	wg       sync.WaitGroup
-	traceWg  sync.WaitGroup
-	inFlight atomic.Int32
+	sem        chan struct{}
+	wg         sync.WaitGroup
+	traceWg    sync.WaitGroup
+	inFlight   atomic.Int32
+	scheduleMu sync.Mutex
 
 	resultMu sync.Mutex
 	result   DrainResult
 
-	processMu sync.Mutex
-	processes map[string]trackedProcess
+	processMu       sync.Mutex
+	processes       map[string]trackedProcess
+	classMu         sync.Mutex
+	inFlightByClass map[string]int
 }
 
 type trackedProcess struct {
@@ -140,17 +143,19 @@ func New(cfg *config.Config, q *queue.Queue, wt WorktreeManager, r CommandRunner
 		concurrency = cfg.Concurrency
 	}
 	return &Runner{
-		Config:    cfg,
-		Queue:     q,
-		Worktree:  wt,
-		Runner:    r,
-		LiveGate:  gate.NewLiveVerifier(),
-		sem:       make(chan struct{}, concurrency),
-		processes: make(map[string]trackedProcess),
+		Config:          cfg,
+		Queue:           q,
+		Worktree:        wt,
+		Runner:          r,
+		LiveGate:        gate.NewLiveVerifier(),
+		sem:             make(chan struct{}, concurrency),
+		processes:       make(map[string]trackedProcess),
+		inFlightByClass: make(map[string]int),
 	}
 }
 
-// Drain dequeues pending vessels and launches sessions up to Config.Concurrency concurrently.
+// Drain dequeues pending vessels and launches sessions up to the configured global
+// concurrency limit.
 // On context cancellation, no new vessels are launched; running vessels complete normally.
 // Drain returns once the current dequeue tick ends. Use DrainAndWait or Wait for
 // synchronous callers that need terminal outcomes.
@@ -207,23 +212,35 @@ drainLoop:
 			break drainLoop
 		}
 
-		vessel, err := r.Queue.Dequeue()
+		r.scheduleMu.Lock()
+		vessel, err := r.Queue.DequeueMatching(func(v queue.Vessel) bool {
+			return r.classSlotAvailable(v.ConcurrencyClass())
+		})
 		if err != nil || vessel == nil {
+			r.scheduleMu.Unlock()
 			<-r.sem
 			break drainLoop
 		}
+		class := vessel.ConcurrencyClass()
+		if !r.reserveClassSlot(class) {
+			r.scheduleMu.Unlock()
+			<-r.sem
+			continue
+		}
+		r.scheduleMu.Unlock()
 
-		log.Printf("%sdequeued vessel workflow=%s", vesselLabel(*vessel), vessel.Workflow)
+		log.Printf("%sdequeued vessel workflow=%s workflow_class=%s", vesselLabel(*vessel), vessel.Workflow, class)
 
 		result.Launched++
 		r.recordLaunched()
 		r.inFlight.Add(1)
 		r.wg.Add(1)
 		drainLaunchWg.Add(1)
-		go func(j queue.Vessel) {
+		go func(j queue.Vessel, workflowClass string) {
 			defer r.wg.Done()
 			defer drainLaunchWg.Done()
 			defer func() {
+				r.releaseClassSlot(workflowClass)
 				<-r.sem
 				r.inFlight.Add(-1)
 			}()
@@ -297,7 +314,7 @@ drainLoop:
 			}
 			drainStatsMu.Unlock()
 			r.recordOutcome(outcome)
-		}(*vessel)
+		}(*vessel, class)
 	}
 
 	if r.Tracer != nil {
@@ -332,6 +349,55 @@ drainLoop:
 	}
 
 	return result, nil
+}
+
+func (r *Runner) classSlotAvailable(class string) bool {
+	if r.Config == nil {
+		return true
+	}
+	limit, ok := r.Config.ConcurrencyLimit(class)
+	if !ok {
+		return true
+	}
+	r.classMu.Lock()
+	defer r.classMu.Unlock()
+	return r.inFlightByClass[class] < limit
+}
+
+func (r *Runner) reserveClassSlot(class string) bool {
+	if r.Config == nil {
+		return true
+	}
+	limit, ok := r.Config.ConcurrencyLimit(class)
+	if !ok {
+		return true
+	}
+	r.classMu.Lock()
+	defer r.classMu.Unlock()
+	if r.inFlightByClass == nil {
+		r.inFlightByClass = make(map[string]int)
+	}
+	if r.inFlightByClass[class] >= limit {
+		return false
+	}
+	r.inFlightByClass[class]++
+	return true
+}
+
+func (r *Runner) releaseClassSlot(class string) {
+	if r.Config == nil {
+		return
+	}
+	if _, ok := r.Config.ConcurrencyLimit(class); !ok {
+		return
+	}
+	r.classMu.Lock()
+	defer r.classMu.Unlock()
+	if r.inFlightByClass[class] <= 1 {
+		delete(r.inFlightByClass, class)
+		return
+	}
+	r.inFlightByClass[class]--
 }
 
 // DrainAndWait preserves the historical synchronous Drain behaviour for callers

@@ -205,6 +205,61 @@ func (c *countingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reade
 	return []byte("mock output"), nil
 }
 
+type classCountingCmdRunner struct {
+	mu             sync.Mutex
+	currentByClass map[string]int
+	maxByClass     map[string]int
+	globalCurrent  int
+	globalMax      int
+	delay          time.Duration
+}
+
+func (c *classCountingCmdRunner) RunOutput(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func (c *classCountingCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
+	return nil
+}
+
+func (c *classCountingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	prompt, _ := io.ReadAll(stdin)
+	class := "unknown"
+	switch {
+	case bytes.Contains(prompt, []byte("implement-feature")):
+		class = "implement-feature"
+	case bytes.Contains(prompt, []byte("merge-pr")):
+		class = "merge-pr"
+	}
+
+	c.mu.Lock()
+	if c.currentByClass == nil {
+		c.currentByClass = make(map[string]int)
+	}
+	if c.maxByClass == nil {
+		c.maxByClass = make(map[string]int)
+	}
+	c.currentByClass[class]++
+	if c.currentByClass[class] > c.maxByClass[class] {
+		c.maxByClass[class] = c.currentByClass[class]
+	}
+	c.globalCurrent++
+	if c.globalCurrent > c.globalMax {
+		c.globalMax = c.globalCurrent
+	}
+	c.mu.Unlock()
+
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+
+	c.mu.Lock()
+	c.currentByClass[class]--
+	c.globalCurrent--
+	c.mu.Unlock()
+	return []byte("mock output"), nil
+}
+
 type blockingPhaseCmdRunner struct {
 	mu            sync.Mutex
 	phaseCalls    []string
@@ -3350,6 +3405,57 @@ func TestDrainConcurrencyLimit(t *testing.T) {
 	}
 	if max != 2 {
 		t.Fatalf("max concurrent = %d, want exactly 2 to prove the limit is enforced without collapsing throughput", max)
+	}
+}
+
+func TestDrainPerClassConcurrencyLimit(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 3)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.ConcurrencyPerClass = map[string]int{
+		"implement-feature": 1,
+		"merge-pr":          2,
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	writeWorkflowFile(t, dir, "implement-feature", []testPhase{
+		{name: "analyze", promptContent: "implement-feature", maxTurns: 5},
+	})
+	writeWorkflowFile(t, dir, "merge-pr", []testPhase{
+		{name: "analyze", promptContent: "merge-pr", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	_, _ = q.Enqueue(makeVessel(1, "implement-feature"))
+	_, _ = q.Enqueue(makeVessel(2, "implement-feature"))
+	_, _ = q.Enqueue(makeVessel(3, "merge-pr"))
+	_, _ = q.Enqueue(makeVessel(4, "merge-pr"))
+
+	counter := &classCountingCmdRunner{delay: 50 * time.Millisecond}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, counter)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 4 {
+		t.Fatalf("DrainAndWait().Completed = %d, want 4", result.Completed)
+	}
+	if counter.maxByClass["implement-feature"] != 1 {
+		t.Fatalf("implement-feature max concurrent = %d, want 1", counter.maxByClass["implement-feature"])
+	}
+	if counter.maxByClass["merge-pr"] != 2 {
+		t.Fatalf("merge-pr max concurrent = %d, want 2", counter.maxByClass["merge-pr"])
+	}
+	if counter.globalMax != 3 {
+		t.Fatalf("global max concurrent = %d, want 3", counter.globalMax)
 	}
 }
 

@@ -67,7 +67,11 @@ sources:
 # ---------------------------------------------------------------------------
 # Execution limits
 # ---------------------------------------------------------------------------
-concurrency: 2          # max simultaneous sessions
+concurrency:
+  global: 2            # hard ceiling across all workflows
+  per_class:
+    implement-feature: 1
+    merge-pr: 2        # optional per-workflow caps keyed by workflow name
 max_turns: 50           # max turns per prompt phase or prompt-only run
 timeout: "30m"          # per-session timeout (Go duration string)
 
@@ -739,7 +743,7 @@ sources:
         workflow: fix-bug
 ```
 
-The migration is transparent -- you do not need to change your config file. Both formats are validated the same way after normalization.
+The migration is transparent -- you do not need to change your config file. Both formats are validated the same way after normalization, and the legacy scalar form of `concurrency` continues to work alongside the newer `global`/`per_class` block.
 
 ### When to migrate
 

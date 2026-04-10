@@ -59,28 +59,29 @@ const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
 var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
-	Profiles      []string                  `yaml:"profiles,omitempty"`
-	Repo          string                    `yaml:"repo,omitempty"`
-	Sources       map[string]SourceConfig   `yaml:"sources,omitempty"`
-	Tasks         map[string]Task           `yaml:"tasks,omitempty"`
-	Concurrency   int                       `yaml:"concurrency"`
-	MaxTurns      int                       `yaml:"max_turns"`
-	Timeout       string                    `yaml:"timeout"`
-	StateDir      string                    `yaml:"state_dir"`
-	Exclude       []string                  `yaml:"exclude,omitempty"`
-	DefaultBranch string                    `yaml:"default_branch,omitempty"`
-	CleanupAfter  string                    `yaml:"cleanup_after,omitempty"`
-	LLM           string                    `yaml:"llm,omitempty"`
-	Model         string                    `yaml:"model,omitempty"`
-	Providers     map[string]ProviderConfig `yaml:"providers,omitempty"`
-	LLMRouting    LLMRoutingConfig          `yaml:"llm_routing,omitempty"`
-	Claude        ClaudeConfig              `yaml:"claude"`
-	Copilot       CopilotConfig             `yaml:"copilot,omitempty"`
-	Validation    ValidationConfig          `yaml:"validation,omitempty"`
-	Daemon        DaemonConfig              `yaml:"daemon,omitempty"`
-	Harness       HarnessConfig             `yaml:"harness,omitempty"`
-	Observability ObservabilityConfig       `yaml:"observability,omitempty"`
-	Cost          CostConfig                `yaml:"cost,omitempty"`
+	Profiles            []string                  `yaml:"profiles,omitempty"`
+	Repo                string                    `yaml:"repo,omitempty"`
+	Sources             map[string]SourceConfig   `yaml:"sources,omitempty"`
+	Tasks               map[string]Task           `yaml:"tasks,omitempty"`
+	Concurrency         int                       `yaml:"concurrency"`
+	ConcurrencyPerClass map[string]int            `yaml:"-"`
+	MaxTurns            int                       `yaml:"max_turns"`
+	Timeout             string                    `yaml:"timeout"`
+	StateDir            string                    `yaml:"state_dir"`
+	Exclude             []string                  `yaml:"exclude,omitempty"`
+	DefaultBranch       string                    `yaml:"default_branch,omitempty"`
+	CleanupAfter        string                    `yaml:"cleanup_after,omitempty"`
+	LLM                 string                    `yaml:"llm,omitempty"`
+	Model               string                    `yaml:"model,omitempty"`
+	Providers           map[string]ProviderConfig `yaml:"providers,omitempty"`
+	LLMRouting          LLMRoutingConfig          `yaml:"llm_routing,omitempty"`
+	Claude              ClaudeConfig              `yaml:"claude"`
+	Copilot             CopilotConfig             `yaml:"copilot,omitempty"`
+	Validation          ValidationConfig          `yaml:"validation,omitempty"`
+	Daemon              DaemonConfig              `yaml:"daemon,omitempty"`
+	Harness             HarnessConfig             `yaml:"harness,omitempty"`
+	Observability       ObservabilityConfig       `yaml:"observability,omitempty"`
+	Cost                CostConfig                `yaml:"cost,omitempty"`
 }
 
 type ProviderConfig struct {
@@ -265,19 +266,37 @@ type BudgetConfig struct {
 	MaxTokens  int     `yaml:"max_tokens,omitempty"`
 }
 
+type parsedConcurrency struct {
+	Global   int
+	PerClass map[string]int
+	Set      bool
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", path, err)
 	}
 
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("parse config yaml: %w", err)
+	}
+
+	concurrency, err := parseConcurrencyNode(&root)
+	if err != nil {
+		return nil, err
+	}
+	removeYAMLField(&root, "concurrency")
+
 	cfg := &Config{
-		Concurrency:  2,
-		MaxTurns:     50,
-		Timeout:      "30m",
-		StateDir:     ".xylem",
-		CleanupAfter: "168h",
-		Exclude:      []string{"wontfix", "duplicate", "in-progress", "no-bot"},
+		Concurrency:         2,
+		ConcurrencyPerClass: nil,
+		MaxTurns:            50,
+		Timeout:             "30m",
+		StateDir:            ".xylem",
+		CleanupAfter:        "168h",
+		Exclude:             []string{"wontfix", "duplicate", "in-progress", "no-bot"},
 		Claude: ClaudeConfig{
 			Command: "claude",
 		},
@@ -295,8 +314,12 @@ func Load(path string) (*Config, error) {
 		},
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config yaml: %w", err)
+	if err := root.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("decode config yaml: %w", err)
+	}
+	if concurrency.Set {
+		cfg.Concurrency = concurrency.Global
+		cfg.ConcurrencyPerClass = concurrency.PerClass
 	}
 
 	cfg.normalize()
@@ -321,12 +344,21 @@ func (c *Config) normalize() {
 			},
 		}
 	}
+	c.ConcurrencyPerClass = normalizeConcurrencyPerClass(c.ConcurrencyPerClass)
 	c.normalizeProviders()
 }
 
 func (c *Config) Validate() error {
 	if c.Concurrency <= 0 {
 		return fmt.Errorf("concurrency must be greater than 0")
+	}
+	for class, limit := range c.ConcurrencyPerClass {
+		if strings.TrimSpace(class) == "" {
+			return fmt.Errorf("concurrency.per_class keys must be non-empty")
+		}
+		if limit <= 0 {
+			return fmt.Errorf("concurrency.per_class[%q] must be greater than 0", class)
+		}
 	}
 
 	if c.MaxTurns <= 0 {
@@ -492,6 +524,14 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+func (c *Config) ConcurrencyLimit(class string) (int, bool) {
+	if c == nil {
+		return 0, false
+	}
+	limit, ok := c.ConcurrencyPerClass[strings.TrimSpace(class)]
+	return limit, ok
+}
+
 func (c Config) ValidationConfigured() bool {
 	return !c.Validation.IsEmpty()
 }
@@ -621,6 +661,84 @@ func (c *Config) ObservabilitySampleRate() float64 {
 		return 1.0
 	}
 	return c.Observability.SampleRate
+}
+
+func parseConcurrencyNode(root *yaml.Node) (parsedConcurrency, error) {
+	mapping := root
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return parsedConcurrency{}, nil
+		}
+		mapping = root.Content[0]
+	}
+	if mapping.Kind != yaml.MappingNode {
+		return parsedConcurrency{}, nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key := mapping.Content[i]
+		if key.Value != "concurrency" {
+			continue
+		}
+		value := mapping.Content[i+1]
+		switch value.Kind {
+		case yaml.ScalarNode:
+			var global int
+			if err := value.Decode(&global); err != nil {
+				return parsedConcurrency{}, fmt.Errorf("parse concurrency: %w", err)
+			}
+			return parsedConcurrency{Global: global, Set: true}, nil
+		case yaml.MappingNode:
+			var raw struct {
+				Global   *int           `yaml:"global"`
+				PerClass map[string]int `yaml:"per_class,omitempty"`
+			}
+			if err := value.Decode(&raw); err != nil {
+				return parsedConcurrency{}, fmt.Errorf("parse concurrency: %w", err)
+			}
+			if raw.Global == nil {
+				return parsedConcurrency{}, fmt.Errorf("concurrency.global is required when concurrency is a map")
+			}
+			return parsedConcurrency{
+				Global:   *raw.Global,
+				PerClass: normalizeConcurrencyPerClass(raw.PerClass),
+				Set:      true,
+			}, nil
+		default:
+			return parsedConcurrency{}, fmt.Errorf("parse concurrency: must be an integer or map")
+		}
+	}
+	return parsedConcurrency{}, nil
+}
+
+func removeYAMLField(root *yaml.Node, field string) {
+	mapping := root
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return
+		}
+		mapping = root.Content[0]
+	}
+	if mapping.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value != field {
+			continue
+		}
+		mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
+		return
+	}
+}
+
+func normalizeConcurrencyPerClass(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for class, limit := range in {
+		out[strings.TrimSpace(class)] = limit
+	}
+	return out
 }
 
 func (c *Config) VesselBudget() *cost.Budget {
