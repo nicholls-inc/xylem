@@ -114,8 +114,8 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		drainRunner.CheckWaitingVessels(ctx)
 		drainRunner.CheckHungVessels(ctx)
 		// Auto-merge: best-effort request copilot review on merge-ready
-		// harness PRs, then enable GitHub auto-merge once checks are green
-		// and the PR is mergeable.
+		// harness PRs, then admin-merge once deterministic safety checks
+		// are green.
 		if cfg.Daemon.AutoMerge {
 			autoMergeXylemPRs(ctx, cfg.Daemon)
 		}

@@ -1352,6 +1352,7 @@ func runGHPRMerge(_ context.Context, store *dtu.Store, args []string, stderr io.
 		return repo.MergePullRequest(number, dtu.MergePullRequestOptions{
 			DeleteHeadBranch: opts.deleteBranch,
 			AutoMerge:        opts.autoMerge,
+			AdminMerge:       opts.adminMerge,
 		})
 	})
 	if err != nil {
@@ -1435,6 +1436,7 @@ type ghOptions struct {
 	limit        int
 	deleteBranch bool
 	autoMerge    bool
+	adminMerge   bool
 	addLabels    []string
 	removeLabels []string
 }
@@ -1514,6 +1516,8 @@ func parseGHFlags(args []string) (ghOptions, error) {
 			opts.deleteBranch = true
 		case "--auto":
 			opts.autoMerge = true
+		case "--admin":
+			opts.adminMerge = true
 		case "--add-label":
 			value, next, err := requireValue(args, i, args[i])
 			if err != nil {
@@ -1593,10 +1597,30 @@ func encodePR(state *dtu.State, repo *dtu.Repository, pr dtu.PullRequest, fields
 			out[field] = prURL(state, repo, pr)
 		case "labels":
 			out[field] = encodeLabels(pr.Labels)
+		case "state":
+			out[field] = prState(pr)
 		case "headRefName":
 			out[field] = pr.HeadBranch
 		case "headRefOid":
 			out[field] = pr.HeadSHA
+		case "mergeable":
+			out[field] = prMergeable(pr)
+		case "reviewDecision":
+			out[field] = prReviewDecision(pr)
+		case "autoMergeRequest":
+			if pr.AutoMergeEnabled {
+				out[field] = map[string]any{}
+			} else {
+				out[field] = nil
+			}
+		case "statusCheckRollup":
+			out[field] = encodeStatusCheckRollup(pr.Checks)
+		case "reviewRequests":
+			out[field] = encodeReviewRequests(pr.ReviewRequests)
+		case "latestReviews":
+			out[field] = encodeLatestReviews(pr.Reviews)
+		case "reviewThreads":
+			out[field] = encodeReviewThreads(pr.ReviewThreads)
 		case "mergeCommit":
 			out[field] = map[string]any{"oid": pr.HeadSHA}
 		}
@@ -1646,6 +1670,66 @@ func ghCheckState(state dtu.CheckState) string {
 	default:
 		return "PENDING"
 	}
+}
+
+func prState(pr dtu.PullRequest) string {
+	if pr.State != "" {
+		return strings.ToUpper(string(pr.State))
+	}
+	return "OPEN"
+}
+
+func prMergeable(pr dtu.PullRequest) string {
+	if trimmed := strings.TrimSpace(pr.Mergeable); trimmed != "" {
+		return trimmed
+	}
+	return "MERGEABLE"
+}
+
+func prReviewDecision(pr dtu.PullRequest) string {
+	return strings.TrimSpace(pr.ReviewDecision)
+}
+
+func encodeStatusCheckRollup(checks []dtu.Check) []map[string]string {
+	out := make([]map[string]string, 0, len(checks))
+	for _, check := range checks {
+		status := "COMPLETED"
+		if check.State == dtu.CheckStatePending {
+			status = "IN_PROGRESS"
+		}
+		out = append(out, map[string]string{
+			"conclusion": ghCheckState(check.State),
+			"status":     status,
+		})
+	}
+	return out
+}
+
+func encodeReviewRequests(requests []string) []map[string]string {
+	out := make([]map[string]string, 0, len(requests))
+	for _, request := range requests {
+		out = append(out, map[string]string{"login": request})
+	}
+	return out
+}
+
+func encodeLatestReviews(reviews []dtu.Review) []map[string]any {
+	out := make([]map[string]any, 0, len(reviews))
+	for _, review := range reviews {
+		out = append(out, map[string]any{
+			"author": map[string]string{"login": review.Author},
+			"state":  string(review.State),
+		})
+	}
+	return out
+}
+
+func encodeReviewThreads(threads []dtu.ReviewThread) []map[string]any {
+	out := make([]map[string]any, 0, len(threads))
+	for _, thread := range threads {
+		out = append(out, map[string]any{"isResolved": thread.IsResolved})
+	}
+	return out
 }
 
 func matchesPRState(pr dtu.PullRequest, want string) bool {

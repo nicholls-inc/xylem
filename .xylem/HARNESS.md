@@ -79,3 +79,13 @@ CI runs, in order: `goimports -l .`, `go vet`, `golangci-lint`, `go build`, `go 
 - **git** — must be on PATH (worktree operations)
 - **claude** — Claude Code CLI, for session execution
 - **gh** — GitHub CLI, authenticated. Required only for `github` source scanning.
+
+# Harness PR auto-admin-merge contract
+
+For self-hosted `harness-impl` pull requests, the daemon and the checked-in
+`merge-pr` workflow share the same contract:
+
+- Only PRs on xylem-managed issue branches with the required merge labels are eligible.
+- The `no-auto-admin-merge` label is an immediate opt-out and leaves the PR for manual handling.
+- Auto-admin-merge only fires when the PR is `MERGEABLE`, CI is fully green, there is no active `CHANGES_REQUESTED` review state, and all review threads are resolved.
+- Non-`harness-impl` or otherwise human-authored PRs remain outside this path and still require normal manual merge decisions.

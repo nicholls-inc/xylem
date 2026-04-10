@@ -55,19 +55,17 @@ func TestPropDecideAutoMergeActionMatchesMergeReadiness(t *testing.T) {
 	})
 }
 
-func TestPropDecideAutoMergeActionWaitsWhenAutoMergeAlreadyEnabled(t *testing.T) {
+func TestPropDecideAutoMergeActionAdminMergesWithReviewerEvidence(t *testing.T) {
 	settings := xylemAutoMergeSettings(t)
 	rapid.Check(t, func(t *rapid.T) {
 		reviewDecision := rapid.SampledFrom([]string{"", "REVIEW_REQUIRED", "APPROVED"}).Draw(t, "reviewDecision")
-		withReviewRequest := rapid.Bool().Draw(t, "withReviewRequest")
-		withLatestReview := rapid.Bool().Draw(t, "withLatestReview")
+		reviewEvidence := rapid.SampledFrom([]string{"request", "latest-review"}).Draw(t, "reviewEvidence")
 
 		pr := prSummary{
-			HeadRefName:      "feat/issue-42-42",
-			State:            "OPEN",
-			Mergeable:        "MERGEABLE",
-			ReviewDecision:   reviewDecision,
-			AutoMergeRequest: &struct{}{},
+			HeadRefName:    "feat/issue-42-42",
+			State:          "OPEN",
+			Mergeable:      "MERGEABLE",
+			ReviewDecision: reviewDecision,
 			Labels: []struct {
 				Name string `json:"name"`
 			}{{Name: "ready-to-merge"}, {Name: "harness-impl"}},
@@ -75,13 +73,16 @@ func TestPropDecideAutoMergeActionWaitsWhenAutoMergeAlreadyEnabled(t *testing.T)
 				Conclusion string `json:"conclusion"`
 				Status     string `json:"status"`
 			}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
+			ReviewThreads: []struct {
+				IsResolved bool `json:"isResolved"`
+			}{{IsResolved: true}},
 		}
-		if withReviewRequest {
-			pr.ReviewRequests = append(pr.ReviewRequests, struct {
+		switch reviewEvidence {
+		case "request":
+			pr.ReviewRequests = []struct {
 				Login string `json:"login"`
-			}{Login: settings.reviewer})
-		}
-		if withLatestReview {
+			}{{Login: settings.reviewer}}
+		case "latest-review":
 			pr.LatestReviews = append(pr.LatestReviews, struct {
 				Author struct {
 					Login string `json:"login"`
@@ -93,10 +94,39 @@ func TestPropDecideAutoMergeActionWaitsWhenAutoMergeAlreadyEnabled(t *testing.T)
 				}{Login: settings.reviewer},
 				State: "COMMENTED",
 			})
+		default:
+			t.Fatalf("unexpected review evidence %q", reviewEvidence)
 		}
 
-		if got := decideAutoMergeAction(pr, settings); got != actionWaitForAutoMerge {
-			t.Fatalf("expected wait-for-auto-merge, got %v for %+v", got, pr)
+		if got := decideAutoMergeAction(pr, settings); got != actionAdminMerge {
+			t.Fatalf("expected admin-merge, got %v for %+v", got, pr)
+		}
+	})
+}
+
+func TestPropDecideAutoMergeActionOptOutLabelAlwaysBlocks(t *testing.T) {
+	settings := xylemAutoMergeSettings(t)
+	rapid.Check(t, func(t *rapid.T) {
+		resolved := rapid.Bool().Draw(t, "resolved")
+		pr := prSummary{
+			HeadRefName:    "feat/issue-42-42",
+			State:          "OPEN",
+			Mergeable:      "MERGEABLE",
+			ReviewDecision: "APPROVED",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "ready-to-merge"}, {Name: "harness-impl"}, {Name: settings.optOutLabel}},
+			StatusCheckRollup: []struct {
+				Conclusion string `json:"conclusion"`
+				Status     string `json:"status"`
+			}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
+			ReviewThreads: []struct {
+				IsResolved bool `json:"isResolved"`
+			}{{IsResolved: resolved}},
+		}
+
+		if got := decideAutoMergeAction(pr, settings); got != actionBlockedOptOut {
+			t.Fatalf("expected opt-out block, got %v for %+v", got, pr)
 		}
 	})
 }

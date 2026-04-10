@@ -405,11 +405,13 @@ func (r *Repository) DeleteBranch(name string) bool {
 type MergePullRequestOptions struct {
 	DeleteHeadBranch bool
 	AutoMerge        bool
+	AdminMerge       bool
 }
 
 // MergePullRequest updates pull-request and git-visible state to reflect a merge.
 // When auto-merge is requested and merge-blocking checks are still present, the
-// pull request remains open with auto-merge enabled until checks pass.
+// pull request remains open with auto-merge enabled until checks pass. Admin
+// merges bypass the queued-auto-merge path and merge immediately.
 func (r *Repository) MergePullRequest(number int, opts MergePullRequestOptions) error {
 	if r == nil {
 		return fmt.Errorf("repository must not be nil")
@@ -432,7 +434,7 @@ func (r *Repository) MergePullRequest(number int, opts MergePullRequestOptions) 
 		return fmt.Errorf("pull request %d: head SHA is required", number)
 	}
 
-	if opts.AutoMerge {
+	if opts.AutoMerge && !opts.AdminMerge {
 		pr.AutoMergeEnabled = true
 		pr.AutoMergeDeleteBranch = opts.DeleteHeadBranch
 		if pr.HasBlockingMergeChecks() {
@@ -535,12 +537,16 @@ type PullRequest struct {
 	Merged                bool             `yaml:"merged,omitempty" json:"merged,omitempty"`
 	AutoMergeEnabled      bool             `yaml:"auto_merge_enabled,omitempty" json:"auto_merge_enabled,omitempty"`
 	AutoMergeDeleteBranch bool             `yaml:"auto_merge_delete_branch,omitempty" json:"auto_merge_delete_branch,omitempty"`
+	Mergeable             string           `yaml:"mergeable,omitempty" json:"mergeable,omitempty"`
+	ReviewDecision        string           `yaml:"review_decision,omitempty" json:"review_decision,omitempty"`
 	Labels                []string         `yaml:"labels,omitempty" json:"labels,omitempty"`
 	BaseBranch            string           `yaml:"base_branch" json:"base_branch"`
 	HeadBranch            string           `yaml:"head_branch" json:"head_branch"`
 	HeadSHA               string           `yaml:"head_sha" json:"head_sha"`
 	Comments              []Comment        `yaml:"comments,omitempty" json:"comments,omitempty"`
 	Reviews               []Review         `yaml:"reviews,omitempty" json:"reviews,omitempty"`
+	ReviewRequests        []string         `yaml:"review_requests,omitempty" json:"review_requests,omitempty"`
+	ReviewThreads         []ReviewThread   `yaml:"review_threads,omitempty" json:"review_threads,omitempty"`
 	Checks                []Check          `yaml:"checks,omitempty" json:"checks,omitempty"`
 }
 
@@ -574,6 +580,11 @@ type Review struct {
 	Author string      `yaml:"author,omitempty" json:"author,omitempty"`
 	State  ReviewState `yaml:"state,omitempty" json:"state,omitempty"`
 	Body   string      `yaml:"body,omitempty" json:"body,omitempty"`
+}
+
+// ReviewThread describes a pull request review thread.
+type ReviewThread struct {
+	IsResolved bool `yaml:"is_resolved,omitempty" json:"is_resolved,omitempty"`
 }
 
 // Check describes a pull request check run.

@@ -106,3 +106,77 @@ func TestPropRepositoryAutoMergeRespectsCheckStates(t *testing.T) {
 		}
 	})
 }
+
+func TestPropRepositoryAdminMergeBypassesCheckStates(t *testing.T) {
+	t.Parallel()
+
+	checkStates := []CheckState{
+		CheckStatePending,
+		CheckStateSuccess,
+		CheckStateFailure,
+		CheckStateCancelled,
+		CheckStateSkipped,
+	}
+
+	rapid.Check(t, func(t *rapid.T) {
+		deleteHeadBranch := rapid.Bool().Draw(t, "delete_head_branch")
+		checkCount := rapid.IntRange(0, 5).Draw(t, "check_count")
+
+		checks := make([]Check, 0, checkCount)
+		for i := 0; i < checkCount; i++ {
+			state := rapid.SampledFrom(checkStates).Draw(t, fmt.Sprintf("check_state_%d", i))
+			checks = append(checks, Check{
+				ID:    int64(i + 1),
+				Name:  fmt.Sprintf("check-%d", i),
+				State: state,
+			})
+		}
+
+		repo := &Repository{
+			Owner:         "owner",
+			Name:          "repo",
+			DefaultBranch: "main",
+			Branches: []Branch{
+				{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+				{Name: "feature/merge-me", SHA: "deadbeefcafebabe"},
+			},
+			PullRequests: []PullRequest{{
+				Number:     8,
+				Title:      "Admin merge me",
+				State:      PullRequestStateOpen,
+				BaseBranch: "main",
+				HeadBranch: "feature/merge-me",
+				HeadSHA:    "feedfacecafebeef",
+				Checks:     checks,
+			}},
+		}
+
+		if err := repo.MergePullRequest(8, MergePullRequestOptions{DeleteHeadBranch: deleteHeadBranch, AdminMerge: true}); err != nil {
+			t.Fatalf("MergePullRequest() error = %v", err)
+		}
+
+		pr := repo.PullRequestByNumber(8)
+		if pr == nil {
+			t.Fatal("PullRequestByNumber() = nil")
+			return
+		}
+		if pr.State != PullRequestStateMerged || !pr.Merged {
+			t.Fatalf("merged pull request = %#v, want merged state", pr)
+		}
+		if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch {
+			t.Fatalf("merged pull request flags = %#v, want cleared auto-merge flags", pr)
+		}
+		if branch := repo.BranchByName("main"); branch == nil || branch.SHA != pr.HeadSHA {
+			t.Fatalf("main branch = %#v, want SHA %q", branch, pr.HeadSHA)
+		}
+		if deleteHeadBranch {
+			if branch := repo.BranchByName(pr.HeadBranch); branch != nil {
+				t.Fatalf("head branch = %#v, want deleted", branch)
+			}
+		} else {
+			if branch := repo.BranchByName(pr.HeadBranch); branch == nil || branch.SHA != pr.HeadSHA {
+				t.Fatalf("head branch = %#v, want retained at SHA %q", branch, pr.HeadSHA)
+			}
+		}
+	})
+}
