@@ -4926,15 +4926,19 @@ func TestSmoke_S4_BuildTemplateDataExposesRepoAndValidation(t *testing.T) {
 
 	vessel := queue.Vessel{
 		ID:     "pr-42",
+		Ref:    "https://github.com/owner/config-repo/pull/42",
 		Source: "github-pr",
-		Meta:   map[string]string{"config_source": "harness-merge"},
+		Meta: map[string]string{
+			"config_source":        "harness-merge",
+			"schedule.source_name": "security-compliance",
+		},
 	}
 	td := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "")
 
-	rendered, err := renderCommandTemplate("merge", "command", "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} && echo {{.Source.Name}} {{.Source.Repo}} {{.Repo.DefaultBranch}} {{.Validation.Format}} {{.Validation.Lint}} {{.Validation.Build}} {{.Validation.Test}}", td)
+	rendered, err := renderCommandTemplate("merge", "command", "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} && echo {{.Source.Name}} {{.Source.Repo}} {{.Repo.DefaultBranch}} {{.Validation.Format}} {{.Validation.Lint}} {{.Validation.Build}} {{.Validation.Test}} {{.Vessel.Ref}} {{index .Vessel.Meta \"schedule.source_name\"}}", td)
 	require.NoError(t, err)
 	assert.Contains(t, rendered, "gh pr merge 42 --repo owner/config-repo")
-	assert.Contains(t, rendered, "echo harness-merge owner/config-repo trunk fmt ./... lint ./... build ./... test ./...")
+	assert.Contains(t, rendered, "echo harness-merge owner/config-repo trunk fmt ./... lint ./... build ./... test ./... https://github.com/owner/config-repo/pull/42 security-compliance")
 }
 
 func TestResolveSourcePrefersConfigSource(t *testing.T) {
