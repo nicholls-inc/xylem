@@ -395,6 +395,8 @@ func shouldRouteToRefinement(vessel queue.Vessel) bool {
 	class := vessel.Meta[recovery.MetaClass]
 	return action == string(recovery.ActionRefine) ||
 		action == string(recovery.ActionSplitTask) ||
+		action == string(recovery.ActionRequestInfo) ||
+		action == string(recovery.ActionSplitIssue) ||
 		class == string(recovery.ClassSpecGap) ||
 		class == string(recovery.ClassScopeGap)
 }

@@ -1585,6 +1585,20 @@ func (r *Runner) annotateRecoveryMetadata(id string, state queue.VesselState, er
 	}
 }
 
+func (r *Runner) persistRecoveryMetadata(id string, artifact *recovery.Artifact) {
+	if r.Queue == nil || artifact == nil {
+		return
+	}
+	current, err := r.Queue.FindByID(id)
+	if err != nil || current == nil {
+		return
+	}
+	current.Meta = recovery.ApplyToMeta(current.Meta, artifact)
+	if updateErr := r.Queue.UpdateVessel(*current); updateErr != nil {
+		log.Printf("warn: persist recovery metadata for vessel %s: %v", id, updateErr)
+	}
+}
+
 func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktreePath string, phaseResults []reporter.PhaseResult, vrs *vesselRunState, claims []evidence.Claim) string {
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
 		if r.cancelledTransition(vessel.ID, updateErr) {
@@ -1663,7 +1677,7 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	}
 
 	if state == string(queue.StateFailed) || state == string(queue.StateTimedOut) {
-		reviewArtifact := recovery.Build(recovery.Input{
+		seedArtifact := recovery.Build(recovery.Input{
 			VesselID:    artifactVessel.ID,
 			Source:      artifactVessel.Source,
 			Workflow:    artifactVessel.Workflow,
@@ -1677,12 +1691,34 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 			Trace:       traceContextPointer(vrs.trace),
 			CreatedAt:   now,
 		})
+		reviewArtifact := recovery.Build(recovery.Input{
+			VesselID:             artifactVessel.ID,
+			Source:               artifactVessel.Source,
+			Workflow:             artifactVessel.Workflow,
+			Ref:                  artifactVessel.Ref,
+			State:                artifactVessel.State,
+			FailedPhase:          artifactVessel.FailedPhase,
+			Error:                artifactVessel.Error,
+			GateOutput:           artifactVessel.GateOutput,
+			RetryOf:              artifactVessel.RetryOf,
+			Meta:                 artifactVessel.Meta,
+			Trace:                traceContextPointer(vrs.trace),
+			CreatedAt:            now,
+			RepeatedFailureCount: r.matchingFailureCount(artifactVessel, seedArtifact.FailureFingerprint),
+			EvidencePaths:        r.failureEvidencePaths(vessel.ID, summary, reviewArtifacts),
+		})
+		if diagnosedArtifact, invoked, err := recovery.RunDiagnosisWorkflow(recovery.DiagnosisInput{Artifact: reviewArtifact}); err != nil {
+			log.Printf("warn: run recovery diagnosis workflow: %v", err)
+		} else if invoked {
+			reviewArtifact = diagnosedArtifact
+		}
 		if err := recovery.Save(r.Config.StateDir, reviewArtifact); err != nil {
 			log.Printf("warn: save recovery artifact: %v", err)
 		} else {
 			summary.FailureReviewPath = failureReviewRelativePath(vessel.ID)
 			reviewArtifacts.FailureReview = summary.FailureReviewPath
 			summary.Recovery = recoverySummaryFromArtifact(reviewArtifact)
+			r.persistRecoveryMetadata(vessel.ID, reviewArtifact)
 		}
 	}
 
@@ -1696,6 +1732,48 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	}
 
 	return manifest
+}
+
+func (r *Runner) failureEvidencePaths(vesselID string, summary *VesselSummary, artifacts *ReviewArtifacts) []string {
+	paths := []string{filepath.ToSlash(filepath.Join("phases", vesselID, summaryFileName))}
+	if summary == nil {
+		return paths
+	}
+	for _, path := range []string{
+		summary.EvidenceManifestPath,
+		summary.CostReportPath,
+		summary.BudgetAlertsPath,
+		summary.EvalReportPath,
+	} {
+		if strings.TrimSpace(path) != "" {
+			paths = append(paths, path)
+		}
+	}
+	if artifacts != nil {
+		for _, path := range []string{
+			artifacts.EvidenceManifest,
+			artifacts.CostReport,
+			artifacts.BudgetAlerts,
+			artifacts.EvalReport,
+		} {
+			if strings.TrimSpace(path) != "" {
+				paths = append(paths, path)
+			}
+		}
+	}
+	return paths
+}
+
+func (r *Runner) matchingFailureCount(vessel queue.Vessel, fingerprint string) int {
+	if r.Queue == nil || fingerprint == "" {
+		return 0
+	}
+	vessels, err := r.Queue.List()
+	if err != nil {
+		log.Printf("warn: list queue for repeated failure count: %v", err)
+		return 0
+	}
+	return recovery.CountMatchingFailures(vessels, vessel, fingerprint)
 }
 
 func saveJSONArtifact(path string, value any) error {

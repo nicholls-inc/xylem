@@ -520,6 +520,65 @@ func TestSmoke_S19_FailurePathBuildsSummaryWithStateFailedAndCallsSaveVesselSumm
 	assert.Equal(t, summary.FailureReviewPath, summary.ReviewArtifacts.FailureReview)
 }
 
+func TestSmoke_S19b_RepeatedFailureRunsDiagnosisWorkflow(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	ref := "https://github.com/owner/repo/issues/55"
+	now := time.Date(2026, time.April, 9, 19, 0, 0, 0, time.UTC)
+
+	previous := queue.Vessel{
+		ID:          "issue-55",
+		Source:      "github-issue",
+		Workflow:    "fix-bug",
+		Ref:         ref,
+		State:       queue.StatePending,
+		CreatedAt:   now.Add(-2 * time.Minute),
+		FailedPhase: "implement",
+	}
+	_, err := q.Enqueue(previous)
+	require.NoError(t, err)
+	require.NoError(t, q.Update(previous.ID, queue.StateRunning, ""))
+	require.NoError(t, q.Update(previous.ID, queue.StateFailed, "panic: invariant violated during phase execution"))
+
+	current := queue.Vessel{
+		ID:          "issue-55-retry-1",
+		Source:      "github-issue",
+		Workflow:    "fix-bug",
+		Ref:         ref,
+		State:       queue.StatePending,
+		CreatedAt:   now,
+		FailedPhase: "implement",
+		RetryOf:     previous.ID,
+	}
+	_, err = q.Enqueue(current)
+	require.NoError(t, err)
+	require.NoError(t, q.Update(current.ID, queue.StateRunning, ""))
+	require.NoError(t, q.Update(current.ID, queue.StateFailed, "panic: invariant violated during phase execution"))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	vrs := newVesselRunState(cfg, current, now)
+	vrs.addPhase(PhaseSummary{Name: "implement", Status: "failed"})
+
+	r.persistRunArtifacts(current, string(queue.StateFailed), vrs, nil, now.Add(time.Second))
+
+	summary := loadSummary(t, cfg.StateDir, current.ID)
+	artifact, err := recovery.Load(filepath.Join(cfg.StateDir, summary.FailureReviewPath))
+	require.NoError(t, err)
+	assert.Equal(t, recovery.DecisionSourceDiagnosis, artifact.DecisionSource)
+	assert.Equal(t, recovery.ActionHumanEscalation, artifact.RecoveryAction)
+	assert.True(t, artifact.RequiresDecisionRefresh)
+	assert.Equal(t, 2, artifact.RepeatedFailureCount)
+	assert.Contains(t, artifact.EvidencePaths, filepath.ToSlash(filepath.Join("phases", current.ID, "summary.json")))
+
+	latest, err := q.FindByID(current.ID)
+	require.NoError(t, err)
+	require.NotNil(t, latest)
+	assert.Equal(t, string(recovery.ActionHumanEscalation), latest.Meta[recovery.MetaAction])
+}
+
 func TestSmoke_S20_BudgetMaxCostUSDAndBudgetMaxTokensAppearInSummaryWhenBudgetIsConfigured(t *testing.T) {
 	stateDir := t.TempDir()
 	startedAt := time.Date(2026, time.April, 8, 20, 33, 0, 0, time.UTC)

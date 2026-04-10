@@ -64,6 +64,91 @@ func TestSmoke_S1_RetryCommandMarksRecoveryArtifactEnqueued(t *testing.T) {
 	assert.Equal(t, string(recovery.ClassTransient), retry.Meta[recovery.MetaClass])
 }
 
+func TestSmoke_S1b_RetryCommandBlocksUntilFailureReviewDecisionChanges(t *testing.T) {
+	q := newRetryTestQueue(t)
+	cfg := newRetryTestConfig(t)
+	now := time.Now().UTC()
+	v := queue.Vessel{
+		ID:        "issue-43",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	}
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-43", queue.StateRunning, ""))
+	require.NoError(t, q.Update("issue-43", queue.StateFailed, "panic: invariant violated"))
+
+	artifact := &recovery.Artifact{
+		SchemaVersion:           "v1",
+		VesselID:                "issue-43",
+		State:                   string(queue.StateFailed),
+		FailureFingerprint:      "fingerprint",
+		RecoveryClass:           recovery.ClassUnknown,
+		Confidence:              0.79,
+		RecoveryAction:          recovery.ActionHumanEscalation,
+		DecisionSource:          recovery.DecisionSourceDiagnosis,
+		Rationale:               "needs human review",
+		EvidencePaths:           []string{"phases/issue-43/summary.json"},
+		RetryPreconditions:      []string{"Refresh the recovery decision after a human reviews the cited artifacts."},
+		RetrySuppressed:         true,
+		RetryOutcome:            "suppressed",
+		RequiresDecisionRefresh: true,
+		CreatedAt:               now.Add(time.Minute),
+	}
+	require.NoError(t, recovery.Save(cfg.StateDir, artifact))
+
+	err = cmdRetry(q, cfg, "issue-43", false)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decision changes")
+}
+
+func TestSmoke_S1c_RetryCommandAllowsUpdatedDiagnosisDecision(t *testing.T) {
+	q := newRetryTestQueue(t)
+	cfg := newRetryTestConfig(t)
+	now := time.Now().UTC()
+	v := queue.Vessel{
+		ID:        "issue-44",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	}
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-44", queue.StateRunning, ""))
+	require.NoError(t, q.Update("issue-44", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := &recovery.Artifact{
+		SchemaVersion:      "v1",
+		VesselID:           "issue-44",
+		State:              string(queue.StateFailed),
+		FailureFingerprint: "fingerprint",
+		RecoveryClass:      recovery.ClassTransient,
+		Confidence:         0.72,
+		RecoveryAction:     recovery.ActionRetry,
+		DecisionSource:     recovery.DecisionSourceDiagnosis,
+		Rationale:          "bounded retry approved",
+		EvidencePaths:      []string{"phases/issue-44/summary.json"},
+		RetryPreconditions: []string{"Review the cited artifacts and confirm the retry budget before retrying."},
+		RetrySuppressed:    false,
+		RetryOutcome:       "not_attempted",
+		CreatedAt:          now.Add(time.Minute),
+	}
+	require.NoError(t, recovery.Save(cfg.StateDir, artifact))
+
+	require.NoError(t, cmdRetry(q, cfg, "issue-44", false))
+
+	retry, err := q.FindByID("issue-44-retry-1")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StatePending, retry.State)
+
+	loaded, err := recovery.Load(filepath.Join(cfg.StateDir, recovery.RelativePath("issue-44")))
+	require.NoError(t, err)
+	assert.Equal(t, "enqueued", loaded.RetryOutcome)
+}
+
 func TestRetryCreatesNewVessel(t *testing.T) {
 	q := newRetryTestQueue(t)
 	cfg := newRetryTestConfig(t)
@@ -518,11 +603,11 @@ func TestRewritePhaseOutputsNil(t *testing.T) {
 func TestCopyPhaseOutputFilesMissingSrcDir(t *testing.T) {
 	stateDir := t.TempDir()
 	dstDir := filepath.Join(stateDir, "phases", "new")
-	// Source directory does not exist — should be a no-op
+	// Source directory does not exist — should be a no-op that leaves the retry artifact tree untouched.
 	if err := copyPhaseOutputFiles(stateDir, "nonexistent", "new"); err != nil {
 		t.Fatalf("expected no error for missing src dir, got: %v", err)
 	}
 	if _, err := os.Stat(dstDir); !os.IsNotExist(err) {
-		t.Fatalf("expected missing source dir to avoid creating %s, got err=%v", dstDir, err)
+		t.Fatalf("expected no destination dir for missing source, got err=%v", err)
 	}
 }
