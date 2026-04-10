@@ -258,6 +258,192 @@ func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailure(t *testing.T) {
 	assert.Equal(t, "1", vessels[0].Meta[recovery.MetaRetryCount])
 }
 
+func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailureIgnoresStaleBranchWithoutPR(t *testing.T) {
+	t.Parallel()
+
+	type repoState struct {
+		retrying         bool
+		priorState       queue.VesselState
+		hasBranch        bool
+		hasOpenPR        bool
+		hasMergedPR      bool
+		wantRetry        bool
+		wantBranchLookup bool
+	}
+
+	issue := ghIssue{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}
+
+	tests := []struct {
+		name  string
+		state repoState
+	}{
+		{
+			name: "failed retry ignores stale branch without pr",
+			state: repoState{
+				retrying:   true,
+				priorState: queue.StateFailed,
+				hasBranch:  true,
+				wantRetry:  true,
+			},
+		},
+		{
+			name: "timed out retry ignores stale branch without pr",
+			state: repoState{
+				retrying:   true,
+				priorState: queue.StateTimedOut,
+				hasBranch:  true,
+				wantRetry:  true,
+			},
+		},
+		{
+			name: "retry remains blocked by open pr",
+			state: repoState{
+				retrying:   true,
+				priorState: queue.StateFailed,
+				hasBranch:  true,
+				hasOpenPR:  true,
+			},
+		},
+		{
+			name: "retry remains blocked by merged pr",
+			state: repoState{
+				retrying:    true,
+				priorState:  queue.StateTimedOut,
+				hasBranch:   true,
+				hasMergedPR: true,
+			},
+		},
+		{
+			name: "fresh issue stays blocked by existing branch",
+			state: repoState{
+				hasBranch:        true,
+				wantBranchLookup: true,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			q := queue.New(filepath.Join(dir, "queue.jsonl"))
+			r := newMock()
+
+			issueBytes, _ := json.Marshal([]ghIssue{issue})
+			r.set(issueBytes, "gh", "search", "issues",
+				"--repo", "owner/repo",
+				"--state", "open",
+				"--json", "number,title,body,url,labels",
+				"--limit", "20",
+				"--label", "bug")
+
+			if tt.state.hasBranch {
+				r.set([]byte("abc123\trefs/heads/fix/issue-42-flaky-dependency\n"),
+					"git", "ls-remote", "--heads", "origin", "fix/issue-42-*")
+			}
+			if tt.state.hasOpenPR {
+				openPRs, _ := json.Marshal([]struct {
+					Number      int    `json:"number"`
+					HeadRefName string `json:"headRefName"`
+				}{
+					{Number: 43, HeadRefName: "fix/issue-42-flaky-dependency"},
+				})
+				r.set(openPRs, "gh", "pr", "list",
+					"--repo", "owner/repo",
+					"--search", "head:fix/issue-42-",
+					"--state", "open",
+					"--json", "number,headRefName",
+					"--limit", "5")
+			}
+			if tt.state.hasMergedPR {
+				mergedPRs, _ := json.Marshal([]struct {
+					Number      int    `json:"number"`
+					HeadRefName string `json:"headRefName"`
+				}{
+					{Number: 44, HeadRefName: "fix/issue-42-flaky-dependency"},
+				})
+				r.set(mergedPRs, "gh", "pr", "list",
+					"--repo", "owner/repo",
+					"--search", "head:fix/issue-42-",
+					"--state", "merged",
+					"--json", "number,headRefName",
+					"--limit", "5")
+			}
+
+			g := &GitHub{
+				Repo:      "owner/repo",
+				Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+				Queue:     q,
+				CmdRunner: r,
+			}
+
+			if tt.state.retrying {
+				fingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+				_, err := q.Enqueue(queue.Vessel{
+					ID:       "issue-42",
+					Source:   "github-issue",
+					Ref:      issue.URL,
+					Workflow: "fix-bug",
+					Meta: map[string]string{
+						"issue_num":                "42",
+						"source_input_fingerprint": fingerprint,
+					},
+					State:     queue.StatePending,
+					CreatedAt: time.Now().UTC(),
+				})
+				require.NoError(t, err)
+				_, err = q.Dequeue()
+				require.NoError(t, err)
+				require.NoError(t, q.Update("issue-42", tt.state.priorState, "temporary failure from upstream 503"))
+
+				artifact := recovery.Build(recovery.Input{
+					VesselID:  "issue-42",
+					Source:    "github-issue",
+					Workflow:  "fix-bug",
+					Ref:       issue.URL,
+					State:     tt.state.priorState,
+					Error:     "temporary failure from upstream 503",
+					CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+				})
+				require.NoError(t, recovery.Save(dir, artifact))
+				g.StateDir = dir
+			}
+
+			vessels, err := g.Scan(context.Background())
+			require.NoError(t, err)
+			branchLookups := 0
+			for _, call := range r.calls {
+				if len(call) >= 3 && call[0] == "git" && call[1] == "ls-remote" && call[2] == "--heads" {
+					branchLookups++
+				}
+			}
+			assert.Equal(t, boolToInt(tt.state.wantBranchLookup), branchLookups)
+			if tt.state.wantRetry {
+				require.Len(t, vessels, 1)
+				assert.Equal(t, "issue-42-retry-1", vessels[0].ID)
+				assert.Equal(t, "issue-42", vessels[0].RetryOf)
+				assert.Equal(t, "cooldown", vessels[0].Meta[recovery.MetaUnlockedBy])
+				return
+			}
+			assert.Empty(t, vessels)
+		})
+	}
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 func TestSmoke_S3_GitHubScanBlocksNonTransientRecoveryClasses(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
