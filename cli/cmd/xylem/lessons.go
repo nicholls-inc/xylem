@@ -14,6 +14,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	lessonspkg "github.com/nicholls-inc/xylem/cli/internal/lessons"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	reviewpkg "github.com/nicholls-inc/xylem/cli/internal/review"
 	runnerpkg "github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
@@ -97,12 +98,29 @@ func cmdLessons(cfg *config.Config, wt lessonsWorktree, runner lessonsRunner) er
 }
 
 func buildBuiltinWorkflowHandlers(cfg *config.Config, wt lessonsWorktree, runner lessonsRunner) map[string]runnerpkg.BuiltinWorkflowHandler {
-	return map[string]runnerpkg.BuiltinWorkflowHandler{
+	handlers := map[string]runnerpkg.BuiltinWorkflowHandler{
 		"lessons": func(ctx context.Context, _ queue.Vessel) error {
 			_, err := runLessons(ctx, cfg, wt, runner)
 			return err
 		},
 	}
+	// Register built-in scheduled audit workflows so the daemon's drain
+	// loop handles them directly instead of trying to load a YAML file.
+	for _, name := range []string{
+		reviewpkg.ContextWeightAuditWorkflow,
+		reviewpkg.HarnessGapAnalysisWorkflow,
+		reviewpkg.WorkflowHealthReportWorkflow,
+	} {
+		workflowName := name // capture loop variable
+		handlers[workflowName] = func(ctx context.Context, vessel queue.Vessel) error {
+			repo := resolveScheduledAuditRepo(cfg, vessel)
+			if repo == "" {
+				return fmt.Errorf("%s requires a source repo", workflowName)
+			}
+			return runBuiltInScheduledWorkflow(ctx, cfg, workflowName, repo, runner)
+		}
+	}
+	return handlers
 }
 
 func runLessons(ctx context.Context, cfg *config.Config, wt lessonsWorktree, runner lessonsRunner) (*lessonspkg.Result, error) {
