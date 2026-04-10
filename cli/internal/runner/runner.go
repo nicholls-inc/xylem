@@ -3784,7 +3784,9 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 		GateResult:      gateResult,
 		Vessel: phase.VesselData{
 			ID:     vessel.ID,
+			Ref:    vessel.Ref,
 			Source: vessel.Source,
+			Meta:   maps.Clone(vessel.Meta),
 		},
 		Repo: phase.RepoData{
 			Slug:          repoSlug,

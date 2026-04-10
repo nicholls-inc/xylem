@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"gopkg.in/yaml.v3"
 	"pgregory.net/rapid"
 )
 
@@ -118,5 +119,53 @@ func TestPropValidateClassRejectsUnknownClasses(t *testing.T) {
 		if !strings.Contains(err.Error(), class) {
 			t.Fatalf("validateClass(%q) error = %q, want mention of class", class, err.Error())
 		}
+	})
+}
+
+func TestPropWorkflowTierYAMLRoundTripPreservesPointerSemantics(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		optionalTier := func(label string) *string {
+			kind := rapid.SampledFrom([]string{"nil", "empty", "value"}).Draw(t, label+"-kind")
+			switch kind {
+			case "nil":
+				return nil
+			case "empty":
+				value := ""
+				return &value
+			default:
+				value := rapid.StringMatching(`[a-z][a-z0-9-]{0,7}`).Draw(t, label+"-value")
+				return &value
+			}
+		}
+
+		wf := Workflow{
+			Name:   rapid.StringMatching(`[a-z][a-z0-9-]{0,7}`).Draw(t, "workflow-name"),
+			Tier:   optionalTier("workflow-tier"),
+			Phases: []Phase{{Name: "analyze", Tier: optionalTier("phase-tier")}},
+		}
+
+		data, err := yaml.Marshal(wf)
+		if err != nil {
+			t.Fatalf("yaml.Marshal() error = %v", err)
+		}
+
+		var roundTripped Workflow
+		if err := yaml.Unmarshal(data, &roundTripped); err != nil {
+			t.Fatalf("yaml.Unmarshal() error = %v", err)
+		}
+
+		assertOptional := func(name string, want, got *string) {
+			switch {
+			case want == nil && got != nil:
+				t.Fatalf("%s = %q, want nil", name, *got)
+			case want != nil && got == nil:
+				t.Fatalf("%s = nil, want %q", name, *want)
+			case want != nil && got != nil && *want != *got:
+				t.Fatalf("%s = %q, want %q", name, *got, *want)
+			}
+		}
+
+		assertOptional("workflow tier", wf.Tier, roundTripped.Tier)
+		assertOptional("phase tier", wf.Phases[0].Tier, roundTripped.Phases[0].Tier)
 	})
 }

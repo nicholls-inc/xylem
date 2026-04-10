@@ -69,6 +69,7 @@ type Vessel struct {
 	Ref           string            `json:"ref,omitempty"`
 	Workflow      string            `json:"workflow,omitempty"`
 	WorkflowClass string            `json:"workflow_class,omitempty"`
+	Tier          string            `json:"tier,omitempty"`
 	Prompt        string            `json:"prompt,omitempty"`
 	Meta          map[string]string `json:"meta,omitempty"`
 	State         VesselState       `json:"state"`

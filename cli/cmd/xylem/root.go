@@ -31,14 +31,19 @@ func newRootCmd() *cobra.Command {
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || cmd.CommandPath() == "xylem dtu" || strings.HasPrefix(cmd.CommandPath(), "xylem dtu ") || cmd.CommandPath() == "xylem bootstrap" || strings.HasPrefix(cmd.CommandPath(), "xylem bootstrap ") {
+			commandPath := cmd.CommandPath()
+			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || commandPath == "xylem dtu" || strings.HasPrefix(commandPath, "xylem dtu ") || commandPath == "xylem bootstrap" || strings.HasPrefix(commandPath, "xylem bootstrap ") {
 				return nil
 			}
 
 			// visualize (and its subcommands) and review are read-only commands
 			// that only parse config, workflow YAML, and local state; they
-			// don't shell out to git or gh.
-			skipTooling := cmd.Name() == "visualize" || strings.HasPrefix(cmd.CommandPath(), "xylem visualize") || cmd.Name() == "review"
+			// don't shell out to git or gh. continuous-improvement select is
+			// another local-only helper used by a command phase.
+			skipTooling := cmd.Name() == "visualize" ||
+				strings.HasPrefix(commandPath, "xylem visualize") ||
+				cmd.Name() == "review" ||
+				commandPath == "xylem continuous-improvement select"
 
 			if !skipTooling {
 				if _, err := exec.LookPath("git"); err != nil {
@@ -82,6 +87,8 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(),
 		newBootstrapCmd(),
+		newContinuousImprovementCmd(),
+		newContinuousSimplicityCmd(),
 		newDtuCmd(),
 		newShimDispatchCmd(),
 		newScanCmd(),

@@ -155,6 +155,7 @@ Use `noop.match` on a phase to let that phase complete the workflow early when i
 
 - **fix-bug** -- Analyze, Plan, Implement (with test gate), PR
 - **implement-feature** -- Analyze, Plan (with label gate for approval), Implement (with test gate), PR
+- **security-compliance** -- Daily scheduled secrets, static-analysis, dependency-audit, and synthesis pass with issue filing for actionable risk
 
 See the [Workflows Guide](docs/workflows.md) for template variables, custom workflows, and prompt authoring tips.
 

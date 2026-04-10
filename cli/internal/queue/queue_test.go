@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // helperTransitionToWaiting transitions a vessel from pending -> running -> waiting via the queue.
@@ -97,6 +99,32 @@ func TestEnqueue(t *testing.T) {
 	if got.State != StatePending {
 		t.Fatalf("expected state pending, got %q", got.State)
 	}
+}
+
+func TestSmoke_S2_LegacyQueueJsonlWithoutTierLoadsEmptyTier(t *testing.T) {
+	q, path := newTestQueue(t)
+	legacy := `{"id":"issue-42","source":"github-issue","ref":"https://github.com/example/repo/issues/42","workflow":"fix-bug","state":"pending","created_at":"2026-04-10T00:00:00Z"}`
+	require.NoError(t, os.WriteFile(path, []byte(legacy+"\n"), 0o644))
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Empty(t, vessels[0].Tier)
+}
+
+func TestSmoke_S3_QueueJsonlRoundTripsTier(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(77)
+	vessel.Tier = "high"
+
+	enqueued, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+	require.True(t, enqueued)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "high", vessels[0].Tier)
 }
 
 // TestWS6S28VesselJSONLNoNewFields verifies that queue JSONL records remain

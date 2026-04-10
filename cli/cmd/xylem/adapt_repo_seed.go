@@ -158,20 +158,33 @@ func primaryGitHubRepo(cfg *config.Config) string {
 }
 
 func findExistingAdaptRepoIssue(ctx context.Context, runner adaptRepoSeedRunner, repo string) (*adaptRepoIssue, error) {
+	for _, state := range []string{"open", "closed"} {
+		issue, err := findAdaptRepoIssueByState(ctx, runner, repo, state)
+		if err != nil {
+			return nil, err
+		}
+		if issue != nil {
+			return issue, nil
+		}
+	}
+	return nil, nil
+}
+
+func findAdaptRepoIssueByState(ctx context.Context, runner adaptRepoSeedRunner, repo, state string) (*adaptRepoIssue, error) {
 	out, err := runner.Run(ctx, "gh", "search", "issues",
 		"--repo", repo,
-		"--state", "all",
+		"--state", state,
 		"--json", "number,title,url",
 		"--limit", "100",
 		"--search", adaptRepoIssueTitle,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("search adapt-repo seed issue: %w", err)
+		return nil, fmt.Errorf("search adapt-repo seed issue in %s state: %w", state, err)
 	}
 
 	var issues []adaptRepoIssue
 	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parse adapt-repo seed issue search output: %w", err)
+		return nil, fmt.Errorf("parse adapt-repo seed issue search output for %s state: %w", state, err)
 	}
 	for _, issue := range issues {
 		if issue.Title == adaptRepoIssueTitle {

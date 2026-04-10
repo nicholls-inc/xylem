@@ -215,6 +215,11 @@ sources:
     type: schedule
     cadence: "@daily"
     workflow: lessons
+
+  security-compliance:
+    type: schedule
+    cadence: "@daily"
+    workflow: security-compliance
 ```
 
 Behavior:
@@ -223,6 +228,7 @@ Behavior:
 - Later scans enqueue only when the cadence boundary has elapsed since the last successful enqueue.
 - Scheduled sources do not use `tasks`.
 - Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
+- Built-in scheduled workflows such as `lessons`, `workflow-health-report`, and `security-compliance` fit this source type directly.
 
 ### `scheduled`
 
@@ -256,7 +262,22 @@ sources:
         ref: harness-gap-analysis
 ```
 
-To opt out, omit or delete the scheduled `harness-gap-analysis` source from your config; no separate feature flag is required.
+`continuous-improvement` is another scheduled self-hosting workflow. It runs a deterministic rotation helper before the prompt phases, persists its focus history under `<state_dir>/state/continuous-improvement/state.json`, writes the current focus brief to `<state_dir>/state/continuous-improvement/current-selection.json`, and then drives a small improvement PR through the normal workflow pipeline.
+
+```yaml
+sources:
+  continuous-improvement:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@daily"
+    tasks:
+      daily-rotation:
+        workflow: continuous-improvement
+        ref: continuous-improvement
+```
+
+To opt out, omit or delete the scheduled `continuous-improvement` source from your config; likewise, omit `harness-gap-analysis` if you do not want the sibling scheduled review. No separate feature flag is required.
+
 ### `status_labels`
 
 When `status_labels` is set, xylem records the configured labels in vessel metadata and applies them during source lifecycle hooks.

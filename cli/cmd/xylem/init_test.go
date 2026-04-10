@@ -30,11 +30,14 @@ var expectedCoreWorkflows = []string{
 	"resolve-conflicts",
 	"respond-to-pr-review",
 	"review-pr",
+	"security-compliance",
 	"triage",
 	"workflow-health-report",
 }
 
 var expectedSelfHostingWorkflows = []string{
+	"continuous-improvement",
+	"continuous-simplicity",
 	"diagnose-failures",
 	"implement-harness",
 	"sota-gap-analysis",
@@ -288,6 +291,7 @@ func TestInitCreatesV2Files(t *testing.T) {
 		".xylem/profile.lock",
 		".xylem/prompts/adapt-repo/apply.md",
 		".xylem/prompts/adapt-repo/plan.md",
+		".xylem/prompts/security-compliance/synthesize.md",
 		".xylem/prompts/workflow-health-report/analyze.md",
 	}
 	for _, workflowName := range expectedCoreWorkflows {
@@ -316,8 +320,9 @@ func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
 
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCall("owner/name"): []byte("[]"),
-			adaptRepoCreateCall("owner/name"): []byte("https://github.com/owner/name/issues/12\n"),
+			adaptRepoSearchCallForState("owner/name", "open"):   []byte("[]"),
+			adaptRepoSearchCallForState("owner/name", "closed"): []byte("[]"),
+			adaptRepoCreateCall("owner/name"):                   []byte("https://github.com/owner/name/issues/12\n"),
 		},
 	}
 
@@ -333,7 +338,7 @@ func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
 	assert.Equal(t, "https://github.com/owner/name/issues/12", marker.IssueURL)
 	assert.Equal(t, adaptRepoSeededByInit, marker.SeededBy)
 	assert.Equal(t, 1, marker.ProfileVersion)
-	assert.Len(t, runner.calls, 2)
+	assert.Len(t, runner.calls, 3)
 }
 
 func TestInitSkipsExistingV2Files(t *testing.T) {
@@ -431,6 +436,7 @@ func TestInitScaffoldConfigV2Format(t *testing.T) {
 	}
 	assert.Contains(t, content, "profiles:")
 	assert.Contains(t, content, "workflow-health-report")
+	assert.Contains(t, content, "security-compliance")
 	assert.NotContains(t, content, "template:")
 }
 
@@ -532,6 +538,7 @@ func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
 	assert.Contains(t, cfg.Sources, "pr-lifecycle")
 	assert.Contains(t, cfg.Sources, "lessons-hygiene")
 	assert.Contains(t, cfg.Sources, "context-audit")
+	assert.Contains(t, cfg.Sources, "security-compliance")
 	assert.Contains(t, cfg.Sources, "workflow-health")
 	require.NoError(t, cfg.Validate())
 }
@@ -554,6 +561,7 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	expectedWorkflows := append(append([]string{}, expectedCoreWorkflows...), expectedSelfHostingWorkflows...)
 	sort.Strings(expectedWorkflows)
 	assert.Equal(t, expectedWorkflows, scaffoldedWorkflowNames(t, dir))
+	assert.Contains(t, output, "Created .xylem/workflows/continuous-simplicity.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/implement-harness.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/unblock-wave.yaml")
 

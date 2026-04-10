@@ -13,14 +13,16 @@ import (
 // MergeTask defines a task triggered by merged PRs.
 type MergeTask struct {
 	Workflow string
+	Tier     string
 }
 
 // GitHubMerge scans for merged PRs and produces vessels.
 type GitHubMerge struct {
-	Repo      string
-	Tasks     map[string]MergeTask
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
+	Repo        string
+	Tasks       map[string]MergeTask
+	DefaultTier string
+	Queue       *queue.Queue
+	CmdRunner   CommandRunner
 }
 
 type ghMergeCommit struct {
@@ -73,6 +75,7 @@ func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				Source:   "github-merge",
 				Ref:      ref,
 				Workflow: task.Workflow,
+				Tier:     ResolveTaskTier(task.Tier, g.DefaultTier),
 				Meta: map[string]string{
 					"pr_num":         strconv.Itoa(pr.Number),
 					"event_type":     "merge",

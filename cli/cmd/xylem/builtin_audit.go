@@ -73,7 +73,7 @@ func runBuiltInScheduledVessels(ctx context.Context, cfg *config.Config, q *queu
 
 func isBuiltInScheduledWorkflow(workflow string) bool {
 	switch workflow {
-	case reviewpkg.ContextWeightAuditWorkflow, reviewpkg.HarnessGapAnalysisWorkflow:
+	case reviewpkg.ContextWeightAuditWorkflow, reviewpkg.HarnessGapAnalysisWorkflow, reviewpkg.WorkflowHealthReportWorkflow:
 		return true
 	default:
 		return false
@@ -95,6 +95,14 @@ func runBuiltInScheduledWorkflow(ctx context.Context, cfg *config.Config, workfl
 		_, err := reviewpkg.RunHarnessGapAnalysis(ctx, cfg.StateDir, repo, cmdRunner, reviewpkg.HarnessGapOptions{
 			OutputDir: cfg.HarnessReviewOutputDir(),
 			Now:       now,
+		})
+		return err
+	case reviewpkg.WorkflowHealthReportWorkflow:
+		_, err := reviewpkg.RunWorkflowHealthReport(ctx, cfg.StateDir, repo, cmdRunner, reviewpkg.WorkflowHealthOptions{
+			LookbackRuns:        cfg.HarnessReviewLookbackRuns(),
+			OutputDir:           cfg.HarnessReviewOutputDir(),
+			Now:                 now,
+			EscalationThreshold: 2,
 		})
 		return err
 	default:
@@ -155,6 +163,8 @@ func builtInScheduledWorkflowSummaryNote(workflow string) string {
 	switch workflow {
 	case reviewpkg.HarnessGapAnalysisWorkflow:
 		return "Built-in harness-gap analysis uses persisted daemon/GitHub/git telemetry and may open de-duplicated GitHub issues."
+	case reviewpkg.WorkflowHealthReportWorkflow:
+		return "Built-in workflow-health reporting summarizes recent vessel health and may open weekly de-duplicated GitHub issues."
 	default:
 		return "Built-in context-weight audit uses persisted summary artifacts and may open de-duplicated GitHub issues."
 	}

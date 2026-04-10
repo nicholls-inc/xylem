@@ -133,6 +133,26 @@ sources:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
 
+  continuous-simplicity:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-continuous-simplicity:
+        workflow: continuous-simplicity
+        ref: continuous-simplicity
+
+  continuous-improvement:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@daily"
+    timeout: "90m"
+    tasks:
+      daily-rotation:
+        workflow: continuous-improvement
+        ref: continuous-improvement
+
   harness-gap-analysis:
     type: scheduled
     repo: nicholls-inc/xylem

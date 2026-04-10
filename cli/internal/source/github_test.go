@@ -917,6 +917,7 @@ func TestGitHubTaskFromConfigCopiesLabelGateLabels(t *testing.T) {
 	task := GitHubTaskFromConfig(config.Task{
 		Labels:   []string{"bug"},
 		Workflow: "fix-bug",
+		Tier:     "  high  ",
 		LabelGateLabels: &config.LabelGateLabels{
 			Waiting: "blocked",
 			Ready:   "ready-for-implementation",
@@ -931,6 +932,9 @@ func TestGitHubTaskFromConfigCopiesLabelGateLabels(t *testing.T) {
 	}
 	if task.LabelGateLabels.Ready != "ready-for-implementation" {
 		t.Errorf("LabelGateLabels.Ready = %q, want ready-for-implementation", task.LabelGateLabels.Ready)
+	}
+	if task.Tier != "high" {
+		t.Errorf("Tier = %q, want high", task.Tier)
 	}
 }
 

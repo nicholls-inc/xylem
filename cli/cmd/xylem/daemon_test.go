@@ -198,6 +198,73 @@ func (r daemonBacklogRunner) Run(_ context.Context, _ string, _ ...string) ([]by
 	return r.output, nil
 }
 
+func TestSmoke_S7_DaemonStartupContinuesWhenAdaptRepoSearchFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"issues": {
+				Type: "github",
+				Repo: "owner/repo",
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logBuf := withBufferedDefaultLogger(t)
+	markerPath := adaptRepoSeedMarkerPath(cfg.StateDir)
+	runner := &seedRunnerStub{
+		errors: map[string]error{
+			adaptRepoSearchCallForState("owner/repo", "open"): fmt.Errorf("gh unavailable"),
+		},
+	}
+
+	err := daemonStartup(context.Background(), cfg, q, nil, runner)
+	require.NoError(t, err)
+	_, statErr := os.Stat(markerPath)
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+	assert.Contains(t, logBuf.String(), "seed adapt-repo issue failed, continuing")
+	assert.Contains(t, logBuf.String(), "gh unavailable")
+	assert.Len(t, runner.calls, 1)
+}
+
+func TestSmoke_S8_DaemonStartupLeavesMarkerAbsentWhenAdaptRepoCreateFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"issues": {
+				Type: "github",
+				Repo: "owner/repo",
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logBuf := withBufferedDefaultLogger(t)
+	runner := &seedRunnerStub{
+		outputs: map[string][]byte{
+			adaptRepoSearchCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoSearchCallForState("owner/repo", "closed"): []byte("[]"),
+		},
+		errors: map[string]error{
+			adaptRepoCreateCall("owner/repo"): fmt.Errorf("gh create failed"),
+		},
+	}
+	markerPath := adaptRepoSeedMarkerPath(cfg.StateDir)
+	_, statErr := os.Stat(markerPath)
+	require.Error(t, statErr)
+	require.True(t, os.IsNotExist(statErr))
+
+	err := daemonStartup(context.Background(), cfg, q, nil, runner)
+	require.NoError(t, err)
+	_, statErr = os.Stat(markerPath)
+	require.Error(t, statErr)
+	assert.True(t, os.IsNotExist(statErr))
+	assert.Contains(t, logBuf.String(), "seed adapt-repo issue failed, continuing")
+	assert.Contains(t, logBuf.String(), "gh create failed")
+	assert.Len(t, runner.calls, 3)
+}
+
 func TestDaemonLoopScheduledSourceRunsSingleTick(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{

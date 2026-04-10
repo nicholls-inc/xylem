@@ -9,6 +9,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func writeWorkflowFile(t *testing.T, dir, name, content string) string {
@@ -58,6 +59,51 @@ func chdirTemp(t *testing.T, dir string) {
 		t.Fatalf("chdir %q: %v", dir, err)
 	}
 	t.Cleanup(func() { os.Chdir(orig) })
+}
+
+func tierPtr(s string) *string {
+	return &s
+}
+
+func TestSmoke_S1_WorkflowTierRoundTripPreservesNilAndEmptyStringDistinction(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+	createPromptFile(t, dir, "prompts/plan.md")
+	createPromptFile(t, dir, "prompts/apply.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+tier: high
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+  - name: plan
+    prompt_file: prompts/plan.md
+    max_turns: 10
+    tier: ""
+  - name: apply
+    prompt_file: prompts/apply.md
+    max_turns: 10
+    tier: low
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, tierPtr("high"), got.Tier)
+	require.Nil(t, got.Phases[0].Tier)
+	assert.Equal(t, tierPtr(""), got.Phases[1].Tier)
+	assert.Equal(t, tierPtr("low"), got.Phases[2].Tier)
+
+	data, err := yaml.Marshal(got)
+	require.NoError(t, err)
+
+	var roundTripped Workflow
+	require.NoError(t, yaml.Unmarshal(data, &roundTripped))
+	require.Equal(t, got.Tier, roundTripped.Tier)
+	require.Nil(t, roundTripped.Phases[0].Tier)
+	assert.Equal(t, got.Phases[1].Tier, roundTripped.Phases[1].Tier)
+	assert.Equal(t, got.Phases[2].Tier, roundTripped.Phases[2].Tier)
 }
 
 func TestSmoke_S11_GateWithoutEvidenceMetadataLoadsCleanlyWithNilEvidenceField(t *testing.T) {

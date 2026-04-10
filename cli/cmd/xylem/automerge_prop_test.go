@@ -73,9 +73,6 @@ func TestPropDecideAutoMergeActionAdminMergesWithReviewerEvidence(t *testing.T) 
 				Conclusion string `json:"conclusion"`
 				Status     string `json:"status"`
 			}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
-			ReviewThreads: []struct {
-				IsResolved bool `json:"isResolved"`
-			}{{IsResolved: true}},
 		}
 		switch reviewEvidence {
 		case "request":
@@ -107,7 +104,6 @@ func TestPropDecideAutoMergeActionAdminMergesWithReviewerEvidence(t *testing.T) 
 func TestPropDecideAutoMergeActionOptOutLabelAlwaysBlocks(t *testing.T) {
 	settings := xylemAutoMergeSettings(t)
 	rapid.Check(t, func(t *rapid.T) {
-		resolved := rapid.Bool().Draw(t, "resolved")
 		pr := prSummary{
 			HeadRefName:    "feat/issue-42-42",
 			State:          "OPEN",
@@ -120,9 +116,6 @@ func TestPropDecideAutoMergeActionOptOutLabelAlwaysBlocks(t *testing.T) {
 				Conclusion string `json:"conclusion"`
 				Status     string `json:"status"`
 			}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
-			ReviewThreads: []struct {
-				IsResolved bool `json:"isResolved"`
-			}{{IsResolved: resolved}},
 		}
 
 		if got := decideAutoMergeAction(pr, settings); got != actionBlockedOptOut {

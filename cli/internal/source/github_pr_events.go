@@ -15,6 +15,7 @@ import (
 // PREventsTask defines a task triggered by PR events.
 type PREventsTask struct {
 	Workflow        string
+	Tier            string
 	Labels          []string
 	ReviewSubmitted bool
 	ChecksFailed    bool
@@ -32,13 +33,14 @@ type PREventsTask struct {
 
 // GitHubPREvents scans GitHub PRs for specific events and produces vessels.
 type GitHubPREvents struct {
-	Repo      string
-	Tasks     map[string]PREventsTask
-	Exclude   []string
-	StateDir  string
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
-	Now       func() time.Time
+	Repo        string
+	Tasks       map[string]PREventsTask
+	Exclude     []string
+	StateDir    string
+	DefaultTier string
+	Queue       *queue.Queue
+	CmdRunner   CommandRunner
+	Now         func() time.Time
 
 	// selfLogin is the authenticated gh CLI user's login, looked up once
 	// per Scan. Used to unconditionally filter out events authored by
@@ -185,6 +187,7 @@ func (g *GitHubPREvents) Scan(ctx context.Context) ([]queue.Vessel, error) {
 								Source:   "github-pr-events",
 								Ref:      ref,
 								Workflow: task.Workflow,
+								Tier:     ResolveTaskTier(task.Tier, g.DefaultTier),
 								Meta: map[string]string{
 									"pr_num":         strconv.Itoa(pr.Number),
 									"event_type":     "label",
@@ -521,6 +524,7 @@ func (g *GitHubPREvents) newPREventVessel(pr ghPR, task PREventsTask, eventType,
 		Source:    g.Name(),
 		Ref:       ref,
 		Workflow:  task.Workflow,
+		Tier:      ResolveTaskTier(task.Tier, g.DefaultTier),
 		Meta:      meta,
 		State:     queue.StatePending,
 		CreatedAt: createdAt,
