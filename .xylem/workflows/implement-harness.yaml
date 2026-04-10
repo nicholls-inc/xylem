@@ -39,7 +39,7 @@ phases:
       retries: 2
   - name: pr_draft
     prompt_file: .xylem/prompts/implement-harness/pr_draft.md
-    max_turns: 15
+    max_turns: 30
     gate:
       type: command
       run: |
