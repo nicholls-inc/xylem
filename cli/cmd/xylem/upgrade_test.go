@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/nicholls-inc/xylem/cli/internal/config"
-	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,27 +28,6 @@ func stubDaemonUpgradeDependencies(
 		daemonGitPull = prevGitPull
 		daemonGoBuild = prevGoBuild
 		daemonExec = prevExec
-	})
-}
-
-func stubUpgradeProfileDependencies(
-	t *testing.T,
-	loadConfig func(string) (*config.Config, error),
-	composeProfiles func(...string) (*profiles.ComposedProfile, error),
-	syncProfileFiles func(string, *profiles.ComposedProfile, bool) error,
-) {
-	t.Helper()
-
-	prevLoadConfig := daemonLoadConfig
-	prevComposeProfiles := daemonComposeProfiles
-	prevSyncProfileFiles := daemonSyncProfileFiles
-	daemonLoadConfig = loadConfig
-	daemonComposeProfiles = composeProfiles
-	daemonSyncProfileFiles = syncProfileFiles
-	t.Cleanup(func() {
-		daemonLoadConfig = prevLoadConfig
-		daemonComposeProfiles = prevComposeProfiles
-		daemonSyncProfileFiles = prevSyncProfileFiles
 	})
 }
 
@@ -123,13 +100,17 @@ func TestSmoke_S37_DaemonAutoUpgradeSyncsDaemonWorktreeControlPlaneFiles(t *test
 	require.NoError(t, os.MkdirAll(filepath.Dir(executablePath), 0o755))
 	require.NoError(t, os.WriteFile(executablePath, []byte("old-binary"), 0o755))
 
-	upgradedWorkflowData := []byte(`run: "gh pr merge 181 --auto"`)
-	upgradedPromptData := []byte("use the upgraded merge workflow")
+	binaryWorkflowPath := filepath.Join(binaryRepo, ".xylem", "workflows", "merge-pr.yaml")
 	daemonWorkflowPath := filepath.Join(daemonRepo, ".xylem", "workflows", "merge-pr.yaml")
+	binaryPromptPath := filepath.Join(binaryRepo, ".xylem", "prompts", "merge-pr", "check.md")
 	daemonPromptPath := filepath.Join(daemonRepo, ".xylem", "prompts", "merge-pr", "check.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(binaryWorkflowPath), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Dir(daemonWorkflowPath), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(binaryPromptPath), 0o755))
 	require.NoError(t, os.MkdirAll(filepath.Dir(daemonPromptPath), 0o755))
+	require.NoError(t, os.WriteFile(binaryWorkflowPath, []byte(`run: "gh pr merge 181 --auto"`), 0o644))
 	require.NoError(t, os.WriteFile(daemonWorkflowPath, []byte(`run: "gh pr merge 181 --admin"`), 0o644))
+	require.NoError(t, os.WriteFile(binaryPromptPath, []byte("use the upgraded merge workflow"), 0o644))
 	require.NoError(t, os.WriteFile(daemonPromptPath, []byte("stale prompt from old worktree"), 0o644))
 
 	var pulledRepo string
@@ -139,18 +120,18 @@ func TestSmoke_S37_DaemonAutoUpgradeSyncsDaemonWorktreeControlPlaneFiles(t *test
 		t,
 		func(repoDir string) error {
 			pulledRepo = repoDir
-			targetWorkflowPath := filepath.Join(repoDir, ".xylem", "workflows", "merge-pr.yaml")
-			targetPromptPath := filepath.Join(repoDir, ".xylem", "prompts", "merge-pr", "check.md")
-			if err := os.MkdirAll(filepath.Dir(targetWorkflowPath), 0o755); err != nil {
+			updated, err := os.ReadFile(binaryWorkflowPath)
+			if err != nil {
 				return err
 			}
-			if err := os.MkdirAll(filepath.Dir(targetPromptPath), 0o755); err != nil {
+			if err := os.WriteFile(daemonWorkflowPath, updated, 0o644); err != nil {
 				return err
 			}
-			if err := os.WriteFile(targetWorkflowPath, upgradedWorkflowData, 0o644); err != nil {
+			updatedPrompt, err := os.ReadFile(binaryPromptPath)
+			if err != nil {
 				return err
 			}
-			return os.WriteFile(targetPromptPath, upgradedPromptData, 0o644)
+			return os.WriteFile(daemonPromptPath, updatedPrompt, 0o644)
 		},
 		func(cliDir, outPath string) error {
 			builtCLI = cliDir
@@ -176,149 +157,10 @@ func TestSmoke_S37_DaemonAutoUpgradeSyncsDaemonWorktreeControlPlaneFiles(t *test
 
 	got, err := os.ReadFile(filepath.Join(target.repoDir, ".xylem", "workflows", "merge-pr.yaml"))
 	require.NoError(t, err)
-	assert.Equal(t, upgradedWorkflowData, got)
+	assert.Contains(t, string(got), "--auto")
+	assert.NotContains(t, string(got), "--admin")
 
 	prompt, err := os.ReadFile(filepath.Join(target.repoDir, ".xylem", "prompts", "merge-pr", "check.md"))
 	require.NoError(t, err)
-	assert.Equal(t, upgradedPromptData, prompt)
-
-	binaryWorkflowPath := filepath.Join(binaryRepo, ".xylem", "workflows", "merge-pr.yaml")
-	assert.NoFileExists(t, binaryWorkflowPath)
-}
-
-func TestSyncDaemonProfileAssetsUsesConfiguredProfilesAndStateDir(t *testing.T) {
-	repoDir := t.TempDir()
-	composed := &profiles.ComposedProfile{}
-
-	var loadedConfigPath string
-	var composedProfiles []string
-	var syncedStateDir string
-	var syncedForce bool
-	var syncedProfile *profiles.ComposedProfile
-	stubUpgradeProfileDependencies(
-		t,
-		func(path string) (*config.Config, error) {
-			loadedConfigPath = path
-			return &config.Config{
-				Profiles: []string{"core", "self-hosting-xylem"},
-				StateDir: ".state/xylem",
-			}, nil
-		},
-		func(names ...string) (*profiles.ComposedProfile, error) {
-			composedProfiles = append([]string(nil), names...)
-			return composed, nil
-		},
-		func(stateDir string, got *profiles.ComposedProfile, force bool) error {
-			syncedStateDir = stateDir
-			syncedProfile = got
-			syncedForce = force
-			return nil
-		},
-	)
-
-	require.NoError(t, syncDaemonProfileAssets(repoDir))
-	assert.Equal(t, filepath.Join(repoDir, ".xylem.yml"), loadedConfigPath)
-	assert.Equal(t, []string{"core", "self-hosting-xylem"}, composedProfiles)
-	assert.Equal(t, filepath.Join(repoDir, ".state/xylem"), syncedStateDir)
-	assert.Same(t, composed, syncedProfile)
-	assert.False(t, syncedForce)
-}
-
-func TestSelfUpgradeContinuesToExecWhenProfileSyncFails(t *testing.T) {
-	repoDir := t.TempDir()
-	executablePath := filepath.Join(repoDir, "cli", "xylem")
-	require.NoError(t, os.MkdirAll(filepath.Dir(executablePath), 0o755))
-	require.NoError(t, os.WriteFile(executablePath, []byte("old-binary"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".xylem.yml"), []byte("profiles:\n  - core\n"), 0o644))
-
-	var execPath string
-	var loadedConfigPath string
-	var composedProfiles []string
-	syncAttempts := 0
-	stubDaemonUpgradeDependencies(
-		t,
-		func(string) error { return nil },
-		func(string, string) error {
-			return os.WriteFile(executablePath+".upgrade", []byte("new-binary"), 0o755)
-		},
-		func(path string, _ []string, _ []string) error {
-			execPath = path
-			return errors.New("exec blocked in test")
-		},
-	)
-	stubUpgradeProfileDependencies(
-		t,
-		func(path string) (*config.Config, error) {
-			loadedConfigPath = path
-			return &config.Config{Profiles: []string{"core"}, StateDir: ".xylem"}, nil
-		},
-		func(names ...string) (*profiles.ComposedProfile, error) {
-			composedProfiles = append([]string(nil), names...)
-			return &profiles.ComposedProfile{}, nil
-		},
-		func(string, *profiles.ComposedProfile, bool) error {
-			syncAttempts++
-			return errors.New("sync failed")
-		},
-	)
-
-	selfUpgrade(repoDir, executablePath)
-
-	assert.Equal(t, executablePath, execPath)
-	assert.Equal(t, filepath.Join(repoDir, ".xylem.yml"), loadedConfigPath)
-	assert.Equal(t, []string{"core"}, composedProfiles)
-	assert.Equal(t, 1, syncAttempts)
-}
-
-func TestSmoke_S38_DaemonAutoUpgradeScaffoldsMissingProfileWorkflowAssets(t *testing.T) {
-	repoDir := t.TempDir()
-	executablePath := filepath.Join(repoDir, "cli", "xylem")
-	require.NoError(t, os.MkdirAll(filepath.Dir(executablePath), 0o755))
-	require.NoError(t, os.WriteFile(executablePath, []byte("old-binary"), 0o755))
-
-	runGit(t, repoDir, "init")
-	runGit(t, repoDir, "remote", "add", "origin", "git@github.com:nicholls-inc/xylem.git")
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(repoDir))
-	t.Cleanup(func() {
-		require.NoError(t, os.Chdir(oldWd))
-	})
-	require.NoError(t, cmdInitWithProfile(filepath.Join(repoDir, ".xylem.yml"), false, "core,self-hosting-xylem"))
-
-	require.NoError(t, os.WriteFile(filepath.Join(repoDir, ".xylem", "workflows", "fix-bug.yaml"), []byte("existing workflow\n"), 0o644))
-	require.NoError(t, os.Remove(filepath.Join(repoDir, ".xylem", "workflows", "implement-harness.yaml")))
-	require.NoError(t, os.Remove(filepath.Join(repoDir, ".xylem", "prompts", "implement-harness", "plan.md")))
-
-	var execPath string
-	stubDaemonUpgradeDependencies(
-		t,
-		func(string) error { return nil },
-		func(string, string) error {
-			return os.WriteFile(executablePath+".upgrade", []byte("new-binary"), 0o755)
-		},
-		func(path string, _ []string, _ []string) error {
-			execPath = path
-			return errors.New("exec blocked in test")
-		},
-	)
-
-	selfUpgrade(repoDir, executablePath)
-
-	assert.Equal(t, executablePath, execPath)
-
-	composed, err := profiles.Compose("core", "self-hosting-xylem")
-	require.NoError(t, err)
-
-	workflowData, err := os.ReadFile(filepath.Join(repoDir, ".xylem", "workflows", "implement-harness.yaml"))
-	require.NoError(t, err)
-	assert.Equal(t, composed.Workflows["implement-harness"], workflowData)
-
-	promptData, err := os.ReadFile(filepath.Join(repoDir, ".xylem", "prompts", "implement-harness", "plan.md"))
-	require.NoError(t, err)
-	assert.Equal(t, composed.Prompts["implement-harness/plan"], promptData)
-
-	existingWorkflowData, err := os.ReadFile(filepath.Join(repoDir, ".xylem", "workflows", "fix-bug.yaml"))
-	require.NoError(t, err)
-	assert.Equal(t, "existing workflow\n", string(existingWorkflowData))
+	assert.Equal(t, "use the upgraded merge workflow", string(prompt))
 }

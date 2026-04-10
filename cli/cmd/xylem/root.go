@@ -32,7 +32,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			commandPath := cmd.CommandPath()
-			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || commandPath == "xylem dtu" || strings.HasPrefix(commandPath, "xylem dtu ") || commandPath == "xylem bootstrap" || strings.HasPrefix(commandPath, "xylem bootstrap ") || strings.HasPrefix(commandPath, "xylem continuous-refactoring") || strings.HasPrefix(commandPath, "xylem continuous-simplicity") || strings.HasPrefix(commandPath, "xylem continuous-style") {
+			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || commandPath == "xylem dtu" || strings.HasPrefix(commandPath, "xylem dtu ") || commandPath == "xylem bootstrap" || strings.HasPrefix(commandPath, "xylem bootstrap ") || strings.HasPrefix(commandPath, "xylem continuous-simplicity") {
 				return nil
 			}
 
@@ -45,6 +45,7 @@ func newRootCmd() *cobra.Command {
 				strings.HasPrefix(commandPath, "xylem visualize") ||
 				cmd.Name() == "review" ||
 				commandPath == "xylem continuous-improvement select" ||
+				commandPath == "xylem field-report generate" ||
 				commandPath == "xylem daemon stop"
 
 			if !skipTooling {
@@ -89,8 +90,6 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(),
 		newBootstrapCmd(),
-		newContinuousStyleCmd(),
-		newContinuousRefactoringCmd(),
 		newContinuousImprovementCmd(),
 		newContinuousSimplicityCmd(),
 		newDtuCmd(),
@@ -112,6 +111,7 @@ func newRootCmd() *cobra.Command {
 		newRetryCmd(),
 		newVisualizeCmd(),
 		newVersionCmd(),
+		newFieldReportCmd(),
 	)
 
 	return cmd

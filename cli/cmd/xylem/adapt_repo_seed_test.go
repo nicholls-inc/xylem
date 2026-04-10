@@ -64,7 +64,7 @@ func TestSmoke_S3_DaemonSeedingCreatesIssueAndMarkerOnFreshRepo(t *testing.T) {
 	assert.Equal(t, 34, marker.IssueNumber)
 	assert.Equal(t, "https://github.com/owner/repo/issues/34", marker.IssueURL)
 	assert.Equal(t, adaptRepoSeededByDaemon, marker.SeededBy)
-	assert.Equal(t, 1, marker.ProfileVersion)
+	assert.Equal(t, 2, marker.ProfileVersion)
 
 	written, err := readAdaptRepoSeedMarker(filepath.Join(cfg.StateDir, "state", "bootstrap", "adapt-repo-seeded.json"))
 	require.NoError(t, err)

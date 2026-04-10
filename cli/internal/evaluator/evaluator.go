@@ -82,17 +82,17 @@ type EvalResult struct {
 
 // Criterion defines one dimension of quality evaluation.
 type Criterion struct {
-	Name        string  `json:"name" yaml:"name"`
-	Description string  `json:"description" yaml:"description"`
-	Weight      float64 `json:"weight" yaml:"weight"`
-	Threshold   float64 `json:"threshold" yaml:"threshold"`
+	Name        string  `json:"name"`
+	Description string  `json:"description"`
+	Weight      float64 `json:"weight"`
+	Threshold   float64 `json:"threshold"`
 }
 
 // EvalConfig controls the gen-eval loop behavior.
 type EvalConfig struct {
-	Criteria      []Criterion `json:"criteria" yaml:"criteria"`
-	MaxIterations int         `json:"max_iterations" yaml:"max_iterations"`
-	PassThreshold float64     `json:"pass_threshold" yaml:"pass_threshold"`
+	Criteria      []Criterion `json:"criteria"`
+	MaxIterations int         `json:"max_iterations"`
+	PassThreshold float64     `json:"pass_threshold"`
 }
 
 // DefaultMaxIterations is used when MaxIterations is zero.

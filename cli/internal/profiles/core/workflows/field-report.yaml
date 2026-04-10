@@ -1,0 +1,59 @@
+name: field-report
+class: ops
+description: "Generate and submit anonymized field telemetry report to upstream xylem repo"
+phases:
+  - name: generate
+    type: command
+    run: "xylem field-report generate"
+    noop:
+      match: "insufficient vessel data"
+  - name: post
+    type: command
+    run: |
+      set -euo pipefail
+      REPORT_DIR=".xylem/state/field-reports"
+      LATEST=$(ls -t "$REPORT_DIR"/*.json 2>/dev/null | head -1)
+      if [ -z "$LATEST" ]; then
+        echo "No field report found to post"
+        exit 0
+      fi
+      DATE=$(basename "$LATEST" .json)
+      REPORT_ID=$(jq -r '.report_id' "$LATEST")
+      TOTAL=$(jq -r '.total_vessels' "$LATEST")
+      HEALTHY=$(jq -r '.fleet.healthy' "$LATEST")
+      UNHEALTHY=$(jq -r '.fleet.unhealthy' "$LATEST")
+      COST=$(jq -r '.cost_digest.total_cost_usd' "$LATEST")
+      TARGET_REPO=$(xylem config get telemetry.target_repo 2>/dev/null || echo "nicholls-inc/xylem")
+
+      TITLE="[field-report] ${DATE} ${REPORT_ID}"
+      EXISTING=$(gh issue list --repo "$TARGET_REPO" --search "$TITLE" --json number --jq 'length' 2>/dev/null || echo "0")
+      if [ "$EXISTING" -gt 0 ]; then
+        echo "Field report already posted: $TITLE"
+        exit 0
+      fi
+
+      BODY=$(cat <<EOF
+      ## Field Report: ${DATE}
+
+      | Metric | Value |
+      |--------|-------|
+      | Vessels | ${TOTAL} |
+      | Healthy | ${HEALTHY} |
+      | Unhealthy | ${UNHEALTHY} |
+      | Total Cost (USD) | \$${COST} |
+
+      <details>
+      <summary>Full report JSON</summary>
+
+      \`\`\`json
+      $(cat "$LATEST")
+      \`\`\`
+
+      </details>
+      EOF
+      )
+
+      gh issue create --repo "$TARGET_REPO" \
+        --title "$TITLE" \
+        --body "$BODY" \
+        --label field-report

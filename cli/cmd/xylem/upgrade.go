@@ -8,21 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"syscall"
-
-	"github.com/nicholls-inc/xylem/cli/internal/config"
-	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 )
 
 var (
-	daemonGitPull          = gitPull
-	daemonGoBuild          = goBuild
-	daemonHashFile         = hashFile
-	daemonLoadConfig       = config.Load
-	daemonComposeProfiles  = profiles.Compose
-	daemonSyncProfileFiles = syncProfileAssets
-	daemonExec             = func(path string, args []string, env []string) error {
+	daemonGitPull  = gitPull
+	daemonGoBuild  = goBuild
+	daemonHashFile = hashFile
+	daemonExec     = func(path string, args []string, env []string) error {
 		return syscall.Exec(path, args, env)
 	}
 )
@@ -104,52 +97,10 @@ func selfUpgrade(repoDir, executablePath string) {
 		return
 	}
 
-	if err := syncDaemonProfileAssets(repoDir); err != nil {
-		slog.Warn("daemon auto-upgrade profile asset sync failed", "error", err)
-	}
-
 	slog.Info("daemon auto-upgrade execing rebuilt binary", "old_hash", oldHash[:12], "new_hash", newHash[:12])
 	execErr := daemonExec(executablePath, os.Args, os.Environ())
 	// If we reach here, exec() failed.
 	slog.Warn("daemon auto-upgrade exec failed", "error", execErr)
-}
-
-func syncDaemonProfileAssets(repoDir string) error {
-	cfg, err := daemonLoadConfig(filepath.Join(repoDir, ".xylem.yml"))
-	if err != nil {
-		return fmt.Errorf("load daemon config: %w", err)
-	}
-
-	composed, err := daemonComposeProfiles(daemonProfileNames(cfg)...)
-	if err != nil {
-		return fmt.Errorf("compose daemon profiles: %w", err)
-	}
-
-	stateDir := config.ResolveStateDir(repoDir, cfg.StateDir)
-	if err := daemonSyncProfileFiles(stateDir, composed, false); err != nil {
-		return fmt.Errorf("sync daemon profile assets: %w", err)
-	}
-
-	return nil
-}
-
-func daemonProfileNames(cfg *config.Config) []string {
-	if cfg == nil {
-		return []string{"core"}
-	}
-
-	names := make([]string, 0, len(cfg.Profiles))
-	for _, name := range cfg.Profiles {
-		trimmed := strings.TrimSpace(name)
-		if trimmed == "" {
-			continue
-		}
-		names = append(names, trimmed)
-	}
-	if len(names) == 0 {
-		return []string{"core"}
-	}
-	return names
 }
 
 func gitPull(repoDir string) error {

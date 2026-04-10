@@ -1,0 +1,92 @@
+name: ingest-field-reports
+class: harness-maintenance
+description: "Fetch, parse, and analyze anonymized field reports from productized xylem installations"
+phases:
+  - name: fetch
+    type: command
+    run: |
+      set -euo pipefail
+      mkdir -p .xylem/state/field-reports/parsed
+      INBOX=".xylem/state/field-reports/inbox.jsonl"
+      > "$INBOX"
+      gh issue list --repo nicholls-inc/xylem \
+        --label field-report \
+        --state open \
+        --json number,body,createdAt,title \
+        --limit 100 \
+        | jq -c '.[]' >> "$INBOX"
+      COUNT=$(wc -l < "$INBOX" | tr -d ' ')
+      echo "Fetched $COUNT open field-report issues"
+      if [ "$COUNT" -eq 0 ]; then
+        echo "XYLEM_NOOP"
+      fi
+    noop:
+      match: XYLEM_NOOP
+  - name: parse
+    type: command
+    run: |
+      set -euo pipefail
+      INBOX=".xylem/state/field-reports/inbox.jsonl"
+      PARSED=".xylem/state/field-reports/parsed/$(date -u +%Y-%m-%d).jsonl"
+      PROCESSED=".xylem/state/field-reports/processed-ids.txt"
+      touch "$PROCESSED"
+      > "$PARSED"
+      ADDED=0
+      SKIPPED=0
+      while IFS= read -r line; do
+        BODY=$(echo "$line" | jq -r '.body')
+        # Extract JSON from code fence in issue body
+        JSON=$(echo "$BODY" | sed -n '/^```json$/,/^```$/p' | sed '1d;$d')
+        if [ -z "$JSON" ]; then
+          SKIPPED=$((SKIPPED + 1))
+          continue
+        fi
+        # Validate it has a report_id and version field
+        REPORT_ID=$(echo "$JSON" | jq -r '.report_id // empty')
+        VERSION=$(echo "$JSON" | jq -r '.version // empty')
+        if [ -z "$REPORT_ID" ] || [ -z "$VERSION" ]; then
+          SKIPPED=$((SKIPPED + 1))
+          continue
+        fi
+        # Deduplicate
+        if grep -qF "$REPORT_ID" "$PROCESSED"; then
+          SKIPPED=$((SKIPPED + 1))
+          continue
+        fi
+        ISSUE_NUM=$(echo "$line" | jq -r '.number')
+        echo "{\"issue_number\": $ISSUE_NUM, \"report\": $JSON}" >> "$PARSED"
+        echo "$REPORT_ID" >> "$PROCESSED"
+        ADDED=$((ADDED + 1))
+      done < "$INBOX"
+      echo "Parsed $ADDED new reports, skipped $SKIPPED (duplicate or malformed)"
+      if [ "$ADDED" -eq 0 ]; then
+        echo "XYLEM_NOOP"
+      fi
+    noop:
+      match: XYLEM_NOOP
+  - name: aggregate
+    prompt_file: .xylem/prompts/ingest-field-reports/aggregate.md
+    max_turns: 30
+    noop:
+      match: XYLEM_NOOP
+  - name: close_processed
+    type: command
+    run: |
+      set -euo pipefail
+      PARSED_DIR=".xylem/state/field-reports/parsed"
+      LATEST=$(ls -t "$PARSED_DIR"/*.jsonl 2>/dev/null | head -1)
+      if [ -z "$LATEST" ]; then
+        echo "No parsed reports to close"
+        exit 0
+      fi
+      CLOSED=0
+      while IFS= read -r line; do
+        ISSUE_NUM=$(echo "$line" | jq -r '.issue_number')
+        if [ -n "$ISSUE_NUM" ] && [ "$ISSUE_NUM" != "null" ]; then
+          gh issue close "$ISSUE_NUM" --repo nicholls-inc/xylem \
+            --comment "Ingested into field report aggregate. Thank you for contributing telemetry data." \
+            2>/dev/null || true
+          CLOSED=$((CLOSED + 1))
+        fi
+      done < "$LATEST"
+      echo "Closed $CLOSED processed field-report issues"

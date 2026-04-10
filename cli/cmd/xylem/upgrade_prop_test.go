@@ -3,10 +3,8 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
-	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"pgregory.net/rapid"
 )
 
@@ -87,61 +85,6 @@ func TestPropDaemonUpgradeTargetAlwaysUsesWorkingDirectory(t *testing.T) {
 		}
 		if targetB.repoDir == filepath.Dir(filepath.Dir(executablePathB)) {
 			rt.Fatalf("repoDir unexpectedly matched second binary repo: repoDir=%q executablePath=%q", targetB.repoDir, executablePathB)
-		}
-	})
-}
-
-func TestDaemonProfileNamesDefaultsToCoreWhenConfigIsNil(t *testing.T) {
-	t.Parallel()
-
-	got := daemonProfileNames(nil)
-	if len(got) != 1 || got[0] != "core" {
-		t.Fatalf("daemonProfileNames(nil) = %v, want [core]", got)
-	}
-}
-
-func TestPropDaemonProfileNamesNormalizesConfiguredProfiles(t *testing.T) {
-	t.Parallel()
-
-	rapid.Check(t, func(t *rapid.T) {
-		rawNames := rapid.SliceOf(rapid.SampledFrom([]string{
-			"",
-			" ",
-			"core",
-			" core ",
-			"self-hosting-xylem",
-			" self-hosting-xylem ",
-		})).Draw(t, "profiles")
-
-		got := daemonProfileNames(&config.Config{Profiles: rawNames})
-
-		expectedIndex := 0
-		for _, raw := range rawNames {
-			trimmed := strings.TrimSpace(raw)
-			if trimmed == "" {
-				continue
-			}
-			if expectedIndex >= len(got) {
-				t.Fatalf("daemonProfileNames(%v) returned too few names: got %v", rawNames, got)
-			}
-			if got[expectedIndex] != trimmed {
-				t.Fatalf("daemonProfileNames(%v)[%d] = %q, want %q", rawNames, expectedIndex, got[expectedIndex], trimmed)
-			}
-			if got[expectedIndex] == "" || got[expectedIndex] != strings.TrimSpace(got[expectedIndex]) {
-				t.Fatalf("daemonProfileNames(%v) returned untrimmed name %q", rawNames, got[expectedIndex])
-			}
-			expectedIndex++
-		}
-
-		if expectedIndex == 0 {
-			if len(got) != 1 || got[0] != "core" {
-				t.Fatalf("daemonProfileNames(%v) = %v, want [core]", rawNames, got)
-			}
-			return
-		}
-
-		if len(got) != expectedIndex {
-			t.Fatalf("daemonProfileNames(%v) returned extra names: got %v", rawNames, got)
 		}
 	})
 }
