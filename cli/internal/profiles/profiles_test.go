@@ -129,6 +129,11 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
 	require.Len(t, composed.ConfigOverlays, 2)
+
+	implementHarnessWorkflow := string(composed.Workflows["implement-harness"])
+	assert.Contains(t, implementHarnessWorkflow, `--repo nicholls-inc/xylem`)
+	assert.Contains(t, implementHarnessWorkflow, `--label "harness-impl"`)
+	assert.Contains(t, implementHarnessWorkflow, `--label "ready-to-merge"`)
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

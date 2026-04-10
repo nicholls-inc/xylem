@@ -53,32 +53,92 @@ func TestPropComposeCoreKeepsSecurityComplianceBundlePresent(t *testing.T) {
 			t.Fatalf("Compose(core) error = %v", err)
 		}
 
-		checks := []assetRef{
-			{name: "workflow:security-compliance", data: composed.Workflows["security-compliance"]},
-			{name: "prompt:security-compliance/scan_secrets", data: composed.Prompts["security-compliance/scan_secrets"]},
-			{name: "prompt:security-compliance/synthesize", data: composed.Prompts["security-compliance/synthesize"]},
-			{name: "source:security-compliance", data: composed.Sources["security-compliance"]},
-		}
+		checks := securityComplianceBundle(composed)
 		check := checks[rapid.IntRange(0, len(checks)-1).Draw(t, "checkIndex")]
 		if len(check.data) == 0 {
 			t.Fatalf("%s missing or empty", check.name)
 		}
+		byteIndex := rapid.IntRange(0, len(check.data)-1).Draw(t, "byteIndex")
+		check.data[byteIndex] ^= 0xff
 
-		expectedFragment := map[string]string{
-			"workflow:security-compliance":            "name: security-compliance",
-			"prompt:security-compliance/scan_secrets": "RESULT: CLEAN | FINDINGS | TOOLING-GAP",
-			"prompt:security-compliance/synthesize":   "ISSUES_CREATED:",
-			"source:security-compliance":              "workflow: security-compliance",
-		}[check.name]
-		if !strings.Contains(string(check.data), expectedFragment) {
-			t.Fatalf("%s = %q, want fragment %q", check.name, string(check.data), expectedFragment)
+		fresh, err := Compose("core")
+		if err != nil {
+			t.Fatalf("Compose(core) fresh call error = %v", err)
+		}
+
+		for _, want := range securityComplianceBundle(fresh) {
+			expectedFragment := securityComplianceExpectedFragments[want.name]
+			if len(want.data) == 0 {
+				t.Fatalf("%s missing or empty", want.name)
+			}
+			if !strings.Contains(string(want.data), expectedFragment) {
+				t.Fatalf("%s = %q, want fragment %q", want.name, string(want.data), expectedFragment)
+			}
 		}
 	})
+}
+
+func TestPropComposeSelfHostingXylemImplementHarnessWorkflowKeepsPRCreateContract(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		composed, err := Compose("core", "self-hosting-xylem")
+		if err != nil {
+			t.Fatalf("Compose(core, self-hosting-xylem) error = %v", err)
+		}
+
+		workflowData, ok := composed.Workflows["implement-harness"]
+		if !ok {
+			t.Fatal(`Compose(core, self-hosting-xylem) missing workflow "implement-harness"`)
+		}
+		if len(workflowData) == 0 {
+			t.Fatal(`Compose(core, self-hosting-xylem) returned empty workflow "implement-harness"`)
+		}
+
+		byteIndex := rapid.IntRange(0, len(workflowData)-1).Draw(t, "byteIndex")
+		workflowData[byteIndex] ^= 0xff
+
+		fresh, err := Compose("core", "self-hosting-xylem")
+		if err != nil {
+			t.Fatalf("Compose(core, self-hosting-xylem) fresh call error = %v", err)
+		}
+		freshWorkflowData, ok := fresh.Workflows["implement-harness"]
+		if !ok {
+			t.Fatal(`Compose(core, self-hosting-xylem) fresh call missing workflow "implement-harness"`)
+		}
+
+		for _, requiredFragment := range implementHarnessPRCreateContract {
+			if !strings.Contains(string(freshWorkflowData), requiredFragment) {
+				t.Fatalf("implement-harness workflow missing fragment %q", requiredFragment)
+			}
+		}
+	})
+}
+
+var securityComplianceExpectedFragments = map[string]string{
+	"workflow:security-compliance":            "name: security-compliance",
+	"prompt:security-compliance/scan_secrets": "RESULT: CLEAN | FINDINGS | TOOLING-GAP",
+	"prompt:security-compliance/synthesize":   "ISSUES_CREATED:",
+	"source:security-compliance":              "workflow: security-compliance",
+}
+
+var implementHarnessPRCreateContract = []string{
+	`gh pr create`,
+	`--repo nicholls-inc/xylem`,
+	`--label "harness-impl"`,
+	`--label "ready-to-merge"`,
 }
 
 type assetRef struct {
 	name string
 	data []byte
+}
+
+func securityComplianceBundle(composed *ComposedProfile) []assetRef {
+	return []assetRef{
+		{name: "workflow:security-compliance", data: composed.Workflows["security-compliance"]},
+		{name: "prompt:security-compliance/scan_secrets", data: composed.Prompts["security-compliance/scan_secrets"]},
+		{name: "prompt:security-compliance/synthesize", data: composed.Prompts["security-compliance/synthesize"]},
+		{name: "source:security-compliance", data: composed.Sources["security-compliance"]},
+	}
 }
 
 func composedSignature(composed *ComposedProfile) string {

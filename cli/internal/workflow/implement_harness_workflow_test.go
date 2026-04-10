@@ -13,14 +13,17 @@ import (
 )
 
 const (
-	implementHarnessFetchMain = "git fetch origin main"
-	implementHarnessFetchHead = `git fetch origin main "$current_branch"`
-	implementHarnessMergeBase = "git merge-base --is-ancestor origin/main HEAD"
-	implementHarnessRemoteRef = `git rev-parse "origin/$current_branch"`
-	implementHarnessGoVet     = "go vet ./..."
-	implementHarnessGoBuild   = "go build ./cmd/xylem"
-	implementHarnessGoTest    = "go test ./..."
-	implementHarnessPRCreate  = "gh pr create"
+	implementHarnessFetchMain  = "git fetch origin main"
+	implementHarnessFetchHead  = `git fetch origin main "$current_branch"`
+	implementHarnessMergeBase  = "git merge-base --is-ancestor origin/main HEAD"
+	implementHarnessRemoteRef  = `git rev-parse "origin/$current_branch"`
+	implementHarnessGoVet      = "go vet ./..."
+	implementHarnessGoBuild    = "go build ./cmd/xylem"
+	implementHarnessGoTest     = "go test ./..."
+	implementHarnessPRCreate   = "gh pr create"
+	implementHarnessRepoFlag   = "--repo nicholls-inc/xylem"
+	implementHarnessPRLabel    = `--label "harness-impl"`
+	implementHarnessMergeLabel = `--label "ready-to-merge"`
 )
 
 func checkedInWorkflowPath(t *testing.T, name string) string {
@@ -110,8 +113,18 @@ func TestSmoke_S3_ImplementHarnessWorkflowChecksMainFreshnessBeforePRCreate(t *t
 	assert.Equal(t, "command", prCreate.Type)
 	assert.Contains(t, prCreate.Run, implementHarnessFetchMain)
 	assert.Contains(t, prCreate.Run, implementHarnessMergeBase)
+	assert.Contains(t, prCreate.Run, implementHarnessRepoFlag)
+	assert.Contains(t, prCreate.Run, implementHarnessPRLabel)
+	assert.Contains(t, prCreate.Run, implementHarnessMergeLabel)
 	assert.Contains(t, prCreate.Run, `ERROR: branch is behind origin/main; rebase before creating the PR`)
-	assert.True(t, commandContainsInOrder(prCreate.Run, implementHarnessFetchMain, implementHarnessMergeBase, implementHarnessPRCreate))
+	assert.True(t, commandContainsInOrder(
+		prCreate.Run,
+		implementHarnessFetchMain,
+		implementHarnessMergeBase,
+		implementHarnessPRCreate,
+		implementHarnessPRLabel,
+		implementHarnessMergeLabel,
+	))
 }
 
 func TestSmoke_S4_ImplementHarnessPRDraftPromptRequiresRebaseRetestAndForcePush(t *testing.T) {
