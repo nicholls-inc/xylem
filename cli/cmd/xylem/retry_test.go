@@ -59,6 +59,9 @@ func TestSmoke_S1_RetryCommandMarksRecoveryArtifactEnqueued(t *testing.T) {
 	retry, err := q.FindByID("issue-42-retry-1")
 	require.NoError(t, err)
 	assert.Equal(t, queue.StatePending, retry.State)
+	assert.Equal(t, "decision", retry.Meta[recovery.MetaUnlockedBy])
+	assert.Equal(t, "1", retry.Meta[recovery.MetaRetryCount])
+	assert.Equal(t, string(recovery.ClassTransient), retry.Meta[recovery.MetaClass])
 }
 
 func TestSmoke_S1b_RetryCommandBlocksUntilFailureReviewDecisionChanges(t *testing.T) {
@@ -600,7 +603,6 @@ func TestRewritePhaseOutputsNil(t *testing.T) {
 func TestCopyPhaseOutputFilesMissingSrcDir(t *testing.T) {
 	stateDir := t.TempDir()
 	dstDir := filepath.Join(stateDir, "phases", "new")
-
 	// Source directory does not exist — should be a no-op that leaves the retry artifact tree untouched.
 	if err := copyPhaseOutputFiles(stateDir, "nonexistent", "new"); err != nil {
 		t.Fatalf("expected no error for missing src dir, got: %v", err)

@@ -1,0 +1,90 @@
+sources:
+  harness-impl:
+    type: github
+    repo: "{{ .Repo }}"
+    timeout: "90m"
+    exclude: [wontfix, duplicate, in-progress, no-bot, blocked, xylem-failed]
+    tasks:
+      implement-harness-steps:
+        labels: [harness-impl, ready-for-work]
+        workflow: implement-harness
+        status_labels:
+          running: in-progress
+          failed: xylem-failed
+          timed_out: xylem-failed
+  harness-pr-lifecycle:
+    type: github-pr-events
+    repo: "{{ .Repo }}"
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      respond-reviews:
+        workflow: respond-to-pr-review
+        on:
+          review_submitted: true
+          author_allow:
+            - "copilot-pull-request-reviewer[bot]"
+      fix-checks:
+        workflow: fix-pr-checks
+        on:
+          checks_failed: true
+  harness-merge:
+    type: github-pr
+    repo: "{{ .Repo }}"
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      merge-ready:
+        labels: [ready-to-merge, harness-impl]
+        workflow: merge-pr
+        status_labels:
+          running: pr-vessel-active
+          completed: pr-vessel-merged
+          failed: xylem-failed
+  conflict-resolution:
+    type: github-pr
+    repo: "{{ .Repo }}"
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      resolve-conflicts:
+        labels: [needs-conflict-resolution, harness-impl]
+        workflow: resolve-conflicts
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+  sota-gap:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-self-gap-analysis:
+        workflow: sota-gap-analysis
+        ref: sota-gap-analysis
+  continuous-simplicity:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-continuous-simplicity:
+        workflow: continuous-simplicity
+        ref: continuous-simplicity
+  continuous-improvement:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@daily"
+    timeout: "90m"
+    tasks:
+      daily-rotation:
+        workflow: continuous-improvement
+        ref: continuous-improvement
+  harness-post-merge:
+    type: github-merge
+    repo: "{{ .Repo }}"
+    tasks:
+      unblock-deps:
+        workflow: unblock-wave
+
+daemon:
+  auto_upgrade: true
+  auto_merge: true
+  auto_merge_repo: "{{ .Repo }}"

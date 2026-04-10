@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -187,6 +188,436 @@ func TestScanSkipsMergedPR(t *testing.T) {
 	if len(vessels) != 0 {
 		t.Errorf("expected 0 vessels (merged PR exists), got %d", len(vessels))
 	}
+}
+
+func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailure(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "issue-42",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		Ref:       issues[0].URL,
+		State:     queue.StateFailed,
+		Error:     "temporary failure from upstream 503",
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+
+	g := &GitHub{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "issue-42-retry-1", vessels[0].ID)
+	assert.Equal(t, "issue-42", vessels[0].RetryOf)
+	assert.Equal(t, "cooldown", vessels[0].Meta[recovery.MetaUnlockedBy])
+	assert.Equal(t, "1", vessels[0].Meta[recovery.MetaRetryCount])
+}
+
+func TestSmoke_S3_GitHubScanBlocksNonTransientRecoveryClasses(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "ambiguous acceptance criteria",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("ambiguous acceptance criteria", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "missing requirement: acceptance criteria are ambiguous"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "issue-42",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		Ref:       issues[0].URL,
+		State:     queue.StateFailed,
+		Error:     "missing requirement: acceptance criteria are ambiguous",
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+	require.Equal(t, recovery.ActionRefine, artifact.RecoveryAction)
+
+	g := &GitHub{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+}
+
+func TestSmoke_S4_GitHubScanKeepsLegacyBlockingWhenRecoveryArtifactMissing(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	g := &GitHub{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+}
+
+func TestGitHubScanRetriesWhenOnlySourceFingerprintChanges(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "updated body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	oldFingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": oldFingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID: "issue-42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      issues[0].URL,
+		State:    queue.StateFailed,
+		Error:    "temporary failure from upstream 503",
+		Meta: map[string]string{
+			"source_input_fingerprint": oldFingerprint,
+		},
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	artifact.HarnessDigest = "har-same"
+	artifact.WorkflowDigest = "wf-same"
+	artifact.DecisionDigest = recovery.DecisionDigest(artifact)
+	artifact.RemediationEpoch = "0"
+	artifact.RemediationFP = recovery.ComputeRemediationFingerprint(recovery.RemediationState{
+		SourceInputFP:    oldFingerprint,
+		HarnessDigest:    artifact.HarnessDigest,
+		WorkflowDigest:   artifact.WorkflowDigest,
+		DecisionDigest:   artifact.DecisionDigest,
+		RemediationEpoch: artifact.RemediationEpoch,
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+
+	g := &GitHub{
+		Repo:                   "owner/repo",
+		Tasks:                  map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		StateDir:               dir,
+		Queue:                  q,
+		CmdRunner:              r,
+		HarnessDigestResolver:  func() string { return "har-same" },
+		WorkflowDigestResolver: func(string) string { return "wf-same" },
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "issue-42-retry-1", vessels[0].ID)
+	assert.Equal(t, "issue-42", vessels[0].RetryOf)
+	assert.Equal(t, "source", vessels[0].Meta[recovery.MetaUnlockedBy])
+}
+
+func TestGitHubScanRetriesWhenOnlyHarnessDigestChanges(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": fingerprint,
+			recovery.MetaHarnessDigest: "har-old",
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID: "issue-42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      issues[0].URL,
+		State:    queue.StateFailed,
+		Error:    "temporary failure from upstream 503",
+		Meta: map[string]string{
+			"source_input_fingerprint":  fingerprint,
+			recovery.MetaHarnessDigest:  "har-old",
+			recovery.MetaWorkflowDigest: "wf-same",
+		},
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+
+	g := &GitHub{
+		Repo:                   "owner/repo",
+		Tasks:                  map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		StateDir:               dir,
+		Queue:                  q,
+		CmdRunner:              r,
+		HarnessDigestResolver:  func() string { return "har-new" },
+		WorkflowDigestResolver: func(string) string { return "wf-same" },
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "issue-42-retry-1", vessels[0].ID)
+	assert.Equal(t, "harness", vessels[0].Meta[recovery.MetaUnlockedBy])
+}
+
+func TestGitHubScanRetriesWhenOnlyDecisionDigestChanges(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+	storedDecision := "dec-old"
+	storedState := recovery.RemediationState{
+		SourceInputFP:    fingerprint,
+		HarnessDigest:    "har-same",
+		WorkflowDigest:   "wf-same",
+		DecisionDigest:   storedDecision,
+		RemediationEpoch: "0",
+	}
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                         "42",
+			"source_input_fingerprint":          fingerprint,
+			recovery.MetaHarnessDigest:          storedState.HarnessDigest,
+			recovery.MetaWorkflowDigest:         storedState.WorkflowDigest,
+			recovery.MetaDecisionDigest:         storedState.DecisionDigest,
+			recovery.MetaRemediationEpoch:       storedState.RemediationEpoch,
+			recovery.MetaRemediationFingerprint: recovery.ComputeRemediationFingerprint(storedState),
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID: "issue-42",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Ref:      issues[0].URL,
+		State:    queue.StateFailed,
+		Error:    "temporary failure from upstream 503",
+		Meta: map[string]string{
+			"source_input_fingerprint":  fingerprint,
+			recovery.MetaHarnessDigest:  storedState.HarnessDigest,
+			recovery.MetaWorkflowDigest: storedState.WorkflowDigest,
+		},
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+	require.NotEqual(t, storedDecision, recovery.DecisionDigest(artifact))
+
+	g := &GitHub{
+		Repo:                   "owner/repo",
+		Tasks:                  map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		StateDir:               dir,
+		Queue:                  q,
+		CmdRunner:              r,
+		HarnessDigestResolver:  func() string { return storedState.HarnessDigest },
+		WorkflowDigestResolver: func(string) string { return storedState.WorkflowDigest },
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "issue-42-retry-1", vessels[0].ID)
+	assert.Equal(t, "decision", vessels[0].Meta[recovery.MetaUnlockedBy])
 }
 
 func TestOnFailAppliesLabel(t *testing.T) {
@@ -498,6 +929,7 @@ func TestGitHubTaskFromConfigCopiesLabelGateLabels(t *testing.T) {
 	task := GitHubTaskFromConfig(config.Task{
 		Labels:   []string{"bug"},
 		Workflow: "fix-bug",
+		Tier:     "  high  ",
 		LabelGateLabels: &config.LabelGateLabels{
 			Waiting: "blocked",
 			Ready:   "ready-for-implementation",
@@ -512,6 +944,9 @@ func TestGitHubTaskFromConfigCopiesLabelGateLabels(t *testing.T) {
 	}
 	if task.LabelGateLabels.Ready != "ready-for-implementation" {
 		t.Errorf("LabelGateLabels.Ready = %q, want ready-for-implementation", task.LabelGateLabels.Ready)
+	}
+	if task.Tier != "high" {
+		t.Errorf("Tier = %q, want high", task.Tier)
 	}
 }
 

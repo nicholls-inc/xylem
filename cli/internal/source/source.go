@@ -2,6 +2,7 @@ package source
 
 import (
 	"context"
+	"strings"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -34,6 +35,7 @@ func GitHubTaskFromConfig(t config.Task) GitHubTask {
 	task := GitHubTask{
 		Labels:   t.Labels,
 		Workflow: t.Workflow,
+		Tier:     strings.TrimSpace(t.Tier),
 	}
 	if t.StatusLabels != nil {
 		task.StatusLabels = &StatusLabels{
@@ -51,6 +53,16 @@ func GitHubTaskFromConfig(t config.Task) GitHubTask {
 		}
 	}
 	return task
+}
+
+func ResolveTaskTier(taskTier, defaultTier string) string {
+	if tier := strings.TrimSpace(taskTier); tier != "" {
+		return tier
+	}
+	if tier := strings.TrimSpace(defaultTier); tier != "" {
+		return tier
+	}
+	return config.DefaultLLMRoutingTier
 }
 
 // ResolveRunningLabel returns the running status label for a vessel,
@@ -138,6 +150,12 @@ type Source interface {
 	RemoveRunningLabel(ctx context.Context, vessel queue.Vessel) error
 	// BranchName generates the git branch name for this vessel.
 	BranchName(vessel queue.Vessel) string
+}
+
+// BacklogSource reports how many items currently match this source's scan
+// criteria without enqueueing them.
+type BacklogSource interface {
+	BacklogCount(ctx context.Context) (int, error)
 }
 
 // CommandRunner abstracts subprocess execution for testing.

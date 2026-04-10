@@ -71,7 +71,7 @@ Sources                     xylem scan            Queue
 
 2. **Enqueue** -- The scanner writes each new vessel to `queue.jsonl` in `pending` state. The queue is a JSONL file protected by file-level locking (`gofrs/flock`). Deduplication uses `HasRef()` to prevent the same issue URL from being enqueued twice.
 
-3. **Dequeue** -- The runner atomically reads the queue, finds the first `pending` vessel, transitions it to `running`, sets `StartedAt`, and returns it. The runner respects `Config.Concurrency` using a buffered channel as a semaphore.
+3. **Dequeue** -- The runner atomically reads the queue, finds the first `pending` vessel that fits both the global and per-workflow concurrency limits, transitions it to `running`, sets `StartedAt`, and returns it. The runner enforces the global limit with a buffered-channel semaphore and tracks optional per-workflow caps in-memory.
 
 4. **Worktree creation** -- The runner asks the source for a branch name (e.g. `fix/issue-42-login-crash`), then creates an isolated git worktree at `.claude/worktrees/<branch>` branched from `origin/<default-branch>`. Provider config files (`.claude/settings.json`, rules) are copied into the worktree.
 

@@ -133,6 +133,36 @@ sources:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
 
+  continuous-simplicity:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-continuous-simplicity:
+        workflow: continuous-simplicity
+        ref: continuous-simplicity
+
+  continuous-improvement:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@daily"
+    timeout: "90m"
+    tasks:
+      daily-rotation:
+        workflow: continuous-improvement
+        ref: continuous-improvement
+
+  harness-gap-analysis:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "4h"
+    timeout: "30m"
+    tasks:
+      analyze-gaps:
+        workflow: harness-gap-analysis
+        ref: harness-gap-analysis
+
   # Post-merge wave dependency unblocking
   # NOTE: github-merge has no label filtering. The unblock-wave prompt
   # guards with XYLEM_NOOP for non-harness merges.
@@ -149,10 +179,19 @@ observability:
   insecure: true
   sample_rate: 1.0
 
+validation:
+  format: "goimports -l ./cli/..."
+  lint: "go vet ./cli/..."
+  build: "go build ./cli/cmd/xylem"
+  test: "go test ./cli/..."
+
 daemon:
   auto_upgrade: true
   auto_merge: true
   auto_merge_repo: nicholls-inc/xylem
+  auto_merge_labels: [ready-to-merge, harness-impl]
+  auto_merge_branch_pattern: "^(feat|fix|chore)/issue-\\d+"
+  auto_merge_reviewer: "copilot-pull-request-reviewer"
 
 concurrency: 3
 max_turns: 80

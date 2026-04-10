@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"gopkg.in/yaml.v3"
 )
 
@@ -19,14 +20,41 @@ var validPhaseName = regexp.MustCompile(`^[a-z][a-z0-9_]*$`)
 
 // Workflow defines a multi-phase execution plan loaded from a YAML file.
 type Workflow struct {
+	Name                          string       `yaml:"name"`
+	Description                   string       `yaml:"description,omitempty"`
+	Class                         policy.Class `yaml:"class,omitempty"`
+	LLM                           *string      `yaml:"llm,omitempty"`
+	Model                         *string      `yaml:"model,omitempty"`
+	Tier                          *string      `yaml:"tier,omitempty"`
+	AllowAdditiveProtectedWrites  bool         `yaml:"allow_additive_protected_writes,omitempty"`
+	AllowCanonicalProtectedWrites bool         `yaml:"allow_canonical_protected_writes,omitempty"`
+	Phases                        []Phase      `yaml:"phases"`
+
+	classSpecified                         bool `yaml:"-"`
+	allowAdditiveProtectedWritesSpecified  bool `yaml:"-"`
+	allowCanonicalProtectedWritesSpecified bool `yaml:"-"`
+}
+
+type workflowYAML struct {
 	Name                          string  `yaml:"name"`
 	Description                   string  `yaml:"description,omitempty"`
+	Class                         *string `yaml:"class,omitempty"`
 	LLM                           *string `yaml:"llm,omitempty"`
 	Model                         *string `yaml:"model,omitempty"`
-	AllowAdditiveProtectedWrites  bool    `yaml:"allow_additive_protected_writes,omitempty"`
-	AllowCanonicalProtectedWrites bool    `yaml:"allow_canonical_protected_writes,omitempty"`
+	Tier                          *string `yaml:"tier,omitempty"`
+	AllowAdditiveProtectedWrites  *bool   `yaml:"allow_additive_protected_writes,omitempty"`
+	AllowCanonicalProtectedWrites *bool   `yaml:"allow_canonical_protected_writes,omitempty"`
 	Phases                        []Phase `yaml:"phases"`
 }
+
+// Class identifies the policy class a workflow belongs to.
+type Class = policy.Class
+
+const (
+	ClassDelivery           = policy.Delivery
+	ClassHarnessMaintenance = policy.HarnessMaintenance
+	ClassOps                = policy.Ops
+)
 
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
@@ -37,6 +65,7 @@ type Phase struct {
 	MaxTurns     int      `yaml:"max_turns"`
 	LLM          *string  `yaml:"llm,omitempty"`
 	Model        *string  `yaml:"model,omitempty"`
+	Tier         *string  `yaml:"tier,omitempty"`
 	NoOp         *NoOp    `yaml:"noop,omitempty"`
 	Gate         *Gate    `yaml:"gate,omitempty"`
 	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
@@ -147,8 +176,13 @@ func Load(path string) (*Workflow, error) {
 		return nil, fmt.Errorf("read workflow file %q: %w", path, err)
 	}
 
-	var s Workflow
-	if err := yaml.Unmarshal(data, &s); err != nil {
+	var raw workflowYAML
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse workflow yaml %q: %w", path, err)
+	}
+
+	s, err := workflowFromYAML(raw)
+	if err != nil {
 		return nil, fmt.Errorf("parse workflow yaml %q: %w", path, err)
 	}
 
@@ -156,7 +190,7 @@ func Load(path string) (*Workflow, error) {
 		return nil, fmt.Errorf("validate workflow %q: %w", path, err)
 	}
 
-	return &s, nil
+	return s, nil
 }
 
 // Validate checks that the workflow definition is well-formed. workflowFilePath is
@@ -166,6 +200,18 @@ func Load(path string) (*Workflow, error) {
 func (s *Workflow) Validate(workflowFilePath string) error {
 	if s.Name == "" {
 		return fmt.Errorf(`"name" is required`)
+	}
+
+	if s.Class == "" {
+		s.Class = policy.Delivery
+	} else if parsedClass, err := policy.ParseClass(string(s.Class)); err != nil {
+		return fmt.Errorf(`"class" is invalid: %w`, err)
+	} else {
+		s.Class = parsedClass
+	}
+
+	if err := validateLegacyClassConsistency(s); err != nil {
+		return err
 	}
 
 	expectedName := strings.TrimSuffix(filepath.Base(workflowFilePath), filepath.Ext(workflowFilePath))
@@ -265,6 +311,70 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 	return nil
 }
 
+func workflowFromYAML(raw workflowYAML) (*Workflow, error) {
+	s := &Workflow{
+		Name:        raw.Name,
+		Description: raw.Description,
+		LLM:         raw.LLM,
+		Model:       raw.Model,
+		Tier:        raw.Tier,
+		Phases:      raw.Phases,
+	}
+
+	if raw.AllowAdditiveProtectedWrites != nil {
+		s.AllowAdditiveProtectedWrites = *raw.AllowAdditiveProtectedWrites
+		s.allowAdditiveProtectedWritesSpecified = true
+	}
+	if raw.AllowCanonicalProtectedWrites != nil {
+		s.AllowCanonicalProtectedWrites = *raw.AllowCanonicalProtectedWrites
+		s.allowCanonicalProtectedWritesSpecified = true
+	}
+
+	if raw.Class != nil {
+		parsedClass, err := policy.ParseClass(*raw.Class)
+		if err != nil {
+			return nil, fmt.Errorf(`"class" is invalid: %w`, err)
+		}
+		s.Class = parsedClass
+		s.classSpecified = true
+	} else if s.AllowAdditiveProtectedWrites || s.AllowCanonicalProtectedWrites {
+		s.Class = policy.HarnessMaintenance
+	} else {
+		s.Class = policy.Delivery
+	}
+
+	if err := validateLegacyClassConsistency(s); err != nil {
+		return nil, err
+	}
+
+	return s, nil
+}
+
+func validateLegacyClassConsistency(s *Workflow) error {
+	if s == nil {
+		return nil
+	}
+
+	if !s.classSpecified || (!s.allowAdditiveProtectedWritesSpecified && !s.allowCanonicalProtectedWritesSpecified) {
+		return nil
+	}
+
+	switch s.Class {
+	case policy.Delivery:
+		if s.AllowAdditiveProtectedWrites || s.AllowCanonicalProtectedWrites {
+			return fmt.Errorf(`"class" %q conflicts with legacy protected write flags: delivery requires both legacy flags to be false`, s.Class)
+		}
+	case policy.HarnessMaintenance:
+		if !s.AllowAdditiveProtectedWrites && !s.AllowCanonicalProtectedWrites {
+			return fmt.Errorf(`"class" %q conflicts with legacy protected write flags: harness-maintenance requires at least one legacy flag to be true`, s.Class)
+		}
+	case policy.Ops:
+		return fmt.Errorf(`"class" %q conflicts with legacy protected write flags: ops cannot be combined with legacy protected write flags`, s.Class)
+	}
+
+	return nil
+}
+
 // HasDependencies returns true if any phase declares explicit depends_on.
 func (s *Workflow) HasDependencies() bool {
 	for _, p := range s.Phases {
@@ -336,6 +446,15 @@ func validateNoOp(phaseName string, n *NoOp) error {
 		return fmt.Errorf("phase %q: noop: match is required", phaseName)
 	}
 	return nil
+}
+
+func validateClass(class policy.Class) error {
+	switch class {
+	case "", ClassDelivery, ClassHarnessMaintenance, ClassOps:
+		return nil
+	default:
+		return fmt.Errorf("workflow class %q is invalid; must be delivery, harness-maintenance, or ops", class)
+	}
 }
 
 func validateGate(phaseName string, g *Gate) error {

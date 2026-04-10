@@ -64,17 +64,19 @@ func (s VesselState) IsTerminal() bool {
 }
 
 type Vessel struct {
-	ID        string            `json:"id"`
-	Source    string            `json:"source"`
-	Ref       string            `json:"ref,omitempty"`
-	Workflow  string            `json:"workflow,omitempty"`
-	Prompt    string            `json:"prompt,omitempty"`
-	Meta      map[string]string `json:"meta,omitempty"`
-	State     VesselState       `json:"state"`
-	CreatedAt time.Time         `json:"created_at"`
-	StartedAt *time.Time        `json:"started_at,omitempty"`
-	EndedAt   *time.Time        `json:"ended_at,omitempty"`
-	Error     string            `json:"error,omitempty"`
+	ID            string            `json:"id"`
+	Source        string            `json:"source"`
+	Ref           string            `json:"ref,omitempty"`
+	Workflow      string            `json:"workflow,omitempty"`
+	WorkflowClass string            `json:"workflow_class,omitempty"`
+	Tier          string            `json:"tier,omitempty"`
+	Prompt        string            `json:"prompt,omitempty"`
+	Meta          map[string]string `json:"meta,omitempty"`
+	State         VesselState       `json:"state"`
+	CreatedAt     time.Time         `json:"created_at"`
+	StartedAt     *time.Time        `json:"started_at,omitempty"`
+	EndedAt       *time.Time        `json:"ended_at,omitempty"`
+	Error         string            `json:"error,omitempty"`
 
 	// v2 phase-based execution fields
 	CurrentPhase int               `json:"current_phase,omitempty"`
@@ -86,6 +88,24 @@ type Vessel struct {
 	FailedPhase  string            `json:"failed_phase,omitempty"`
 	GateOutput   string            `json:"gate_output,omitempty"`
 	RetryOf      string            `json:"retry_of,omitempty"`
+}
+
+func (v *Vessel) NormalizeWorkflowClass() {
+	if v == nil {
+		return
+	}
+	if trimmed := strings.TrimSpace(v.WorkflowClass); trimmed != "" {
+		v.WorkflowClass = trimmed
+		return
+	}
+	v.WorkflowClass = strings.TrimSpace(v.Workflow)
+}
+
+func (v Vessel) ConcurrencyClass() string {
+	if trimmed := strings.TrimSpace(v.WorkflowClass); trimmed != "" {
+		return trimmed
+	}
+	return strings.TrimSpace(v.Workflow)
 }
 
 type Queue struct {
@@ -104,6 +124,7 @@ func New(path string) *Queue {
 // acquisition, eliminating the TOCTOU race between HasRef and Enqueue.
 func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 	var enqueued bool
+	vessel.NormalizeWorkflowClass()
 	err := q.withLock(func() error {
 		vessels, err := q.readAllVessels()
 		if err != nil {
@@ -135,6 +156,10 @@ func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 }
 
 func (q *Queue) Dequeue() (*Vessel, error) {
+	return q.DequeueMatching(nil)
+}
+
+func (q *Queue) DequeueMatching(match func(Vessel) bool) (*Vessel, error) {
 	var out *Vessel
 	err := q.withLock(func() error {
 		vessels, err := q.readAllVessels()
@@ -146,7 +171,11 @@ func (q *Queue) Dequeue() (*Vessel, error) {
 			if vessels[i].State != StatePending {
 				continue
 			}
+			if match != nil && !match(vessels[i]) {
+				continue
+			}
 			previous := vessels[i]
+			vessels[i].NormalizeWorkflowClass()
 			now := queueNow()
 			vessels[i].State = StateRunning
 			vessels[i].StartedAt = &now

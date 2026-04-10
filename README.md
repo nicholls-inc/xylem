@@ -70,7 +70,11 @@ sources:
     cadence: "@daily"
     workflow: doc-garden
 
-concurrency: 2
+concurrency:
+  global: 2
+  per_class:
+    implement-feature: 1
+    merge-pr: 2
 max_turns: 50
 timeout: "30m"
 state_dir: ".xylem"
@@ -92,7 +96,7 @@ daemon:
   drain_interval: "30s"
 ```
 
-This example covers the most common fields. Scheduled sources fire a synthetic vessel whenever their cadence elapses; `cadence` accepts Go durations like `1h`, cron descriptors like `@daily`, and standard cron expressions. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), recurring harness reviews (`harness.review`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
+This example covers the most common fields. `concurrency` still accepts the legacy scalar form (`concurrency: 2`); the mapping form adds a global ceiling plus optional per-workflow limits keyed by workflow name. Scheduled sources fire a synthetic vessel whenever their cadence elapses; `cadence` accepts Go durations like `1h`, cron descriptors like `@daily`, and standard cron expressions. Additional configuration is available for per-source provider overrides (`llm`, `model`), agent safety guardrails (`harness`), recurring harness reviews (`harness.review`), OpenTelemetry tracing (`observability`), and token budget enforcement (`cost`). See the [Configuration Reference](docs/configuration.md) for all fields, defaults, and validation rules.
 
 ## Workflows
 
@@ -151,6 +155,7 @@ Use `noop.match` on a phase to let that phase complete the workflow early when i
 
 - **fix-bug** -- Analyze, Plan, Implement (with test gate), PR
 - **implement-feature** -- Analyze, Plan (with label gate for approval), Implement (with test gate), PR
+- **security-compliance** -- Daily scheduled secrets, static-analysis, dependency-audit, and synthesis pass with issue filing for actionable risk
 
 See the [Workflows Guide](docs/workflows.md) for template variables, custom workflows, and prompt authoring tips.
 

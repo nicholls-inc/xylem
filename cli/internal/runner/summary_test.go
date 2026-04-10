@@ -148,6 +148,27 @@ func TestSmoke_S10_BuildSummaryComputesTotalCostUSDEstAsSumOfPhaseCosts(t *testi
 	assert.InDelta(t, 0.0046, summary.TotalCostUSDEst, 1e-9)
 }
 
+func TestSummarizeUsageSourceHandlesMissingUsageScenarios(t *testing.T) {
+	t.Run("non llm phases", func(t *testing.T) {
+		source, reason := summarizeUsageSource([]PhaseSummary{
+			{Name: "verify", Type: "command", UsageSource: cost.UsageSourceNotApplicable, UsageUnavailableReason: "non-llm phase"},
+		}, 0, 0)
+
+		assert.Equal(t, cost.UsageSourceNotApplicable, source)
+		assert.Equal(t, "run did not execute an llm phase", reason)
+	})
+
+	t.Run("mixed phases retains available usage source", func(t *testing.T) {
+		source, reason := summarizeUsageSource([]PhaseSummary{
+			{Name: "verify", Type: "command", UsageSource: cost.UsageSourceNotApplicable, UsageUnavailableReason: "non-llm phase"},
+			{Name: "implement", Type: "prompt", UsageSource: cost.UsageSourceProvider},
+		}, 0, 0)
+
+		assert.Equal(t, cost.UsageSourceProvider, source)
+		assert.Empty(t, reason)
+	})
+}
+
 func TestSmoke_S11_BuildSummarySetsDurationMSFromStartedAtToCallTime(t *testing.T) {
 	startedAt := time.Now().UTC().Add(-2 * time.Second)
 	vrs := newVesselRunState(nil, queue.Vessel{
@@ -334,7 +355,6 @@ func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testin
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem-state")
-	cfg.Cost.Budget = &config.BudgetConfig{MaxCostUSD: 1}
 
 	startedAt := time.Date(2026, time.April, 8, 20, 32, 30, 0, time.UTC)
 	vessel := runningSmokeVessel("vessel-cost-artifacts", "github", "fix-bug", startedAt)
@@ -348,7 +368,7 @@ func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testin
 		Model:        "claude-sonnet-4-6",
 		InputTokens:  1000,
 		OutputTokens: 1000,
-		CostUSD:      1.2,
+		CostUSD:      0.6,
 		Timestamp:    startedAt.Add(time.Second),
 	})
 	require.NoError(t, err)
@@ -366,10 +386,49 @@ func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testin
 	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", vessel.ID, costReportFileName))
 	require.NoError(t, err)
 	assert.Equal(t, vessel.ID, report.MissionID)
+	assert.Equal(t, cost.UsageSourceEstimated, report.UsageSource)
 
 	alertsData, err := os.ReadFile(filepath.Join(cfg.StateDir, "phases", vessel.ID, budgetAlertsFileName))
 	require.NoError(t, err)
-	assert.Contains(t, string(alertsData), `"type": "exceeded"`)
+	assert.JSONEq(t, "[]", string(alertsData))
+	assert.Zero(t, summary.BudgetAlertCount)
+	assert.False(t, summary.BudgetWarning)
+}
+
+func TestPersistRunArtifactsSummarizesBudgetWarnings(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem-state")
+	cfg.Cost.Budget = &config.BudgetConfig{MaxCostUSD: 1}
+
+	startedAt := time.Date(2026, time.April, 8, 20, 33, 30, 0, time.UTC)
+	vessel := runningSmokeVessel("vessel-budget-warning", "github", "fix-bug", startedAt)
+	vrs := newVesselRunState(cfg, vessel, startedAt)
+	require.NotNil(t, vrs.costTracker)
+
+	err := vrs.costTracker.Record(cost.UsageRecord{
+		MissionID:    vessel.ID,
+		AgentRole:    cost.RoleGenerator,
+		Purpose:      cost.PurposeReasoning,
+		Model:        "claude-sonnet-4-6",
+		InputTokens:  1000,
+		OutputTokens: 1000,
+		CostUSD:      0.85,
+		Timestamp:    startedAt.Add(time.Second),
+	})
+	require.NoError(t, err)
+
+	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{}, &mockCmdRunner{})
+	r.persistRunArtifacts(vessel, string(queue.StateCompleted), vrs, nil, startedAt.Add(2*time.Second))
+
+	summary := loadSummary(t, cfg.StateDir, vessel.ID)
+	assert.True(t, summary.BudgetWarning)
+	assert.False(t, summary.BudgetExceeded)
+	assert.Equal(t, 1, summary.BudgetAlertCount)
+
+	alertsData, err := os.ReadFile(filepath.Join(cfg.StateDir, "phases", vessel.ID, budgetAlertsFileName))
+	require.NoError(t, err)
+	assert.Contains(t, string(alertsData), `"type": "warning"`)
 }
 
 func TestSmoke_S18b_PersistRunArtifactsLinksExistingEvalReport(t *testing.T) {
@@ -897,8 +956,17 @@ func TestDrainPromptOnlyWritesSummaryArtifact(t *testing.T) {
 	if summary.State != "completed" {
 		t.Fatalf("State = %q, want completed", summary.State)
 	}
-	if len(summary.Phases) != 0 {
-		t.Fatalf("len(Phases) = %d, want 0", len(summary.Phases))
+	if len(summary.Phases) != 1 {
+		t.Fatalf("len(Phases) = %d, want 1", len(summary.Phases))
+	}
+	if summary.Phases[0].Name != "prompt" {
+		t.Fatalf("Phases[0].Name = %q, want prompt", summary.Phases[0].Name)
+	}
+	if summary.Phases[0].Type != "prompt" {
+		t.Fatalf("Phases[0].Type = %q, want prompt", summary.Phases[0].Type)
+	}
+	if summary.Phases[0].UsageSource != cost.UsageSourceEstimated {
+		t.Fatalf("Phases[0].UsageSource = %q, want %q", summary.Phases[0].UsageSource, cost.UsageSourceEstimated)
 	}
 	if summary.TotalTokensEst <= 0 {
 		t.Fatalf("TotalTokensEst = %d, want > 0", summary.TotalTokensEst)

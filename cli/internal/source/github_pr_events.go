@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
@@ -14,25 +15,32 @@ import (
 // PREventsTask defines a task triggered by PR events.
 type PREventsTask struct {
 	Workflow        string
+	Tier            string
 	Labels          []string
 	ReviewSubmitted bool
 	ChecksFailed    bool
 	Commented       bool
+	PROpened        bool
+	PRHeadUpdated   bool
 	// AuthorAllow restricts authored events (reviews, comments) to the
 	// listed GitHub logins. Empty slice = no allowlist.
 	AuthorAllow []string
 	// AuthorDeny skips authored events from these GitHub logins.
 	// AuthorDeny takes precedence over AuthorAllow.
 	AuthorDeny []string
+	Debounce   time.Duration
 }
 
 // GitHubPREvents scans GitHub PRs for specific events and produces vessels.
 type GitHubPREvents struct {
-	Repo      string
-	Tasks     map[string]PREventsTask
-	Exclude   []string
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
+	Repo        string
+	Tasks       map[string]PREventsTask
+	Exclude     []string
+	StateDir    string
+	DefaultTier string
+	Queue       *queue.Queue
+	CmdRunner   CommandRunner
+	Now         func() time.Time
 
 	// selfLogin is the authenticated gh CLI user's login, looked up once
 	// per Scan. Used to unconditionally filter out events authored by
@@ -135,6 +143,9 @@ func (g *GitHubPREvents) Scan(ctx context.Context) ([]queue.Vessel, error) {
 		excludeSet[ex] = true
 	}
 
+	g.selfLogin = ""
+	g.selfLoginResolved = false
+
 	// List open PRs
 	args := []string{
 		"pr", "list",
@@ -176,6 +187,7 @@ func (g *GitHubPREvents) Scan(ctx context.Context) ([]queue.Vessel, error) {
 								Source:   "github-pr-events",
 								Ref:      ref,
 								Workflow: task.Workflow,
+								Tier:     ResolveTaskTier(task.Tier, g.DefaultTier),
 								Meta: map[string]string{
 									"pr_num":         strconv.Itoa(pr.Number),
 									"event_type":     "label",
@@ -187,6 +199,22 @@ func (g *GitHubPREvents) Scan(ctx context.Context) ([]queue.Vessel, error) {
 						}
 					}
 				}
+			}
+
+			if task.PROpened {
+				v, err := g.scanPROpened(pr, task)
+				if err != nil {
+					return vessels, err
+				}
+				vessels = append(vessels, v...)
+			}
+
+			if task.PRHeadUpdated {
+				v, err := g.scanPRHeadUpdated(ctx, pr, task)
+				if err != nil {
+					return vessels, err
+				}
+				vessels = append(vessels, v...)
 			}
 
 			// Review submitted trigger
@@ -221,7 +249,63 @@ func (g *GitHubPREvents) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	return vessels, nil
 }
 
+func (g *GitHubPREvents) scanPROpened(pr ghPR, task PREventsTask) ([]queue.Vessel, error) {
+	blocked, err := g.shouldDebounceTrigger(preventPROpened, pr.Number, task)
+	if err != nil {
+		return nil, fmt.Errorf("debounce pr_opened for PR %d: %w", pr.Number, err)
+	}
+	if blocked {
+		return nil, nil
+	}
+
+	ref := fmt.Sprintf("%s#pr-opened", pr.URL)
+	if g.Queue.HasRefAny(ref) {
+		return nil, nil
+	}
+
+	return []queue.Vessel{
+		g.newPREventVessel(pr, task, preventPROpened, fmt.Sprintf("pr-%d-pr-opened", pr.Number), ref, nil),
+	}, nil
+}
+
+func (g *GitHubPREvents) scanPRHeadUpdated(ctx context.Context, pr ghPR, task PREventsTask) ([]queue.Vessel, error) {
+	blocked, err := g.shouldDebounceTrigger(preventPRHeadUpdated, pr.Number, task)
+	if err != nil {
+		return nil, fmt.Errorf("debounce pr_head_updated for PR %d: %w", pr.Number, err)
+	}
+	if blocked {
+		return nil, nil
+	}
+
+	headOID, err := g.loadPRHeadOID(ctx, pr.Number)
+	if err != nil {
+		return nil, nil
+	}
+	if headOID == "" {
+		return nil, nil
+	}
+
+	ref := fmt.Sprintf("%s#head-%s", pr.URL, headOID)
+	if g.Queue.HasRefAny(ref) {
+		return nil, nil
+	}
+
+	return []queue.Vessel{
+		g.newPREventVessel(pr, task, preventPRHeadUpdated, fmt.Sprintf("pr-%d-head-%s", pr.Number, headOID[:minLen(len(headOID), 8)]), ref, map[string]string{
+			"pr_head_sha": headOID,
+		}),
+	}, nil
+}
+
 func (g *GitHubPREvents) scanReviews(ctx context.Context, pr ghPR, task PREventsTask) ([]queue.Vessel, error) {
+	blocked, err := g.shouldDebounceTrigger(preventReviewSubmitted, pr.Number, task)
+	if err != nil {
+		return nil, fmt.Errorf("debounce review_submitted for PR %d: %w", pr.Number, err)
+	}
+	if blocked {
+		return nil, nil
+	}
+
 	args := []string{
 		"api",
 		fmt.Sprintf("repos/%s/pulls/%d/reviews", g.Repo, pr.Number),
@@ -234,6 +318,15 @@ func (g *GitHubPREvents) scanReviews(ctx context.Context, pr ghPR, task PREvents
 
 	selfLogin := g.resolveSelfLogin(ctx)
 	events := parseAuthoredEvents(out)
+	if debounceCollapsesEvents(task, preventReviewSubmitted) {
+		events = newestEligibleAuthoredEvents(events, func(ev ghAuthoredEvent) bool {
+			if ev.ID == 0 || shouldSkipAuthoredEvent(ev.Login, selfLogin, task) {
+				return false
+			}
+			ref := fmt.Sprintf("%s#review-%d", pr.URL, ev.ID)
+			return !g.Queue.HasRefAny(ref)
+		})
+	}
 
 	var vessels []queue.Vessel
 	for _, ev := range events {
@@ -248,20 +341,9 @@ func (g *GitHubPREvents) scanReviews(ctx context.Context, pr ghPR, task PREvents
 		if g.Queue.HasRefAny(ref) {
 			continue
 		}
-		vessels = append(vessels, queue.Vessel{
-			ID:       fmt.Sprintf("pr-%d-review-%s", pr.Number, reviewID),
-			Source:   "github-pr-events",
-			Ref:      ref,
-			Workflow: task.Workflow,
-			Meta: map[string]string{
-				"pr_num":         strconv.Itoa(pr.Number),
-				"event_type":     "review_submitted",
-				"pr_head_branch": pr.HeadRefName,
-				"review_author":  ev.Login,
-			},
-			State:     queue.StatePending,
-			CreatedAt: sourceNow(),
-		})
+		vessels = append(vessels, g.newPREventVessel(pr, task, preventReviewSubmitted, fmt.Sprintf("pr-%d-review-%s", pr.Number, reviewID), ref, map[string]string{
+			"review_author": ev.Login,
+		}))
 	}
 	return vessels, nil
 }
@@ -272,6 +354,14 @@ type ghCheck struct {
 }
 
 func (g *GitHubPREvents) scanChecksFailed(ctx context.Context, pr ghPR, task PREventsTask) ([]queue.Vessel, error) {
+	blocked, err := g.shouldDebounceTrigger(preventChecksFailed, pr.Number, task)
+	if err != nil {
+		return nil, fmt.Errorf("debounce checks_failed for PR %d: %w", pr.Number, err)
+	}
+	if blocked {
+		return nil, nil
+	}
+
 	args := []string{
 		"pr", "checks", strconv.Itoa(pr.Number),
 		"--repo", g.Repo,
@@ -299,19 +389,10 @@ func (g *GitHubPREvents) scanChecksFailed(ctx context.Context, pr ghPR, task PRE
 		return nil, nil
 	}
 
-	// Use head SHA via gh pr view for dedup
-	shaArgs := []string{
-		"pr", "view", strconv.Itoa(pr.Number),
-		"--repo", g.Repo,
-		"--json", "headRefOid",
-		"--jq", ".headRefOid",
-	}
-	shaOut, err := g.CmdRunner.Run(ctx, "gh", shaArgs...)
+	sha, err := g.loadPRHeadOID(ctx, pr.Number)
 	if err != nil {
 		return nil, nil // non-fatal
 	}
-
-	sha := strings.TrimSpace(string(shaOut))
 	if sha == "" {
 		return nil, nil
 	}
@@ -322,23 +403,21 @@ func (g *GitHubPREvents) scanChecksFailed(ctx context.Context, pr ghPR, task PRE
 	}
 
 	return []queue.Vessel{
-		{
-			ID:       fmt.Sprintf("pr-%d-checks-failed-%s", pr.Number, sha[:minLen(len(sha), 8)]),
-			Source:   "github-pr-events",
-			Ref:      ref,
-			Workflow: task.Workflow,
-			Meta: map[string]string{
-				"pr_num":         strconv.Itoa(pr.Number),
-				"event_type":     "checks_failed",
-				"pr_head_branch": pr.HeadRefName,
-			},
-			State:     queue.StatePending,
-			CreatedAt: sourceNow(),
-		},
+		g.newPREventVessel(pr, task, preventChecksFailed, fmt.Sprintf("pr-%d-checks-failed-%s", pr.Number, sha[:minLen(len(sha), 8)]), ref, map[string]string{
+			"pr_head_sha": sha,
+		}),
 	}, nil
 }
 
 func (g *GitHubPREvents) scanComments(ctx context.Context, pr ghPR, task PREventsTask) ([]queue.Vessel, error) {
+	blocked, err := g.shouldDebounceTrigger(preventCommented, pr.Number, task)
+	if err != nil {
+		return nil, fmt.Errorf("debounce commented for PR %d: %w", pr.Number, err)
+	}
+	if blocked {
+		return nil, nil
+	}
+
 	args := []string{
 		"api",
 		fmt.Sprintf("repos/%s/issues/%d/comments", g.Repo, pr.Number),
@@ -351,6 +430,15 @@ func (g *GitHubPREvents) scanComments(ctx context.Context, pr ghPR, task PREvent
 
 	selfLogin := g.resolveSelfLogin(ctx)
 	events := parseAuthoredEvents(out)
+	if debounceCollapsesEvents(task, preventCommented) {
+		events = newestEligibleAuthoredEvents(events, func(ev ghAuthoredEvent) bool {
+			if ev.ID == 0 || shouldSkipAuthoredEvent(ev.Login, selfLogin, task) {
+				return false
+			}
+			ref := fmt.Sprintf("%s#comment-%d", pr.URL, ev.ID)
+			return !g.Queue.HasRefAny(ref)
+		})
+	}
 
 	var vessels []queue.Vessel
 	for _, ev := range events {
@@ -365,25 +453,16 @@ func (g *GitHubPREvents) scanComments(ctx context.Context, pr ghPR, task PREvent
 		if g.Queue.HasRefAny(ref) {
 			continue
 		}
-		vessels = append(vessels, queue.Vessel{
-			ID:       fmt.Sprintf("pr-%d-comment-%s", pr.Number, commentID),
-			Source:   "github-pr-events",
-			Ref:      ref,
-			Workflow: task.Workflow,
-			Meta: map[string]string{
-				"pr_num":         strconv.Itoa(pr.Number),
-				"event_type":     "commented",
-				"pr_head_branch": pr.HeadRefName,
-				"comment_author": ev.Login,
-			},
-			State:     queue.StatePending,
-			CreatedAt: sourceNow(),
-		})
+		vessels = append(vessels, g.newPREventVessel(pr, task, preventCommented, fmt.Sprintf("pr-%d-comment-%s", pr.Number, commentID), ref, map[string]string{
+			"comment_author": ev.Login,
+		}))
 	}
 	return vessels, nil
 }
 
-func (g *GitHubPREvents) OnEnqueue(_ context.Context, _ queue.Vessel) error          { return nil }
+func (g *GitHubPREvents) OnEnqueue(_ context.Context, vessel queue.Vessel) error {
+	return g.persistDebounce(vessel)
+}
 func (g *GitHubPREvents) OnStart(_ context.Context, _ queue.Vessel) error            { return nil }
 func (g *GitHubPREvents) OnWait(_ context.Context, _ queue.Vessel) error             { return nil }
 func (g *GitHubPREvents) OnResume(_ context.Context, _ queue.Vessel) error           { return nil }
@@ -413,4 +492,57 @@ func minLen(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (g *GitHubPREvents) loadPRHeadOID(ctx context.Context, prNumber int) (string, error) {
+	args := []string{
+		"pr", "view", strconv.Itoa(prNumber),
+		"--repo", g.Repo,
+		"--json", "headRefOid",
+		"--jq", ".headRefOid",
+	}
+	out, err := g.CmdRunner.Run(ctx, "gh", args...)
+	if err != nil {
+		return "", fmt.Errorf("gh pr view headRefOid for PR %d: %w", prNumber, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (g *GitHubPREvents) newPREventVessel(pr ghPR, task PREventsTask, eventType, id, ref string, extraMeta map[string]string) queue.Vessel {
+	createdAt := g.now()
+	meta := map[string]string{
+		"pr_num":         strconv.Itoa(pr.Number),
+		"event_type":     eventType,
+		"pr_head_branch": pr.HeadRefName,
+	}
+	for key, value := range extraMeta {
+		meta[key] = value
+	}
+	g.markDebounceMeta(meta, eventType, pr.Number, task, createdAt)
+	return queue.Vessel{
+		ID:        id,
+		Source:    g.Name(),
+		Ref:       ref,
+		Workflow:  task.Workflow,
+		Tier:      ResolveTaskTier(task.Tier, g.DefaultTier),
+		Meta:      meta,
+		State:     queue.StatePending,
+		CreatedAt: createdAt,
+	}
+}
+
+func newestEligibleAuthoredEvents(events []ghAuthoredEvent, keep func(ghAuthoredEvent) bool) []ghAuthoredEvent {
+	for i := len(events) - 1; i >= 0; i-- {
+		if keep(events[i]) {
+			return []ghAuthoredEvent{events[i]}
+		}
+	}
+	return nil
+}
+
+func (g *GitHubPREvents) now() time.Time {
+	if g.Now != nil {
+		return g.Now().UTC().Truncate(time.Second)
+	}
+	return sourceNow().UTC().Truncate(time.Second)
 }

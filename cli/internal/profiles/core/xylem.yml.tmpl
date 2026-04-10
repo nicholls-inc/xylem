@@ -1,0 +1,113 @@
+sources:
+  bugs:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      fix:
+        labels: [bug, ready-for-work]
+        workflow: fix-bug
+  adaptation:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      adapt:
+        labels: [xylem-adapt-repo]
+        workflow: adapt-repo
+  features:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      implement:
+        labels: [enhancement, ready-for-work]
+        workflow: implement-feature
+  triage:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      issues:
+        labels: [needs-triage]
+        workflow: triage
+  refinement:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      issues:
+        labels: [needs-refinement]
+        workflow: refine-issue
+  pr-lifecycle:
+    type: github-pr-events
+    repo: "{{ .Repo }}"
+    exclude: [no-bot]
+    tasks:
+      review-opened:
+        workflow: review-pr
+        on:
+          pr_opened: true
+      review-updated:
+        workflow: review-pr
+        on:
+          pr_head_updated: true
+      respond-to-review:
+        workflow: respond-to-pr-review
+        on:
+          review_submitted: true
+          author_deny:
+            - "github-actions[bot]"
+      fix-checks:
+        workflow: fix-pr-checks
+        on:
+          checks_failed: true
+  merges:
+    type: github-pr
+    repo: "{{ .Repo }}"
+    exclude: [no-bot]
+    tasks:
+      ready:
+        labels: [ready-to-merge]
+        workflow: merge-pr
+  conflicts:
+    type: github-pr
+    repo: "{{ .Repo }}"
+    exclude: [no-bot]
+    tasks:
+      resolve:
+        labels: [needs-conflict-resolution]
+        workflow: resolve-conflicts
+  lessons-hygiene:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
+  context-audit:
+    type: schedule
+    cadence: "@weekly"
+    workflow: context-weight-audit
+  security-compliance:
+    type: schedule
+    cadence: "@daily"
+    workflow: security-compliance
+  workflow-health:
+    type: schedule
+    cadence: "@weekly"
+    workflow: workflow-health-report
+
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+state_dir: ".xylem"
+
+validation:
+  test: "true"
+
+llm: claude
+
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+  flags: "--bare --dangerously-skip-permissions"
+  env:
+    ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"

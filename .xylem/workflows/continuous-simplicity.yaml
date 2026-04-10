@@ -1,0 +1,50 @@
+name: continuous-simplicity
+description: "Recurring code simplification and duplicate-detection sweep for xylem"
+phases:
+  - name: scan_changes
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem continuous-simplicity scan-changes \
+        --repo-root .. \
+        --days 7 \
+        --output ../.xylem/state/continuous-simplicity/changed-files.json
+  - name: simplify
+    prompt_file: .xylem/prompts/continuous-simplicity/simplify.md
+    max_turns: 40
+    llm: copilot
+    model: gpt-5.4
+  - name: dedup
+    prompt_file: .xylem/prompts/continuous-simplicity/dedup.md
+    max_turns: 50
+    llm: copilot
+    model: gpt-5.4
+  - name: plan_prs
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem continuous-simplicity plan-prs \
+        --simplifications ../.xylem/state/continuous-simplicity/simplifications.json \
+        --duplications ../.xylem/state/continuous-simplicity/duplications.json \
+        --output ../.xylem/state/continuous-simplicity/pr-plan.json
+  - name: apply
+    prompt_file: .xylem/prompts/continuous-simplicity/apply.md
+    max_turns: 80
+    llm: copilot
+    model: gpt-5.4
+    gate:
+      type: command
+      run: |
+        set -euo pipefail
+        cd cli
+        go build ./... && go test ./...
+  - name: pr
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem continuous-simplicity open-prs \
+        --plan ../.xylem/state/continuous-simplicity/pr-plan.json \
+        --output ../.xylem/state/continuous-simplicity/opened-prs.json

@@ -5,14 +5,13 @@ URL: {{.Issue.URL}}
 
 {{.Issue.Body}}
 
-Check out the PR branch and attempt a merge from main:
+## Merge Attempt Output
+{{.PreviousOutputs.merge_main}}
 
-1. Run `gh pr checkout {{.Issue.Number}}`
-2. Run `git fetch origin main && git merge origin/main --no-commit`
+The workflow has already checked out the PR branch and attempted `git merge origin/{{ .Repo.DefaultBranch }} --no-commit --no-ff`.
+Do not rerun the merge. Inspect the current conflicted worktree state produced by that command.
 
 Do not modify, stage, or delete anything under `.xylem/`. The xylem control plane is out of scope for conflict resolution.
-
-If the merge completes with no conflicts, include the exact standalone line `XYLEM_NOOP` in your final output and explain that no conflict resolution is needed.
 
 If there are conflicts:
 

@@ -1,0 +1,28 @@
+name: implement-feature
+description: "Implement a feature from a GitHub issue"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/implement-feature/analyze.md
+    max_turns: 20
+    noop:
+      match: XYLEM_NOOP
+  - name: plan
+    prompt_file: .xylem/prompts/implement-feature/plan.md
+    max_turns: 20
+  - name: implement
+    prompt_file: .xylem/prompts/implement-feature/implement.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "make test"
+      retries: 2
+  - name: verify
+    prompt_file: .xylem/prompts/implement-feature/verify.md
+    max_turns: 60
+    gate:
+      type: command
+      run: "make test"
+      retries: 1
+  - name: pr
+    prompt_file: .xylem/prompts/implement-feature/pr.md
+    max_turns: 10

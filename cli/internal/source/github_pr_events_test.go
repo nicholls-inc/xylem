@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func prEventsListJSON(prs []ghPR) []byte {
@@ -132,6 +136,7 @@ func TestPREventsScanReviewSubmitted(t *testing.T) {
 			"reviews": {
 				Workflow:        "handle-review",
 				ReviewSubmitted: true,
+				Debounce:        0,
 				AuthorAllow:     []string{"copilot-pull-request-reviewer[bot]"},
 			},
 		},
@@ -273,6 +278,7 @@ func TestPREventsScanCommented(t *testing.T) {
 			"comments": {
 				Workflow:    "respond-comment",
 				Commented:   true,
+				Debounce:    0,
 				AuthorAllow: []string{"alice"},
 			},
 		},
@@ -431,6 +437,216 @@ func TestPREventsScanDedupCompletedRef(t *testing.T) {
 	}
 }
 
+func TestPREventsScanPROpenedDedupByPR(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 11, Title: "PR 11", URL: "https://github.com/owner/repo/pull/11", HeadRefName: "branch-11"},
+	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {
+				Workflow: "review-pr",
+				PROpened: true,
+			},
+		},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if vessels[0].Meta["event_type"] != "pr_opened" {
+		t.Fatalf("Meta[event_type] = %q, want pr_opened", vessels[0].Meta["event_type"])
+	}
+	if !strings.Contains(vessels[0].Ref, "#pr-opened") {
+		t.Fatalf("Ref = %q, want #pr-opened suffix", vessels[0].Ref)
+	}
+	if _, err := q.Enqueue(vessels[0]); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := g.OnEnqueue(context.Background(), vessels[0]); err != nil {
+		t.Fatalf("OnEnqueue: %v", err)
+	}
+
+	vessels, err = g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan again: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels after dedup, got %d", len(vessels))
+	}
+}
+
+func TestPREventsScanPRHeadUpdatedDedupsPerHead(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 12, Title: "PR 12", URL: "https://github.com/owner/repo/pull/12", HeadRefName: "branch-12"},
+	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+	r.set([]byte("abc12345def"), "gh", "pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {
+				Workflow:      "review-pr",
+				PRHeadUpdated: true,
+				Debounce:      0,
+			},
+		},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if !strings.Contains(vessels[0].Ref, "#head-abc12345def") {
+		t.Fatalf("Ref = %q, want #head-abc12345def", vessels[0].Ref)
+	}
+	if _, err := q.Enqueue(vessels[0]); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := g.OnEnqueue(context.Background(), vessels[0]); err != nil {
+		t.Fatalf("OnEnqueue: %v", err)
+	}
+
+	vessels, err = g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan same head: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels for repeated head, got %d", len(vessels))
+	}
+
+	r.set([]byte("fedcba987654"), "gh", "pr", "view", "12", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+	vessels, err = g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan new head: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel for new head, got %d", len(vessels))
+	}
+	if !strings.Contains(vessels[0].Ref, "#head-fedcba987654") {
+		t.Fatalf("Ref = %q, want #head-fedcba987654", vessels[0].Ref)
+	}
+}
+
+func TestPREventDefaultDebounceMatchesSpec(t *testing.T) {
+	cases := []struct {
+		trigger string
+		want    time.Duration
+	}{
+		{trigger: preventPROpened, want: 0},
+		{trigger: preventPRHeadUpdated, want: 10 * time.Minute},
+		{trigger: preventReviewSubmitted, want: 0},
+		{trigger: preventChecksFailed, want: 0},
+		{trigger: preventCommented, want: 0},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.trigger, func(t *testing.T) {
+			got := effectivePREventDebounce(PREventsTask{Debounce: UnsetPREventsDebounce}, tc.trigger)
+			if got != tc.want {
+				t.Fatalf("effectivePREventDebounce(%q) = %v, want %v", tc.trigger, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPREventsScanPRHeadUpdatedDebouncesAcrossHeads(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 13, Title: "PR 13", URL: "https://github.com/owner/repo/pull/13", HeadRefName: "branch-13"},
+	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+	r.set([]byte("11111111aaaa"), "gh", "pr", "view", "13", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+
+	now := time.Date(2026, 4, 9, 21, 0, 0, 0, time.UTC)
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {
+				Workflow:      "review-pr",
+				PRHeadUpdated: true,
+				Debounce:      UnsetPREventsDebounce,
+			},
+		},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if _, err := q.Enqueue(vessels[0]); err != nil {
+		t.Fatalf("Enqueue: %v", err)
+	}
+	if err := g.OnEnqueue(context.Background(), vessels[0]); err != nil {
+		t.Fatalf("OnEnqueue: %v", err)
+	}
+
+	now = now.Add(5 * time.Minute)
+	r.set([]byte("22222222bbbb"), "gh", "pr", "view", "13", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+	vessels, err = g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan inside debounce window: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels inside debounce window, got %d", len(vessels))
+	}
+
+	now = now.Add(6 * time.Minute)
+	vessels, err = g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan after debounce window: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel after debounce window, got %d", len(vessels))
+	}
+	if !strings.Contains(vessels[0].Ref, "#head-22222222bbbb") {
+		t.Fatalf("Ref = %q, want #head-22222222bbbb", vessels[0].Ref)
+	}
+}
+
+func TestPREventsDebounceStatePathMatchesSpec(t *testing.T) {
+	g := &GitHubPREvents{StateDir: ".xylem"}
+	if got := g.debounceStatePath(); got != filepath.Join(".xylem", "state", "pr-events", "debounce.json") {
+		t.Fatalf("debounceStatePath() = %q", got)
+	}
+}
+
 func TestPREventsBranchName(t *testing.T) {
 	g := &GitHubPREvents{}
 	vessel := queue.Vessel{
@@ -446,40 +662,183 @@ func TestPREventsBranchName(t *testing.T) {
 	}
 }
 
-func TestPREventsOnStartNoOp(t *testing.T) {
-	g := &GitHubPREvents{}
-	err := g.OnStart(context.Background(), queue.Vessel{})
+func TestPREventsLifecycleHooksWithoutDebounceMetaLeaveStateUntouched(t *testing.T) {
+	dir := t.TempDir()
+	g := &GitHubPREvents{StateDir: dir}
+	if err := g.storeDebounceEmittedAt(preventPRHeadUpdated, 42, time.Date(2026, 4, 9, 21, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatalf("seed debounce state: %v", err)
+	}
+	want, err := os.ReadFile(g.debounceStatePath())
 	if err != nil {
-		t.Fatalf("OnStart should be no-op, got: %v", err)
+		t.Fatalf("read seeded debounce state: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		run  func(context.Context, queue.Vessel) error
+	}{
+		{name: "on enqueue", run: g.OnEnqueue},
+		{name: "on start", run: g.OnStart},
+		{name: "on wait", run: g.OnWait},
+		{name: "on resume", run: g.OnResume},
+		{name: "on complete", run: g.OnComplete},
+		{name: "on fail", run: g.OnFail},
+		{name: "on timed out", run: g.OnTimedOut},
+		{name: "remove running label", run: g.RemoveRunningLabel},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.run(context.Background(), queue.Vessel{}); err != nil {
+				t.Fatalf("%s: %v", tt.name, err)
+			}
+			got, err := os.ReadFile(g.debounceStatePath())
+			if err != nil {
+				t.Fatalf("read debounce state after %s: %v", tt.name, err)
+			}
+			if string(got) != string(want) {
+				t.Fatalf("%s mutated debounce state:\nwant %s\ngot  %s", tt.name, want, got)
+			}
+		})
 	}
 }
 
-func TestPREventsOnEnqueueNoOp(t *testing.T) {
-	g := &GitHubPREvents{}
-	if err := g.OnEnqueue(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnEnqueue should be no-op, got: %v", err)
+func TestSmoke_S44_PROpenedScansExactlyOncePerPR(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 21, Title: "PR 21", URL: "https://github.com/owner/repo/pull/21", HeadRefName: "feature/pr-opened"},
 	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {
+				Workflow: "review-pr",
+				PROpened: true,
+			},
+		},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+
+	v := vessels[0]
+	assert.Equal(t, "pr_opened", v.Meta["event_type"])
+	assert.Equal(t, "21", v.Meta["pr_num"])
+	assert.Equal(t, "feature/pr-opened", v.Meta["pr_head_branch"])
+	assert.Contains(t, v.Ref, "#pr-opened")
+
+	_, err = q.Enqueue(v)
+	require.NoError(t, err)
+	require.NoError(t, g.OnEnqueue(context.Background(), v))
+
+	vessels, err = g.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
 }
 
-func TestPREventsOnCompleteNoOp(t *testing.T) {
-	g := &GitHubPREvents{}
-	if err := g.OnComplete(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnComplete should be no-op, got: %v", err)
+func TestSmoke_S45_PRHeadUpdatedScansPerHeadSHA(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{Number: 22, Title: "PR 22", URL: "https://github.com/owner/repo/pull/22", HeadRefName: "feature/head-updated"},
 	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+	r.set([]byte("aaaabbbbcccc"), "gh", "pr", "view", "22", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {
+				Workflow:      "review-pr",
+				PRHeadUpdated: true,
+				Debounce:      0,
+			},
+		},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "pr_head_updated", vessels[0].Meta["event_type"])
+	assert.Contains(t, vessels[0].Ref, "#head-aaaabbbbcccc")
+
+	_, err = q.Enqueue(vessels[0])
+	require.NoError(t, err)
+	require.NoError(t, g.OnEnqueue(context.Background(), vessels[0]))
+
+	vessels, err = g.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+
+	r.set([]byte("dddd1111eeee"), "gh", "pr", "view", "22", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+	vessels, err = g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Contains(t, vessels[0].Ref, "#head-dddd1111eeee")
 }
 
-func TestPREventsOnFailNoOp(t *testing.T) {
-	g := &GitHubPREvents{}
-	if err := g.OnFail(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnFail should be no-op, got: %v", err)
-	}
-}
+func TestSmoke_S46_PRHeadUpdatedDefaultDebounceCapsRapidHeadAdvances(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
 
-func TestPREventsOnTimedOutNoOp(t *testing.T) {
-	g := &GitHubPREvents{}
-	if err := g.OnTimedOut(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnTimedOut should be no-op, got: %v", err)
+	prs := []ghPR{
+		{Number: 23, Title: "PR 23", URL: "https://github.com/owner/repo/pull/23", HeadRefName: "feature/debounce"},
 	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+	r.set([]byte("111122223333"), "gh", "pr", "view", "23", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+
+	now := time.Date(2026, 4, 9, 21, 0, 0, 0, time.UTC)
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {
+				Workflow:      "review-pr",
+				PRHeadUpdated: true,
+				Debounce:      UnsetPREventsDebounce,
+			},
+		},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+
+	_, err = q.Enqueue(vessels[0])
+	require.NoError(t, err)
+	require.NoError(t, g.OnEnqueue(context.Background(), vessels[0]))
+
+	now = now.Add(5 * time.Minute)
+	r.set([]byte("444455556666"), "gh", "pr", "view", "23", "--repo", "owner/repo", "--json", "headRefOid", "--jq", ".headRefOid")
+	vessels, err = g.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+
+	now = now.Add(6 * time.Minute)
+	vessels, err = g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Contains(t, vessels[0].Ref, "#head-444455556666")
 }
 
 func TestPREventsScanGHError(t *testing.T) {

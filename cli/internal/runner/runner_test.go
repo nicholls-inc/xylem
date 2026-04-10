@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
@@ -201,6 +202,61 @@ func (c *countingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reade
 		time.Sleep(c.delay)
 	}
 	atomic.AddInt32(&c.concurrent, -1)
+	return []byte("mock output"), nil
+}
+
+type classCountingCmdRunner struct {
+	mu             sync.Mutex
+	currentByClass map[string]int
+	maxByClass     map[string]int
+	globalCurrent  int
+	globalMax      int
+	delay          time.Duration
+}
+
+func (c *classCountingCmdRunner) RunOutput(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func (c *classCountingCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
+	return nil
+}
+
+func (c *classCountingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	prompt, _ := io.ReadAll(stdin)
+	class := "unknown"
+	switch {
+	case bytes.Contains(prompt, []byte("implement-feature")):
+		class = "implement-feature"
+	case bytes.Contains(prompt, []byte("merge-pr")):
+		class = "merge-pr"
+	}
+
+	c.mu.Lock()
+	if c.currentByClass == nil {
+		c.currentByClass = make(map[string]int)
+	}
+	if c.maxByClass == nil {
+		c.maxByClass = make(map[string]int)
+	}
+	c.currentByClass[class]++
+	if c.currentByClass[class] > c.maxByClass[class] {
+		c.maxByClass[class] = c.currentByClass[class]
+	}
+	c.globalCurrent++
+	if c.globalCurrent > c.globalMax {
+		c.globalMax = c.globalCurrent
+	}
+	c.mu.Unlock()
+
+	if c.delay > 0 {
+		time.Sleep(c.delay)
+	}
+
+	c.mu.Lock()
+	c.currentByClass[class]--
+	c.globalCurrent--
+	c.mu.Unlock()
 	return []byte("mock output"), nil
 }
 
@@ -2533,6 +2589,7 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
+	setPricedModel(cfg)
 
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only summary"))
@@ -2546,29 +2603,26 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	summary := loadSummary(t, cfg.StateDir, "prompt-1")
 	assert.Equal(t, "completed", summary.State)
 	assert.Equal(t, "prompt-1", summary.VesselID)
-}
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, "prompt", summary.Phases[0].Name)
+	assert.Equal(t, "prompt", summary.Phases[0].Type)
+	assert.Equal(t, "completed", summary.Phases[0].Status)
+	assert.Equal(t, cost.UsageSourceEstimated, summary.Phases[0].UsageSource)
+	assert.Positive(t, summary.Phases[0].InputTokensEst)
+	assert.Positive(t, summary.Phases[0].OutputTokensEst)
+	assert.Positive(t, summary.Phases[0].CostUSDEst)
+	assert.Equal(t, summary.TotalTokensEst, summary.Phases[0].InputTokensEst+summary.Phases[0].OutputTokensEst)
+	assert.Equal(t, summary.TotalCostUSDEst, summary.Phases[0].CostUSDEst)
 
-func TestSmoke_WS6_S18_PromptOnlyVesselSummaryEmptyPhases(t *testing.T) {
-	dir := t.TempDir()
-	cfg := makeTestConfig(dir, 1)
-	cfg.StateDir = filepath.Join(dir, ".xylem")
-
-	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	_, _ = q.Enqueue(makePromptVessel(1, "prompt-only empty phases"))
-
-	r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
-	result, err := r.DrainAndWait(context.Background())
-	if err != nil {
-		t.Fatalf("Drain() error = %v", err)
-	}
-	if result.Completed != 1 {
-		t.Fatalf("Completed = %d, want 1", result.Completed)
-	}
-
-	summary := loadSummary(t, cfg.StateDir, "prompt-1")
-	if len(summary.Phases) != 0 {
-		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
-	}
+	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", "prompt-1", costReportFileName))
+	require.NoError(t, err)
+	require.Len(t, report.Phases, 1)
+	assert.Equal(t, "prompt", report.Phases[0].Name)
+	assert.Equal(t, "prompt", report.Phases[0].Type)
+	assert.Equal(t, "completed", report.Phases[0].Status)
+	assert.Equal(t, cost.UsageSourceEstimated, report.Phases[0].UsageSource)
+	assert.Equal(t, summary.TotalTokensEst, report.Phases[0].TotalTokens)
+	assert.Equal(t, summary.TotalCostUSDEst, report.Phases[0].CostUSD)
 }
 
 func TestDrainCommandGatePasses(t *testing.T) {
@@ -3351,6 +3405,57 @@ func TestDrainConcurrencyLimit(t *testing.T) {
 	}
 	if max != 2 {
 		t.Fatalf("max concurrent = %d, want exactly 2 to prove the limit is enforced without collapsing throughput", max)
+	}
+}
+
+func TestDrainPerClassConcurrencyLimit(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 3)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.ConcurrencyPerClass = map[string]int{
+		"implement-feature": 1,
+		"merge-pr":          2,
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	writeWorkflowFile(t, dir, "implement-feature", []testPhase{
+		{name: "analyze", promptContent: "implement-feature", maxTurns: 5},
+	})
+	writeWorkflowFile(t, dir, "merge-pr", []testPhase{
+		{name: "analyze", promptContent: "merge-pr", maxTurns: 5},
+	})
+
+	oldWd, _ := os.Getwd()
+	os.Chdir(dir)
+	defer os.Chdir(oldWd)
+
+	_, _ = q.Enqueue(makeVessel(1, "implement-feature"))
+	_, _ = q.Enqueue(makeVessel(2, "implement-feature"))
+	_, _ = q.Enqueue(makeVessel(3, "merge-pr"))
+	_, _ = q.Enqueue(makeVessel(4, "merge-pr"))
+
+	counter := &classCountingCmdRunner{delay: 50 * time.Millisecond}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, counter)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Completed != 4 {
+		t.Fatalf("DrainAndWait().Completed = %d, want 4", result.Completed)
+	}
+	if counter.maxByClass["implement-feature"] != 1 {
+		t.Fatalf("implement-feature max concurrent = %d, want 1", counter.maxByClass["implement-feature"])
+	}
+	if counter.maxByClass["merge-pr"] != 2 {
+		t.Fatalf("merge-pr max concurrent = %d, want 2", counter.maxByClass["merge-pr"])
+	}
+	if counter.globalMax != 3 {
+		t.Fatalf("global max concurrent = %d, want 3", counter.globalMax)
 	}
 }
 
@@ -4658,6 +4763,54 @@ func TestDrainCommandPhaseWithGate(t *testing.T) {
 	}
 }
 
+func assertCommandPhaseOutputAvailableToNextPrompt(t *testing.T, workflowName string) {
+	t.Helper()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, workflowName))
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, workflowName, []testPhase{
+		{name: "merge_main", phaseType: "command", run: "git merge origin/main --no-commit --no-ff"},
+		{name: "analyze", promptContent: "Merge output: {{.PreviousOutputs.merge_main}}", maxTurns: 10},
+	})
+
+	withTestWorkingDir(t, dir)
+
+	const mergeOutput = "Auto-merging cli/internal/runner/runner.go\nCONFLICT (content): Merge conflict in cli/internal/runner/runner.go\n"
+	var sawInterpolatedMergeOutput bool
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte(mergeOutput),
+		runPhaseHook: func(_ string, prompt string, _ string, _ ...string) ([]byte, error, bool) {
+			sawInterpolatedMergeOutput = strings.Contains(prompt, "Merge output: "+mergeOutput)
+			return []byte("analyzed conflicts"), nil, true
+		},
+	}
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	require.Len(t, cmdRunner.phaseCalls, 1)
+	assert.True(t, sawInterpolatedMergeOutput, "prompt = %q, want command phase output", cmdRunner.phaseCalls[0].prompt)
+}
+
+func TestDrainCommandPhaseOutputAvailableToNextPrompt(t *testing.T) {
+	assertCommandPhaseOutputAvailableToNextPrompt(t, "fix-bug")
+}
+
+func TestSmoke_S8_ResolveConflictsDeterministicMergeOutputFeedsAnalysisPrompt(t *testing.T) {
+	assertCommandPhaseOutputAvailableToNextPrompt(t, "resolve-conflicts")
+}
+
 func TestDrainCommandPhaseWithNoOp(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
@@ -4848,6 +5001,50 @@ func TestResolveRepoPrefersConfigSource(t *testing.T) {
 	if got != "owner/primary-repo" {
 		t.Fatalf("resolveRepo() = %q, want owner/primary-repo", got)
 	}
+}
+
+func TestSmoke_S4_BuildTemplateDataExposesRepoAndValidation(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.DefaultBranch = "trunk"
+	cfg.Validation = config.ValidationConfig{
+		Format: "fmt ./...",
+		Lint:   "lint ./...",
+		Build:  "build ./...",
+		Test:   "test ./...",
+	}
+	cfg.Sources["harness-merge"] = config.SourceConfig{
+		Type: "github-pr",
+		Repo: "owner/config-repo",
+		Tasks: map[string]config.Task{
+			"merge-ready": {Labels: []string{"ready"}, Workflow: "merge-pr"},
+		},
+	}
+	r := &Runner{
+		Config: cfg,
+		Sources: map[string]source.Source{
+			"github-pr":     &source.GitHubPR{Repo: "owner/runtime-repo"},
+			"harness-merge": &source.GitHubPR{Repo: "owner/config-repo"},
+		},
+	}
+
+	vessel := queue.Vessel{
+		ID:     "pr-42",
+		Ref:    "https://github.com/owner/config-repo/pull/42",
+		Source: "github-pr",
+		Meta: map[string]string{
+			"config_source":        "harness-merge",
+			"schedule.source_name": "security-compliance",
+		},
+	}
+	td := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "")
+
+	rendered, err := renderCommandTemplate("merge", "command", "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} && echo {{.Source.Name}} {{.Source.Repo}} {{.Repo.DefaultBranch}} {{.Validation.Format}} {{.Validation.Lint}} {{.Validation.Build}} {{.Validation.Test}} {{.Vessel.Ref}} {{index .Vessel.Meta \"schedule.source_name\"}}", td)
+	require.NoError(t, err)
+	assert.Contains(t, rendered, "gh pr merge 42 --repo owner/config-repo")
+	assert.Contains(t, rendered, "echo harness-merge owner/config-repo trunk fmt ./... lint ./... build ./... test ./... https://github.com/owner/config-repo/pull/42 security-compliance")
 }
 
 func TestResolveSourcePrefersConfigSource(t *testing.T) {
@@ -7202,6 +7399,135 @@ func TestCheckHungVesselsWritesTraceableSummary(t *testing.T) {
 	timeoutSpan := endedSpanByName(t, rec, "wait_transition:timed_out")
 	assert.Equal(t, timeoutSpan.SpanContext().TraceID().String(), summary.Trace.TraceID)
 	assert.Equal(t, timeoutSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
+}
+
+func TestSmoke_S1_PhaseStalledVesselTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = false
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "stall-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "analyze.output")
+	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+	require.NoError(t, os.WriteFile(outputPath, []byte(""), 0o644))
+	old := now.Add(-11 * time.Minute)
+	require.NoError(t, os.Chtimes(outputPath, old, old))
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	findings := r.CheckStalledVessels(context.Background())
+	require.Len(t, findings, 1)
+	assert.Equal(t, "phase_stalled", findings[0].Code)
+	assert.Equal(t, "analyze", findings[0].Phase)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Contains(t, updated.Error, "phase stalled: no output for")
+}
+
+func TestSmoke_S3_OrphanedRunningVesselTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "orphan-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.markProcessStarted(vessel.ID, "analyze", os.Getpid())
+	r.markProcessExited(vessel.ID, os.Getpid())
+	findings := r.CheckStalledVessels(context.Background())
+	require.Len(t, findings, 1)
+	assert.Equal(t, "orphaned_subprocess", findings[0].Code)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Equal(t, "vessel orphaned (no live subprocess)", updated.Error)
+}
+
+func TestTimeoutRunningVesselReturnsFalseWhenStateAlreadyChanged(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "transition-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+	require.NoError(t, q.Update(vessel.ID, queue.StateCompleted, ""))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	ok := r.timeoutRunningVessel(context.Background(), *vessel, "phase stalled: no output for 11m0s")
+	assert.False(t, ok)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateCompleted, updated.State)
+	assert.Empty(t, updated.Error)
+}
+
+func TestCheckStalledVesselsDoesNotTimeoutUntrackedRecentPhase(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "command-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "analyze.output")
+	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+	require.NoError(t, os.WriteFile(outputPath, []byte("still running"), 0o644))
+	require.NoError(t, os.Chtimes(outputPath, now, now))
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	findings := r.CheckStalledVessels(context.Background())
+	require.Empty(t, findings)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateRunning, updated.State)
 }
 
 func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {

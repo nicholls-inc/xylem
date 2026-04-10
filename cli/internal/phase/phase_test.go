@@ -132,6 +132,22 @@ func TestRenderPrompt(t *testing.T) {
 			want: "Vessel: issue-42 from github",
 		},
 		{
+			name:     "renders vessel ref and metadata",
+			template: `Ref: {{.Vessel.Ref}} Source: {{index .Vessel.Meta "schedule.source_name"}} Fired: {{index .Vessel.Meta "schedule.fired_at"}}`,
+			data: TemplateData{
+				Vessel: VesselData{
+					ID:     "schedule-security-compliance-20260410",
+					Ref:    "schedule://security-compliance/2026-04-10T00:00:00Z",
+					Source: "schedule",
+					Meta: map[string]string{
+						"schedule.source_name": "security-compliance",
+						"schedule.fired_at":    "2026-04-10T00:00:00Z",
+					},
+				},
+			},
+			want: "Ref: schedule://security-compliance/2026-04-10T00:00:00Z Source: security-compliance Fired: 2026-04-10T00:00:00Z",
+		},
+		{
 			name:     "template syntax error",
 			template: "{{.BadSyntax",
 			data:     TemplateData{},
@@ -280,6 +296,11 @@ func TestPrepareDataDoesNotMutateOriginal(t *testing.T) {
 		},
 		GateResult: strings.Repeat("y", MaxGateResultLen+100),
 		Issue:      IssueData{Body: strings.Repeat("z", MaxIssueBodyLen+100)},
+		Vessel: VesselData{
+			Meta: map[string]string{
+				"schedule.source_name": "security-compliance",
+			},
+		},
 	}
 
 	originalAnalyzeLen := len(original.PreviousOutputs["analyze"])
@@ -296,6 +317,9 @@ func TestPrepareDataDoesNotMutateOriginal(t *testing.T) {
 	}
 	if len(original.Issue.Body) != originalBodyLen {
 		t.Fatal("prepareData mutated original Issue.Body")
+	}
+	if original.Vessel.Meta["schedule.source_name"] != "security-compliance" {
+		t.Fatal("prepareData mutated original Vessel.Meta")
 	}
 }
 

@@ -132,3 +132,148 @@ func TestPropHarnessReviewOutputDirRejectsTraversal(t *testing.T) {
 		}
 	})
 }
+
+func TestPropNormalizeLegacyProvidersPreservesDefaultTierModels(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		includeClaude := rapid.Bool().Draw(t, "include-claude")
+		includeCopilot := rapid.Bool().Draw(t, "include-copilot")
+		if !includeClaude && !includeCopilot {
+			includeClaude = true
+		}
+
+		cfg := Config{
+			Concurrency: 1,
+			MaxTurns:    10,
+			Timeout:     "30m",
+			LLMRouting: LLMRoutingConfig{
+				DefaultTier: rapid.SampledFrom([]string{"high", "med", "low"}).Draw(t, "default-tier"),
+			},
+			Claude: ClaudeConfig{
+				Command:      "claude",
+				DefaultModel: rapid.StringMatching(`[a-z0-9.-]{4,24}`).Draw(t, "claude-model"),
+			},
+			Copilot: CopilotConfig{
+				Command:      "copilot",
+				DefaultModel: rapid.StringMatching(`[a-z0-9.-]{4,24}`).Draw(t, "copilot-model"),
+			},
+		}
+		cfg.LLM = rapid.SampledFrom([]string{"", "claude", "copilot"}).Draw(t, "llm")
+		if !includeClaude {
+			cfg.Claude = ClaudeConfig{Command: "claude"}
+		}
+		if !includeCopilot {
+			cfg.Copilot = CopilotConfig{Command: "copilot"}
+		}
+
+		cfg.normalizeProviders()
+
+		defaultTier := cfg.LLMRouting.DefaultTier
+		if defaultTier == "" {
+			t.Fatal("normalizeProviders() left default tier empty")
+		}
+
+		wantProviders := map[string]string{}
+		if includeClaude || cfg.LLM == "claude" || cfg.LLM == "" {
+			wantProviders["claude"] = cfg.Claude.DefaultModel
+		}
+		if includeCopilot || cfg.LLM == "copilot" {
+			wantProviders["copilot"] = cfg.Copilot.DefaultModel
+		}
+		if len(cfg.Providers) != len(wantProviders) {
+			t.Fatalf("normalizeProviders() produced providers %#v, want %#v", cfg.Providers, wantProviders)
+		}
+		for name, wantModel := range wantProviders {
+			provider, ok := cfg.Providers[name]
+			if !ok {
+				t.Fatalf("normalizeProviders() missing provider %q in %#v", name, cfg.Providers)
+			}
+			if got := provider.Tiers[defaultTier]; got != wantModel {
+				t.Fatalf("%s tier model = %q, want %q", name, got, wantModel)
+			}
+		}
+
+		routing, ok := cfg.LLMRouting.Tiers[defaultTier]
+		if !ok {
+			t.Fatalf("normalizeProviders() missing routing tier %q in %#v", defaultTier, cfg.LLMRouting.Tiers)
+		}
+
+		wantOrder := make([]string, 0, len(wantProviders))
+		for _, name := range []string{"claude", "copilot"} {
+			if _, ok := wantProviders[name]; ok {
+				wantOrder = append(wantOrder, name)
+			}
+		}
+		if cfg.LLM != "" && containsString(wantOrder, cfg.LLM) && wantOrder[0] != cfg.LLM {
+			wantOrder = append([]string{cfg.LLM}, removeString(wantOrder, cfg.LLM)...)
+		}
+		if !reflect.DeepEqual(routing.Providers, wantOrder) {
+			t.Fatalf("default provider order = %#v, want %#v", routing.Providers, wantOrder)
+		}
+	})
+}
+
+func TestPropValidationRequirementAcceptsAnyNonEmptyValidationCommand(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := validConfig()
+		cfg.Sources = map[string]SourceConfig{
+			"github": {
+				Type: "github",
+				Repo: "owner/name",
+				Tasks: map[string]Task{
+					"fix-checks": {Labels: []string{"ci"}, Workflow: "fix-pr-checks"},
+				},
+			},
+		}
+		commands := []*string{
+			&cfg.Validation.Format,
+			&cfg.Validation.Lint,
+			&cfg.Validation.Build,
+			&cfg.Validation.Test,
+		}
+		idx := rapid.IntRange(0, len(commands)-1).Draw(t, "command-index")
+		*commands[idx] = rapid.StringMatching(`[a-z0-9 ./_-]{4,32}`).Draw(t, "command")
+
+		if err := cfg.validateWorkflowRequirements(); err != nil {
+			t.Fatalf("validateWorkflowRequirements() error = %v", err)
+		}
+	})
+}
+
+func TestPropEffectiveAutoMergeLabelsNeverReturnsBlank(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		size := rapid.IntRange(0, 6).Draw(t, "size")
+		labels := make([]string, 0, size)
+		for i := 0; i < size; i++ {
+			labels = append(labels, rapid.SampledFrom([]string{"ready-to-merge", "harness-impl", " ci ", "   "}).Draw(t, fmt.Sprintf("label-%d", i)))
+		}
+
+		got := (DaemonConfig{AutoMergeLabels: labels}).EffectiveAutoMergeLabels()
+		if len(got) == 0 {
+			t.Fatal("EffectiveAutoMergeLabels() returned no labels")
+		}
+		for _, label := range got {
+			if strings.TrimSpace(label) == "" {
+				t.Fatalf("EffectiveAutoMergeLabels() returned blank label in %#v", got)
+			}
+		}
+	})
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
+func removeString(values []string, skip string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if value != skip {
+			out = append(out, value)
+		}
+	}
+	return out
+}

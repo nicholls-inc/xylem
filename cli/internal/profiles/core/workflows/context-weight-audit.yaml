@@ -1,0 +1,7 @@
+name: context-weight-audit
+class: ops
+description: "Audit repeated high-context workflows and publish de-duplicated findings"
+phases:
+  - name: run
+    type: command
+    run: "xylem review"

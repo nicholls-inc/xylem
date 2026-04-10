@@ -11,7 +11,7 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestSmoke_S1_MergePRWorkflowUsesAutoFlag(t *testing.T) {
+func TestSmoke_S7_MergePRWorkflowUsesRepoSlugAndAdminFlag(t *testing.T) {
 	t.Parallel()
 
 	_, file, _, ok := runtime.Caller(0)
@@ -33,6 +33,8 @@ func TestSmoke_S1_MergePRWorkflowUsesAutoFlag(t *testing.T) {
 	}
 	require.NotNil(t, mergePhase, "workflow %q missing merge phase", wf.Name)
 	assert.Equal(t, "command", mergePhase.Type)
-	assert.Contains(t, mergePhase.Run, "--auto")
-	assert.NotContains(t, mergePhase.Run, "--admin")
+	assert.Contains(t, mergePhase.Run, "--admin")
+	assert.NotContains(t, mergePhase.Run, "--auto")
+	assert.Contains(t, mergePhase.Run, "{{.Repo.Slug}}")
+	assert.NotContains(t, mergePhase.Run, "nicholls-inc/xylem")
 }

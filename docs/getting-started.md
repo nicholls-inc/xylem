@@ -84,7 +84,10 @@ sources:
         labels: [bug, ready-for-work]       # Issues with BOTH labels are picked up
         workflow: fix-bug                    # Maps to .xylem/workflows/fix-bug.yaml
 
-concurrency: 2          # Max simultaneous sessions
+concurrency:
+  global: 2            # Max simultaneous sessions
+  per_class:
+    fix-bug: 1         # Optional per-workflow caps keyed by workflow name
 max_turns: 50           # Max turns per session
 timeout: "30m"          # Per-session timeout
 
@@ -279,7 +282,7 @@ Here is what happens during drain:
 5. If a command gate fails, the phase retries up to the configured limit.
 6. Phase outputs are persisted to `.xylem/phases/<vessel-id>/`.
 
-Drain respects the `concurrency` setting. If you set `concurrency: 2`, at most two sessions run in parallel.
+Drain respects the `concurrency` setting. `global` is the hard ceiling, and optional `per_class` entries let you cap individual workflows without blocking unrelated pending work.
 
 Drain handles SIGINT and SIGTERM gracefully: running sessions finish, but no new vessels are started.
 

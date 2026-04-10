@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -44,6 +46,15 @@ type CommandRunner interface {
 	RunOutput(ctx context.Context, name string, args ...string) ([]byte, error)
 	RunProcess(ctx context.Context, dir string, name string, args ...string) error
 	RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error)
+}
+
+type PhaseProcessObserver interface {
+	ProcessStarted(pid int)
+	ProcessExited(pid int)
+}
+
+type PhaseProcessRunner interface {
+	RunPhaseObserved(ctx context.Context, dir string, stdin io.Reader, observer PhaseProcessObserver, name string, args ...string) ([]byte, error)
 }
 
 // WorktreeManager abstracts worktree lifecycle for testing.
@@ -96,13 +107,33 @@ type Runner struct {
 	// newly available capacity and blocks idle-only work such as upgrades.
 	DrainBudget time.Duration
 
-	sem      chan struct{}
-	wg       sync.WaitGroup
-	traceWg  sync.WaitGroup
-	inFlight atomic.Int32
+	sem        chan struct{}
+	wg         sync.WaitGroup
+	traceWg    sync.WaitGroup
+	inFlight   atomic.Int32
+	scheduleMu sync.Mutex
 
 	resultMu sync.Mutex
 	result   DrainResult
+
+	processMu       sync.Mutex
+	processes       map[string]trackedProcess
+	classMu         sync.Mutex
+	inFlightByClass map[string]int
+}
+
+type trackedProcess struct {
+	PID       int
+	PhaseName string
+	Exited    bool
+}
+
+type StallFinding struct {
+	Code     string
+	Level    string
+	VesselID string
+	Phase    string
+	Message  string
 }
 
 // New creates a Runner.
@@ -112,16 +143,19 @@ func New(cfg *config.Config, q *queue.Queue, wt WorktreeManager, r CommandRunner
 		concurrency = cfg.Concurrency
 	}
 	return &Runner{
-		Config:   cfg,
-		Queue:    q,
-		Worktree: wt,
-		Runner:   r,
-		LiveGate: gate.NewLiveVerifier(),
-		sem:      make(chan struct{}, concurrency),
+		Config:          cfg,
+		Queue:           q,
+		Worktree:        wt,
+		Runner:          r,
+		LiveGate:        gate.NewLiveVerifier(),
+		sem:             make(chan struct{}, concurrency),
+		processes:       make(map[string]trackedProcess),
+		inFlightByClass: make(map[string]int),
 	}
 }
 
-// Drain dequeues pending vessels and launches sessions up to Config.Concurrency concurrently.
+// Drain dequeues pending vessels and launches sessions up to the configured global
+// concurrency limit.
 // On context cancellation, no new vessels are launched; running vessels complete normally.
 // Drain returns once the current dequeue tick ends. Use DrainAndWait or Wait for
 // synchronous callers that need terminal outcomes.
@@ -178,23 +212,35 @@ drainLoop:
 			break drainLoop
 		}
 
-		vessel, err := r.Queue.Dequeue()
+		r.scheduleMu.Lock()
+		vessel, err := r.Queue.DequeueMatching(func(v queue.Vessel) bool {
+			return r.classSlotAvailable(v.ConcurrencyClass())
+		})
 		if err != nil || vessel == nil {
+			r.scheduleMu.Unlock()
 			<-r.sem
 			break drainLoop
 		}
+		class := vessel.ConcurrencyClass()
+		if !r.reserveClassSlot(class) {
+			r.scheduleMu.Unlock()
+			<-r.sem
+			continue
+		}
+		r.scheduleMu.Unlock()
 
-		log.Printf("%sdequeued vessel workflow=%s", vesselLabel(*vessel), vessel.Workflow)
+		log.Printf("%sdequeued vessel workflow=%s workflow_class=%s", vesselLabel(*vessel), vessel.Workflow, class)
 
 		result.Launched++
 		r.recordLaunched()
 		r.inFlight.Add(1)
 		r.wg.Add(1)
 		drainLaunchWg.Add(1)
-		go func(j queue.Vessel) {
+		go func(j queue.Vessel, workflowClass string) {
 			defer r.wg.Done()
 			defer drainLaunchWg.Done()
 			defer func() {
+				r.releaseClassSlot(workflowClass)
 				<-r.sem
 				r.inFlight.Add(-1)
 			}()
@@ -239,6 +285,18 @@ drainLoop:
 					AnomalyCount: len(status.Anomalies),
 					Anomalies:    AnomalyCodes(status.Anomalies),
 				}))
+				if r.Config != nil && r.Config.StateDir != "" {
+					if summary, loadErr := LoadVesselSummary(r.Config.StateDir, j.ID); loadErr == nil && summary != nil {
+						vesselSpan.AddAttributes(observability.VesselCostAttributes(observability.VesselCostData{
+							TotalTokens:            summary.TotalTokensEst,
+							TotalCostUSDEst:        summary.TotalCostUSDEst,
+							UsageSource:            string(summary.UsageSource),
+							UsageUnavailableReason: summary.UsageUnavailableReason,
+							BudgetExceeded:         summary.BudgetExceeded,
+							BudgetWarning:          summary.BudgetWarning,
+						}))
+					}
+				}
 				vesselSpan.AddAttributes(observability.RecoveryAttributes(recoveryAttributesFromMeta(finalVessel.Meta)))
 			}
 
@@ -256,7 +314,7 @@ drainLoop:
 			}
 			drainStatsMu.Unlock()
 			r.recordOutcome(outcome)
-		}(*vessel)
+		}(*vessel, class)
 	}
 
 	if r.Tracer != nil {
@@ -291,6 +349,55 @@ drainLoop:
 	}
 
 	return result, nil
+}
+
+func (r *Runner) classSlotAvailable(class string) bool {
+	if r.Config == nil {
+		return true
+	}
+	limit, ok := r.Config.ConcurrencyLimit(class)
+	if !ok {
+		return true
+	}
+	r.classMu.Lock()
+	defer r.classMu.Unlock()
+	return r.inFlightByClass[class] < limit
+}
+
+func (r *Runner) reserveClassSlot(class string) bool {
+	if r.Config == nil {
+		return true
+	}
+	limit, ok := r.Config.ConcurrencyLimit(class)
+	if !ok {
+		return true
+	}
+	r.classMu.Lock()
+	defer r.classMu.Unlock()
+	if r.inFlightByClass == nil {
+		r.inFlightByClass = make(map[string]int)
+	}
+	if r.inFlightByClass[class] >= limit {
+		return false
+	}
+	r.inFlightByClass[class]++
+	return true
+}
+
+func (r *Runner) releaseClassSlot(class string) {
+	if r.Config == nil {
+		return
+	}
+	if _, ok := r.Config.ConcurrencyLimit(class); !ok {
+		return
+	}
+	r.classMu.Lock()
+	defer r.classMu.Unlock()
+	if r.inFlightByClass[class] <= 1 {
+		delete(r.inFlightByClass, class)
+		return
+	}
+	r.inFlightByClass[class]--
 }
 
 // DrainAndWait preserves the historical synchronous Drain behaviour for callers
@@ -461,6 +568,8 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 }
 
 func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome string) {
+	defer r.clearTrackedProcess(vessel.ID)
+
 	// Look up source for this vessel
 	src := r.resolveSourceForVessel(vessel)
 
@@ -578,19 +687,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			phaseStart := r.runtimeNow()
 
 			// Build template data
-			td := phase.TemplateData{
-				Issue: issueData,
-				Phase: phase.PhaseData{
-					Name:  p.Name,
-					Index: i,
-				},
-				PreviousOutputs: previousOutputs,
-				GateResult:      gateResult,
-				Vessel: phase.VesselData{
-					ID:     vessel.ID,
-					Source: vessel.Source,
-				},
-			}
+			td := r.buildTemplateData(vessel, issueData, p.Name, i, previousOutputs, gateResult)
 
 			var output []byte
 			var runErr error
@@ -677,6 +774,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					}
 					return "failed"
 				}
+				outputPath := filepath.Join(phasesDir, p.Name+".output")
+				if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+					log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+				}
 				cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
 				output = []byte(cmdOut)
 				runErr = cmdErr
@@ -745,7 +846,11 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if phaseStdin != nil {
 					stdinContent = rendered
 				}
-				output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+				outputPath := filepath.Join(phasesDir, p.Name+".output")
+				if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+					log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+				}
+				output, runErr = r.runPhaseWithRateLimitRetry(ctx, vessel.ID, p.Name, worktreePath, stdinContent, cmd, args)
 			}
 
 			if r.vesselCancelled(ctx, vessel.ID) {
@@ -849,10 +954,26 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			phaseSpanStatus = phaseStatus
 
 			// Report phase completion (non-fatal)
-			phaseResults = append(phaseResults, reporter.PhaseResult{Name: p.Name, Duration: phaseDuration, Status: phaseStatus})
+			phaseReport := reporter.PhaseResult{
+				Name:                   p.Name,
+				Duration:               phaseDuration,
+				Status:                 phaseStatus,
+				Provider:               provider,
+				Model:                  model,
+				InputTokensEst:         inputTokensEst,
+				OutputTokensEst:        outputTokensEst,
+				CostUSDEst:             costUSDEst,
+				UsageSource:            cost.UsageSourceEstimated,
+				UsageUnavailableReason: "",
+			}
+			if p.Type == "command" {
+				phaseReport.UsageSource = cost.UsageSourceNotApplicable
+				phaseReport.UsageUnavailableReason = "non-llm phase"
+			}
+			phaseResults = append(phaseResults, phaseReport)
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post phase-complete comment", vessel.ID,
-					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
+					r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
 			}
 
 			if phaseStatus == "no-op" {
@@ -1042,48 +1163,108 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	cmd, args := buildPromptOnlyCmdArgs(r.Config, prompt)
 	provider := resolveProvider(r.Config, nil, nil, nil)
 	model := resolveModel(r.Config, nil, nil, nil, provider)
+	phaseDef := workflow.Phase{Name: "prompt"}
+	phaseStartedAt := r.runtimeNow()
 	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 	if err != nil {
 		snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
+		if vrs != nil {
+			vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, r.runtimeSince(phaseStartedAt), "failed", nil, snapErr.Error()))
+		}
 		r.failVessel(vessel.ID, snapErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 		}
+		issueNum := r.parseIssueNum(vessel)
+		if issueNum > 0 && r.Reporter != nil {
+			r.logReporterError("post vessel-failed comment", vessel.ID,
+				r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, snapErr.Error(), ""))
+		}
 		return "failed"
 	}
 
-	output, runErr := r.runPhaseWithRateLimitRetry(ctx, worktreePath, prompt, cmd, args)
+	outputPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, "prompt.output")
+	if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+		log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+	}
+	output, runErr := r.runPhaseWithRateLimitRetry(ctx, vessel.ID, "prompt", worktreePath, prompt, cmd, args)
+	phaseDuration := r.runtimeSince(phaseStartedAt)
 	if r.vesselCancelled(ctx, vessel.ID) {
 		return r.cancelVessel(vessel, worktreePath, vrs, nil)
 	}
 	if runErr != nil {
+		if vrs != nil {
+			vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
+		}
 		r.failVessel(vessel.ID, runErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
 			log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+		}
+		issueNum := r.parseIssueNum(vessel)
+		if issueNum > 0 && r.Reporter != nil {
+			r.logReporterError("post vessel-failed comment", vessel.ID,
+				r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, runErr.Error(), ""))
 		}
 		return "failed"
 	}
 	if checkProtectedSurfaces {
 		if err := r.verifyProtectedSurfaces(vessel, workflow.Phase{Name: "prompt-only"}, worktreePath, beforeSnapshot); err != nil {
+			if vrs != nil {
+				vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
+			}
 			r.failVessel(vessel.ID, err.Error())
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, err.Error(), ""))
 			}
 			return "failed"
 		}
 	}
 	recordedAt := r.runtimeNow()
+	var phaseResults []reporter.PhaseResult
 	if vrs != nil {
-		vrs.recordPromptOnlyUsage(model, prompt, string(output), recordedAt)
+		inputTokensEst, outputTokensEst, costUSDEst := vrs.recordLLMUsage(model, prompt, string(output), recordedAt)
+		phaseSummary := vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "")
+		phaseReport := reporter.PhaseResult{
+			Name:                   phaseDef.Name,
+			Duration:               phaseDuration,
+			Status:                 "completed",
+			Provider:               provider,
+			Model:                  model,
+			InputTokensEst:         inputTokensEst,
+			OutputTokensEst:        outputTokensEst,
+			CostUSDEst:             costUSDEst,
+			UsageSource:            cost.UsageSourceEstimated,
+			UsageUnavailableReason: "",
+		}
 		if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
 			errMsg := fmt.Sprintf("budget exceeded: estimated cost $%.4f, estimated tokens %d",
 				vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
+			phaseSummary.Status = "failed"
+			phaseSummary.Error = errMsg
+			vrs.addPhase(phaseSummary)
 			r.failVessel(vessel.ID, errMsg)
 			if err := src.OnFail(ctx, vessel); err != nil {
 				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
 			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, phaseDef.Name, errMsg, ""))
+			}
 			return "failed"
 		}
+		vrs.addPhase(phaseSummary)
+		phaseResults = append(phaseResults, phaseReport)
+	}
+	issueNum := r.parseIssueNum(vessel)
+	if issueNum > 0 && r.Reporter != nil && len(phaseResults) > 0 {
+		r.logReporterError("post phase-complete comment", vessel.ID,
+			r.Reporter.PhaseComplete(ctx, issueNum, phaseResults[0], string(output)))
 	}
 
 	if r.vesselCancelled(ctx, vessel.ID) {
@@ -1093,7 +1274,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
 
-	return r.completeVessel(ctx, vessel, worktreePath, nil, vrs, nil)
+	return r.completeVessel(ctx, vessel, worktreePath, phaseResults, vrs, nil)
 }
 
 func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, src source.Source, vrs *vesselRunState, handler BuiltinWorkflowHandler) string {
@@ -1124,10 +1305,12 @@ func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, sr
 	}
 	if vrs != nil {
 		vrs.addPhase(PhaseSummary{
-			Name:       vessel.Workflow,
-			Type:       "builtin",
-			DurationMS: r.runtimeSince(startedAt).Milliseconds(),
-			Status:     "completed",
+			Name:                   vessel.Workflow,
+			Type:                   "builtin",
+			DurationMS:             r.runtimeSince(startedAt).Milliseconds(),
+			Status:                 "completed",
+			UsageSource:            cost.UsageSourceNotApplicable,
+			UsageUnavailableReason: "builtin workflow did not execute an llm phase",
 		})
 	}
 	if r.vesselCancelled(ctx, vessel.ID) {
@@ -1468,9 +1651,10 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 
 	if vrs.costTracker != nil {
 		reportPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, costReportFileName)
+		report := vrs.buildCostReport(summary)
 		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
 			log.Printf("warn: save cost report: %v", fmt.Errorf("create dir: %w", err))
-		} else if err := cost.SaveReport(reportPath, vrs.costTracker.Report(vessel.ID)); err != nil {
+		} else if err := cost.SaveReport(reportPath, report); err != nil {
 			log.Printf("warn: save cost report: %v", err)
 		} else {
 			summary.CostReportPath = costReportRelativePath(vessel.ID)
@@ -1615,8 +1799,17 @@ func recoveryAttributesFromMeta(meta map[string]string) observability.RecoveryDa
 		Action:          meta[recovery.MetaAction],
 		RetrySuppressed: meta[recovery.MetaRetrySuppressed],
 		RetryOutcome:    meta[recovery.MetaRetryOutcome],
-		UnlockDimension: meta[recovery.MetaUnlockDimension],
+		UnlockDimension: firstNonEmptyMeta(meta, recovery.MetaUnlockedBy, recovery.MetaUnlockDimension),
 	}
+}
+
+func firstNonEmptyMeta(meta map[string]string, keys ...string) string {
+	for _, key := range keys {
+		if value := strings.TrimSpace(meta[key]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func traceContextPointer(data *TraceArtifacts) *observability.TraceContextData {
@@ -1846,6 +2039,9 @@ type gateExecutionResult struct {
 // gate evaluation and retries. It returns the outcome without mutating the
 // vessel's queue state directly (the caller handles that).
 func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *workflow.Workflow, phaseIdx int, previousOutputs map[string]string, issueData phase.IssueData, harnessContent, worktreePath string, src source.Source, vrs *vesselRunState, enforceBudget bool) singlePhaseResult {
+	if vessel.Meta != nil {
+		vessel.Meta = maps.Clone(vessel.Meta)
+	}
 	p := wf.Phases[phaseIdx]
 	gateResult := ""
 	gateRetries := 0
@@ -1862,19 +2058,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
 		phaseStart := r.runtimeNow()
 
-		td := phase.TemplateData{
-			Issue: issueData,
-			Phase: phase.PhaseData{
-				Name:  p.Name,
-				Index: phaseIdx,
-			},
-			PreviousOutputs: previousOutputs,
-			GateResult:      gateResult,
-			Vessel: phase.VesselData{
-				ID:     vessel.ID,
-				Source: vessel.Source,
-			},
-		}
+		td := r.buildTemplateData(vessel, issueData, p.Name, phaseIdx, previousOutputs, gateResult)
 
 		var output []byte
 		var runErr error
@@ -1959,6 +2143,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				}
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
+			outputPath := filepath.Join(phasesDir, p.Name+".output")
+			if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+				log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+			}
 			cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
 			output = []byte(cmdOut)
 			runErr = cmdErr
@@ -2026,7 +2214,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if phaseStdin != nil {
 				stdinContent = rendered
 			}
-			output, runErr = r.runPhaseWithRateLimitRetry(ctx, worktreePath, stdinContent, cmd, args)
+			outputPath := filepath.Join(phasesDir, p.Name+".output")
+			if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
+				log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
+			}
+			output, runErr = r.runPhaseWithRateLimitRetry(ctx, vessel.ID, p.Name, worktreePath, stdinContent, cmd, args)
 		}
 
 		if r.vesselCancelled(ctx, vessel.ID) {
@@ -2113,10 +2305,26 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 
 		// Report phase completion.
 		issueNum := r.parseIssueNum(vessel)
+		phaseReport := reporter.PhaseResult{
+			Name:                   p.Name,
+			Duration:               phaseDuration,
+			Provider:               provider,
+			Model:                  model,
+			InputTokensEst:         inputTokensEst,
+			OutputTokensEst:        outputTokensEst,
+			CostUSDEst:             costUSDEst,
+			UsageSource:            cost.UsageSourceEstimated,
+			UsageUnavailableReason: "",
+		}
+		if p.Type == "command" {
+			phaseReport.UsageSource = cost.UsageSourceNotApplicable
+			phaseReport.UsageUnavailableReason = "non-llm phase"
+		}
 		if phaseMatchedNoOp(&p, string(output)) {
+			phaseReport.Status = "no-op"
 			if issueNum > 0 && r.Reporter != nil {
 				r.logReporterError("post phase-complete comment", vessel.ID,
-					r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
+					r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
 			}
 			phaseSpanStatus = "no-op"
 			finishCurrentPhaseSpan(nil)
@@ -2129,9 +2337,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 		}
 
+		phaseReport.Status = "completed"
 		if issueNum > 0 && r.Reporter != nil {
 			r.logReporterError("post phase-complete comment", vessel.ID,
-				r.Reporter.PhaseComplete(ctx, issueNum, p.Name, phaseDuration, string(output)))
+				r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
 		}
 
 		// Handle gate.
@@ -2450,6 +2659,8 @@ func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *w
 		OutputArtifactPath: outputArtifactPath,
 	}
 	if phaseTypeLabel(p) != "prompt" {
+		data.UsageSource = string(cost.UsageSourceNotApplicable)
+		data.UsageUnavailableReason = "non-llm phase"
 		return data
 	}
 
@@ -2458,6 +2669,7 @@ func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *w
 	data.InputTokensEst = cost.EstimateTokens(renderedPrompt)
 	data.OutputTokensEst = cost.EstimateTokens(output)
 	data.CostUSDEst = cost.EstimateCost(data.InputTokensEst, data.OutputTokensEst, cost.LookupPricing(model))
+	data.UsageSource = string(cost.UsageSourceEstimated)
 	return data
 }
 
@@ -3443,6 +3655,142 @@ func (r *Runner) rebuildPreviousOutputs(vesselID string, sk *workflow.Workflow) 
 	return outputs
 }
 
+func (r *Runner) touchPhaseActivity(path string) error {
+	now := r.runtimeNow()
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create activity dir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE, 0o644)
+	if err != nil {
+		return fmt.Errorf("open activity file: %w", err)
+	}
+	if closeErr := f.Close(); closeErr != nil {
+		return fmt.Errorf("close activity file: %w", closeErr)
+	}
+	if err := os.Chtimes(path, now, now); err != nil {
+		return fmt.Errorf("update activity mtime: %w", err)
+	}
+	return nil
+}
+
+func (r *Runner) latestPhaseActivity(vesselID string) (string, time.Time, error) {
+	phasesDir := filepath.Join(r.Config.StateDir, "phases", vesselID)
+	entries, err := os.ReadDir(phasesDir)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	var (
+		latestPhase string
+		latestTime  time.Time
+	)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".output") {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return "", time.Time{}, err
+		}
+		if latestPhase == "" || info.ModTime().After(latestTime) {
+			latestPhase = strings.TrimSuffix(entry.Name(), ".output")
+			latestTime = info.ModTime()
+		}
+	}
+	if latestPhase == "" {
+		return "", time.Time{}, os.ErrNotExist
+	}
+	return latestPhase, latestTime, nil
+}
+
+func (r *Runner) markProcessStarted(vesselID, phaseName string, pid int) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	r.processes[vesselID] = trackedProcess{PID: pid, PhaseName: phaseName}
+}
+
+func (r *Runner) markProcessExited(vesselID string, pid int) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	current, ok := r.processes[vesselID]
+	if !ok || current.PID != pid {
+		return
+	}
+	current.Exited = true
+	r.processes[vesselID] = current
+}
+
+func (r *Runner) clearTrackedProcess(vesselID string) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	delete(r.processes, vesselID)
+}
+
+func (r *Runner) trackedProcess(vesselID string) (trackedProcess, bool) {
+	r.processMu.Lock()
+	defer r.processMu.Unlock()
+	proc, ok := r.processes[vesselID]
+	return proc, ok
+}
+
+func processAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil
+}
+
+func stopProcess(pid int, sleep func(context.Context, time.Duration) error) error {
+	if pid <= 0 {
+		return nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("find process %d: %w", pid, err)
+	}
+	if err := proc.Signal(syscall.SIGTERM); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("sigterm process %d: %w", pid, err)
+	}
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if !processAlive(pid) {
+			return nil
+		}
+		if sleep != nil {
+			if err := sleep(context.Background(), 250*time.Millisecond); err != nil {
+				break
+			}
+		} else {
+			time.Sleep(250 * time.Millisecond)
+		}
+	}
+	if !processAlive(pid) {
+		return nil
+	}
+	if err := proc.Signal(syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrProcessDone) {
+		return fmt.Errorf("sigkill process %d: %w", pid, err)
+	}
+	return nil
+}
+
+type vesselProcessObserver struct {
+	r         *Runner
+	vesselID  string
+	phaseName string
+}
+
+func (o vesselProcessObserver) ProcessStarted(pid int) {
+	o.r.markProcessStarted(o.vesselID, o.phaseName, pid)
+}
+
+func (o vesselProcessObserver) ProcessExited(pid int) {
+	o.r.markProcessExited(o.vesselID, pid)
+}
+
 func (r *Runner) parseIssueNum(vessel queue.Vessel) int {
 	if vessel.Meta == nil {
 		return 0
@@ -3479,6 +3827,54 @@ func (r *Runner) resolveRepo(vessel queue.Vessel) string {
 		return s.Repo
 	default:
 		return ""
+	}
+}
+
+func (r *Runner) resolveDefaultBranch() string {
+	if r.Config != nil && strings.TrimSpace(r.Config.DefaultBranch) != "" {
+		return strings.TrimSpace(r.Config.DefaultBranch)
+	}
+	return "main"
+}
+
+func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string) phase.TemplateData {
+	sourceName := vessel.Source
+	if configSource := r.sourceConfigNameFromMeta(vessel); configSource != "" {
+		sourceName = configSource
+	}
+	repoSlug := strings.TrimSpace(r.resolveRepo(vessel))
+	validation := phase.ValidationData{}
+	if r.Config != nil {
+		validation = phase.ValidationData{
+			Format: strings.TrimSpace(r.Config.Validation.Format),
+			Lint:   strings.TrimSpace(r.Config.Validation.Lint),
+			Build:  strings.TrimSpace(r.Config.Validation.Build),
+			Test:   strings.TrimSpace(r.Config.Validation.Test),
+		}
+	}
+	return phase.TemplateData{
+		Issue: issueData,
+		Phase: phase.PhaseData{
+			Name:  phaseName,
+			Index: phaseIndex,
+		},
+		PreviousOutputs: previousOutputs,
+		GateResult:      gateResult,
+		Vessel: phase.VesselData{
+			ID:     vessel.ID,
+			Ref:    vessel.Ref,
+			Source: vessel.Source,
+			Meta:   maps.Clone(vessel.Meta),
+		},
+		Repo: phase.RepoData{
+			Slug:          repoSlug,
+			DefaultBranch: r.resolveDefaultBranch(),
+		},
+		Source: phase.SourceData{
+			Name: sourceName,
+			Repo: repoSlug,
+		},
+		Validation: validation,
 	}
 }
 
@@ -3594,6 +3990,100 @@ func (r *Runner) CheckHungVessels(ctx context.Context) {
 	}
 }
 
+func (r *Runner) CheckStalledVessels(ctx context.Context) []StallFinding {
+	threshold := r.Config.Daemon.StallMonitor.PhaseStallThreshold
+	if threshold == "" {
+		return nil
+	}
+	stallThreshold, err := time.ParseDuration(threshold)
+	if err != nil {
+		log.Printf("warn: parse phase stall threshold: %v", err)
+		return nil
+	}
+
+	running, err := r.Queue.ListByState(queue.StateRunning)
+	if err != nil {
+		log.Printf("warn: list running vessels for stall check: %v", err)
+		return nil
+	}
+
+	findings := make([]StallFinding, 0)
+	for _, vessel := range running {
+		if r.Config.Daemon.StallMonitor.OrphanCheckEnabled {
+			proc, ok := r.trackedProcess(vessel.ID)
+			if ok && (proc.Exited || !processAlive(proc.PID)) {
+				msg := "vessel orphaned (no live subprocess)"
+				log.Printf("warn: %s for vessel %s", msg, vessel.ID)
+				if r.timeoutRunningVessel(ctx, vessel, msg) {
+					findings = append(findings, StallFinding{
+						Code:     "orphaned_subprocess",
+						Level:    "critical",
+						VesselID: vessel.ID,
+						Message:  msg,
+					})
+				}
+				continue
+			}
+		}
+
+		phaseName, modifiedAt, err := r.latestPhaseActivity(vessel.ID)
+		if err != nil {
+			if !errors.Is(err, os.ErrNotExist) {
+				log.Printf("warn: inspect phase activity for vessel %s: %v", vessel.ID, err)
+			}
+			continue
+		}
+		staleFor := r.runtimeSince(modifiedAt)
+		if staleFor <= stallThreshold {
+			continue
+		}
+
+		if proc, ok := r.trackedProcess(vessel.ID); ok && !proc.Exited && processAlive(proc.PID) {
+			if err := stopProcess(proc.PID, r.runtimeSleep); err != nil {
+				log.Printf("warn: stop stalled process for vessel %s: %v", vessel.ID, err)
+			}
+		}
+		msg := fmt.Sprintf("phase stalled: no output for %s", staleFor.Truncate(time.Second))
+		log.Printf("warn: %s for vessel %s (phase=%s)", msg, vessel.ID, phaseName)
+		if r.timeoutRunningVessel(ctx, vessel, msg) {
+			findings = append(findings, StallFinding{
+				Code:     "phase_stalled",
+				Level:    "critical",
+				VesselID: vessel.ID,
+				Phase:    phaseName,
+				Message:  fmt.Sprintf("Vessel %s phase-stalled (%s no output on %s)", vessel.ID, staleFor.Truncate(time.Second), phaseName),
+			})
+		}
+	}
+	return findings
+}
+
+func (r *Runner) timeoutRunningVessel(ctx context.Context, vessel queue.Vessel, errMsg string) bool {
+	r.clearTrackedProcess(vessel.ID)
+	if updateErr := r.Queue.Update(vessel.ID, queue.StateTimedOut, errMsg); updateErr != nil {
+		log.Printf("warn: failed to update vessel %s to timed_out: %v", vessel.ID, updateErr)
+		return false
+	}
+
+	timeoutSpan := r.startWaitTransitionSpan(ctx, vessel, "timed_out", waitedDuration(vessel.StartedAt, r.runtimeNow()))
+	vrs := newVesselRunState(r.Config, vessel, r.runtimeNow())
+	vrs.setTraceContext(observability.TraceContextFromContext(timeoutSpan.Context()))
+	r.annotateRecoveryMetadata(vessel.ID, queue.StateTimedOut, errMsg, traceContextPointer(vrs.trace))
+	src := r.resolveSourceForVessel(vessel)
+	if err := src.OnTimedOut(ctx, vessel); err != nil {
+		log.Printf("warn: OnTimedOut hook for vessel %s: %v", vessel.ID, err)
+	}
+	r.persistRunArtifacts(vessel, string(queue.StateTimedOut), vrs, nil, r.runtimeNow())
+	if r.Tracer != nil {
+		if current, findErr := r.Queue.FindByID(vessel.ID); findErr == nil && current != nil {
+			timeoutSpan.AddAttributes(observability.RecoveryAttributes(recoveryAttributesFromMeta(current.Meta)))
+		}
+	}
+	r.finishWaitTransitionSpan(timeoutSpan, nil)
+	r.removeWorktree(ctx, vessel.WorktreePath, vessel.ID)
+	return true
+}
+
 func (r *Runner) runtimeNow() time.Time {
 	now, err := dtu.RuntimeNow()
 	if err != nil {
@@ -3680,14 +4170,26 @@ func isRateLimitError(err error) bool {
 // stdinContent is re-wrapped in a fresh strings.Reader for each attempt;
 // pass "" for nil stdin.
 func (r *Runner) runPhaseWithRateLimitRetry(
-	ctx context.Context, dir, stdinContent, cmd string, args []string,
+	ctx context.Context, vesselID, phaseName, dir, stdinContent, cmd string, args []string,
 ) ([]byte, error) {
 	for attempt := 0; attempt <= rateLimitMaxRetries; attempt++ {
 		var stdin io.Reader
 		if stdinContent != "" {
 			stdin = strings.NewReader(stdinContent)
 		}
-		output, err := r.Runner.RunPhase(ctx, dir, stdin, cmd, args...)
+		var (
+			output []byte
+			err    error
+		)
+		if observedRunner, ok := r.Runner.(PhaseProcessRunner); ok {
+			output, err = observedRunner.RunPhaseObserved(ctx, dir, stdin, vesselProcessObserver{
+				r:         r,
+				vesselID:  vesselID,
+				phaseName: phaseName,
+			}, cmd, args...)
+		} else {
+			output, err = r.Runner.RunPhase(ctx, dir, stdin, cmd, args...)
+		}
 		if err == nil || !isRateLimitError(err) {
 			return output, err
 		}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
+	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,17 +22,22 @@ import (
 type GitHubTask struct {
 	Labels          []string
 	Workflow        string
+	Tier            string
 	StatusLabels    *StatusLabels
 	LabelGateLabels *LabelGateLabels
 }
 
 // GitHub scans GitHub issues and produces vessels.
 type GitHub struct {
-	Repo      string
-	Tasks     map[string]GitHubTask
-	Exclude   []string
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
+	Repo                   string
+	Tasks                  map[string]GitHubTask
+	Exclude                []string
+	StateDir               string
+	DefaultTier            string
+	Queue                  *queue.Queue
+	CmdRunner              CommandRunner
+	HarnessDigestResolver  func() string
+	WorkflowDigestResolver func(string) string
 }
 
 type ghIssue struct {
@@ -80,16 +87,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					continue
 				}
 				fingerprint := githubSourceFingerprint(issue.Title, issue.Body, issueLabelNames(issue.Labels))
-				if g.hasExcludedLabel(issue, excludeSet) ||
-					g.Queue.HasRef(issue.URL) ||
-					g.hasMatchingFailedFingerprint(issue.URL, fingerprint) ||
-					g.hasBranch(ctx, issue.Number) ||
-					g.hasOpenPR(ctx, issue.Number) ||
-					g.hasMergedPR(ctx, issue.Number) {
-					continue
-				}
-				seen[issue.Number] = true
-				meta := map[string]string{
+				baseMeta := map[string]string{
 					"issue_num":                strconv.Itoa(issue.Number),
 					"issue_title":              issue.Title,
 					"issue_body":               issue.Body,
@@ -104,32 +102,97 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 					// consistent with its workflow state.
 					"trigger_label": label,
 				}
+				baseMeta = applyCurrentRemediationMeta(baseMeta, nil, g.currentHarnessDigest(), g.currentWorkflowDigest(task.Workflow))
 				sl := task.StatusLabels
 				if sl != nil {
-					meta["status_label_queued"] = sl.Queued
-					meta["status_label_running"] = sl.Running
-					meta["status_label_completed"] = sl.Completed
-					meta["status_label_failed"] = sl.Failed
-					meta["status_label_timed_out"] = sl.TimedOut
+					baseMeta["status_label_queued"] = sl.Queued
+					baseMeta["status_label_running"] = sl.Running
+					baseMeta["status_label_completed"] = sl.Completed
+					baseMeta["status_label_failed"] = sl.Failed
+					baseMeta["status_label_timed_out"] = sl.TimedOut
 				}
 				lgl := task.LabelGateLabels
 				if lgl != nil {
-					meta["label_gate_label_waiting"] = lgl.Waiting
-					meta["label_gate_label_ready"] = lgl.Ready
+					baseMeta["label_gate_label_waiting"] = lgl.Waiting
+					baseMeta["label_gate_label_ready"] = lgl.Ready
 				}
-				vessels = append(vessels, queue.Vessel{
+				baseVessel := queue.Vessel{
 					ID:        fmt.Sprintf("issue-%d", issue.Number),
 					Source:    "github-issue",
 					Ref:       issue.URL,
 					Workflow:  task.Workflow,
-					Meta:      meta,
+					Tier:      ResolveTaskTier(task.Tier, g.DefaultTier),
+					Meta:      baseMeta,
 					State:     queue.StatePending,
 					CreatedAt: sourceNow(),
-				})
+				}
+				if g.hasExcludedLabel(issue, excludeSet) {
+					continue
+				}
+
+				retryVessel, blocked, err := g.retryCandidate(baseVessel)
+				if err != nil {
+					return vessels, err
+				}
+				if blocked {
+					continue
+				}
+				if g.hasBranch(ctx, issue.Number) ||
+					g.hasOpenPR(ctx, issue.Number) ||
+					g.hasMergedPR(ctx, issue.Number) {
+					continue
+				}
+				seen[issue.Number] = true
+				if retryVessel != nil {
+					vessels = append(vessels, *retryVessel)
+					continue
+				}
+				vessels = append(vessels, baseVessel)
 			}
 		}
 	}
 	return vessels, nil
+}
+
+func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
+	excludeSet := make(map[string]bool, len(g.Exclude))
+	for _, ex := range g.Exclude {
+		excludeSet[ex] = true
+	}
+
+	seen := make(map[int]struct{})
+	count := 0
+	for _, task := range g.Tasks {
+		for _, label := range task.Labels {
+			args := []string{
+				"search", "issues",
+				"--repo", g.Repo,
+				"--state", "open",
+				"--json", "number,title,body,url,labels",
+				"--limit", "20",
+				"--label", label,
+			}
+
+			out, err := g.CmdRunner.Run(ctx, "gh", args...)
+			if err != nil {
+				return 0, fmt.Errorf("gh search issues: %w", err)
+			}
+
+			var issues []ghIssue
+			if err := json.Unmarshal(out, &issues); err != nil {
+				return 0, fmt.Errorf("parse gh search output: %w", err)
+			}
+
+			for _, issue := range issues {
+				if _, ok := seen[issue.Number]; ok || g.hasExcludedLabel(issue, excludeSet) {
+					continue
+				}
+				seen[issue.Number] = struct{}{}
+				count++
+			}
+		}
+	}
+	return count, nil
 }
 
 func (g *GitHub) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
@@ -268,13 +331,52 @@ func sourceNow() time.Time {
 	return now.UTC()
 }
 
-func (g *GitHub) hasMatchingFailedFingerprint(ref, fingerprint string) bool {
-	latest, err := g.Queue.FindLatestByRef(ref)
-	if err != nil || latest == nil {
-		return false
+func (g *GitHub) retryCandidate(base queue.Vessel) (*queue.Vessel, bool, error) {
+	if g == nil || g.Queue == nil {
+		return nil, false, nil
 	}
-	isTerminalFailure := latest.State == queue.StateFailed || latest.State == queue.StateTimedOut
-	return isTerminalFailure && latest.Meta["source_input_fingerprint"] == fingerprint
+	latest, err := g.Queue.FindLatestByRef(base.Ref)
+	if err != nil || latest == nil {
+		return nil, false, nil
+	}
+	switch latest.State {
+	case queue.StatePending, queue.StateRunning, queue.StateWaiting:
+		return nil, true, nil
+	case queue.StateFailed, queue.StateTimedOut:
+		artifact, found, loadErr := g.loadRetryArtifact(*latest)
+		if loadErr != nil {
+			return nil, false, loadErr
+		}
+		if !found {
+			if latest.Meta["source_input_fingerprint"] != base.Meta["source_input_fingerprint"] {
+				return nil, false, nil
+			}
+			return nil, true, nil
+		}
+		base.Meta = applyCurrentRemediationMeta(base.Meta, artifact, g.currentHarnessDigest(), g.currentWorkflowDigest(base.Workflow))
+		decision := retryDecision(artifact, latest.Meta, base.Meta, sourceNow())
+		if !decision.Eligible {
+			return nil, true, nil
+		}
+		retry := recovery.NextRetryVessel(base, *latest, artifact, g.Queue, sourceNow(), decision.UnlockDimension)
+		return &retry, false, nil
+	default:
+		return nil, false, nil
+	}
+}
+
+func (g *GitHub) loadRetryArtifact(vessel queue.Vessel) (*recovery.Artifact, bool, error) {
+	if g.StateDir == "" {
+		return nil, false, nil
+	}
+	artifact, err := recovery.LoadForVessel(g.StateDir, vessel.ID)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("load recovery artifact for %s: %w", vessel.ID, err)
+	}
+	return recovery.HydrateArtifact(artifact, vessel.Meta), true, nil
 }
 
 func (g *GitHub) recoveryAwareVessel(vessel queue.Vessel) queue.Vessel {
@@ -297,6 +399,20 @@ func shouldRouteToRefinement(vessel queue.Vessel) bool {
 		action == string(recovery.ActionSplitIssue) ||
 		class == string(recovery.ClassSpecGap) ||
 		class == string(recovery.ClassScopeGap)
+}
+
+func (g *GitHub) currentHarnessDigest() string {
+	if g != nil && g.HarnessDigestResolver != nil {
+		return strings.TrimSpace(g.HarnessDigestResolver())
+	}
+	return defaultHarnessDigest()
+}
+
+func (g *GitHub) currentWorkflowDigest(workflow string) string {
+	if g != nil && g.WorkflowDigestResolver != nil {
+		return strings.TrimSpace(g.WorkflowDigestResolver(workflow))
+	}
+	return defaultWorkflowDigest(workflow)
 }
 
 func issueLabelNames(labels []struct {

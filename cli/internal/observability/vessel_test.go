@@ -95,17 +95,19 @@ func TestSmoke_S4_PhaseResultAttributesFormatsTokensAndCost(t *testing.T) {
 	})
 	got := attrMap(attrs)
 
-	if len(attrs) != 6 {
-		t.Fatalf("expected 6 attributes, got %d", len(attrs))
+	if len(attrs) != 8 {
+		t.Fatalf("expected 8 attributes, got %d", len(attrs))
 	}
 
 	want := map[string]string{
-		"xylem.phase.input_tokens_est":     "1200",
-		"xylem.phase.output_tokens_est":    "300",
-		"xylem.phase.cost_usd_est":         "0.008100",
-		"xylem.phase.duration_ms":          "4500",
-		"xylem.phase.status":               "completed",
-		"xylem.phase.output_artifact_path": "phases/vessel-1/analyse.output",
+		"xylem.phase.input_tokens_est":         "1200",
+		"xylem.phase.output_tokens_est":        "300",
+		"xylem.phase.cost_usd_est":             "0.008100",
+		"xylem.phase.duration_ms":              "4500",
+		"xylem.phase.status":                   "completed",
+		"xylem.phase.usage_source":             "",
+		"xylem.phase.usage_unavailable_reason": "",
+		"xylem.phase.output_artifact_path":     "phases/vessel-1/analyse.output",
 	}
 	for key, value := range want {
 		if got[key] != value {

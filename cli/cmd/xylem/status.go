@@ -2,15 +2,19 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/daemonhealth"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
@@ -32,8 +36,11 @@ func newStatusCmd() *cobra.Command {
 
 type statusRow struct {
 	queue.Vessel
-	Health    string                 `json:"health"`
-	Anomalies []runner.VesselAnomaly `json:"anomalies,omitempty"`
+	Health           string                 `json:"health"`
+	Anomalies        []runner.VesselAnomaly `json:"anomalies,omitempty"`
+	EstimatedCostUSD float64                `json:"estimated_cost_usd,omitempty"`
+	UsageSource      string                 `json:"usage_source,omitempty"`
+	BudgetWarning    bool                   `json:"budget_warning,omitempty"`
 }
 
 func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter string) error {
@@ -64,12 +71,19 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 	for i, vessel := range vessels {
 		status := runner.AnalyzeVesselStatus(vessel, summaries[vessel.ID])
 		rows[i] = statusRow{
-			Vessel:    vessel,
-			Health:    string(status.Health),
-			Anomalies: status.Anomalies,
+			Vessel:           vessel,
+			Health:           string(status.Health),
+			Anomalies:        status.Anomalies,
+			EstimatedCostUSD: summaryCost(summaries[vessel.ID]),
+			UsageSource:      summaryUsageSource(summaries[vessel.ID]),
+			BudgetWarning:    summaries[vessel.ID] != nil && summaries[vessel.ID].BudgetWarning,
 		}
 	}
 	fleet := runner.AnalyzeFleetStatus(vessels, summaries)
+	daemonSnapshot, daemonErr := loadDaemonSnapshot(cfg)
+	if daemonErr != nil {
+		return daemonErr
+	}
 
 	if jsonMode {
 		enc := json.NewEncoder(os.Stdout)
@@ -78,19 +92,27 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 		return nil
 	}
 
+	counts := map[queue.VesselState]int{}
+	for _, j := range vessels {
+		counts[j.State]++
+	}
+
+	fmt.Printf("Queue: %d running, %d pending, %d completed, %d failed, %d cancelled, %d waiting, %d timed_out\n",
+		counts[queue.StateRunning], counts[queue.StatePending], counts[queue.StateCompleted],
+		counts[queue.StateFailed], counts[queue.StateCancelled], counts[queue.StateWaiting],
+		counts[queue.StateTimedOut])
+	renderDaemonHealth(daemonSnapshot)
 	if len(vessels) == 0 {
 		fmt.Println("No vessels in queue.")
 		return nil
 	}
 
-	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
-		"ID", "Source", "Workflow", "State", "Health", "Info", "Started", "Duration")
-	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
-		"----", "------", "-----", "-----", "------", "----", "-------", "--------")
+	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-12s  %-42s  %-12s  %s\n",
+		"ID", "Source", "Workflow", "State", "Health", "Cost", "Info", "Started", "Duration")
+	fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-12s  %-42s  %-12s  %s\n",
+		"----", "------", "-----", "-----", "------", "----", "----", "-------", "--------")
 
-	counts := map[queue.VesselState]int{}
 	for i, j := range vessels {
-		counts[j.State]++
 		started := "—"
 		duration := "—"
 		if j.StartedAt != nil {
@@ -105,17 +127,12 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 		if wf == "" {
 			wf = "(prompt)"
 		}
-		info := vesselInfo(j, rows[i].Anomalies)
-		fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-42s  %-12s  %s\n",
-			j.ID, j.Source, wf, string(j.State), rows[i].Health, info, started, duration)
+		info := vesselInfo(j, summaries[j.ID], rows[i].Anomalies)
+		fmt.Printf("%-14s  %-14s  %-20s  %-10s  %-10s  %-12s  %-42s  %-12s  %s\n",
+			j.ID, j.Source, wf, string(j.State), rows[i].Health, formatSummaryCost(summaries[j.ID]), info, started, duration)
 	}
 
-	fmt.Printf("\nSummary: %d pending, %d running, %d completed, %d failed, %d cancelled, %d waiting, %d timed_out\n",
-		counts[queue.StatePending], counts[queue.StateRunning],
-		counts[queue.StateCompleted], counts[queue.StateFailed],
-		counts[queue.StateCancelled], counts[queue.StateWaiting],
-		counts[queue.StateTimedOut])
-	fmt.Printf("Health: %d healthy, %d degraded, %d unhealthy\n",
+	fmt.Printf("\nHealth: %d healthy, %d degraded, %d unhealthy\n",
 		fleet.Healthy, fleet.Degraded, fleet.Unhealthy)
 	if len(fleet.Patterns) > 0 {
 		fmt.Printf("Patterns: %s\n", runner.FormatFleetPatterns(fleet.Patterns))
@@ -124,7 +141,7 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 }
 
 // vesselInfo returns additional context for the Info column based on vessel state.
-func vesselInfo(v queue.Vessel, anomalies []runner.VesselAnomaly) string {
+func vesselInfo(v queue.Vessel, summary *runner.VesselSummary, anomalies []runner.VesselAnomaly) string {
 	parts := make([]string, 0, len(anomalies)+1)
 	if v.State == queue.StateWaiting && v.WaitingFor != "" {
 		elapsed := "unknown"
@@ -139,7 +156,41 @@ func vesselInfo(v queue.Vessel, anomalies []runner.VesselAnomaly) string {
 		}
 		parts = append(parts, anomaly.Message)
 	}
+	if summary != nil && summary.UsageUnavailableReason != "" && summary.UsageSource == "unavailable" {
+		parts = append(parts, summary.UsageUnavailableReason)
+	}
 	return strings.Join(parts, "; ")
+}
+
+func summaryCost(summary *runner.VesselSummary) float64 {
+	if summary == nil {
+		return 0
+	}
+	return summary.TotalCostUSDEst
+}
+
+func summaryUsageSource(summary *runner.VesselSummary) string {
+	if summary == nil {
+		return ""
+	}
+	return string(summary.UsageSource)
+}
+
+func formatSummaryCost(summary *runner.VesselSummary) string {
+	if summary == nil {
+		return "—"
+	}
+	switch summary.UsageSource {
+	case "estimated", "provider":
+		return fmt.Sprintf("$%.4f", summary.TotalCostUSDEst)
+	case "not_applicable", "unavailable":
+		return "n/a"
+	default:
+		if summary.TotalCostUSDEst > 0 {
+			return fmt.Sprintf("$%.4f", summary.TotalCostUSDEst)
+		}
+		return "—"
+	}
 }
 
 func pauseMarkerPath(cfg *config.Config) string {
@@ -149,4 +200,76 @@ func pauseMarkerPath(cfg *config.Config) string {
 func isPaused(cfg *config.Config) bool {
 	_, err := os.Stat(pauseMarkerPath(cfg))
 	return err == nil
+}
+
+func loadDaemonSnapshot(cfg *config.Config) (*daemonhealth.Snapshot, error) {
+	if cfg == nil || cfg.StateDir == "" {
+		return nil, nil
+	}
+	snapshot, err := daemonhealth.Load(cfg.StateDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("load daemon health: %w", err)
+	}
+	return snapshot, nil
+}
+
+func renderDaemonHealth(snapshot *daemonhealth.Snapshot) {
+	if snapshot == nil {
+		return
+	}
+	fmt.Println("Health:")
+	if daemonProcessAlive(snapshot.PID) {
+		fmt.Printf("  %s Daemon alive (pid=%d, uptime=%s)\n", daemonHealthIcon(daemonhealth.LevelOK), snapshot.PID, time.Since(snapshot.StartedAt).Round(time.Second))
+	} else {
+		fmt.Printf("  %s Daemon not running (pid=%d, last heartbeat=%s)\n", daemonHealthIcon(daemonhealth.LevelCritical), snapshot.PID, snapshot.UpdatedAt.UTC().Format("15:04:05"))
+	}
+	if !snapshot.LastUpgradeAt.IsZero() {
+		fmt.Printf("  %s Auto-upgrade current (binary=%s, last=%s)\n", daemonHealthIcon(daemonhealth.LevelOK), snapshot.Binary, snapshot.LastUpgradeAt.UTC().Format("15:04:05"))
+	}
+	checks := append([]daemonhealth.Check(nil), snapshot.Checks...)
+	sort.Slice(checks, func(i, j int) bool {
+		if checks[i].Level == checks[j].Level {
+			return checks[i].Code < checks[j].Code
+		}
+		return daemonLevelRank(checks[i].Level) > daemonLevelRank(checks[j].Level)
+	})
+	for _, check := range checks {
+		fmt.Printf("  %s %s\n", daemonHealthIcon(check.Level), check.Message)
+	}
+}
+
+func daemonProcessAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false
+	}
+	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+func daemonHealthIcon(level daemonhealth.Level) string {
+	switch level {
+	case daemonhealth.LevelCritical:
+		return "✗"
+	case daemonhealth.LevelWarning:
+		return "⚠"
+	default:
+		return "✓"
+	}
+}
+
+func daemonLevelRank(level daemonhealth.Level) int {
+	switch level {
+	case daemonhealth.LevelCritical:
+		return 3
+	case daemonhealth.LevelWarning:
+		return 2
+	default:
+		return 1
+	}
 }

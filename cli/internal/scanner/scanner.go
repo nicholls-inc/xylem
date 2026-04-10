@@ -5,9 +5,12 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 )
 
@@ -18,10 +21,15 @@ type CommandRunner interface {
 
 // Scanner scans configured sources for actionable tasks and enqueues vessels.
 type Scanner struct {
-	Config    *config.Config
-	Queue     *queue.Queue
-	CmdRunner CommandRunner
-	RunHooks  bool
+	Config     *config.Config
+	Queue      *queue.Queue
+	CmdRunner  CommandRunner
+	RunHooks   bool
+	BudgetGate budgetGate
+}
+
+type budgetGate interface {
+	Check(class string) cost.Decision
 }
 
 // ScanResult summarises a scan run.
@@ -33,7 +41,13 @@ type ScanResult struct {
 
 // New creates a Scanner.
 func New(cfg *config.Config, q *queue.Queue, runner CommandRunner) *Scanner {
-	return &Scanner{Config: cfg, Queue: q, CmdRunner: runner, RunHooks: true}
+	return &Scanner{
+		Config:     cfg,
+		Queue:      q,
+		CmdRunner:  runner,
+		RunHooks:   true,
+		BudgetGate: cost.NewBudgetGate(cfg.VesselBudget()),
+	}
 }
 
 // Scan queries configured sources, filters candidates, and enqueues new vessels.
@@ -61,11 +75,24 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				vessel.Meta["config_source"] = entry.configName
 			}
 
+			class := vessel.ConcurrencyClass()
+			decision := s.budgetGate().Check(class)
+			if !decision.Allowed {
+				log.Printf("audit: budget.skipped class=%s vessel_source=%s reason=%s remaining_usd=%.4f", class, vessel.Source, decision.Reason, decision.RemainingUSD)
+				result.Skipped++
+				continue
+			}
+
 			enqueued, err := s.Queue.Enqueue(vessel)
 			if err != nil {
 				return result, err
 			}
 			if enqueued {
+				if vessel.RetryOf != "" {
+					if err := recovery.UpdateRetryOutcome(s.Config.StateDir, vessel.RetryOf, "enqueued"); err != nil {
+						return result, err
+					}
+				}
 				result.Added++
 				if s.RunHooks {
 					if err := entry.src.OnEnqueue(ctx, vessel); err != nil {
@@ -78,6 +105,30 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 		}
 	}
 	return result, nil
+}
+
+func (s *Scanner) budgetGate() budgetGate {
+	if s.BudgetGate != nil {
+		return s.BudgetGate
+	}
+	return cost.NewBudgetGate(s.Config.VesselBudget())
+}
+
+// BacklogCount reports how many items currently match backlog-aware sources.
+func (s *Scanner) BacklogCount(ctx context.Context) (int, error) {
+	total := 0
+	for _, entry := range s.buildSources() {
+		backlogSource, ok := entry.src.(source.BacklogSource)
+		if !ok {
+			continue
+		}
+		count, err := backlogSource.BacklogCount(ctx)
+		if err != nil {
+			return total, err
+		}
+		total += count
+	}
+	return total, nil
 }
 
 type sourceEntry struct {
@@ -94,11 +145,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			tasks := convertTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHub{
-					Repo:      srcCfg.Repo,
-					Tasks:     tasks,
-					Exclude:   srcCfg.Exclude,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       tasks,
+					Exclude:     srcCfg.Exclude,
+					StateDir:    s.Config.StateDir,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -106,11 +159,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			tasks := convertTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubPR{
-					Repo:      srcCfg.Repo,
-					Tasks:     tasks,
-					Exclude:   srcCfg.Exclude,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       tasks,
+					Exclude:     srcCfg.Exclude,
+					StateDir:    s.Config.StateDir,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -118,11 +173,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			prEventsTasks := convertPREventsTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubPREvents{
-					Repo:      srcCfg.Repo,
-					Tasks:     prEventsTasks,
-					Exclude:   srcCfg.Exclude,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       prEventsTasks,
+					Exclude:     srcCfg.Exclude,
+					StateDir:    s.Config.StateDir,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -130,10 +187,11 @@ func (s *Scanner) buildSources() []sourceEntry {
 			mergeTasks := convertMergeTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubMerge{
-					Repo:      srcCfg.Repo,
-					Tasks:     mergeTasks,
-					Queue:     s.Queue,
-					CmdRunner: s.CmdRunner,
+					Repo:        srcCfg.Repo,
+					Tasks:       mergeTasks,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
 				},
 				configName: name,
 			})
@@ -141,12 +199,13 @@ func (s *Scanner) buildSources() []sourceEntry {
 			scheduledTasks := convertScheduledTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.Scheduled{
-					Repo:       srcCfg.Repo,
-					StateDir:   s.Config.StateDir,
-					ConfigName: name,
-					Schedule:   srcCfg.Schedule,
-					Tasks:      scheduledTasks,
-					Queue:      s.Queue,
+					Repo:        srcCfg.Repo,
+					StateDir:    s.Config.StateDir,
+					ConfigName:  name,
+					Schedule:    srcCfg.Schedule,
+					Tasks:       scheduledTasks,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
 				},
 				configName: name,
 			})
@@ -179,14 +238,21 @@ func convertPREventsTasks(cfgTasks map[string]config.Task) map[string]source.PRE
 	for name, t := range cfgTasks {
 		task := source.PREventsTask{
 			Workflow: t.Workflow,
+			Tier:     t.Tier,
 		}
 		if t.On != nil {
 			task.Labels = t.On.Labels
 			task.ReviewSubmitted = t.On.ReviewSubmitted
 			task.ChecksFailed = t.On.ChecksFailed
 			task.Commented = t.On.Commented
+			task.PROpened = t.On.PROpened
+			task.PRHeadUpdated = t.On.PRHeadUpdated
 			task.AuthorAllow = t.On.AuthorAllow
 			task.AuthorDeny = t.On.AuthorDeny
+			task.Debounce = source.UnsetPREventsDebounce
+			if t.On.Debounce != "" {
+				task.Debounce, _ = time.ParseDuration(t.On.Debounce)
+			}
 		}
 		tasks[name] = task
 	}
@@ -198,6 +264,7 @@ func convertMergeTasks(cfgTasks map[string]config.Task) map[string]source.MergeT
 	for name, t := range cfgTasks {
 		tasks[name] = source.MergeTask{
 			Workflow: t.Workflow,
+			Tier:     t.Tier,
 		}
 	}
 	return tasks
@@ -209,6 +276,7 @@ func convertScheduledTasks(cfgTasks map[string]config.Task) map[string]source.Sc
 		tasks[name] = source.ScheduledTask{
 			Workflow: t.Workflow,
 			Ref:      t.Ref,
+			Tier:     t.Tier,
 		}
 	}
 	return tasks

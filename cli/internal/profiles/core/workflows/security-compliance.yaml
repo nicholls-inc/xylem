@@ -1,0 +1,53 @@
+name: security-compliance
+class: ops
+description: "Run a scheduled security posture review and open follow-up issues for actionable risk"
+phases:
+  - name: scan_secrets
+    prompt_file: .xylem/prompts/security-compliance/scan_secrets.md
+    max_turns: 25
+    allowed_tools: "Bash, Read, Grep, Glob"
+    gate:
+      type: command
+      run: |
+        set -eu
+        out=".xylem/phases/{{.Vessel.ID}}/scan_secrets.output"
+        test -s "$out"
+        grep -q '^RESULT:' "$out"
+        grep -q '^SEVERITY:' "$out"
+        grep -q '^TOOLS_RUN:' "$out"
+        grep -q '^SUMMARY:' "$out"
+        grep -q '^FINDINGS:' "$out"
+  - name: static_analysis
+    prompt_file: .xylem/prompts/security-compliance/static_analysis.md
+    max_turns: 25
+    allowed_tools: "Bash, Read, Grep, Glob"
+    gate:
+      type: command
+      run: |
+        set -eu
+        out=".xylem/phases/{{.Vessel.ID}}/static_analysis.output"
+        test -s "$out"
+        grep -q '^RESULT:' "$out"
+        grep -q '^SEVERITY:' "$out"
+        grep -q '^TOOLS_RUN:' "$out"
+        grep -q '^SUMMARY:' "$out"
+        grep -q '^FINDINGS:' "$out"
+  - name: dependency_audit
+    prompt_file: .xylem/prompts/security-compliance/dependency_audit.md
+    max_turns: 25
+    allowed_tools: "Bash, Read, Grep, Glob"
+    gate:
+      type: command
+      run: |
+        set -eu
+        out=".xylem/phases/{{.Vessel.ID}}/dependency_audit.output"
+        test -s "$out"
+        grep -q '^RESULT:' "$out"
+        grep -q '^SEVERITY:' "$out"
+        grep -q '^TOOLS_RUN:' "$out"
+        grep -q '^SUMMARY:' "$out"
+        grep -q '^FINDINGS:' "$out"
+  - name: synthesize
+    prompt_file: .xylem/prompts/security-compliance/synthesize.md
+    max_turns: 30
+    allowed_tools: "Bash, Read, Grep, Glob"

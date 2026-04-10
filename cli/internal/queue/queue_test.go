@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // helperTransitionToWaiting transitions a vessel from pending -> running -> waiting via the queue.
@@ -99,6 +101,32 @@ func TestEnqueue(t *testing.T) {
 	}
 }
 
+func TestSmoke_S2_LegacyQueueJsonlWithoutTierLoadsEmptyTier(t *testing.T) {
+	q, path := newTestQueue(t)
+	legacy := `{"id":"issue-42","source":"github-issue","ref":"https://github.com/example/repo/issues/42","workflow":"fix-bug","state":"pending","created_at":"2026-04-10T00:00:00Z"}`
+	require.NoError(t, os.WriteFile(path, []byte(legacy+"\n"), 0o644))
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Empty(t, vessels[0].Tier)
+}
+
+func TestSmoke_S3_QueueJsonlRoundTripsTier(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(77)
+	vessel.Tier = "high"
+
+	enqueued, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+	require.True(t, enqueued)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "high", vessels[0].Tier)
+}
+
 // TestWS6S28VesselJSONLNoNewFields verifies that queue JSONL records remain
 // free of harness-specific fields.
 //
@@ -157,6 +185,9 @@ func TestDequeue(t *testing.T) {
 	if got.StartedAt == nil {
 		t.Fatal("expected StartedAt to be set")
 	}
+	if got.WorkflowClass != "fix-bug" {
+		t.Fatalf("expected workflow class fix-bug, got %q", got.WorkflowClass)
+	}
 }
 
 func TestDequeueEmpty(t *testing.T) {
@@ -167,6 +198,41 @@ func TestDequeueEmpty(t *testing.T) {
 	}
 	if got != nil {
 		t.Fatalf("expected nil vessel, got %+v", *got)
+	}
+}
+
+func TestDequeueMatchingSkipsBlockedPending(t *testing.T) {
+	q, _ := newTestQueue(t)
+	first := testVessel(1)
+	first.Workflow = "implement-feature"
+	second := testVessel(2)
+	second.Workflow = "merge-pr"
+	if _, err := q.Enqueue(first); err != nil {
+		t.Fatalf("enqueue first: %v", err)
+	}
+	if _, err := q.Enqueue(second); err != nil {
+		t.Fatalf("enqueue second: %v", err)
+	}
+
+	got, err := q.DequeueMatching(func(v Vessel) bool {
+		return v.ConcurrencyClass() == "merge-pr"
+	})
+	if err != nil {
+		t.Fatalf("dequeue matching: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected vessel, got nil")
+	}
+	if got.ID != second.ID {
+		t.Fatalf("Dequeued ID = %q, want %q", got.ID, second.ID)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if vessels[0].State != StatePending {
+		t.Fatalf("first vessel state = %q, want pending", vessels[0].State)
 	}
 }
 

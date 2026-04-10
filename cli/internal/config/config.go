@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
 	"strings"
 	"time"
 
@@ -16,6 +18,8 @@ import (
 const minTimeout = 30 * time.Second
 
 const DefaultAuditLogPath = "audit.jsonl"
+const DefaultLLMRoutingTier = "med"
+const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
 
 // DefaultProtectedSurfaces is the default list of paths that xylem's
 // runtime verifier treats as off-limits to vessel modifications.
@@ -55,24 +59,47 @@ const DefaultAuditLogPath = "audit.jsonl"
 var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
-	Repo          string                  `yaml:"repo,omitempty"`
-	Sources       map[string]SourceConfig `yaml:"sources,omitempty"`
-	Tasks         map[string]Task         `yaml:"tasks,omitempty"`
-	Concurrency   int                     `yaml:"concurrency"`
-	MaxTurns      int                     `yaml:"max_turns"`
-	Timeout       string                  `yaml:"timeout"`
-	StateDir      string                  `yaml:"state_dir"`
-	Exclude       []string                `yaml:"exclude,omitempty"`
-	DefaultBranch string                  `yaml:"default_branch,omitempty"`
-	CleanupAfter  string                  `yaml:"cleanup_after,omitempty"`
-	LLM           string                  `yaml:"llm,omitempty"`
-	Model         string                  `yaml:"model,omitempty"`
-	Claude        ClaudeConfig            `yaml:"claude"`
-	Copilot       CopilotConfig           `yaml:"copilot,omitempty"`
-	Daemon        DaemonConfig            `yaml:"daemon,omitempty"`
-	Harness       HarnessConfig           `yaml:"harness,omitempty"`
-	Observability ObservabilityConfig     `yaml:"observability,omitempty"`
-	Cost          CostConfig              `yaml:"cost,omitempty"`
+	Profiles            []string                  `yaml:"profiles,omitempty"`
+	Repo                string                    `yaml:"repo,omitempty"`
+	Sources             map[string]SourceConfig   `yaml:"sources,omitempty"`
+	Tasks               map[string]Task           `yaml:"tasks,omitempty"`
+	Concurrency         int                       `yaml:"concurrency"`
+	ConcurrencyPerClass map[string]int            `yaml:"-"`
+	MaxTurns            int                       `yaml:"max_turns"`
+	Timeout             string                    `yaml:"timeout"`
+	StateDir            string                    `yaml:"state_dir"`
+	Exclude             []string                  `yaml:"exclude,omitempty"`
+	DefaultBranch       string                    `yaml:"default_branch,omitempty"`
+	CleanupAfter        string                    `yaml:"cleanup_after,omitempty"`
+	LLM                 string                    `yaml:"llm,omitempty"`
+	Model               string                    `yaml:"model,omitempty"`
+	Providers           map[string]ProviderConfig `yaml:"providers,omitempty"`
+	LLMRouting          LLMRoutingConfig          `yaml:"llm_routing,omitempty"`
+	Claude              ClaudeConfig              `yaml:"claude"`
+	Copilot             CopilotConfig             `yaml:"copilot,omitempty"`
+	Validation          ValidationConfig          `yaml:"validation,omitempty"`
+	Daemon              DaemonConfig              `yaml:"daemon,omitempty"`
+	Harness             HarnessConfig             `yaml:"harness,omitempty"`
+	Observability       ObservabilityConfig       `yaml:"observability,omitempty"`
+	Cost                CostConfig                `yaml:"cost,omitempty"`
+}
+
+type ProviderConfig struct {
+	Kind         string            `yaml:"kind"`
+	Command      string            `yaml:"command"`
+	Flags        string            `yaml:"flags,omitempty"`
+	Tiers        map[string]string `yaml:"tiers,omitempty"`
+	Env          map[string]string `yaml:"env,omitempty"`
+	AllowedTools []string          `yaml:"allowed_tools,omitempty"`
+}
+
+type LLMRoutingConfig struct {
+	DefaultTier string                 `yaml:"default_tier,omitempty"`
+	Tiers       map[string]TierRouting `yaml:"tiers,omitempty"`
+}
+
+type TierRouting struct {
+	Providers []string `yaml:"providers"`
 }
 
 type SourceConfig struct {
@@ -111,6 +138,8 @@ type PREventsConfig struct {
 	ReviewSubmitted bool     `yaml:"review_submitted,omitempty"`
 	ChecksFailed    bool     `yaml:"checks_failed,omitempty"`
 	Commented       bool     `yaml:"commented,omitempty"`
+	PROpened        bool     `yaml:"pr_opened,omitempty"`
+	PRHeadUpdated   bool     `yaml:"pr_head_updated,omitempty"`
 	// AuthorAllow is an allowlist of GitHub logins whose reviews/comments
 	// create vessels. If non-empty, events from any other login are skipped.
 	// YAML footgun: bot logins like "copilot-pull-request-reviewer[bot]"
@@ -119,11 +148,13 @@ type PREventsConfig struct {
 	// AuthorDeny is a denylist of GitHub logins whose reviews/comments
 	// never create vessels. AuthorDeny takes precedence over AuthorAllow.
 	AuthorDeny []string `yaml:"author_deny,omitempty"`
+	Debounce   string   `yaml:"debounce,omitempty"`
 }
 
 type Task struct {
 	Labels          []string         `yaml:"labels,omitempty"`
 	Workflow        string           `yaml:"workflow"`
+	Tier            string           `yaml:"tier,omitempty"`
 	Ref             string           `yaml:"ref,omitempty"`
 	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
 	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
@@ -148,22 +179,45 @@ type CopilotConfig struct {
 	Env          map[string]string `yaml:"env,omitempty"`
 }
 
+type ValidationConfig struct {
+	Format string `yaml:"format,omitempty"`
+	Lint   string `yaml:"lint,omitempty"`
+	Build  string `yaml:"build,omitempty"`
+	Test   string `yaml:"test,omitempty"`
+}
+
 type DaemonConfig struct {
-	ScanInterval  string `yaml:"scan_interval,omitempty"`
-	DrainInterval string `yaml:"drain_interval,omitempty"`
-	AutoUpgrade   bool   `yaml:"auto_upgrade,omitempty"`
+	ScanInterval  string             `yaml:"scan_interval,omitempty"`
+	DrainInterval string             `yaml:"drain_interval,omitempty"`
+	StallMonitor  StallMonitorConfig `yaml:"stall_monitor,omitempty"`
+	AutoUpgrade   bool               `yaml:"auto_upgrade,omitempty"`
 	// UpgradeInterval controls how often the daemon re-runs the
 	// auto_upgrade check while the loop is running. Only meaningful when
 	// AutoUpgrade is true. Defaults to 5m. Accepts any Go duration string.
 	UpgradeInterval string `yaml:"upgrade_interval,omitempty"`
-	// AutoMerge enables the automatic copilot review cycle + GitHub
-	// auto-merge for merge-ready xylem-authored PRs. The daemon only acts
-	// on PRs labeled ready-to-merge + harness-impl whose branches match
-	// feat/issue-*, fix/issue-*, or chore/issue-*.
+	// AutoMerge enables the daemon's automatic reviewer-request +
+	// admin-merge loop for merge-ready harness PRs. Only PRs matching the
+	// configured labels and branch pattern are eligible, and the
+	// no-auto-admin-merge label always opts a PR out.
 	AutoMerge bool `yaml:"auto_merge,omitempty"`
 	// AutoMergeRepo is the GitHub repo slug (owner/name) for auto-merge.
 	// If empty, gh CLI uses the current directory's origin remote.
 	AutoMergeRepo string `yaml:"auto_merge_repo,omitempty"`
+	// AutoMergeLabels are the labels a PR must carry before the daemon treats
+	// it as merge-ready. Defaults to ["ready-to-merge"].
+	AutoMergeLabels []string `yaml:"auto_merge_labels,omitempty"`
+	// AutoMergeBranchPattern filters which PR head refs the daemon manages.
+	// Defaults to ".*".
+	AutoMergeBranchPattern string `yaml:"auto_merge_branch_pattern,omitempty"`
+	// AutoMergeReviewer is the GitHub login to request before enabling
+	// auto-merge. Defaults to empty, which skips reviewer requests.
+	AutoMergeReviewer string `yaml:"auto_merge_reviewer,omitempty"`
+}
+
+type StallMonitorConfig struct {
+	PhaseStallThreshold  string `yaml:"phase_stall_threshold,omitempty"`
+	ScannerIdleThreshold string `yaml:"scanner_idle_threshold,omitempty"`
+	OrphanCheckEnabled   bool   `yaml:"orphan_check_enabled,omitempty"`
 }
 
 type HarnessConfig struct {
@@ -212,19 +266,37 @@ type BudgetConfig struct {
 	MaxTokens  int     `yaml:"max_tokens,omitempty"`
 }
 
+type parsedConcurrency struct {
+	Global   int
+	PerClass map[string]int
+	Set      bool
+}
+
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", path, err)
 	}
 
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("parse config yaml: %w", err)
+	}
+
+	concurrency, err := parseConcurrencyNode(&root)
+	if err != nil {
+		return nil, err
+	}
+	removeYAMLField(&root, "concurrency")
+
 	cfg := &Config{
-		Concurrency:  2,
-		MaxTurns:     50,
-		Timeout:      "30m",
-		StateDir:     ".xylem",
-		CleanupAfter: "168h",
-		Exclude:      []string{"wontfix", "duplicate", "in-progress", "no-bot"},
+		Concurrency:         2,
+		ConcurrencyPerClass: nil,
+		MaxTurns:            50,
+		Timeout:             "30m",
+		StateDir:            ".xylem",
+		CleanupAfter:        "168h",
+		Exclude:             []string{"wontfix", "duplicate", "in-progress", "no-bot"},
 		Claude: ClaudeConfig{
 			Command: "claude",
 		},
@@ -234,11 +306,20 @@ func Load(path string) (*Config, error) {
 		Daemon: DaemonConfig{
 			ScanInterval:  "60s",
 			DrainInterval: "30s",
+			StallMonitor: StallMonitorConfig{
+				PhaseStallThreshold:  "10m",
+				ScannerIdleThreshold: "5m",
+				OrphanCheckEnabled:   true,
+			},
 		},
 	}
 
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("parse config yaml: %w", err)
+	if err := root.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("decode config yaml: %w", err)
+	}
+	if concurrency.Set {
+		cfg.Concurrency = concurrency.Global
+		cfg.ConcurrencyPerClass = concurrency.PerClass
 	}
 
 	cfg.normalize()
@@ -263,11 +344,21 @@ func (c *Config) normalize() {
 			},
 		}
 	}
+	c.ConcurrencyPerClass = normalizeConcurrencyPerClass(c.ConcurrencyPerClass)
+	c.normalizeProviders()
 }
 
 func (c *Config) Validate() error {
 	if c.Concurrency <= 0 {
 		return fmt.Errorf("concurrency must be greater than 0")
+	}
+	for class, limit := range c.ConcurrencyPerClass {
+		if strings.TrimSpace(class) == "" {
+			return fmt.Errorf("concurrency.per_class keys must be non-empty")
+		}
+		if limit <= 0 {
+			return fmt.Errorf("concurrency.per_class[%q] must be greater than 0", class)
+		}
 	}
 
 	if c.MaxTurns <= 0 {
@@ -314,6 +405,8 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	c.normalizeProviders()
+
 	if c.Daemon.ScanInterval != "" {
 		if _, err := time.ParseDuration(c.Daemon.ScanInterval); err != nil {
 			return fmt.Errorf("daemon.scan_interval must be a valid duration: %w", err)
@@ -322,6 +415,26 @@ func (c *Config) Validate() error {
 	if c.Daemon.DrainInterval != "" {
 		if _, err := time.ParseDuration(c.Daemon.DrainInterval); err != nil {
 			return fmt.Errorf("daemon.drain_interval must be a valid duration: %w", err)
+		}
+	}
+	if c.Daemon.StallMonitor.PhaseStallThreshold != "" {
+		if _, err := time.ParseDuration(c.Daemon.StallMonitor.PhaseStallThreshold); err != nil {
+			return fmt.Errorf("daemon.stall_monitor.phase_stall_threshold must be a valid duration: %w", err)
+		}
+	}
+	if c.Daemon.StallMonitor.ScannerIdleThreshold != "" {
+		if _, err := time.ParseDuration(c.Daemon.StallMonitor.ScannerIdleThreshold); err != nil {
+			return fmt.Errorf("daemon.stall_monitor.scanner_idle_threshold must be a valid duration: %w", err)
+		}
+	}
+	if strings.TrimSpace(c.Daemon.AutoMergeBranchPattern) != "" {
+		if _, err := regexp.Compile(strings.TrimSpace(c.Daemon.AutoMergeBranchPattern)); err != nil {
+			return fmt.Errorf("daemon.auto_merge_branch_pattern must be a valid regexp: %w", err)
+		}
+	}
+	for i, label := range c.Daemon.AutoMergeLabels {
+		if strings.TrimSpace(label) == "" {
+			return fmt.Errorf("daemon.auto_merge_labels[%d] must be non-empty", i)
 		}
 	}
 
@@ -401,11 +514,66 @@ func (c *Config) Validate() error {
 		return err
 	}
 
-	if err := c.validateProviderDefaultModels(); err != nil {
+	if err := c.validateProviders(); err != nil {
+		return err
+	}
+	if err := c.validateWorkflowRequirements(); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func (c *Config) ConcurrencyLimit(class string) (int, bool) {
+	if c == nil {
+		return 0, false
+	}
+	limit, ok := c.ConcurrencyPerClass[strings.TrimSpace(class)]
+	return limit, ok
+}
+
+func (c Config) ValidationConfigured() bool {
+	return !c.Validation.IsEmpty()
+}
+
+func (v ValidationConfig) IsEmpty() bool {
+	return strings.TrimSpace(v.Format) == "" &&
+		strings.TrimSpace(v.Lint) == "" &&
+		strings.TrimSpace(v.Build) == "" &&
+		strings.TrimSpace(v.Test) == ""
+}
+
+func (d DaemonConfig) EffectiveAutoMergeLabels() []string {
+	if len(d.AutoMergeLabels) == 0 {
+		return []string{"ready-to-merge"}
+	}
+	labels := make([]string, 0, len(d.AutoMergeLabels))
+	for _, label := range d.AutoMergeLabels {
+		trimmed := strings.TrimSpace(label)
+		if trimmed == "" {
+			continue
+		}
+		labels = append(labels, trimmed)
+	}
+	if len(labels) == 0 {
+		return []string{"ready-to-merge"}
+	}
+	return labels
+}
+
+func (d DaemonConfig) EffectiveAutoMergeBranchPattern() string {
+	if trimmed := strings.TrimSpace(d.AutoMergeBranchPattern); trimmed != "" {
+		return trimmed
+	}
+	return ".*"
+}
+
+func (d DaemonConfig) EffectiveAutoMergeReviewer() string {
+	return strings.TrimSpace(d.AutoMergeReviewer)
+}
+
+func (d DaemonConfig) EffectiveAutoAdminMergeOptOutLabel() string {
+	return DefaultAutoAdminMergeOptOutLabel
 }
 
 // CleanupAfterDuration returns the parsed cleanup_after duration, defaulting to
@@ -493,6 +661,84 @@ func (c *Config) ObservabilitySampleRate() float64 {
 		return 1.0
 	}
 	return c.Observability.SampleRate
+}
+
+func parseConcurrencyNode(root *yaml.Node) (parsedConcurrency, error) {
+	mapping := root
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return parsedConcurrency{}, nil
+		}
+		mapping = root.Content[0]
+	}
+	if mapping.Kind != yaml.MappingNode {
+		return parsedConcurrency{}, nil
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		key := mapping.Content[i]
+		if key.Value != "concurrency" {
+			continue
+		}
+		value := mapping.Content[i+1]
+		switch value.Kind {
+		case yaml.ScalarNode:
+			var global int
+			if err := value.Decode(&global); err != nil {
+				return parsedConcurrency{}, fmt.Errorf("parse concurrency: %w", err)
+			}
+			return parsedConcurrency{Global: global, Set: true}, nil
+		case yaml.MappingNode:
+			var raw struct {
+				Global   *int           `yaml:"global"`
+				PerClass map[string]int `yaml:"per_class,omitempty"`
+			}
+			if err := value.Decode(&raw); err != nil {
+				return parsedConcurrency{}, fmt.Errorf("parse concurrency: %w", err)
+			}
+			if raw.Global == nil {
+				return parsedConcurrency{}, fmt.Errorf("concurrency.global is required when concurrency is a map")
+			}
+			return parsedConcurrency{
+				Global:   *raw.Global,
+				PerClass: normalizeConcurrencyPerClass(raw.PerClass),
+				Set:      true,
+			}, nil
+		default:
+			return parsedConcurrency{}, fmt.Errorf("parse concurrency: must be an integer or map")
+		}
+	}
+	return parsedConcurrency{}, nil
+}
+
+func removeYAMLField(root *yaml.Node, field string) {
+	mapping := root
+	if root.Kind == yaml.DocumentNode {
+		if len(root.Content) == 0 {
+			return
+		}
+		mapping = root.Content[0]
+	}
+	if mapping.Kind != yaml.MappingNode {
+		return
+	}
+	for i := 0; i+1 < len(mapping.Content); i += 2 {
+		if mapping.Content[i].Value != field {
+			continue
+		}
+		mapping.Content = append(mapping.Content[:i], mapping.Content[i+2:]...)
+		return
+	}
+}
+
+func normalizeConcurrencyPerClass(in map[string]int) map[string]int {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]int, len(in))
+	for class, limit := range in {
+		out[strings.TrimSpace(class)] = limit
+	}
+	return out
 }
 
 func (c *Config) VesselBudget() *cost.Budget {
@@ -634,10 +880,135 @@ func (c *Config) validateCost() error {
 	return nil
 }
 
+func (c *Config) validateWorkflowRequirements() error {
+	if c.ValidationConfigured() {
+		return nil
+	}
+	required := []string{"fix-pr-checks", "resolve-conflicts"}
+	active := make([]string, 0, len(required))
+	for _, workflowName := range required {
+		if c.workflowActive(workflowName) {
+			active = append(active, workflowName)
+		}
+	}
+	if len(active) == 0 {
+		return nil
+	}
+	sort.Strings(active)
+	return fmt.Errorf("validation: at least one of format, lint, build, or test must be set when workflows are active: %s", strings.Join(active, ", "))
+}
+
+func (c *Config) workflowActive(name string) bool {
+	for _, task := range c.Tasks {
+		if strings.TrimSpace(task.Workflow) == name {
+			return true
+		}
+	}
+	for _, src := range c.Sources {
+		if strings.TrimSpace(src.Workflow) == name {
+			return true
+		}
+		for _, task := range src.Tasks {
+			if strings.TrimSpace(task.Workflow) == name {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // validateProviderDefaultModels ensures every active LLM provider has a
 // default_model configured. A provider is active if it is the global llm value
 // or referenced by any source's llm field.
-func (c *Config) validateProviderDefaultModels() error {
+func (c *Config) validateProviders() error {
+	if len(c.Providers) == 0 && len(c.LLMRouting.Tiers) == 0 {
+		return nil
+	}
+
+	for name, provider := range c.Providers {
+		switch provider.Kind {
+		case "claude", "copilot":
+		default:
+			return fmt.Errorf("providers.%s.kind must be one of claude or copilot, got %q", name, provider.Kind)
+		}
+
+		for tierName := range c.LLMRouting.Tiers {
+			model, ok := provider.Tiers[tierName]
+			if !ok || strings.TrimSpace(model) == "" {
+				return fmt.Errorf("providers.%s.tiers.%s must be set because llm_routing.tiers.%s is configured", name, tierName, tierName)
+			}
+		}
+
+		if provider.Kind == "claude" && strings.Contains(provider.Flags, "--bare") {
+			if provider.Env == nil || strings.TrimSpace(provider.Env["ANTHROPIC_API_KEY"]) == "" {
+				return fmt.Errorf("--bare requires ANTHROPIC_API_KEY in providers.%s.env", name)
+			}
+		}
+	}
+
+	if strings.TrimSpace(c.LLMRouting.DefaultTier) == "" {
+		return fmt.Errorf("llm_routing.default_tier must be set")
+	}
+	if _, ok := c.LLMRouting.Tiers[c.LLMRouting.DefaultTier]; !ok {
+		return fmt.Errorf("llm_routing.default_tier %q must exist in llm_routing.tiers", c.LLMRouting.DefaultTier)
+	}
+
+	for tierName, routing := range c.LLMRouting.Tiers {
+		for _, providerName := range routing.Providers {
+			if _, ok := c.Providers[providerName]; !ok {
+				return fmt.Errorf("llm_routing.tiers.%s.providers references unknown provider %q", tierName, providerName)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (c *Config) normalizeProviders() {
+	defaultTier := strings.TrimSpace(c.LLMRouting.DefaultTier)
+	if defaultTier == "" {
+		defaultTier = DefaultLLMRoutingTier
+		c.LLMRouting.DefaultTier = defaultTier
+	}
+
+	if len(c.Providers) == 0 {
+		providers := make(map[string]ProviderConfig)
+		active := c.activeLegacyProviders()
+		if c.shouldSynthesizeClaudeProvider(active["claude"]) {
+			providers["claude"] = ProviderConfig{
+				Kind:         "claude",
+				Command:      c.Claude.Command,
+				Flags:        c.Claude.Flags,
+				Tiers:        map[string]string{defaultTier: c.Claude.DefaultModel},
+				Env:          copyStringMap(c.Claude.Env),
+				AllowedTools: append([]string(nil), c.Claude.AllowedTools...),
+			}
+		}
+		if c.shouldSynthesizeCopilotProvider(active["copilot"]) {
+			providers["copilot"] = ProviderConfig{
+				Kind:    "copilot",
+				Command: c.Copilot.Command,
+				Flags:   c.Copilot.Flags,
+				Tiers:   map[string]string{defaultTier: c.Copilot.DefaultModel},
+				Env:     copyStringMap(c.Copilot.Env),
+			}
+		}
+		if len(providers) > 0 {
+			c.Providers = providers
+		}
+	}
+
+	if len(c.LLMRouting.Tiers) == 0 {
+		providerNames := orderedProviderNames(c.Providers, c.LLM)
+		if len(providerNames) > 0 {
+			c.LLMRouting.Tiers = map[string]TierRouting{
+				defaultTier: {Providers: providerNames},
+			}
+		}
+	}
+}
+
+func (c *Config) activeLegacyProviders() map[string]bool {
 	active := map[string]bool{}
 	switch c.LLM {
 	case "", "claude":
@@ -653,13 +1024,61 @@ func (c *Config) validateProviderDefaultModels() error {
 			active["copilot"] = true
 		}
 	}
-	if active["claude"] && c.Claude.DefaultModel == "" {
-		return fmt.Errorf("claude.default_model must be set when claude is an active provider")
+	return active
+}
+
+func (c *Config) shouldSynthesizeClaudeProvider(active bool) bool {
+	if active {
+		return true
 	}
-	if active["copilot"] && c.Copilot.DefaultModel == "" {
-		return fmt.Errorf("copilot.default_model must be set when copilot is an active provider")
+	return strings.TrimSpace(c.Claude.DefaultModel) != "" ||
+		strings.TrimSpace(c.Claude.Flags) != "" ||
+		len(c.Claude.Env) > 0 ||
+		len(c.Claude.AllowedTools) > 0 ||
+		strings.TrimSpace(c.Claude.Template) != "" ||
+		(strings.TrimSpace(c.Claude.Command) != "" && strings.TrimSpace(c.Claude.Command) != "claude")
+}
+
+func (c *Config) shouldSynthesizeCopilotProvider(active bool) bool {
+	if active {
+		return true
 	}
-	return nil
+	return strings.TrimSpace(c.Copilot.DefaultModel) != "" ||
+		strings.TrimSpace(c.Copilot.Flags) != "" ||
+		len(c.Copilot.Env) > 0 ||
+		(strings.TrimSpace(c.Copilot.Command) != "" && strings.TrimSpace(c.Copilot.Command) != "copilot")
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func orderedProviderNames(providers map[string]ProviderConfig, preferred string) []string {
+	if len(providers) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(providers))
+	for name := range providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if preferred == "" {
+		return names
+	}
+	for i, name := range names {
+		if name != preferred {
+			continue
+		}
+		return append([]string{name}, append(names[:i], names[i+1:]...)...)
+	}
+	return names
 }
 
 func validateGitHubSource(name string, src SourceConfig) error {
@@ -704,14 +1123,28 @@ func validateGitHubPREventsSource(name string, src SourceConfig) error {
 		if task.On == nil {
 			return fmt.Errorf("source %q task %q: must include an 'on' block with at least one trigger", name, tname)
 		}
-		if len(task.On.Labels) == 0 && !task.On.ReviewSubmitted && !task.On.ChecksFailed && !task.On.Commented {
-			return fmt.Errorf("source %q task %q: 'on' block must specify at least one trigger (labels, review_submitted, checks_failed, or commented)", name, tname)
+		if len(task.On.Labels) == 0 &&
+			!task.On.ReviewSubmitted &&
+			!task.On.ChecksFailed &&
+			!task.On.Commented &&
+			!task.On.PROpened &&
+			!task.On.PRHeadUpdated {
+			return fmt.Errorf("source %q task %q: 'on' block must specify at least one trigger (labels, review_submitted, checks_failed, commented, pr_opened, or pr_head_updated)", name, tname)
 		}
 		// Authored-event triggers must specify an author filter to prevent
 		// self-trigger loops (e.g. xylem responds to its own review as hnipps,
 		// that review triggers another vessel, ad infinitum).
 		if (task.On.ReviewSubmitted || task.On.Commented) && len(task.On.AuthorAllow) == 0 && len(task.On.AuthorDeny) == 0 {
 			return fmt.Errorf("source %q task %q: tasks with review_submitted or commented must specify author_allow or author_deny to prevent self-trigger loops", name, tname)
+		}
+		if strings.TrimSpace(task.On.Debounce) != "" {
+			debounce, err := time.ParseDuration(task.On.Debounce)
+			if err != nil {
+				return fmt.Errorf("source %q task %q: parse debounce %q: %w", name, tname, task.On.Debounce, err)
+			}
+			if debounce < 0 {
+				return fmt.Errorf("source %q task %q: debounce must be non-negative", name, tname)
+			}
 		}
 	}
 	return nil

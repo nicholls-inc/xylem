@@ -14,8 +14,12 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/review"
+	"github.com/nicholls-inc/xylem/cli/internal/source"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type mockRunner struct {
@@ -150,6 +154,43 @@ func TestScanFindsIssues(t *testing.T) {
 	}
 }
 
+func TestBacklogCountDeduplicatesAndSkipsExcludedIssues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	srcCfg := cfg.Sources["github"]
+	srcCfg.Tasks["triage-incidents"] = config.Task{Labels: []string{"incident"}, Workflow: "triage"}
+	cfg.Sources["github"] = srcCfg
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	bugIssues := []ghIssue{
+		{Number: 1, Title: "fix null response", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+		{Number: 2, Title: "investigate prod incident", URL: "https://github.com/owner/repo/issues/2", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "incident"}}},
+		{Number: 3, Title: "skip duplicate backlog item", URL: "https://github.com/owner/repo/issues/3", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "wontfix"}}},
+	}
+	incidentIssues := []ghIssue{
+		{Number: 2, Title: "investigate prod incident", URL: "https://github.com/owner/repo/issues/2", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "incident"}}},
+		{Number: 4, Title: "on-call handoff", URL: "https://github.com/owner/repo/issues/4", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "incident"}}},
+	}
+	r.set(issueJSON(bugIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(incidentIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "incident")
+
+	s := New(cfg, q, r)
+	count, err := s.BacklogCount(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+}
+
 func TestScanExcludedLabel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeConfig(dir)
@@ -261,6 +302,52 @@ func TestScanBuildsScheduledSource(t *testing.T) {
 	}
 	if got := vessels[0].Meta["config_source"]; got != "sota-gap" {
 		t.Fatalf("config_source = %q, want sota-gap", got)
+	}
+}
+
+func TestSmoke_S4_ScannerSetsVesselTierFromTaskOrDefault(t *testing.T) {
+	tests := []struct {
+		name        string
+		taskTier    string
+		defaultTier string
+		wantTier    string
+	}{
+		{name: "task tier wins", taskTier: "high", defaultTier: "low", wantTier: "high"},
+		{name: "falls back to routing default", taskTier: "", defaultTier: "low", wantTier: "low"},
+		{name: "falls back to med when default missing", taskTier: "", defaultTier: "", wantTier: config.DefaultLLMRoutingTier},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := makeConfig(dir)
+			cfg.LLMRouting.DefaultTier = tt.defaultTier
+			cfg.Sources["github"] = config.SourceConfig{
+				Type: "github",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug", Tier: tt.taskTier},
+				},
+			}
+			q := queue.New(filepath.Join(dir, "queue.jsonl"))
+			r := newMock()
+			issues := []ghIssue{
+				{Number: 1, Title: "fix null response", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "bug"}}},
+			}
+			r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+
+			s := New(cfg, q, r)
+			result, err := s.Scan(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, 1, result.Added)
+
+			vessels, err := q.List()
+			require.NoError(t, err)
+			require.Len(t, vessels, 1)
+			assert.Equal(t, tt.wantTier, vessels[0].Tier)
+		})
 	}
 }
 
@@ -943,6 +1030,163 @@ func TestScanPREvents(t *testing.T) {
 	if vessels[0].Workflow != "handle-review" {
 		t.Errorf("expected workflow handle-review, got %q", vessels[0].Workflow)
 	}
+}
+
+func TestConvertPREventsTasksParsesDebounce(t *testing.T) {
+	tasks := convertPREventsTasks(map[string]config.Task{
+		"review": {
+			Workflow: "review-pr",
+			On: &config.PREventsConfig{
+				PROpened:        true,
+				PRHeadUpdated:   true,
+				Debounce:        "10m",
+				ReviewSubmitted: true,
+			},
+		},
+		"defaulted": {
+			Workflow: "review-pr",
+			On: &config.PREventsConfig{
+				Commented: true,
+			},
+		},
+	})
+
+	if got := tasks["review"].Debounce; got != 10*time.Minute {
+		t.Fatalf("review debounce = %v, want 10m", got)
+	}
+	if !tasks["review"].PROpened || !tasks["review"].PRHeadUpdated || !tasks["review"].ReviewSubmitted {
+		t.Fatalf("review task triggers were not copied: %#v", tasks["review"])
+	}
+	if got := tasks["defaulted"].Debounce; got != source.UnsetPREventsDebounce {
+		t.Fatalf("defaulted debounce = %v, want unset sentinel %v", got, source.UnsetPREventsDebounce)
+	}
+}
+
+type stubBudgetGate struct {
+	decision cost.Decision
+	classes  []string
+}
+
+func (g *stubBudgetGate) Check(class string) cost.Decision {
+	g.classes = append(g.classes, class)
+	return g.decision
+}
+
+func TestScanBudgetGateSkipDoesNotEnqueueOrRunHooks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Sources: map[string]config.SourceConfig{
+			"github": {
+				Type: "github",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug"},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+	r.set(issueJSON([]ghIssue{{
+		Number: 1,
+		Title:  "blocked by budget",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/1",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+
+	gate := &stubBudgetGate{decision: cost.Decision{Allowed: false, Reason: "stub exhausted", RemainingUSD: 0}}
+	s := New(cfg, q, r)
+	s.BudgetGate = gate
+
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if result.Added != 0 || result.Skipped != 1 {
+		t.Fatalf("Scan result = %#v, want 0 added and 1 skipped", result)
+	}
+	if len(gate.classes) != 1 || gate.classes[0] != "fix-bug" {
+		t.Fatalf("budget gate classes = %#v, want [fix-bug]", gate.classes)
+	}
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected no queued vessels, got %d", len(vessels))
+	}
+	for _, call := range r.calls {
+		if len(call) >= 3 && call[0] == "gh" && call[1] == "issue" && call[2] == "edit" {
+			t.Fatalf("unexpected OnEnqueue label edit call: %#v", call)
+		}
+	}
+}
+
+func TestSmoke_S47_BudgetGateSkipLeavesSourceUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Sources: map[string]config.SourceConfig{
+			"github": {
+				Type: "github",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug"},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+	r.set(issueJSON([]ghIssue{{
+		Number: 1,
+		Title:  "blocked by budget",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/1",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+
+	gate := &stubBudgetGate{decision: cost.Decision{Allowed: false, Reason: "stub exhausted", RemainingUSD: 0}}
+	s := New(cfg, q, r)
+	s.BudgetGate = gate
+
+	result, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.Added)
+	assert.Equal(t, 1, result.Skipped)
+	require.Equal(t, []string{"fix-bug"}, gate.classes)
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	assert.Empty(t, vessels)
+	for _, call := range r.calls {
+		assert.False(t, len(call) >= 3 && call[0] == "gh" && call[1] == "issue" && call[2] == "edit", "unexpected OnEnqueue label edit call: %#v", call)
+	}
+
+	gate.decision = cost.Decision{Allowed: true, RemainingUSD: 12.5}
+	result, err = s.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Added)
+
+	vessels, err = q.List()
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "github-issue", vessels[0].Source)
+	assert.Equal(t, "fix-bug", vessels[0].Workflow)
 }
 
 type ghMergeCommitForScanner struct {

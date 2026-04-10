@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/stretchr/testify/assert"
@@ -55,11 +56,23 @@ func newReporterTracer(t *testing.T) *tracetest.SpanRecorder {
 	return rec
 }
 
+func estimatedPhase(name string, duration time.Duration, status string, costUSD float64, inputTokens, outputTokens int) PhaseResult {
+	return PhaseResult{
+		Name:            name,
+		Duration:        duration,
+		Status:          status,
+		CostUSDEst:      costUSD,
+		InputTokensEst:  inputTokens,
+		OutputTokensEst: outputTokens,
+		UsageSource:     cost.UsageSourceEstimated,
+	}
+}
+
 func TestPhaseComplete(t *testing.T) {
 	mock := &mockRunner{}
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
-	err := r.PhaseComplete(context.Background(), 42, "analyze", 2*time.Minute+15*time.Second, "some output here")
+	err := r.PhaseComplete(context.Background(), 42, estimatedPhase("analyze", 2*time.Minute+15*time.Second, "completed", 0.0123, 320, 110), "some output here")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -69,6 +82,9 @@ func TestPhaseComplete(t *testing.T) {
 	}
 	if !strings.Contains(mock.lastBody, "2m15s") {
 		t.Errorf("expected duration in comment, got: %s", mock.lastBody)
+	}
+	if !strings.Contains(mock.lastBody, "_Usage:_ $0.0123, 430") {
+		t.Errorf("expected usage summary in comment, got: %s", mock.lastBody)
 	}
 	if !strings.Contains(mock.lastBody, "some output here") {
 		t.Errorf("expected output in comment, got: %s", mock.lastBody)
@@ -83,7 +99,7 @@ func TestPhaseCompleteEmitsReporterSpan(t *testing.T) {
 	mock := &mockRunner{}
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
-	require.NoError(t, r.PhaseComplete(context.Background(), 42, "analyze", time.Second, "ok"))
+	require.NoError(t, r.PhaseComplete(context.Background(), 42, estimatedPhase("analyze", time.Second, "completed", 0.001, 20, 10), "ok"))
 
 	var found bool
 	for _, span := range rec.Ended() {
@@ -107,7 +123,7 @@ func TestPhaseCompleteGhArgs(t *testing.T) {
 	mock := &mockRunner{}
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
-	_ = r.PhaseComplete(context.Background(), 42, "analyze", time.Second, "out")
+	_ = r.PhaseComplete(context.Background(), 42, estimatedPhase("analyze", time.Second, "completed", 0.001, 20, 10), "out")
 
 	wantArgs := []string{"gh", "issue", "comment", "42", "--repo", "owner/repo", "--body"}
 	if len(mock.lastArgs) < len(wantArgs) {
@@ -125,7 +141,7 @@ func TestPhaseCompleteTruncation(t *testing.T) {
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
 	longOutput := strings.Repeat("x", MaxOutputLen+1000)
-	err := r.PhaseComplete(context.Background(), 7, "build", time.Second, longOutput)
+	err := r.PhaseComplete(context.Background(), 7, estimatedPhase("build", time.Second, "completed", 0.001, 20, 10), longOutput)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -143,7 +159,7 @@ func TestPhaseCompleteExactMaxLen(t *testing.T) {
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
 	exactOutput := strings.Repeat("y", MaxOutputLen)
-	err := r.PhaseComplete(context.Background(), 1, "test", time.Second, exactOutput)
+	err := r.PhaseComplete(context.Background(), 1, estimatedPhase("test", time.Second, "completed", 0.001, 20, 10), exactOutput)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -201,9 +217,9 @@ func TestVesselCompleted(t *testing.T) {
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
 	phases := []PhaseResult{
-		{Name: "analyze", Duration: 2*time.Minute + 15*time.Second, Status: "completed"},
-		{Name: "implement", Duration: 5*time.Minute + 30*time.Second, Status: "completed"},
-		{Name: "pr", Duration: time.Minute, Status: "completed"},
+		estimatedPhase("analyze", 2*time.Minute+15*time.Second, "completed", 0.0123, 320, 110),
+		estimatedPhase("implement", 5*time.Minute+30*time.Second, "completed", 0.0345, 500, 140),
+		estimatedPhase("pr", time.Minute, "completed", 0.0042, 90, 30),
 	}
 
 	err := r.VesselCompleted(context.Background(), 5, phases, nil)
@@ -214,19 +230,19 @@ func TestVesselCompleted(t *testing.T) {
 	if !strings.Contains(mock.lastBody, "all phases completed") {
 		t.Errorf("expected header in comment, got: %s", mock.lastBody)
 	}
-	if !strings.Contains(mock.lastBody, "| analyze | 2m15s | completed |") {
+	if !strings.Contains(mock.lastBody, "| analyze | 2m15s | $0.0123 | 430 | completed |") {
 		t.Errorf("expected analyze row in table, got: %s", mock.lastBody)
 	}
-	if !strings.Contains(mock.lastBody, "| implement | 5m30s | completed |") {
+	if !strings.Contains(mock.lastBody, "| implement | 5m30s | $0.0345 | 640 | completed |") {
 		t.Errorf("expected implement row in table, got: %s", mock.lastBody)
 	}
-	if !strings.Contains(mock.lastBody, "| pr | 1m0s | completed |") {
+	if !strings.Contains(mock.lastBody, "| pr | 1m0s | $0.0042 | 120 | completed |") {
 		t.Errorf("expected pr row in table, got: %s", mock.lastBody)
 	}
-	if !strings.Contains(mock.lastBody, "Total: 8m45s") {
+	if !strings.Contains(mock.lastBody, "Total: 8m45s — $0.0510, 1190 tokens (estimated)") {
 		t.Errorf("expected total duration in comment, got: %s", mock.lastBody)
 	}
-	if !strings.Contains(mock.lastBody, "| Phase | Duration | Status |") {
+	if !strings.Contains(mock.lastBody, "| Phase | Duration | Cost | Tokens | Status |") {
 		t.Errorf("expected table header in comment, got: %s", mock.lastBody)
 	}
 	if strings.Contains(mock.lastBody, "### Verification evidence") {
@@ -250,7 +266,7 @@ func TestVesselCompletedNoOp(t *testing.T) {
 	if !strings.Contains(mock.lastBody, "workflow completed early via no-op") {
 		t.Fatalf("expected no-op completion header, got: %s", mock.lastBody)
 	}
-	if !strings.Contains(mock.lastBody, "| analyze | 2s | no-op |") {
+	if !strings.Contains(mock.lastBody, "| analyze | 2s | — | — | no-op |") {
 		t.Fatalf("expected no-op row in table, got: %s", mock.lastBody)
 	}
 }
@@ -260,7 +276,7 @@ func TestVesselCompletedWithEvidence(t *testing.T) {
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
 	phases := []PhaseResult{
-		{Name: "implement", Duration: 5 * time.Second, Status: "completed"},
+		estimatedPhase("implement", 5*time.Second, "completed", 0.004, 50, 20),
 	}
 
 	manifest := &evidence.Manifest{
@@ -303,11 +319,11 @@ func TestSmoke_S20_VesselCompletedNilManifestProducesOutputIdenticalToCurrentBeh
 	got := renderVesselCompletedBody(t, phases, nil)
 	want := `**xylem — all phases completed**
 
-| Phase | Duration | Status |
-|-------|----------|--------|
-| analyze | 2m15s | completed |
-| implement | 5m30s | completed |
-| pr | 1m0s | completed |
+| Phase | Duration | Cost | Tokens | Status |
+|-------|----------|------|--------|--------|
+| analyze | 2m15s | — | — | completed |
+| implement | 5m30s | — | — | completed |
+| pr | 1m0s | — | — | completed |
 
 Total: 8m45s`
 
@@ -405,11 +421,11 @@ func TestSmoke_S24_ExistingVesselCompletedScenariosPassNilManifest(t *testing.T)
 		got := renderVesselCompletedBody(t, phases, nil)
 		want := `**xylem — all phases completed**
 
-| Phase | Duration | Status |
-|-------|----------|--------|
-| analyze | 2m15s | completed |
-| implement | 5m30s | completed |
-| pr | 1m0s | completed |
+| Phase | Duration | Cost | Tokens | Status |
+|-------|----------|------|--------|--------|
+| analyze | 2m15s | — | — | completed |
+| implement | 5m30s | — | — | completed |
+| pr | 1m0s | — | — | completed |
 
 Total: 8m45s`
 
@@ -427,9 +443,9 @@ Total: 8m45s`
 
 Remaining phases were skipped intentionally because a phase output matched its configured no-op marker.
 
-| Phase | Duration | Status |
-|-------|----------|--------|
-| analyze | 2s | no-op |
+| Phase | Duration | Cost | Tokens | Status |
+|-------|----------|------|--------|--------|
+| analyze | 2s | — | — | no-op |
 
 Total: 2s`
 
@@ -446,9 +462,9 @@ func TestSmoke_S30_VesselCompletedNilManifestProducesIdenticalOutputToCurrentBeh
 	body := renderVesselCompletedBody(t, phases, nil)
 	want := `**xylem — all phases completed**
 
-| Phase | Duration | Status |
-|-------|----------|--------|
-| prompt | 7s | completed |
+| Phase | Duration | Cost | Tokens | Status |
+|-------|----------|------|--------|--------|
+| prompt | 7s | — | — | completed |
 
 Total: 7s`
 
@@ -456,6 +472,37 @@ Total: 7s`
 	assert.Equal(t, want, body)
 	assert.NotContains(t, bodyLower, "evidence")
 	assert.NotContains(t, bodyLower, "manifest")
+}
+
+func TestUsageFormattingHandlesUnavailableUsage(t *testing.T) {
+	result := PhaseResult{
+		Name:                   "implement",
+		Duration:               5 * time.Second,
+		Status:                 "completed",
+		UsageSource:            cost.UsageSourceUnavailable,
+		UsageUnavailableReason: "provider did not return token usage",
+	}
+
+	assert.Equal(t, "_Usage:_ n/a — provider did not return token usage", formatPhaseUsageLine(result))
+	assert.Equal(t, "—", formatPhaseCostCell(result))
+	assert.Equal(t, "—", formatPhaseTokenCell(result))
+}
+
+func TestVesselCompletedOmitsAggregateUsageForUnavailablePhase(t *testing.T) {
+	body := renderVesselCompletedBody(t, []PhaseResult{
+		{
+			Name:                   "implement",
+			Duration:               5 * time.Second,
+			Status:                 "completed",
+			UsageSource:            cost.UsageSourceUnavailable,
+			UsageUnavailableReason: "provider did not return token usage",
+		},
+	}, nil)
+
+	assert.Contains(t, body, "| implement | 5s | — | — | completed |")
+	assert.Contains(t, body, "Total: 5s")
+	assert.NotContains(t, body, "tokens (")
+	assert.NotContains(t, body, "$0.")
 }
 
 func TestLabelTimeout(t *testing.T) {
@@ -482,7 +529,7 @@ func TestGhFailureNonFatal(t *testing.T) {
 		{
 			name: "PhaseComplete",
 			call: func(r *Reporter) error {
-				return r.PhaseComplete(context.Background(), 1, "analyze", time.Second, "out")
+				return r.PhaseComplete(context.Background(), 1, estimatedPhase("analyze", time.Second, "completed", 0.001, 20, 10), "out")
 			},
 		},
 		{
@@ -598,7 +645,7 @@ func TestPostCommentArgs(t *testing.T) {
 			mock := &mockRunner{}
 			r := &Reporter{Runner: mock, Repo: tc.repo}
 
-			_ = r.PhaseComplete(context.Background(), tc.issueNum, "test", time.Second, "out")
+			_ = r.PhaseComplete(context.Background(), tc.issueNum, estimatedPhase("test", time.Second, "completed", 0.001, 20, 10), "out")
 
 			if len(mock.lastArgs) < len(tc.wantArgs) {
 				t.Fatalf("expected at least %d args, got %d: %v", len(tc.wantArgs), len(mock.lastArgs), mock.lastArgs)
@@ -653,11 +700,12 @@ func TestPhaseCompleteCommentFormat(t *testing.T) {
 	mock := &mockRunner{}
 	r := &Reporter{Runner: mock, Repo: "owner/repo"}
 
-	_ = r.PhaseComplete(context.Background(), 1, "deploy", 5*time.Second, "deployed successfully")
+	_ = r.PhaseComplete(context.Background(), 1, estimatedPhase("deploy", 5*time.Second, "completed", 0.0025, 40, 15), "deployed successfully")
 
 	// Verify the full structure matches the spec format
 	expectedParts := []string{
 		"**xylem — phase `deploy` completed** (5s)",
+		"_Usage:_ $0.0025, 55",
 		"<details>",
 		"<summary>Phase output (click to expand)</summary>",
 		"deployed successfully",

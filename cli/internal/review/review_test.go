@@ -231,6 +231,29 @@ func TestSmoke_S1_LoadRunsIncludesRecoveryArtifactWhenPresent(t *testing.T) {
 	assert.Equal(t, "suppressed", runs[0].Recovery.RetryOutcome)
 }
 
+func TestSmoke_S2_LoadRunsLeavesRecoveryNilWhenArtifactAbsent(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, time.April, 8, 13, 31, 0, 0, time.UTC)
+
+	writeRunArtifacts(t, stateDir, runFixture{
+		vesselID:  "legacy-run-without-recovery",
+		source:    "github-issue",
+		workflow:  "implement-harness",
+		state:     "failed",
+		startedAt: now,
+		endedAt:   now.Add(time.Minute),
+	})
+
+	runs, total, warnings, err := LoadRuns(stateDir, 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, total)
+	require.Len(t, runs, 1)
+	assert.Nil(t, runs[0].Recovery)
+	assert.Equal(t, "legacy-run-without-recovery", runs[0].Summary.VesselID)
+	assert.Equal(t, "failed", runs[0].Summary.State)
+	assert.Empty(t, warnings)
+}
+
 type runFixture struct {
 	vesselID         string
 	source           string

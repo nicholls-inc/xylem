@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/daemonhealth"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -74,11 +75,53 @@ func TestStatusTable(t *testing.T) {
 	if !strings.Contains(out, "completed") {
 		t.Errorf("expected 'completed' state in output, got: %s", out)
 	}
-	if !strings.Contains(out, "Summary:") {
-		t.Errorf("expected summary line, got: %s", out)
+	if !strings.Contains(out, "Queue:") {
+		t.Errorf("expected queue line, got: %s", out)
 	}
 	if !strings.Contains(out, "Info") {
 		t.Errorf("expected Info column header, got: %s", out)
+	}
+}
+
+func TestStatusShowsDaemonHealth(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	err := daemonhealth.Save(filepath.Join(dir, ".xylem"), daemonhealth.Snapshot{
+		PID:           os.Getpid(),
+		StartedAt:     now.Add(-2 * time.Hour),
+		UpdatedAt:     now,
+		Binary:        "f366e79d",
+		LastUpgradeAt: now.Add(-15 * time.Minute),
+		Checks: []daemonhealth.Check{
+			{
+				Code:      "idle_with_backlog",
+				Level:     daemonhealth.LevelWarning,
+				Message:   "Daemon idle with 4 backlog items on GitHub",
+				UpdatedAt: now,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save daemon health: %v", err)
+	}
+
+	var statusErr error
+	out := captureStdout(func() { statusErr = cmdStatus(testStatusConfig(dir), q, false, "") })
+	if statusErr != nil {
+		t.Fatalf("unexpected error: %v", statusErr)
+	}
+	if !strings.Contains(out, "Health:") {
+		t.Fatalf("expected health section, got: %s", out)
+	}
+	if !strings.Contains(out, "Daemon alive") {
+		t.Fatalf("expected daemon alive line, got: %s", out)
+	}
+	if !strings.Contains(out, "Auto-upgrade current") {
+		t.Fatalf("expected auto-upgrade line, got: %s", out)
+	}
+	if !strings.Contains(out, "Daemon idle with 4 backlog items on GitHub") {
+		t.Fatalf("expected backlog warning, got: %s", out)
 	}
 }
 
@@ -403,7 +446,8 @@ func TestStatusSurfacesHealthAndPatterns(t *testing.T) {
   "total_input_tokens_est": 0,
   "total_output_tokens_est": 0,
   "total_tokens_est": 0,
-  "total_cost_usd_est": 0,
+  "total_cost_usd_est": 0.25,
+  "usage_source": "estimated",
   "budget_exceeded": true,
   "note": "test"
 }`
@@ -425,6 +469,9 @@ func TestStatusSurfacesHealthAndPatterns(t *testing.T) {
 	}
 	if !strings.Contains(out, "budget exceeded") {
 		t.Fatalf("expected anomaly details in output, got: %s", out)
+	}
+	if !strings.Contains(out, "$0.2500") {
+		t.Fatalf("expected estimated cost in output, got: %s", out)
 	}
 	if !strings.Contains(out, "Health: 1 healthy, 0 degraded, 1 unhealthy") {
 		t.Fatalf("expected health summary counts, got: %s", out)
@@ -465,6 +512,64 @@ func TestStatusJSONIncludesHealthAndAnomalies(t *testing.T) {
 	}
 	if len(rows[0].Anomalies) != 1 || rows[0].Anomalies[0].Code != "waiting_on_gate" {
 		t.Fatalf("expected waiting_on_gate anomaly, got %#v", rows[0].Anomalies)
+	}
+}
+
+func TestStatusSurfacesUnavailableUsageReason(t *testing.T) {
+	dir := t.TempDir()
+	cfg := testStatusConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	started := now.Add(-2 * time.Minute)
+	ended := now.Add(-time.Minute)
+
+	q.Enqueue(queue.Vessel{ //nolint:errcheck
+		ID: "issue-usage-unavailable", Source: "github-issue", Workflow: "fix-bug",
+		State: queue.StateCompleted, CreatedAt: now,
+		StartedAt: &started, EndedAt: &ended,
+	})
+
+	summaryDir := filepath.Join(cfg.StateDir, "phases", "issue-usage-unavailable")
+	if err := os.MkdirAll(summaryDir, 0o755); err != nil {
+		t.Fatalf("mkdir summary dir: %v", err)
+	}
+	summary := `{
+  "vessel_id": "issue-usage-unavailable",
+  "source": "github-issue",
+  "workflow": "fix-bug",
+  "state": "completed",
+  "started_at": "2026-04-08T20:00:00Z",
+  "ended_at": "2026-04-08T20:01:00Z",
+  "duration_ms": 60000,
+  "phases": [
+    {
+      "name": "implement",
+      "type": "prompt",
+      "duration_ms": 1000,
+      "status": "completed",
+      "usage_source": "unavailable",
+      "usage_unavailable_reason": "provider did not return token usage"
+    }
+  ],
+  "usage_source": "unavailable",
+  "usage_unavailable_reason": "provider did not return token usage",
+  "note": "test"
+}`
+	if err := os.WriteFile(filepath.Join(summaryDir, "summary.json"), []byte(summary), 0o644); err != nil {
+		t.Fatalf("write summary: %v", err)
+	}
+
+	var err error
+	out := captureStdout(func() { err = cmdStatus(cfg, q, false, "") })
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if !strings.Contains(out, "n/a") {
+		t.Fatalf("expected n/a cost in output, got: %s", out)
+	}
+	if !strings.Contains(out, "provider did not return token usage") {
+		t.Fatalf("expected unavailable usage reason in info column, got: %s", out)
 	}
 }
 

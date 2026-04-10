@@ -1,0 +1,7 @@
+profile_version: 1
+profiles:
+{{- range .Profiles }}
+  - name: {{ .Name }}
+    version: {{ .Version }}
+{{- end }}
+locked_at: {{ .LockedAt }}

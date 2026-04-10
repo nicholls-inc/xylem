@@ -1,0 +1,8 @@
+name: lessons
+class: harness-maintenance
+description: "Synthesize institutional-memory lessons from persisted vessel artifacts"
+allow_additive_protected_writes: true
+phases:
+  - name: run
+    type: command
+    run: "xylem lessons"

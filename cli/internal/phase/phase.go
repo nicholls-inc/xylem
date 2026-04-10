@@ -22,6 +22,9 @@ type TemplateData struct {
 	PreviousOutputs map[string]string // phase name → output text
 	GateResult      string            // most recent gate command output
 	Vessel          VesselData
+	Repo            RepoData
+	Source          SourceData
+	Validation      ValidationData
 }
 
 // IssueData describes the issue being worked on.
@@ -42,7 +45,29 @@ type PhaseData struct {
 // VesselData identifies the vessel (work item) being processed.
 type VesselData struct {
 	ID     string
+	Ref    string
 	Source string
+	Meta   map[string]string
+}
+
+// RepoData describes repository-level template metadata for the vessel.
+type RepoData struct {
+	Slug          string
+	DefaultBranch string
+}
+
+// SourceData describes the configured source that produced the vessel.
+type SourceData struct {
+	Name string
+	Repo string
+}
+
+// ValidationData describes optional repo-specific validation commands.
+type ValidationData struct {
+	Format string
+	Lint   string
+	Build  string
+	Test   string
 }
 
 // TruncateOutput truncates s to maxLen characters, appending a suffix if truncated.
@@ -63,6 +88,13 @@ func prepareData(data TemplateData) TemplateData {
 		out.PreviousOutputs = make(map[string]string, len(data.PreviousOutputs))
 		for k, v := range data.PreviousOutputs {
 			out.PreviousOutputs[k] = TruncateOutput(v, MaxPreviousOutputLen)
+		}
+	}
+
+	if data.Vessel.Meta != nil {
+		out.Vessel.Meta = make(map[string]string, len(data.Vessel.Meta))
+		for k, v := range data.Vessel.Meta {
+			out.Vessel.Meta[k] = v
 		}
 	}
 
