@@ -869,18 +869,94 @@ func TestUpdateValidTransitionFailedToPending(t *testing.T) {
 	if err := q.Update(vessel.ID, StateFailed, "transient error"); err != nil {
 		t.Fatalf("fail: %v", err)
 	}
+	failed, err := q.FindByID(vessel.ID)
+	if err != nil {
+		t.Fatalf("FindByID after fail: %v", err)
+	}
+	failed.CurrentPhase = 2
+	failed.PhaseOutputs = map[string]string{"plan": "done"}
+	failed.WorktreePath = "/tmp/wt-14"
+	if err := q.UpdateVessel(*failed); err != nil {
+		t.Fatalf("UpdateVessel(failed): %v", err)
+	}
 
 	// Retry: failed -> pending should be allowed.
 	if err := q.Update(vessel.ID, StatePending, ""); err != nil {
 		t.Fatalf("expected failed->pending to succeed for retry, got: %v", err)
 	}
 
-	vessels, err := q.List()
+	got, err := q.FindByID(vessel.ID)
 	if err != nil {
-		t.Fatalf("list: %v", err)
+		t.Fatalf("FindByID: %v", err)
 	}
-	if vessels[0].State != StatePending {
-		t.Fatalf("expected pending after retry, got %q", vessels[0].State)
+	if got.State != StatePending {
+		t.Fatalf("expected pending after retry, got %q", got.State)
+	}
+	if got.WorktreePath != "/tmp/wt-14" {
+		t.Fatalf("expected WorktreePath preserved, got %q", got.WorktreePath)
+	}
+	if got.CurrentPhase != 2 {
+		t.Fatalf("expected CurrentPhase preserved, got %d", got.CurrentPhase)
+	}
+	if got.PhaseOutputs["plan"] != "done" {
+		t.Fatalf("expected PhaseOutputs[plan]=done, got %q", got.PhaseOutputs["plan"])
+	}
+}
+
+func TestUpdateValidTransitionRunningToPending(t *testing.T) {
+	q, _ := newTestQueue(t)
+	vessel := testVessel(15)
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	running, err := q.Dequeue()
+	if err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if running == nil {
+		t.Fatal("Dequeue() = nil, want vessel")
+	}
+	running.CurrentPhase = 2
+	running.PhaseOutputs = map[string]string{"plan": "done"}
+	running.WorktreePath = "/tmp/wt-15"
+	running.GateRetries = 3
+	running.FailedPhase = "implement"
+	running.GateOutput = "missing check"
+	if err := q.UpdateVessel(*running); err != nil {
+		t.Fatalf("UpdateVessel(running): %v", err)
+	}
+
+	if err := q.Update(vessel.ID, StatePending, ""); err != nil {
+		t.Fatalf("expected running->pending to succeed for restart recovery, got: %v", err)
+	}
+
+	got, err := q.FindByID(vessel.ID)
+	if err != nil {
+		t.Fatalf("FindByID: %v", err)
+	}
+	if got.State != StatePending {
+		t.Fatalf("expected pending after restart recovery, got %q", got.State)
+	}
+	if got.StartedAt != nil {
+		t.Fatal("expected StartedAt to be cleared")
+	}
+	if got.GateRetries != 0 {
+		t.Fatalf("expected GateRetries reset, got %d", got.GateRetries)
+	}
+	if got.FailedPhase != "" {
+		t.Fatalf("expected FailedPhase cleared, got %q", got.FailedPhase)
+	}
+	if got.GateOutput != "" {
+		t.Fatalf("expected GateOutput cleared, got %q", got.GateOutput)
+	}
+	if got.CurrentPhase != 2 {
+		t.Fatalf("expected CurrentPhase preserved, got %d", got.CurrentPhase)
+	}
+	if got.PhaseOutputs["plan"] != "done" {
+		t.Fatalf("expected PhaseOutputs[plan]=done, got %q", got.PhaseOutputs["plan"])
+	}
+	if got.WorktreePath != "" {
+		t.Fatalf("expected WorktreePath cleared, got %q", got.WorktreePath)
 	}
 }
 

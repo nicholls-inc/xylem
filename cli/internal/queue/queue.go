@@ -35,6 +35,7 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 		StateCancelled: true,
 	},
 	StateRunning: {
+		StatePending:   true, // daemon restart recovery requeues orphaned work
 		StateCompleted: true,
 		StateFailed:    true,
 		StateCancelled: true,
@@ -227,13 +228,7 @@ func (q *Queue) Update(id string, state VesselState, errMsg string) error {
 			vessels[i].State = state
 			switch state {
 			case StatePending:
-				vessels[i].EndedAt = nil
-				vessels[i].Error = ""
-				vessels[i].GateRetries = 0
-				vessels[i].WaitingSince = nil
-				vessels[i].WaitingFor = ""
-				vessels[i].FailedPhase = ""
-				vessels[i].GateOutput = ""
+				resetPendingState(&vessels[i], previous.State)
 			case StateRunning:
 				if vessels[i].StartedAt == nil {
 					vessels[i].StartedAt = &now
@@ -268,6 +263,20 @@ func (q *Queue) Update(id string, state VesselState, errMsg string) error {
 
 		return fmt.Errorf("vessel %s not found", id)
 	})
+}
+
+func resetPendingState(vessel *Vessel, previousState VesselState) {
+	vessel.StartedAt = nil
+	vessel.EndedAt = nil
+	vessel.Error = ""
+	vessel.GateRetries = 0
+	vessel.WaitingSince = nil
+	vessel.WaitingFor = ""
+	vessel.FailedPhase = ""
+	vessel.GateOutput = ""
+	if previousState == StateRunning {
+		vessel.WorktreePath = ""
+	}
 }
 
 func (q *Queue) List() ([]Vessel, error) {

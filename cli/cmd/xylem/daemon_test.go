@@ -1049,7 +1049,7 @@ func TestWS1S28DaemonPathWiresScaffolding(t *testing.T) {
 }
 
 func TestReconcileStaleVessels(t *testing.T) {
-	t.Run("orphaned running vessel transitions to timed_out", func(t *testing.T) {
+	t.Run("orphaned running vessel is requeued as pending", func(t *testing.T) {
 		dir := t.TempDir()
 		q := queue.New(filepath.Join(dir, "queue.jsonl"))
 		now := time.Now().UTC()
@@ -1060,6 +1060,12 @@ func TestReconcileStaleVessels(t *testing.T) {
 			t.Fatal("expected vessel from dequeue")
 			return
 		}
+		v.CurrentPhase = 2
+		v.PhaseOutputs = map[string]string{"plan": "done"}
+		v.WorktreePath = "/tmp/worktree-stale-1"
+		if err := q.UpdateVessel(*v); err != nil {
+			t.Fatalf("UpdateVessel() error = %v", err)
+		}
 
 		reconcileStaleVessels(q, nil)
 
@@ -1067,15 +1073,27 @@ func TestReconcileStaleVessels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to find vessel: %v", err)
 		}
-		if updated.State != queue.StateTimedOut {
-			t.Errorf("expected state %s, got %s", queue.StateTimedOut, updated.State)
+		if updated.State != queue.StatePending {
+			t.Errorf("expected state %s, got %s", queue.StatePending, updated.State)
 		}
-		if updated.Error != "orphaned by daemon restart" {
-			t.Errorf("expected error 'orphaned by daemon restart', got %q", updated.Error)
+		if updated.Error != "" {
+			t.Errorf("expected cleared error, got %q", updated.Error)
+		}
+		if updated.StartedAt != nil {
+			t.Fatal("expected StartedAt to be cleared")
+		}
+		if updated.CurrentPhase != 2 {
+			t.Fatalf("updated.CurrentPhase = %d, want 2", updated.CurrentPhase)
+		}
+		if updated.PhaseOutputs["plan"] != "done" {
+			t.Fatalf("updated.PhaseOutputs[plan] = %q, want done", updated.PhaseOutputs["plan"])
+		}
+		if updated.WorktreePath != "" {
+			t.Fatalf("updated.WorktreePath = %q, want empty", updated.WorktreePath)
 		}
 	})
 
-	t.Run("recently started running vessel is also recovered", func(t *testing.T) {
+	t.Run("recently started running vessel is also requeued", func(t *testing.T) {
 		dir := t.TempDir()
 		q := queue.New(filepath.Join(dir, "queue.jsonl"))
 		now := time.Now().UTC()
@@ -1094,8 +1112,8 @@ func TestReconcileStaleVessels(t *testing.T) {
 		if err != nil {
 			t.Fatalf("failed to find vessel: %v", err)
 		}
-		if updated.State != queue.StateTimedOut {
-			t.Errorf("expected state %s, got %s", queue.StateTimedOut, updated.State)
+		if updated.State != queue.StatePending {
+			t.Errorf("expected state %s, got %s", queue.StatePending, updated.State)
 		}
 	})
 
@@ -1119,7 +1137,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 		}
 	})
 
-	t.Run("running vessel with nil StartedAt is recovered", func(t *testing.T) {
+	t.Run("running vessel with nil StartedAt is requeued", func(t *testing.T) {
 		dir := t.TempDir()
 		q := queue.New(filepath.Join(dir, "queue.jsonl"))
 		now := time.Now().UTC()
@@ -1132,12 +1150,12 @@ func TestReconcileStaleVessels(t *testing.T) {
 		reconcileStaleVessels(q, nil)
 
 		updated, _ := q.FindByID("nil-start")
-		if updated.State != queue.StateTimedOut {
-			t.Errorf("expected state timed_out for nil StartedAt, got %s", updated.State)
+		if updated.State != queue.StatePending {
+			t.Errorf("expected state pending for nil StartedAt, got %s", updated.State)
 		}
 	})
 
-	t.Run("dtu fixture-backed stale running vessel keeps DTU evidence", func(t *testing.T) {
+	t.Run("dtu fixture-backed stale running vessel is requeued without timeout side effects", func(t *testing.T) {
 		repoDir, store, q, cmdRunner := newDaemonDTUEnv(t, "issue-daemon-recovery.yaml")
 		defer withDaemonWorkingDir(t, repoDir)()
 
@@ -1211,28 +1229,31 @@ func TestReconcileStaleVessels(t *testing.T) {
 			t.Fatalf("Stat(%q): %v", absWorktree, err)
 		}
 
-		reconcileStaleVessels(q, nil)
+		reconcileStaleVessels(q, wt)
 
 		updated, err := q.FindByID("issue-4")
 		if err != nil {
 			t.Fatalf("FindByID(issue-4) error = %v", err)
 		}
-		if updated.State != queue.StateTimedOut {
-			t.Fatalf("updated.State = %q, want %q", updated.State, queue.StateTimedOut)
+		if updated.State != queue.StatePending {
+			t.Fatalf("updated.State = %q, want %q", updated.State, queue.StatePending)
 		}
-		if updated.Error != "orphaned by daemon restart" {
-			t.Fatalf("updated.Error = %q, want %q", updated.Error, "orphaned by daemon restart")
+		if updated.Error != "" {
+			t.Fatalf("updated.Error = %q, want empty", updated.Error)
 		}
-		if updated.EndedAt == nil {
-			t.Fatal("updated.EndedAt = nil, want end timestamp")
+		if updated.EndedAt != nil {
+			t.Fatal("updated.EndedAt != nil, want cleared end timestamp")
 		}
-		if updated.StartedAt == nil {
-			t.Fatal("updated.StartedAt = nil, want start timestamp")
+		if updated.StartedAt != nil {
+			t.Fatal("updated.StartedAt != nil, want cleared start timestamp")
+		}
+		if updated.WorktreePath != "" {
+			t.Fatalf("updated.WorktreePath = %q, want empty", updated.WorktreePath)
 		}
 
 		assertLabelsEqual(t, readDaemonDTULabels(t, store, "owner/repo", 4), []string{"bug", "in-progress"})
-		if _, err := os.Stat(absWorktree); err != nil {
-			t.Fatalf("Stat(%q) after reconcile: %v", absWorktree, err)
+		if _, err := os.Stat(absWorktree); !os.IsNotExist(err) {
+			t.Fatalf("Stat(%q) after reconcile error = %v, want not exist", absWorktree, err)
 		}
 
 		state := loadDaemonDTUState(t, store)
@@ -1241,11 +1262,8 @@ func TestReconcileStaleVessels(t *testing.T) {
 			t.Fatal("RepositoryBySlug(owner/repo) = nil")
 			return
 		}
-		if len(repo.Worktrees) != 1 {
-			t.Fatalf("len(repo.Worktrees) = %d, want 1", len(repo.Worktrees))
-		}
-		if repo.Worktrees[0].Branch != src.BranchName(*vessel) {
-			t.Fatalf("worktree branch = %q, want %q", repo.Worktrees[0].Branch, src.BranchName(*vessel))
+		if len(repo.Worktrees) != 0 {
+			t.Fatalf("len(repo.Worktrees) = %d, want 0", len(repo.Worktrees))
 		}
 
 		events := readDaemonDTUEvents(t, store)
@@ -1262,6 +1280,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 			{"fetch", "origin", "main"},
 			{"worktree", "list", "--porcelain"},
 			{"worktree", "add", ".claude/worktrees/" + wantBranch, "-B", wantBranch, "origin/main"},
+			{"worktree", "remove", worktreePath, "--force"},
 		}
 		for _, want := range wantCommands {
 			found := false
