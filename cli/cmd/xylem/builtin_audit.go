@@ -25,7 +25,7 @@ func runBuiltInScheduledVessels(ctx context.Context, cfg *config.Config, q *queu
 
 	var result runner.DrainResult
 	for _, vessel := range pending {
-		if vessel.Source != "scheduled" || !isBuiltInScheduledWorkflow(vessel.Workflow) {
+		if !isBuiltInScheduledVessel(cfg, vessel) {
 			continue
 		}
 		result.Launched++
@@ -80,6 +80,28 @@ func isBuiltInScheduledWorkflow(workflow string) bool {
 	}
 }
 
+func isBuiltInScheduledVessel(cfg *config.Config, vessel queue.Vessel) bool {
+	if !isBuiltInScheduledWorkflow(vessel.Workflow) {
+		return false
+	}
+	switch vessel.Source {
+	case "scheduled", "schedule":
+		return true
+	}
+	if cfg == nil || vessel.Meta == nil {
+		return false
+	}
+	name := strings.TrimSpace(vessel.Meta["config_source"])
+	if name == "" {
+		return false
+	}
+	srcCfg, ok := cfg.Sources[name]
+	if !ok {
+		return false
+	}
+	return srcCfg.Type == "scheduled" || srcCfg.Type == "schedule"
+}
+
 func runBuiltInScheduledWorkflow(ctx context.Context, cfg *config.Config, workflowName, repo string, cmdRunner auditCommandRunner) error {
 	now := time.Now().UTC()
 	switch workflowName {
@@ -117,14 +139,16 @@ func resolveScheduledAuditRepo(cfg *config.Config, vessel queue.Vessel) string {
 	if vessel.Meta != nil {
 		if name := strings.TrimSpace(vessel.Meta["config_source"]); name != "" {
 			if srcCfg, ok := cfg.Sources[name]; ok {
-				return strings.TrimSpace(srcCfg.Repo)
+				if repo := strings.TrimSpace(srcCfg.Repo); repo != "" {
+					return repo
+				}
 			}
 		}
 		if repo := strings.TrimSpace(vessel.Meta["scheduled_repo"]); repo != "" {
 			return repo
 		}
 	}
-	return ""
+	return detectLessonsRepo(cfg)
 }
 
 func persistBuiltInAuditSummary(cfg *config.Config, vessel queue.Vessel) error {
