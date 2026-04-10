@@ -8,9 +8,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	workflowpkg "github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestSmoke_S1_LoadCoreProfileReturnsEmbeddedAssets(t *testing.T) {
@@ -119,13 +121,16 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, sortedKeys(composed.Workflows), "implement-harness")
+	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
 	assert.Contains(t, sortedKeys(composed.Workflows), "unblock-wave")
 	assert.Contains(t, sortedKeys(composed.Workflows), "diagnose-failures")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
+	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
 	require.Len(t, composed.ConfigOverlays, 2)
@@ -134,6 +139,43 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, implementHarnessWorkflow, `--repo nicholls-inc/xylem`)
 	assert.Contains(t, implementHarnessWorkflow, `--label "harness-impl"`)
 	assert.Contains(t, implementHarnessWorkflow, `--label "ready-to-merge"`)
+}
+
+func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	var source config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-improvement"], &source))
+	assert.Equal(t, "scheduled", source.Type)
+	assert.Equal(t, "{{ .Repo }}", source.Repo)
+	assert.Equal(t, "@daily", source.Schedule)
+	require.Contains(t, source.Tasks, "daily-rotation")
+	assert.Equal(t, "continuous-improvement", source.Tasks["daily-rotation"].Workflow)
+	assert.Equal(t, "continuous-improvement", source.Tasks["daily-rotation"].Ref)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["continuous-improvement"], &wf))
+	assert.Equal(t, "continuous-improvement", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 5)
+	assert.Equal(t, "select_focus", wf.Phases[0].Name)
+	assert.Equal(t, "command", wf.Phases[0].Type)
+	assert.Contains(t, wf.Phases[0].Run, "continuous-improvement select")
+	assert.Equal(t, ".xylem/prompts/continuous-improvement/analyze.md", wf.Phases[1].PromptFile)
+	assert.Equal(t, ".xylem/prompts/continuous-improvement/verify.md", wf.Phases[4].PromptFile)
+	require.NotNil(t, wf.Phases[3].Gate)
+	assert.Equal(t, "command", wf.Phases[3].Gate.Type)
+	assert.Equal(t, 2, wf.Phases[3].Gate.Retries)
+	assert.Contains(t, wf.Phases[3].Gate.Run, ".Validation.Format")
+	assert.Contains(t, wf.Phases[3].Gate.Run, ".Validation.Test")
+
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/analyze")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/plan")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/implement")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

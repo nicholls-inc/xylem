@@ -68,6 +68,15 @@ sources:
       weekly-continuous-simplicity:
         workflow: continuous-simplicity
         ref: continuous-simplicity
+  continuous-improvement:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@daily"
+    timeout: "90m"
+    tasks:
+      daily-rotation:
+        workflow: continuous-improvement
+        ref: continuous-improvement
   harness-post-merge:
     type: github-merge
     repo: "{{ .Repo }}"
