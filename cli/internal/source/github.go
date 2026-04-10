@@ -137,9 +137,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				if blocked {
 					continue
 				}
-				if g.hasBranch(ctx, issue.Number) ||
-					g.hasOpenPR(ctx, issue.Number) ||
-					g.hasMergedPR(ctx, issue.Number) {
+				if g.scanBlockedByRepoState(ctx, issue.Number, retryVessel != nil) {
 					continue
 				}
 				seen[issue.Number] = true
@@ -507,4 +505,20 @@ func (g *GitHub) hasMergedPR(ctx context.Context, issueNum int) bool {
 		}
 	}
 	return false
+}
+
+func (g *GitHub) scanBlockedByRepoState(ctx context.Context, issueNum int, retrying bool) bool {
+	if retrying {
+		if g.hasOpenPR(ctx, issueNum) {
+			return true
+		}
+		return g.hasMergedPR(ctx, issueNum)
+	}
+	if g.hasBranch(ctx, issueNum) {
+		return true
+	}
+	if g.hasOpenPR(ctx, issueNum) {
+		return true
+	}
+	return g.hasMergedPR(ctx, issueNum)
 }
