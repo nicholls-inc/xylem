@@ -6,7 +6,7 @@ sources:
     type: github
     repo: nicholls-inc/xylem
     exclude:
-      [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
+      [wontfix, duplicate, in-progress, no-bot, harness-impl]
     tasks:
       fix-bugs:
         labels: [bug, ready-for-work]
@@ -19,7 +19,7 @@ sources:
     type: github
     repo: nicholls-inc/xylem
     exclude:
-      [wontfix, duplicate, in-progress, no-bot, harness-impl, xylem-failed]
+      [wontfix, duplicate, in-progress, no-bot, harness-impl]
     tasks:
       implement-features:
         labels: [enhancement, ready-for-work]
@@ -32,7 +32,7 @@ sources:
     type: github
     repo: nicholls-inc/xylem
     exclude:
-      [wontfix, duplicate, in-progress, no-bot, needs-refinement, xylem-failed]
+      [wontfix, duplicate, in-progress, no-bot, needs-refinement]
     tasks:
       triage-issues:
         labels: [needs-triage]
@@ -44,7 +44,7 @@ sources:
   refinement:
     type: github
     repo: nicholls-inc/xylem
-    exclude: [wontfix, duplicate, in-progress, no-bot, xylem-failed]
+    exclude: [wontfix, duplicate, in-progress, no-bot]
     tasks:
       refine-issues:
         labels: [needs-refinement]
@@ -58,7 +58,7 @@ sources:
     type: github
     repo: nicholls-inc/xylem
     timeout: "90m"
-    exclude: [wontfix, duplicate, in-progress, no-bot, blocked, xylem-failed]
+    exclude: [wontfix, duplicate, in-progress, no-bot, blocked]
     tasks:
       implement-harness-steps:
         labels: [harness-impl, ready-for-work]

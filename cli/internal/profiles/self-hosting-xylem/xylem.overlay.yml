@@ -3,7 +3,7 @@ sources:
     type: github
     repo: "{{ .Repo }}"
     timeout: "90m"
-    exclude: [wontfix, duplicate, in-progress, no-bot, blocked, xylem-failed]
+    exclude: [wontfix, duplicate, in-progress, no-bot, blocked]
     tasks:
       implement-harness-steps:
         labels: [harness-impl, ready-for-work]

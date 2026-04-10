@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +13,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 )
 
 const (
@@ -301,7 +305,7 @@ func buildHarnessGapFindings(ctx context.Context, stateDir, repo string, runner 
 	} else if finding != nil {
 		findings = append(findings, *finding)
 	}
-	if finding, err := detectFailedFingerprintBacklogGap(ctx, repo, runner); err != nil {
+	if finding, err := detectFailedFingerprintBacklogGap(ctx, stateDir, repo, runner); err != nil {
 		return nil, nil, err
 	} else if finding != nil {
 		findings = append(findings, *finding)
@@ -565,7 +569,7 @@ func detectConfigDriftGap(ctx context.Context, runner issueRunner) (*HarnessGapF
 	return &finding, nil
 }
 
-func detectFailedFingerprintBacklogGap(ctx context.Context, repo string, runner issueRunner) (*HarnessGapFinding, error) {
+func detectFailedFingerprintBacklogGap(ctx context.Context, stateDir, repo string, runner issueRunner) (*HarnessGapFinding, error) {
 	args := append(harnessGapRepoArgs(repo), "issue", "list", "--state", "open", "--label", "xylem-failed", "--limit", "100", "--json", "number,title,url,labels")
 	out, err := runner.RunOutput(ctx, "gh", args...)
 	if err != nil {
@@ -576,14 +580,25 @@ func detectFailedFingerprintBacklogGap(ctx context.Context, repo string, runner 
 		return nil, fmt.Errorf("detect failed-fingerprint backlog gap: parse gh issue list output: %w", err)
 	}
 
+	var q *queue.Queue
+	if strings.TrimSpace(stateDir) != "" {
+		q = queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	}
 	evidence := make([]string, 0, len(issues))
 	count := 0
 	for _, issue := range issues {
 		if hasHarnessGapLabel(issue.Labels, "ready-for-work") {
 			continue
 		}
+		missingRoute, detail, err := failedFingerprintIssueMissingRoute(stateDir, q, issue)
+		if err != nil {
+			return nil, err
+		}
+		if !missingRoute {
+			continue
+		}
 		count++
-		evidence = append(evidence, fmt.Sprintf("#%d `%s` is still labeled `xylem-failed` without `ready-for-work`", issue.Number, issue.Title))
+		evidence = append(evidence, detail)
 	}
 	if count < harnessGapFailedBacklogThreshold {
 		return nil, nil
@@ -592,16 +607,44 @@ func detectFailedFingerprintBacklogGap(ctx context.Context, repo string, runner 
 	finding := newHarnessGapFinding(
 		"failed-fingerprint-backlog",
 		"harness-gap-analysis: failed backlog is missing automatic retry routing",
-		fmt.Sprintf("%d failed issue(s) remain parked behind `xylem-failed` without a ready-for-work route", count),
+		fmt.Sprintf("%d failed issue(s) remain labeled `xylem-failed` without queue lineage or a recorded recovery policy", count),
 		count,
 		harnessGapFailedBacklogThreshold,
 		evidence,
 		[]string{
-			"Escalate parked failed issues when no retry cooldown or unlock path returns them to the backlog.",
-			"Pair failure fingerprints with deterministic requeue policies so failed work does not silently accumulate.",
+			"Persist queue lineage and failure-review artifacts for failed issues so the scanner can prove whether a retry or follow-up route exists.",
+			"Escalate failed issues only when they lack a recorded recovery policy, not merely because they are waiting out cooldown.",
 		},
 	)
 	return &finding, nil
+}
+
+func failedFingerprintIssueMissingRoute(stateDir string, q *queue.Queue, issue harnessGapIssue) (bool, string, error) {
+	if q == nil {
+		return true, fmt.Sprintf("#%d `%s` has no local queue context to verify recovery routing", issue.Number, issue.Title), nil
+	}
+	latest, err := q.FindLatestByRef(issue.URL)
+	if err != nil {
+		return true, fmt.Sprintf("#%d `%s` has `xylem-failed` but no queue lineage to reconstruct a retry policy", issue.Number, issue.Title), nil
+	}
+	switch latest.State {
+	case queue.StatePending, queue.StateRunning, queue.StateWaiting, queue.StateCompleted:
+		return false, "", nil
+	case queue.StateFailed, queue.StateTimedOut:
+		artifact, err := recovery.LoadForVessel(stateDir, latest.ID)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return true, fmt.Sprintf("#%d `%s` latest failed vessel `%s` has no failure-review policy", issue.Number, issue.Title, latest.ID), nil
+			}
+			return false, "", fmt.Errorf("detect failed-fingerprint backlog gap: load recovery artifact for %s: %w", latest.ID, err)
+		}
+		if strings.TrimSpace(string(artifact.RecoveryAction)) == "" {
+			return true, fmt.Sprintf("#%d `%s` latest failed vessel `%s` has an empty recovery action", issue.Number, issue.Title, latest.ID), nil
+		}
+		return false, "", nil
+	default:
+		return true, fmt.Sprintf("#%d `%s` latest vessel `%s` is `%s` without an active recovery route", issue.Number, issue.Title, latest.ID, latest.State), nil
+	}
 }
 
 func loadHarnessGapDaemonLog(path string) ([]harnessGapDaemonEntry, error) {

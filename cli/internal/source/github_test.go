@@ -202,7 +202,7 @@ func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailure(t *testing.T) {
 		URL:    "https://github.com/owner/repo/issues/42",
 		Labels: []struct {
 			Name string `json:"name"`
-		}{{Name: "bug"}},
+		}{{Name: "bug"}, {Name: "xylem-failed"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
 	r.set(issueBytes, "gh", "search", "issues",
@@ -242,8 +242,13 @@ func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailure(t *testing.T) {
 	require.NoError(t, recovery.Save(dir, artifact))
 
 	g := &GitHub{
-		Repo:      "owner/repo",
-		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{"fix": {
+			Labels:       []string{"bug"},
+			Workflow:     "fix-bug",
+			StatusLabels: &StatusLabels{Failed: "xylem-failed"},
+		}},
+		Exclude:   []string{"xylem-failed"},
 		StateDir:  dir,
 		Queue:     q,
 		CmdRunner: r,
@@ -1002,7 +1007,7 @@ func TestOnFailNilRunner(t *testing.T) {
 	}
 }
 
-func TestScanSkipsExcludedFailedLabel(t *testing.T) {
+func TestScanSkipsFailedStatusLabelWithoutEligibleRetry(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	r := newMock()
@@ -1028,8 +1033,12 @@ func TestScanSkipsExcludedFailedLabel(t *testing.T) {
 		"--label", "bug")
 
 	g := &GitHub{
-		Repo:      "owner/repo",
-		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{"fix": {
+			Labels:       []string{"bug"},
+			Workflow:     "fix-bug",
+			StatusLabels: &StatusLabels{Failed: "xylem-failed"},
+		}},
 		Exclude:   []string{"xylem-failed"},
 		Queue:     q,
 		CmdRunner: r,
@@ -1040,8 +1049,77 @@ func TestScanSkipsExcludedFailedLabel(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(vessels) != 0 {
-		t.Errorf("expected 0 vessels (xylem-failed excluded), got %d", len(vessels))
+		t.Errorf("expected 0 vessels (failed status labels require retry eligibility), got %d", len(vessels))
 	}
+}
+
+func TestBacklogCountIncludesEligibleRetryableFailedIssue(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "xylem-failed"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "issue-42",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		Ref:       issues[0].URL,
+		State:     queue.StateFailed,
+		Error:     "temporary failure from upstream 503",
+		CreatedAt: time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown),
+	})
+	require.NoError(t, recovery.Save(dir, artifact))
+
+	g := &GitHub{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{"fix": {
+			Labels:       []string{"bug"},
+			Workflow:     "fix-bug",
+			StatusLabels: &StatusLabels{Failed: "xylem-failed"},
+		}},
+		Exclude:   []string{"xylem-failed"},
+		StateDir:  dir,
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	count, err := g.BacklogCount(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
 }
 
 func TestScanPersistsTriggerLabelInMeta(t *testing.T) {
