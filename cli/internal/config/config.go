@@ -196,7 +196,7 @@ type DaemonConfig struct {
 	// AutoUpgrade is true. Defaults to 5m. Accepts any Go duration string.
 	UpgradeInterval string `yaml:"upgrade_interval,omitempty"`
 	// AutoMerge enables the daemon's automatic reviewer-request +
-	// admin-merge loop for merge-ready harness PRs. Only PRs matching the
+	// admin-merge loop for merge-ready vessel PRs. Only PRs matching the
 	// configured labels and branch pattern are eligible, and the
 	// no-auto-admin-merge label always opts a PR out.
 	AutoMerge bool `yaml:"auto_merge,omitempty"`

@@ -15,7 +15,7 @@ func xylemAutoMergeSettings(t *testing.T) autoMergeSettings {
 
 	settings, err := newAutoMergeSettings(config.DaemonConfig{
 		AutoMergeRepo:          "nicholls-inc/xylem",
-		AutoMergeLabels:        []string{"ready-to-merge", "harness-impl"},
+		AutoMergeLabels:        []string{"ready-to-merge"},
 		AutoMergeBranchPattern: `^(feat|fix|chore)/issue-\d+`,
 		AutoMergeReviewer:      "copilot-pull-request-reviewer",
 	})
@@ -208,7 +208,7 @@ func TestDecideAutoMergeAction(t *testing.T) {
 	}{{Conclusion: "SUCCESS", Status: "COMPLETED"}}
 	mergeReadyLabels := []struct {
 		Name string `json:"name"`
-	}{{Name: "ready-to-merge"}, {Name: "harness-impl"}}
+	}{{Name: "ready-to-merge"}}
 	copilotReviewed := []struct {
 		Author struct {
 			Login string `json:"login"`
@@ -244,12 +244,24 @@ func TestDecideAutoMergeAction(t *testing.T) {
 			want: actionSkip,
 		},
 		{
+			name: "xylem PR with harness label but no ready label is skipped",
+			pr: prSummary{
+				HeadRefName: "feat/issue-1-1",
+				State:       "OPEN",
+				Mergeable:   "MERGEABLE",
+				Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "harness-impl"}},
+			},
+			want: actionSkip,
+		},
+		{
 			name: "xylem PR with opt-out label stays blocked",
 			pr: prSummary{
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
 				Labels: []struct {
 					Name string `json:"name"`
-				}{{Name: "ready-to-merge"}, {Name: "harness-impl"}, {Name: settings.optOutLabel}},
+				}{{Name: "ready-to-merge"}, {Name: settings.optOutLabel}},
 				StatusCheckRollup: greenChecks,
 			},
 			want: actionBlockedOptOut,
@@ -270,7 +282,7 @@ func TestDecideAutoMergeAction(t *testing.T) {
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "CONFLICTING",
 				Labels: []struct {
 					Name string `json:"name"`
-				}{{Name: "needs-conflict-resolution"}, {Name: "ready-to-merge"}, {Name: "harness-impl"}},
+				}{{Name: "needs-conflict-resolution"}, {Name: "ready-to-merge"}},
 			},
 			want: actionWaitForMergeable,
 		},
@@ -350,6 +362,102 @@ func TestDecideAutoMergeAction(t *testing.T) {
 	}
 }
 
+func TestSmoke_S7_AutoMergeAppliesToReadyToMergeVesselPRWithoutHarnessImpl(t *testing.T) {
+	settings := xylemAutoMergeSettings(t)
+	origListOpenPRsFn := listOpenPRsFn
+	origGetPRSummaryFn := getPRSummaryFn
+	origRequestCopilotReviewFn := requestCopilotReviewFn
+	origAddPRLabelsFn := addPRLabelsFn
+	origAdminMergePRFn := adminMergePRFn
+	t.Cleanup(func() {
+		listOpenPRsFn = origListOpenPRsFn
+		getPRSummaryFn = origGetPRSummaryFn
+		requestCopilotReviewFn = origRequestCopilotReviewFn
+		addPRLabelsFn = origAddPRLabelsFn
+		adminMergePRFn = origAdminMergePRFn
+	})
+
+	mergeReadyPR := prSummary{
+		Number:         335,
+		HeadRefName:    "fix/issue-334-334",
+		Mergeable:      "MERGEABLE",
+		State:          "OPEN",
+		ReviewDecision: "APPROVED",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "ready-to-merge"}},
+		StatusCheckRollup: []struct {
+			Conclusion string `json:"conclusion"`
+			Status     string `json:"status"`
+		}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
+		LatestReviews: []struct {
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
+			State string `json:"state"`
+		}{{
+			Author: struct {
+				Login string `json:"login"`
+			}{Login: settings.reviewer},
+			State: "APPROVED",
+		}},
+	}
+	require.Equal(t, actionAdminMerge, decideAutoMergeAction(mergeReadyPR, settings))
+
+	listCalls := 0
+	listOpenPRsFn = func(_ context.Context, repo string) ([]prSummary, error) {
+		listCalls++
+		assert.Equal(t, settings.repo, repo)
+		return []prSummary{{
+			Number:      mergeReadyPR.Number,
+			HeadRefName: mergeReadyPR.HeadRefName,
+			State:       mergeReadyPR.State,
+			Labels:      mergeReadyPR.Labels,
+		}}, nil
+	}
+
+	summaryCalls := 0
+	getPRSummaryFn = func(_ context.Context, repo string, number int) (prSummary, error) {
+		summaryCalls++
+		assert.Equal(t, settings.repo, repo)
+		assert.Equal(t, mergeReadyPR.Number, number)
+		return mergeReadyPR, nil
+	}
+
+	reviewCalls := 0
+	requestCopilotReviewFn = func(context.Context, string, int, string) error {
+		reviewCalls++
+		return nil
+	}
+
+	labelCalls := 0
+	addPRLabelsFn = func(context.Context, string, int, []string) error {
+		labelCalls++
+		return nil
+	}
+
+	adminMergeCalls := 0
+	adminMergePRFn = func(_ context.Context, repo string, number int) error {
+		adminMergeCalls++
+		assert.Equal(t, settings.repo, repo)
+		assert.Equal(t, mergeReadyPR.Number, number)
+		return nil
+	}
+
+	autoMergeXylemPRs(context.Background(), config.DaemonConfig{
+		AutoMergeRepo:          settings.repo,
+		AutoMergeLabels:        append([]string(nil), settings.labels...),
+		AutoMergeBranchPattern: settings.branchPatternRaw,
+		AutoMergeReviewer:      settings.reviewer,
+	})
+
+	assert.Equal(t, 1, listCalls)
+	assert.Equal(t, 1, summaryCalls)
+	assert.Equal(t, 0, reviewCalls)
+	assert.Equal(t, 0, labelCalls)
+	assert.Equal(t, 1, adminMergeCalls)
+}
+
 func TestSmoke_S8_AutoMergeContinuesWhenConfiguredReviewerIsNotCollaborator(t *testing.T) {
 	settings := xylemAutoMergeSettings(t)
 	origListOpenPRsFn := listOpenPRsFn
@@ -373,7 +481,7 @@ func TestSmoke_S8_AutoMergeContinuesWhenConfiguredReviewerIsNotCollaborator(t *t
 		ReviewDecision: "REVIEW_REQUIRED",
 		Labels: []struct {
 			Name string `json:"name"`
-		}{{Name: "ready-to-merge"}, {Name: "harness-impl"}},
+		}{{Name: "ready-to-merge"}},
 		StatusCheckRollup: []struct {
 			Conclusion string `json:"conclusion"`
 			Status     string `json:"status"`
@@ -458,7 +566,7 @@ func TestSmoke_S9_AutoAdminMergeWithinOneDaemonTick(t *testing.T) {
 		ReviewDecision: "APPROVED",
 		Labels: []struct {
 			Name string `json:"name"`
-		}{{Name: "ready-to-merge"}, {Name: "harness-impl"}},
+		}{{Name: "ready-to-merge"}},
 		StatusCheckRollup: []struct {
 			Conclusion string `json:"conclusion"`
 			Status     string `json:"status"`
