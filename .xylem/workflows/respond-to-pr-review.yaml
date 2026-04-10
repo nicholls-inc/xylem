@@ -4,15 +4,11 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/respond-to-pr-review/analyze.md
     max_turns: 20
-    llm: copilot
-    model: gpt-5.4
     noop:
       match: XYLEM_NOOP
   - name: respond
     prompt_file: .xylem/prompts/respond-to-pr-review/respond.md
     max_turns: 60
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
@@ -20,5 +16,3 @@ phases:
   - name: push
     prompt_file: .xylem/prompts/respond-to-pr-review/push.md
     max_turns: 10
-    llm: copilot
-    model: gpt-5-mini

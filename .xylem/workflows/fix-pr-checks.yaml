@@ -4,15 +4,11 @@ phases:
   - name: diagnose
     prompt_file: .xylem/prompts/fix-pr-checks/diagnose.md
     max_turns: 30
-    llm: copilot
-    model: gpt-5.4
     noop:
       match: XYLEM_NOOP
   - name: fix
     prompt_file: .xylem/prompts/fix-pr-checks/fix.md
     max_turns: 60
-    llm: copilot
-    model: gpt-5.4
     gate:
       type: command
       run: |
@@ -25,5 +21,3 @@ phases:
   - name: push
     prompt_file: .xylem/prompts/fix-pr-checks/push.md
     max_turns: 10
-    llm: copilot
-    model: gpt-5-mini

@@ -4,13 +4,9 @@ phases:
   - name: ingest
     prompt_file: .xylem/prompts/sota-gap-analysis/ingest.md
     max_turns: 30
-    llm: copilot
-    model: gpt-5.4
   - name: survey
     prompt_file: .xylem/prompts/sota-gap-analysis/survey.md
     max_turns: 60
-    llm: copilot
-    model: gpt-5.4
   - name: diff
     type: command
     run: |
@@ -24,8 +20,6 @@ phases:
   - name: report
     prompt_file: .xylem/prompts/sota-gap-analysis/report.md
     max_turns: 40
-    llm: copilot
-    model: gpt-5.4
   - name: file_issues
     type: command
     run: |
