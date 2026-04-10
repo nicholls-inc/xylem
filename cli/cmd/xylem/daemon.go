@@ -374,21 +374,36 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 			lastUpgrade = now
 			upgrade()
 		} else if upgradeOverdue && drainIdle && inFlight > 0 {
-			// Overdue: log that we're pausing new dequeue to let in-flight
-			// vessels drain naturally, creating an idle window for the
-			// normal upgrade path on a subsequent tick. This does NOT kill
-			// running vessels — we wait for them to complete on their own.
-			slog.Warn("daemon auto-upgrade overdue; pausing new drain dequeue until idle",
-				"elapsed", upgradeElapsed,
-				"in_flight", inFlight)
+			// Check for phantom in_flight: the runner's atomic counter can
+			// get stuck when a goroutine is blocked on a killed subprocess
+			// whose grandchildren hold stdout/stderr open. Detect by
+			// comparing in_flight against actual queue state, but only
+			// after a longer grace period (2x overdue = 6x upgrade
+			// interval) to avoid racing with legitimate drain completions.
+			// Phantom threshold: 30 minutes of overdue with 0 queue running.
+			// This is deliberately long to avoid false positives during
+			// legitimate drain wind-down (the S39 test scenario).
+			phantomThreshold := 30 * time.Minute
+			if upgradeElapsed >= phantomThreshold && daemonQueueCounts(q).running == 0 {
+				slog.Warn("daemon auto-upgrade forcing past phantom in_flight",
+					"elapsed", upgradeElapsed,
+					"in_flight", inFlight,
+					"queue_running", 0)
+				lastUpgrade = now
+				upgrade()
+			} else {
+				slog.Warn("daemon auto-upgrade overdue; pausing new drain dequeue until idle",
+					"elapsed", upgradeElapsed,
+					"in_flight", inFlight)
+			}
 		}
 
 		// Drain dequeue is suppressed while an upgrade is overdue and
-		// in-flight vessels still exist. This creates the idle window the
-		// normal upgrade path needs, without exec()ing while subprocesses
-		// are alive. When in_flight reaches zero, the next tick fires the
-		// normal upgrade path above and dequeue resumes.
-		drainPaused := upgradeOverdue && inFlight > 0
+		// real in-flight vessels still exist. Once the phantom threshold
+		// fires (6x upgrade interval with 0 queue running), the forced
+		// upgrade above handles recovery via exec().
+		phantomInFlight := upgradeElapsed >= 30*time.Minute && inFlight > 0 && daemonQueueCounts(q).running == 0
+		drainPaused := upgradeOverdue && inFlight > 0 && !phantomInFlight
 		if !drainPaused && now.Sub(lastDrain) >= drainInterval {
 			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
