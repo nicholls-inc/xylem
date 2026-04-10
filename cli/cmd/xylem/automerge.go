@@ -229,7 +229,7 @@ func allChecksGreen(pr prSummary) bool {
 // The existing `respond-to-pr-review`, `fix-pr-checks`, and
 // `resolve-conflicts` workflows handle the intermediate steps via the
 // `github-pr-events` source, so auto-merge only needs to (1) kick off the
-// review cycle and (2) admin-merge trusted harness PRs once deterministic
+// review cycle and (2) admin-merge trusted vessel PRs once deterministic
 // merge safety checks pass.
 //
 // The repo slug comes from daemon.auto_merge_repo. If empty, gh uses the

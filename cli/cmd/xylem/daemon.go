@@ -160,7 +160,7 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		// freeing concurrency slots for real work.
 		drainRunner.CancelStalePRVessels(ctx)
 		// Auto-merge: best-effort request copilot review on merge-ready
-		// harness PRs, then admin-merge once deterministic safety checks
+		// vessel PRs, then admin-merge once deterministic safety checks
 		// are green.
 		if cfg.Daemon.AutoMerge {
 			autoMergeXylemPRs(ctx, cfg.Daemon)

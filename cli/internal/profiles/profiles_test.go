@@ -75,6 +75,7 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 		"workflow-health-report",
 	}, sortedKeys(composed.Workflows))
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/plan")
+	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/pr")
 	assert.Contains(t, sortedKeys(composed.Prompts), "security-compliance/synthesize")
 	assert.Contains(t, sortedKeys(composed.Prompts), "workflow-health-report/report")
 	assert.Contains(t, sortedKeys(composed.Sources), "pr-lifecycle")
@@ -83,7 +84,10 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 
 	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
 	assert.Contains(t, string(composed.Workflows["implement-feature"]), "name: implement-feature")
+	assert.Contains(t, string(composed.Prompts["adapt-repo/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "Create a pull request")
+	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), `--label "ready-to-merge"`)
+	assert.Contains(t, string(composed.Prompts["implement-feature/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.ConfigOverlays[0]), `repo: "{{ .Repo }}"`)
 }
 

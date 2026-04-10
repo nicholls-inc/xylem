@@ -187,7 +187,7 @@ daemon:
   auto_upgrade: true
   auto_merge: true
   auto_merge_repo: nicholls-inc/xylem
-  auto_merge_labels: [ready-to-merge, harness-impl]
+  auto_merge_labels: [ready-to-merge]
   auto_merge_branch_pattern: "^(feat|fix|chore)/issue-\\d+"
   auto_merge_reviewer: "copilot-pull-request-reviewer"
 

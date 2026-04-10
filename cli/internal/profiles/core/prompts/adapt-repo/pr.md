@@ -12,3 +12,10 @@ The PR body must:
 - Explain that the changes are restricted to harness/control-plane files and remain PR-gated.
 
 Do not broaden scope beyond the validated adaptation plan.
+
+Create the PR with the merge-ready label so the daemon auto-merge path can pick
+up this vessel-produced PR once checks are green:
+
+```
+gh pr create --title "[xylem] adapt harness to this repository" --body "<body>" --label "ready-to-merge"
+```
