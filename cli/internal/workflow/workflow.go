@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"gopkg.in/yaml.v3"
@@ -59,18 +60,19 @@ const (
 
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
-	Name         string   `yaml:"name"`
-	Type         string   `yaml:"type,omitempty"` // "prompt" (default) or "command"
-	Run          string   `yaml:"run,omitempty"`  // shell command for type=command, supports template variables
-	PromptFile   string   `yaml:"prompt_file"`
-	MaxTurns     int      `yaml:"max_turns"`
-	LLM          *string  `yaml:"llm,omitempty"`
-	Model        *string  `yaml:"model,omitempty"`
-	Tier         *string  `yaml:"tier,omitempty"`
-	NoOp         *NoOp    `yaml:"noop,omitempty"`
-	Gate         *Gate    `yaml:"gate,omitempty"`
-	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
-	DependsOn    []string `yaml:"depends_on,omitempty"`
+	Name         string                `yaml:"name"`
+	Type         string                `yaml:"type,omitempty"` // "prompt" (default) or "command"
+	Run          string                `yaml:"run,omitempty"`  // shell command for type=command, supports template variables
+	PromptFile   string                `yaml:"prompt_file"`
+	MaxTurns     int                   `yaml:"max_turns"`
+	LLM          *string               `yaml:"llm,omitempty"`
+	Model        *string               `yaml:"model,omitempty"`
+	Tier         *string               `yaml:"tier,omitempty"`
+	NoOp         *NoOp                 `yaml:"noop,omitempty"`
+	Gate         *Gate                 `yaml:"gate,omitempty"`
+	Evaluator    *evaluator.EvalConfig `yaml:"evaluator,omitempty"`
+	AllowedTools *string               `yaml:"allowed_tools,omitempty"`
+	DependsOn    []string              `yaml:"depends_on,omitempty"`
 }
 
 // NoOp defines an early-success completion rule for a phase.
@@ -295,6 +297,10 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			}
 		}
 
+		if err := validatePhaseEvaluator(p); err != nil {
+			return err
+		}
+
 		if p.AllowedTools != nil && *p.AllowedTools == "" {
 			return fmt.Errorf("phase %q: allowed_tools must not be empty when specified", p.Name)
 		}
@@ -458,6 +464,19 @@ func validateDependencyCycles(phases []Phase) error {
 func validateNoOp(phaseName string, n *NoOp) error {
 	if strings.TrimSpace(n.Match) == "" {
 		return fmt.Errorf("phase %q: noop: match is required", phaseName)
+	}
+	return nil
+}
+
+func validatePhaseEvaluator(p Phase) error {
+	if p.Evaluator == nil {
+		return nil
+	}
+	if p.Type == "command" {
+		return fmt.Errorf("phase %q: evaluator is only supported for prompt phases", p.Name)
+	}
+	if err := evaluator.ValidateConfig(*p.Evaluator); err != nil {
+		return fmt.Errorf("phase %q: evaluator: %w", p.Name, err)
 	}
 	return nil
 }
