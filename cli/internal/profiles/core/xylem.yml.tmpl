@@ -31,6 +31,15 @@ sources:
       issues:
         labels: [needs-triage]
         workflow: triage
+  auto-triage-issues:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "6h"
+    timeout: "45m"
+    tasks:
+      unlabeled-issues:
+        workflow: auto-triage-issues
+        ref: auto-triage-issues
   refinement:
     type: github
     repo: "{{ .Repo }}"

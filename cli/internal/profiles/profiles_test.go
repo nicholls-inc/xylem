@@ -60,6 +60,7 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 
 	assert.Equal(t, []string{
 		"adapt-repo",
+		"auto-triage-issues",
 		"context-weight-audit",
 		"fix-bug",
 		"fix-pr-checks",
@@ -76,19 +77,67 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	}, sortedKeys(composed.Workflows))
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/pr")
+	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/apply")
+	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/classify")
+	assert.Contains(t, sortedKeys(composed.Prompts), "auto-triage-issues/discover")
 	assert.Contains(t, sortedKeys(composed.Prompts), "security-compliance/synthesize")
 	assert.Contains(t, sortedKeys(composed.Prompts), "workflow-health-report/report")
+	assert.Contains(t, sortedKeys(composed.Sources), "auto-triage-issues")
 	assert.Contains(t, sortedKeys(composed.Sources), "pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "security-compliance")
 	require.Len(t, composed.ConfigOverlays, 1)
 
 	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
 	assert.Contains(t, string(composed.Workflows["implement-feature"]), "name: implement-feature")
+	assert.Contains(t, string(composed.Workflows["auto-triage-issues"]), "name: auto-triage-issues")
 	assert.Contains(t, string(composed.Prompts["adapt-repo/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "Create a pull request")
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["implement-feature/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.ConfigOverlays[0]), `repo: "{{ .Repo }}"`)
+}
+
+func TestSmoke_S2_CoreProfileScaffoldsAutoTriageScheduledWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	var source config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["auto-triage-issues"], &source))
+	assert.Equal(t, "scheduled", source.Type)
+	assert.Equal(t, "{{ .Repo }}", source.Repo)
+	assert.Equal(t, "6h", source.Schedule)
+	require.Contains(t, source.Tasks, "unlabeled-issues")
+	assert.Equal(t, "auto-triage-issues", source.Tasks["unlabeled-issues"].Workflow)
+	assert.Equal(t, "auto-triage-issues", source.Tasks["unlabeled-issues"].Ref)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["auto-triage-issues"], &wf))
+	assert.Equal(t, "auto-triage-issues", wf.Name)
+	assert.Equal(t, workflowpkg.ClassOps, wf.Class)
+	require.Len(t, wf.Phases, 3)
+	assert.Equal(t, "discover", wf.Phases[0].Name)
+	require.NotNil(t, wf.Phases[0].NoOp)
+	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
+	assert.Equal(t, ".xylem/prompts/auto-triage-issues/classify.md", wf.Phases[1].PromptFile)
+	require.NotNil(t, wf.Phases[1].Gate)
+	assert.Equal(t, "command", wf.Phases[1].Gate.Type)
+	assert.Contains(t, wf.Phases[1].Gate.Run, "gh label list --repo")
+	assert.Contains(t, wf.Phases[1].Gate.Run, "classification output validated")
+	assert.Equal(t, ".xylem/prompts/auto-triage-issues/apply.md", wf.Phases[2].PromptFile)
+
+	discoverPrompt := string(composed.Prompts["auto-triage-issues/discover"])
+	assert.Contains(t, discoverPrompt, "Find up to 10 currently open GitHub issues that have no labels")
+	assert.Contains(t, discoverPrompt, "output the exact standalone line `XYLEM_NOOP`")
+
+	classifyPrompt := string(composed.Prompts["auto-triage-issues/classify"])
+	assert.Contains(t, classifyPrompt, "Only propose labels that appear in `available_labels`")
+	assert.Contains(t, classifyPrompt, "If confidence is below `0.80`, prefer `needs-triage`")
+
+	applyPrompt := string(composed.Prompts["auto-triage-issues/apply"])
+	assert.Contains(t, applyPrompt, "re-checking current issue state before each edit")
+	assert.Contains(t, applyPrompt, "RUN_STATUS: CHANGES-APPLIED | NO-CHANGES | PARTIAL | BLOCKED")
 }
 
 func TestSmoke_S3_ComposeUnknownProfileReturnsClearError(t *testing.T) {

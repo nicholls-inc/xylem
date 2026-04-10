@@ -21,6 +21,7 @@ import (
 
 var expectedCoreWorkflows = []string{
 	"adapt-repo",
+	"auto-triage-issues",
 	"context-weight-audit",
 	"fix-bug",
 	"fix-pr-checks",
@@ -404,6 +405,9 @@ func TestInitCreatesV2Files(t *testing.T) {
 		".xylem/profile.lock",
 		".xylem/prompts/adapt-repo/apply.md",
 		".xylem/prompts/adapt-repo/plan.md",
+		".xylem/prompts/auto-triage-issues/classify.md",
+		".xylem/prompts/auto-triage-issues/discover.md",
+		".xylem/prompts/auto-triage-issues/apply.md",
 		".xylem/prompts/security-compliance/synthesize.md",
 		".xylem/prompts/workflow-health-report/analyze.md",
 	}
@@ -550,6 +554,7 @@ func TestInitScaffoldConfigV2Format(t *testing.T) {
 	assert.Contains(t, content, "profiles:")
 	assert.Contains(t, content, "workflow-health-report")
 	assert.Contains(t, content, "security-compliance")
+	assert.Contains(t, content, "auto-triage-issues")
 	assert.NotContains(t, content, "template:")
 }
 
@@ -629,6 +634,7 @@ func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
 
 	assert.Contains(t, output, "Created "+configPath)
 	assert.Contains(t, output, "Created .xylem/profile.lock")
+	assert.Contains(t, output, "Created .xylem/workflows/auto-triage-issues.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/context-weight-audit.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/workflow-health-report.yaml")
 
@@ -648,6 +654,7 @@ func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core"}, cfg.Profiles)
 	assert.Contains(t, cfg.Sources, "adaptation")
+	assert.Contains(t, cfg.Sources, "auto-triage-issues")
 	assert.Contains(t, cfg.Sources, "pr-lifecycle")
 	assert.Contains(t, cfg.Sources, "lessons-hygiene")
 	assert.Contains(t, cfg.Sources, "context-audit")
