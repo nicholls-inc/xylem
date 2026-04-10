@@ -266,8 +266,10 @@ func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousStyleScheduledWorkflow(t 
 	assert.Equal(t, ".xylem/prompts/continuous-style/report.md", wf.Phases[2].PromptFile)
 	assert.Equal(t, "command", wf.Phases[3].Type)
 	assert.Contains(t, wf.Phases[3].Run, "continuous-style file-issues")
+	assert.Contains(t, wf.Phases[3].Run, "--repo {{ .Repo.Slug }}")
 	assert.Equal(t, "command", wf.Phases[4].Type)
 	assert.Contains(t, wf.Phases[4].Run, "continuous-style post-summary")
+	assert.Contains(t, wf.Phases[4].Run, "--repo {{ .Repo.Slug }}")
 
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/ingest")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/survey")

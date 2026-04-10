@@ -17,7 +17,7 @@ phases:
       set -euo pipefail
       cd cli
       go run ./cmd/xylem continuous-style file-issues \
-        --repo {{ .Repo }} \
+        --repo {{ .Repo.Slug }} \
         --report ../.xylem/state/continuous-style/findings.json \
         --output ../.xylem/state/continuous-style/filed-issues.json \
         --prefix "[continuous-style]" \
@@ -29,7 +29,7 @@ phases:
       set -euo pipefail
       cd cli
       go run ./cmd/xylem continuous-style post-summary \
-        --repo {{ .Repo }} \
+        --repo {{ .Repo.Slug }} \
         --report ../.xylem/state/continuous-style/findings.json \
         --filed ../.xylem/state/continuous-style/filed-issues.json \
         --summary ../.xylem/state/continuous-style/report.md \
