@@ -405,6 +405,7 @@ func (r *Repository) DeleteBranch(name string) bool {
 type MergePullRequestOptions struct {
 	DeleteHeadBranch bool
 	AutoMerge        bool
+	Admin            bool
 }
 
 // MergePullRequest updates pull-request and git-visible state to reflect a merge.
@@ -435,12 +436,13 @@ func (r *Repository) MergePullRequest(number int, opts MergePullRequestOptions) 
 	if opts.AutoMerge {
 		pr.AutoMergeEnabled = true
 		pr.AutoMergeDeleteBranch = opts.DeleteHeadBranch
+		pr.AutoMergeAdmin = opts.Admin
 		if pr.HasBlockingMergeChecks() {
 			return nil
 		}
 	}
 
-	return r.mergePullRequest(pr, opts.DeleteHeadBranch)
+	return r.mergePullRequest(pr, opts.DeleteHeadBranch, opts.Admin)
 }
 
 // ApplyQueuedAutoMerge finalizes a previously queued auto-merge once checks no
@@ -456,10 +458,10 @@ func (r *Repository) ApplyQueuedAutoMerge(number int) error {
 	if !pr.AutoMergeEnabled || pr.HasBlockingMergeChecks() {
 		return nil
 	}
-	return r.mergePullRequest(pr, pr.AutoMergeDeleteBranch)
+	return r.mergePullRequest(pr, pr.AutoMergeDeleteBranch, pr.AutoMergeAdmin)
 }
 
-func (r *Repository) mergePullRequest(pr *PullRequest, deleteHeadBranch bool) error {
+func (r *Repository) mergePullRequest(pr *PullRequest, deleteHeadBranch bool, mergedByAdmin bool) error {
 	if pr == nil {
 		return fmt.Errorf("pull request must not be nil")
 	}
@@ -479,8 +481,10 @@ func (r *Repository) mergePullRequest(pr *PullRequest, deleteHeadBranch bool) er
 
 	pr.State = PullRequestStateMerged
 	pr.Merged = true
+	pr.MergedByAdmin = mergedByAdmin
 	pr.AutoMergeEnabled = false
 	pr.AutoMergeDeleteBranch = false
+	pr.AutoMergeAdmin = false
 	r.UpsertBranch(Branch{Name: baseBranch, SHA: headSHA})
 
 	if deleteHeadBranch {
@@ -527,21 +531,29 @@ type Issue struct {
 
 // PullRequest describes a GitHub pull request.
 type PullRequest struct {
-	Number                int              `yaml:"number" json:"number"`
-	Title                 string           `yaml:"title" json:"title"`
-	Body                  string           `yaml:"body,omitempty" json:"body,omitempty"`
-	URL                   string           `yaml:"url,omitempty" json:"url,omitempty"`
-	State                 PullRequestState `yaml:"state,omitempty" json:"state,omitempty"`
-	Merged                bool             `yaml:"merged,omitempty" json:"merged,omitempty"`
-	AutoMergeEnabled      bool             `yaml:"auto_merge_enabled,omitempty" json:"auto_merge_enabled,omitempty"`
-	AutoMergeDeleteBranch bool             `yaml:"auto_merge_delete_branch,omitempty" json:"auto_merge_delete_branch,omitempty"`
-	Labels                []string         `yaml:"labels,omitempty" json:"labels,omitempty"`
-	BaseBranch            string           `yaml:"base_branch" json:"base_branch"`
-	HeadBranch            string           `yaml:"head_branch" json:"head_branch"`
-	HeadSHA               string           `yaml:"head_sha" json:"head_sha"`
-	Comments              []Comment        `yaml:"comments,omitempty" json:"comments,omitempty"`
-	Reviews               []Review         `yaml:"reviews,omitempty" json:"reviews,omitempty"`
-	Checks                []Check          `yaml:"checks,omitempty" json:"checks,omitempty"`
+	Number                int                 `yaml:"number" json:"number"`
+	Title                 string              `yaml:"title" json:"title"`
+	Body                  string              `yaml:"body,omitempty" json:"body,omitempty"`
+	URL                   string              `yaml:"url,omitempty" json:"url,omitempty"`
+	State                 PullRequestState    `yaml:"state,omitempty" json:"state,omitempty"`
+	Merged                bool                `yaml:"merged,omitempty" json:"merged,omitempty"`
+	MergedByAdmin         bool                `yaml:"merged_by_admin,omitempty" json:"merged_by_admin,omitempty"`
+	AutoMergeEnabled      bool                `yaml:"auto_merge_enabled,omitempty" json:"auto_merge_enabled,omitempty"`
+	AutoMergeDeleteBranch bool                `yaml:"auto_merge_delete_branch,omitempty" json:"auto_merge_delete_branch,omitempty"`
+	AutoMergeAdmin        bool                `yaml:"auto_merge_admin,omitempty" json:"auto_merge_admin,omitempty"`
+	Labels                []string            `yaml:"labels,omitempty" json:"labels,omitempty"`
+	BaseBranch            string              `yaml:"base_branch" json:"base_branch"`
+	HeadBranch            string              `yaml:"head_branch" json:"head_branch"`
+	HeadSHA               string              `yaml:"head_sha" json:"head_sha"`
+	Commits               []PullRequestCommit `yaml:"commits,omitempty" json:"commits,omitempty"`
+	Comments              []Comment           `yaml:"comments,omitempty" json:"comments,omitempty"`
+	Reviews               []Review            `yaml:"reviews,omitempty" json:"reviews,omitempty"`
+	Checks                []Check             `yaml:"checks,omitempty" json:"checks,omitempty"`
+}
+
+// PullRequestCommit is a minimal commit entry surfaced by gh pr view --json commits.
+type PullRequestCommit struct {
+	OID string `yaml:"oid,omitempty" json:"oid,omitempty"`
 }
 
 // HasBlockingMergeChecks reports whether any check still prevents a queued

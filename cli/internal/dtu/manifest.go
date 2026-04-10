@@ -217,6 +217,7 @@ func clonePullRequests(in []PullRequest) []PullRequest {
 	for i := range in {
 		out[i] = in[i]
 		out[i].Labels = append([]string(nil), in[i].Labels...)
+		out[i].Commits = append([]PullRequestCommit(nil), in[i].Commits...)
 		out[i].Comments = append([]Comment(nil), in[i].Comments...)
 		out[i].Reviews = append([]Review(nil), in[i].Reviews...)
 		out[i].Checks = append([]Check(nil), in[i].Checks...)

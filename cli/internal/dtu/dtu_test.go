@@ -512,6 +512,43 @@ func TestRepositoryMergePullRequestDeletesHeadBranchAndUpsertsBase(t *testing.T)
 	}
 }
 
+func TestRepositoryMergePullRequestMarksAdminMerge(t *testing.T) {
+	t.Parallel()
+
+	repo := &Repository{
+		Owner:         "owner",
+		Name:          "repo",
+		DefaultBranch: "main",
+		Branches: []Branch{
+			{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+			{Name: "release-please--branches--main", SHA: "feedfacecafebeef"},
+		},
+		PullRequests: []PullRequest{{
+			Number:     13,
+			Title:      "Release PR",
+			State:      PullRequestStateOpen,
+			BaseBranch: "main",
+			HeadBranch: "release-please--branches--main",
+			HeadSHA:    "deadc0dedeadc0de",
+		}},
+	}
+
+	if err := repo.MergePullRequest(13, MergePullRequestOptions{DeleteHeadBranch: true, Admin: true}); err != nil {
+		t.Fatalf("MergePullRequest() error = %v", err)
+	}
+
+	pr := repo.PullRequestByNumber(13)
+	if pr == nil {
+		t.Fatal("PullRequestByNumber() = nil")
+	}
+	if pr.State != PullRequestStateMerged || !pr.Merged {
+		t.Fatalf("pull request = %#v, want merged state", pr)
+	}
+	if !pr.MergedByAdmin {
+		t.Fatalf("MergedByAdmin = %t, want true", pr.MergedByAdmin)
+	}
+}
+
 func TestRepositoryMergePullRequestQueuesAutoMergeUntilChecksPass(t *testing.T) {
 	t.Parallel()
 
@@ -545,7 +582,7 @@ func TestRepositoryMergePullRequestQueuesAutoMergeUntilChecksPass(t *testing.T) 
 	if pr.State != PullRequestStateOpen || pr.Merged {
 		t.Fatalf("pull request = %#v, want open queued auto-merge", pr)
 	}
-	if !pr.AutoMergeEnabled || !pr.AutoMergeDeleteBranch {
+	if !pr.AutoMergeEnabled || !pr.AutoMergeDeleteBranch || pr.AutoMergeAdmin {
 		t.Fatalf("pull request auto-merge flags = %#v, want enabled delete-branch queue", pr)
 	}
 	if branch := repo.BranchByName("main"); branch == nil || branch.SHA != "1111111111111111111111111111111111111111" {
@@ -562,8 +599,11 @@ func TestRepositoryMergePullRequestQueuesAutoMergeUntilChecksPass(t *testing.T) 
 	if pr.State != PullRequestStateMerged || !pr.Merged {
 		t.Fatalf("pull request after check success = %#v, want merged state", pr)
 	}
-	if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch {
+	if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch || pr.AutoMergeAdmin {
 		t.Fatalf("pull request auto-merge flags after merge = %#v, want cleared", pr)
+	}
+	if pr.MergedByAdmin {
+		t.Fatalf("MergedByAdmin = %t, want false", pr.MergedByAdmin)
 	}
 	if branch := repo.BranchByName("main"); branch == nil || branch.SHA != pr.HeadSHA {
 		t.Fatalf("main branch = %#v, want SHA %q", branch, pr.HeadSHA)
@@ -652,7 +692,7 @@ func TestStoreRecordObservationPRCheckMutationAppliesQueuedAutoMerge(t *testing.
 	if pr.State != PullRequestStateMerged || !pr.Merged {
 		t.Fatalf("pull request = %#v, want merged state", pr)
 	}
-	if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch {
+	if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch || pr.AutoMergeAdmin {
 		t.Fatalf("pull request auto-merge flags = %#v, want cleared after merge", pr)
 	}
 	if branch := loadedRepo.BranchByName("main"); branch == nil || branch.SHA != pr.HeadSHA {

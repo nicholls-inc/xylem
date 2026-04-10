@@ -1352,6 +1352,7 @@ func runGHPRMerge(_ context.Context, store *dtu.Store, args []string, stderr io.
 		return repo.MergePullRequest(number, dtu.MergePullRequestOptions{
 			DeleteHeadBranch: opts.deleteBranch,
 			AutoMerge:        opts.autoMerge,
+			Admin:            opts.adminMerge,
 		})
 	})
 	if err != nil {
@@ -1435,6 +1436,7 @@ type ghOptions struct {
 	limit        int
 	deleteBranch bool
 	autoMerge    bool
+	adminMerge   bool
 	addLabels    []string
 	removeLabels []string
 }
@@ -1514,6 +1516,8 @@ func parseGHFlags(args []string) (ghOptions, error) {
 			opts.deleteBranch = true
 		case "--auto":
 			opts.autoMerge = true
+		case "--admin":
+			opts.adminMerge = true
 		case "--add-label":
 			value, next, err := requireValue(args, i, args[i])
 			if err != nil {
@@ -1599,6 +1603,10 @@ func encodePR(state *dtu.State, repo *dtu.Repository, pr dtu.PullRequest, fields
 			out[field] = pr.HeadSHA
 		case "mergeCommit":
 			out[field] = map[string]any{"oid": pr.HeadSHA}
+		case "commits":
+			out[field] = encodePRCommits(pr.Commits, pr.HeadSHA)
+		case "statusCheckRollup":
+			out[field] = encodeStatusCheckRollup(pr.Checks)
 		}
 	}
 	return out
@@ -1633,7 +1641,56 @@ func encodeLabels(labels []string) []map[string]string {
 	return out
 }
 
+func encodePRCommits(commits []dtu.PullRequestCommit, headSHA string) []map[string]any {
+	headSHA = strings.TrimSpace(headSHA)
+	if len(commits) == 0 {
+		if headSHA == "" {
+			return nil
+		}
+		return []map[string]any{{"oid": headSHA}}
+	}
+
+	out := make([]map[string]any, 0, len(commits))
+	for _, commit := range commits {
+		oid := strings.TrimSpace(commit.OID)
+		if oid == "" {
+			continue
+		}
+		out = append(out, map[string]any{"oid": oid})
+	}
+	if len(out) == 0 && headSHA != "" {
+		return []map[string]any{{"oid": headSHA}}
+	}
+	return out
+}
+
+func encodeStatusCheckRollup(checks []dtu.Check) []map[string]any {
+	out := make([]map[string]any, 0, len(checks))
+	for _, check := range checks {
+		out = append(out, map[string]any{
+			"name":       check.Name,
+			"conclusion": ghCheckConclusion(check.State),
+		})
+	}
+	return out
+}
+
 func ghCheckState(state dtu.CheckState) string {
+	switch state {
+	case dtu.CheckStateSuccess:
+		return "SUCCESS"
+	case dtu.CheckStateFailure:
+		return "FAILURE"
+	case dtu.CheckStateCancelled:
+		return "CANCELLED"
+	case dtu.CheckStateSkipped:
+		return "SKIPPED"
+	default:
+		return "PENDING"
+	}
+}
+
+func ghCheckConclusion(state dtu.CheckState) string {
 	switch state {
 	case dtu.CheckStateSuccess:
 		return "SUCCESS"

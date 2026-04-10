@@ -133,6 +133,16 @@ sources:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
 
+  release-please-cut:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "0 10 * * 1,4"
+    timeout: "5m"
+    tasks:
+      cut-release:
+        workflow: cut-release
+        ref: release-please-cut
+
   # Post-merge wave dependency unblocking
   # NOTE: github-merge has no label filtering. The unblock-wave prompt
   # guards with XYLEM_NOOP for non-harness merges.

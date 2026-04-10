@@ -26,6 +26,8 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type scenarioPhase struct {
@@ -33,6 +35,7 @@ type scenarioPhase struct {
 	phaseType      string
 	run            string
 	prompt         string
+	noopMatch      string
 	allowedTools   string
 	gateType       string
 	gateRun        string
@@ -133,8 +136,12 @@ func newScenarioEnv(t *testing.T, fixtureName string) *dtuScenarioEnv {
 
 	repoDir := t.TempDir()
 	stateDir := filepath.Join(repoDir, ".xylem")
+	shimDir := filepath.Join(stateDir, "shims")
 	if err := os.MkdirAll(stateDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", stateDir, err)
+	}
+	if err := os.MkdirAll(shimDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q): %v", shimDir, err)
 	}
 
 	manifestPath := scenarioFixturePath(t, fixtureName)
@@ -158,12 +165,20 @@ func newScenarioEnv(t *testing.T, fixtureName string) *dtuScenarioEnv {
 	t.Setenv(dtu.EnvStatePath, store.Path())
 	t.Setenv(dtu.EnvStateDir, stateDir)
 	t.Setenv(dtu.EnvUniverseID, universeID)
+	t.Setenv(dtu.EnvShimDir, shimDir)
+	if err := writeScenarioShimWrappers(shimDir); err != nil {
+		t.Fatalf("writeScenarioShimWrappers(%q): %v", shimDir, err)
+	}
+	pathValue := shimDir + string(os.PathListSeparator) + os.Getenv("PATH")
+	t.Setenv("PATH", pathValue)
 
 	cmdRunner := &dtuScenarioCmdRunner{
 		env: []string{
 			dtu.EnvStatePath + "=" + store.Path(),
 			dtu.EnvStateDir + "=" + stateDir,
 			dtu.EnvUniverseID + "=" + universeID,
+			dtu.EnvShimDir + "=" + shimDir,
+			"PATH=" + pathValue,
 		},
 	}
 
@@ -175,6 +190,46 @@ func newScenarioEnv(t *testing.T, fixtureName string) *dtuScenarioEnv {
 		queue:        queue.New(filepath.Join(stateDir, "queue.jsonl")),
 		cmdRunner:    cmdRunner,
 	}
+}
+
+func writeScenarioShimWrappers(dir string) error {
+	binary, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve test executable: %w", err)
+	}
+	for _, shim := range []string{"gh", "git", "claude", "copilot"} {
+		content := fmt.Sprintf("#!/bin/sh\nGO_WANT_DTU_SCENARIO_SHIM=1 XYLEM_DTU_TEST_SHIM_NAME=%s exec %q -test.run '^TestDTUScenarioShimHelper$' -- \"$@\"\n", shim, binary)
+		if err := os.WriteFile(filepath.Join(dir, shim), []byte(content), 0o755); err != nil {
+			return fmt.Errorf("write shim %q: %w", shim, err)
+		}
+	}
+	return nil
+}
+
+func TestDTUScenarioShimHelper(t *testing.T) {
+	if os.Getenv("GO_WANT_DTU_SCENARIO_SHIM") != "1" {
+		return
+	}
+	shim := strings.TrimSpace(os.Getenv("XYLEM_DTU_TEST_SHIM_NAME"))
+	if shim == "" {
+		fmt.Fprintln(os.Stderr, "missing XYLEM_DTU_TEST_SHIM_NAME")
+		os.Exit(2)
+	}
+
+	args := []string{}
+	for i, arg := range os.Args {
+		if arg == "--" {
+			args = os.Args[i+1:]
+			break
+		}
+	}
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "missing args for shim %s\n", shim)
+		os.Exit(2)
+	}
+
+	code := dtushim.Execute(context.Background(), shim, args, os.Stdin, os.Stdout, os.Stderr, os.Environ())
+	os.Exit(code)
 }
 
 func (r *dtuScenarioCmdRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
@@ -268,6 +323,10 @@ func writeScenarioWorkflow(t *testing.T, repoDir, workflowName string, phases []
 			if phase.allowedTools != "" {
 				fmt.Fprintf(&phaseYAML, "    allowed_tools: %q\n", phase.allowedTools)
 			}
+		}
+		if phase.noopMatch != "" {
+			phaseYAML.WriteString("    noop:\n")
+			fmt.Fprintf(&phaseYAML, "      match: %q\n", phase.noopMatch)
 		}
 
 		switch {
@@ -889,6 +948,154 @@ func TestScenarioGitHubMergeHappyPath(t *testing.T) {
 	if len(claudeInvocations) != 1 || claudeInvocations[0].Shim.Phase != "postmerge" {
 		t.Fatalf("unexpected merge claude invocations: %#v", claudeInvocations)
 	}
+}
+
+func releaseCutScenarioPhases(verifyRun string) []scenarioPhase {
+	return []scenarioPhase{
+		{
+			name:      "check",
+			phaseType: "command",
+			run: `mkdir -p .xylem/state
+printf '3\n' > .xylem/state/release_pr`,
+		},
+		{
+			name:      "verify",
+			phaseType: "command",
+			run:       verifyRun,
+			noopMatch: "XYLEM_NOOP",
+		},
+		{
+			name:      "merge",
+			phaseType: "command",
+			run: `PR_NUM=$(cat .xylem/state/release_pr)
+gh pr merge "$PR_NUM" --repo {{.Repo.Slug}} --squash --delete-branch --admin`,
+		},
+	}
+}
+
+func releaseCutScenarioSource(stateDir string, q *queue.Queue, cmdRunner *dtuScenarioCmdRunner) (*config.Config, *source.Scheduled) {
+	cfg := baseScenarioConfig(stateDir)
+	cfg.Sources = map[string]config.SourceConfig{
+		"release-please-cut": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "0 10 * * 1,4",
+			Tasks: map[string]config.Task{
+				"cut-release": {
+					Workflow: "cut-release",
+					Ref:      "release-please-cut",
+				},
+			},
+		},
+	}
+
+	src := &source.Scheduled{
+		Repo:       "owner/repo",
+		StateDir:   stateDir,
+		ConfigName: "release-please-cut",
+		Schedule:   "0 10 * * 1,4",
+		Queue:      q,
+		Tasks: map[string]source.ScheduledTask{
+			"cut-release": {
+				Workflow: "cut-release",
+				Ref:      "release-please-cut",
+			},
+		},
+	}
+	_ = cmdRunner
+	return cfg, src
+}
+
+func TestSmoke_S1_MatureReleasePRGetsAdminMerged(t *testing.T) {
+	env := newScenarioEnv(t, "release-please-cut-mature.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "cut-release", releaseCutScenarioPhases(`:`))
+	cfg, src := releaseCutScenarioSource(env.stateDir, env.queue, env.cmdRunner)
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, scanResult.Added)
+
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, drainResult.Completed)
+
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	pr := loaded.RepositoryBySlug("owner/repo").PullRequestByNumber(3)
+	require.NotNil(t, pr)
+	assert.Equal(t, dtu.PullRequestStateMerged, pr.State)
+	assert.True(t, pr.Merged)
+	assert.True(t, pr.MergedByAdmin)
+
+	events := readEvents(t, env.store)
+	mergeCalls := filterShimEvents(events, dtu.EventKindShimInvocation, "gh", []string{"pr", "merge", "3", "--repo", "owner/repo", "--squash", "--delete-branch", "--admin"})
+	assert.Len(t, mergeCalls, 1)
+}
+
+func TestSmoke_S2_BelowCommitThresholdNoops(t *testing.T) {
+	env := newScenarioEnv(t, "release-please-cut-below-threshold.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "cut-release", releaseCutScenarioPhases(`PR_NUM=$(cat .xylem/state/release_pr)
+gh pr view "$PR_NUM" --repo {{.Repo.Slug}} --json commits >/dev/null
+echo "XYLEM_NOOP: only 4 commits, below threshold"`))
+	cfg, src := releaseCutScenarioSource(env.stateDir, env.queue, env.cmdRunner)
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, scanResult.Added)
+
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, drainResult.Completed)
+
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	pr := loaded.RepositoryBySlug("owner/repo").PullRequestByNumber(3)
+	require.NotNil(t, pr)
+	assert.False(t, pr.Merged)
+	assert.Equal(t, dtu.PullRequestStateOpen, pr.State)
+
+	events := readEvents(t, env.store)
+	mergeCalls := filterShimEvents(events, dtu.EventKindShimInvocation, "gh", []string{"pr", "merge", "3"})
+	assert.Len(t, mergeCalls, 0)
+}
+
+func TestSmoke_S3_BlockReleaseLabelNoops(t *testing.T) {
+	env := newScenarioEnv(t, "release-please-cut-blocked.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	writeScenarioWorkflow(t, env.repoDir, "cut-release", releaseCutScenarioPhases(`PR_NUM=$(cat .xylem/state/release_pr)
+gh pr view "$PR_NUM" --repo {{.Repo.Slug}} --json labels >/dev/null
+echo "XYLEM_NOOP: block-release label present"`))
+	cfg, src := releaseCutScenarioSource(env.stateDir, env.queue, env.cmdRunner)
+
+	scan := scanner.New(cfg, env.queue, env.cmdRunner)
+	scanResult, err := scan.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, scanResult.Added)
+
+	drainer := newDrainRunner(t, cfg, env.queue, env.cmdRunner, env.repoDir, src)
+	drainResult, err := drainer.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, drainResult.Completed)
+
+	loaded, err := env.store.Load()
+	require.NoError(t, err)
+	pr := loaded.RepositoryBySlug("owner/repo").PullRequestByNumber(3)
+	require.NotNil(t, pr)
+	assert.False(t, pr.Merged)
+	assert.Equal(t, dtu.PullRequestStateOpen, pr.State)
+
+	events := readEvents(t, env.store)
+	mergeCalls := filterShimEvents(events, dtu.EventKindShimInvocation, "gh", []string{"pr", "merge", "3"})
+	assert.Len(t, mergeCalls, 0)
 }
 
 func TestScenarioIssueProviderFailureMarksFailed(t *testing.T) {

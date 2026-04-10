@@ -1050,23 +1050,12 @@ func validateScheduledSource(name string, src SourceConfig) error {
 	return nil
 }
 
-func parseScheduleValue(value string) (time.Duration, error) {
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "@hourly":
-		return time.Hour, nil
-	case "@daily":
-		return 24 * time.Hour, nil
-	case "@weekly":
-		return 7 * 24 * time.Hour, nil
-	}
-	interval, err := time.ParseDuration(value)
+func parseScheduleValue(value string) (string, error) {
+	spec, err := cadence.Parse(value)
 	if err != nil {
-		return 0, err
+		return "", err
 	}
-	if interval <= 0 {
-		return 0, fmt.Errorf("must be greater than 0")
-	}
-	return interval, nil
+	return spec.Raw(), nil
 }
 func validateScheduleSource(name string, src SourceConfig) error {
 	if strings.TrimSpace(src.Workflow) == "" {

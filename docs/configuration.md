@@ -135,7 +135,7 @@ Each key under `sources` is an arbitrary name (used in logs and vessel metadata)
 |-------|------|---------|----------|-------------|
 | `type` | string | -- | Yes | Source type. Supported values: `"github"`, `"github-pr"`, `"github-pr-events"`, `"github-merge"`, `"schedule"`, `"scheduled"`. |
 | `repo` | string | -- | Yes (GitHub sources and `scheduled`) | GitHub repository in `owner/name` format. Validated strictly -- both owner and name must be non-empty. |
-| `schedule` | string | -- | Required for `scheduled` | Recurring cadence for per-task scheduled sources. Supports `@hourly`, `@daily`, `@weekly`, or any positive Go duration like `168h`. |
+| `schedule` | string | -- | Required for `scheduled` | Recurring cadence for per-task scheduled sources. Supports `@hourly`, `@daily`, `@weekly`, standard 5-field cron expressions, or any positive Go duration like `168h`. |
 | `cadence` | string | -- | Yes (`schedule`) | Recurrence for scheduled sources. Accepts Go durations like `1h`, cron descriptors like `@daily`, and standard 5-field cron expressions. |
 | `workflow` | string | -- | Yes (`schedule`) | Workflow to enqueue each time a scheduled source fires. Scheduled sources define the workflow directly and do not use `tasks`. |
 | `exclude` | list of strings | `[]` | No | Labels that prevent an issue from being queued. If an issue has any of these labels, it is skipped. |
@@ -210,9 +210,21 @@ sources:
       weekly-self-gap-analysis:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
+
+  release-please-cut:
+    type: scheduled
+    repo: owner/repo
+    schedule: "0 10 * * 1,4" # Monday/Thursday at 10:00 UTC
+    timeout: "5m"
+    tasks:
+      cut-release:
+        workflow: cut-release
+        ref: release-please-cut
 ```
 
 The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
+
+For release cadence automation, a `scheduled` source can look for a release-please PR on a cron schedule, skip when the PR is still immature, and no-op when the PR carries a manual `block-release` label. That label is a simple human override: leave it on the release PR to suppress the next scheduled cut without disabling the source entirely.
 ### `status_labels`
 
 When `status_labels` is set, xylem records the configured labels in vessel metadata and applies them during source lifecycle hooks.

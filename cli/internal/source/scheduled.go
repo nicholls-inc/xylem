@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/cadence"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -27,6 +28,7 @@ type Scheduled struct {
 	Schedule   string
 	Tasks      map[string]ScheduledTask
 	Queue      *queue.Queue
+	Now        func() time.Time
 }
 
 type scheduleState struct {
@@ -38,7 +40,7 @@ var safeScheduledPathComponent = regexp.MustCompile(`[^a-zA-Z0-9._-]+`)
 func (s *Scheduled) Name() string { return "scheduled" }
 
 func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
-	interval, err := parseSchedule(s.Schedule)
+	spec, err := cadence.Parse(s.Schedule)
 	if err != nil {
 		if s.ConfigName != "" {
 			return nil, fmt.Errorf("scheduled source %q: parse schedule %q: %w", s.ConfigName, s.Schedule, err)
@@ -51,9 +53,14 @@ func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
 		return nil, err
 	}
 
-	now := sourceNow()
-	bucket := now.UnixNano() / interval.Nanoseconds()
-	slotStart, slotEnd := scheduleWindow(now, interval)
+	now := s.now()
+	bucket, slotStart, slotEnd, err := spec.Bucket(now)
+	if err != nil {
+		if s.ConfigName != "" {
+			return nil, fmt.Errorf("scheduled source %q: compute schedule bucket %q: %w", s.ConfigName, s.Schedule, err)
+		}
+		return nil, fmt.Errorf("compute schedule bucket %q: %w", s.Schedule, err)
+	}
 	taskNames := make([]string, 0, len(s.Tasks))
 	for taskName := range s.Tasks {
 		taskNames = append(taskNames, taskName)
@@ -144,34 +151,6 @@ func (s *Scheduled) BranchName(vessel queue.Vessel) string {
 	return fmt.Sprintf("scheduled/%s-%s", taskName, sanitizeScheduledComponent(vessel.ID))
 }
 
-func parseSchedule(value string) (time.Duration, error) {
-	switch strings.TrimSpace(strings.ToLower(value)) {
-	case "@hourly":
-		return time.Hour, nil
-	case "@daily":
-		return 24 * time.Hour, nil
-	case "@weekly":
-		return 7 * 24 * time.Hour, nil
-	}
-
-	interval, err := time.ParseDuration(value)
-	if err != nil {
-		return 0, err
-	}
-	if interval <= 0 {
-		return 0, fmt.Errorf("must be greater than 0")
-	}
-	return interval, nil
-}
-
-func scheduleWindow(now time.Time, interval time.Duration) (time.Time, time.Time) {
-	now = now.UTC()
-	size := interval.Nanoseconds()
-	startUnix := now.UnixNano() / size * size
-	start := time.Unix(0, startUnix).UTC()
-	return start, start.Add(interval)
-}
-
 func (s *Scheduled) loadState() (*scheduleState, error) {
 	path := s.statePath()
 	data, err := os.ReadFile(path)
@@ -215,6 +194,13 @@ func (s *Scheduled) saveState(state *scheduleState) error {
 
 func (s *Scheduled) statePath() string {
 	return filepath.Join(s.StateDir, "schedules", sanitizeScheduledComponent(s.scope())+".json")
+}
+
+func (s *Scheduled) now() time.Time {
+	if s.Now != nil {
+		return s.Now().UTC()
+	}
+	return sourceNow()
 }
 
 func (s *Scheduled) scope() string {

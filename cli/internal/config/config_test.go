@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -1530,6 +1531,28 @@ func TestValidateScheduledSourceValid(t *testing.T) {
 	}
 }
 
+func TestValidateScheduledSourceCronValid(t *testing.T) {
+	cfg := &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+		Sources: map[string]SourceConfig{
+			"release-please-cut": {
+				Type:     "scheduled",
+				Repo:     "owner/name",
+				Schedule: "0 10 * * 1,4",
+				Tasks: map[string]Task{
+					"cut-release": {Workflow: "cut-release", Ref: "release-please-cut"},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid cron scheduled config, got: %v", err)
+	}
+}
+
 func TestValidateScheduleValid(t *testing.T) {
 	cfg := &Config{
 		Concurrency: 2,
@@ -2050,26 +2073,65 @@ func TestSmoke_S35_HarnessReviewRejectsAbsoluteOutputDir(t *testing.T) {
 }
 
 func TestSmoke_S36_ScheduledSourceLoads(t *testing.T) {
-	cfg := validConfig()
-	cfg.Sources = map[string]SourceConfig{
-		"sota-gap": {
-			Type:     "scheduled",
-			Repo:     "owner/repo",
-			Schedule: "@weekly",
-			Tasks: map[string]Task{
-				"weekly": {Workflow: "sota-gap-analysis", Ref: "sota-gap-analysis"},
-			},
+	tests := []struct {
+		name       string
+		sourceName string
+		taskName   string
+		schedule   string
+		workflow   string
+		ref        string
+	}{
+		{
+			name:       "named cadence",
+			sourceName: "sota-gap",
+			taskName:   "weekly",
+			schedule:   "@weekly",
+			workflow:   "sota-gap-analysis",
+			ref:        "sota-gap-analysis",
+		},
+		{
+			name:       "cron cadence",
+			sourceName: "release-please-cut",
+			taskName:   "cut-release",
+			schedule:   "0 10 * * 1,4",
+			workflow:   "cut-release",
+			ref:        "release-please-cut",
 		},
 	}
 
-	err := cfg.Validate()
-	require.NoError(t, err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeConfigFile(t, fmt.Sprintf(`sources:
+  %s:
+    type: scheduled
+    repo: owner/repo
+    schedule: %q
+    tasks:
+      %s:
+        workflow: %s
+        ref: %s
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`, tt.sourceName, tt.schedule, tt.taskName, tt.workflow, tt.ref))
 
-	sourceCfg := cfg.Sources["sota-gap"]
-	assert.Equal(t, "scheduled", sourceCfg.Type)
-	assert.Equal(t, "@weekly", sourceCfg.Schedule)
-	assert.Equal(t, "sota-gap-analysis", sourceCfg.Tasks["weekly"].Workflow)
-	assert.Equal(t, "sota-gap-analysis", sourceCfg.Tasks["weekly"].Ref)
+			cfg, err := Load(path)
+			require.NoError(t, err)
+
+			sourceCfg, ok := cfg.Sources[tt.sourceName]
+			require.True(t, ok, "missing source %q", tt.sourceName)
+			taskCfg, ok := sourceCfg.Tasks[tt.taskName]
+			require.True(t, ok, "missing task %q", tt.taskName)
+
+			assert.Equal(t, "scheduled", sourceCfg.Type)
+			assert.Equal(t, tt.schedule, sourceCfg.Schedule)
+			assert.Equal(t, tt.workflow, taskCfg.Workflow)
+			assert.Equal(t, tt.ref, taskCfg.Ref)
+		})
+	}
 }
 
 func TestSmoke_S37_ScheduledSourceAllowsMissingRef(t *testing.T) {

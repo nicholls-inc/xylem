@@ -20,6 +20,7 @@ func TestPropRepositoryAutoMergeRespectsCheckStates(t *testing.T) {
 
 	rapid.Check(t, func(t *rapid.T) {
 		deleteHeadBranch := rapid.Bool().Draw(t, "delete_head_branch")
+		adminMerge := rapid.Bool().Draw(t, "admin_merge")
 		checkCount := rapid.IntRange(0, 5).Draw(t, "check_count")
 
 		checks := make([]Check, 0, checkCount)
@@ -55,7 +56,11 @@ func TestPropRepositoryAutoMergeRespectsCheckStates(t *testing.T) {
 			}},
 		}
 
-		if err := repo.MergePullRequest(7, MergePullRequestOptions{DeleteHeadBranch: deleteHeadBranch, AutoMerge: true}); err != nil {
+		if err := repo.MergePullRequest(7, MergePullRequestOptions{
+			DeleteHeadBranch: deleteHeadBranch,
+			AutoMerge:        true,
+			Admin:            adminMerge,
+		}); err != nil {
 			t.Fatalf("MergePullRequest() error = %v", err)
 		}
 
@@ -68,8 +73,8 @@ func TestPropRepositoryAutoMergeRespectsCheckStates(t *testing.T) {
 			if pr.State != PullRequestStateOpen || pr.Merged {
 				t.Fatalf("queued pull request = %#v, want open queued auto-merge", pr)
 			}
-			if !pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch != deleteHeadBranch {
-				t.Fatalf("queued pull request flags = %#v, want auto-merge enabled with delete=%t", pr, deleteHeadBranch)
+			if !pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch != deleteHeadBranch || pr.AutoMergeAdmin != adminMerge {
+				t.Fatalf("queued pull request flags = %#v, want auto-merge enabled with delete=%t admin=%t", pr, deleteHeadBranch, adminMerge)
 			}
 			if branch := repo.BranchByName("main"); branch == nil || branch.SHA != "1111111111111111111111111111111111111111" {
 				t.Fatalf("main branch = %#v, want original SHA preserved", branch)
@@ -89,8 +94,11 @@ func TestPropRepositoryAutoMergeRespectsCheckStates(t *testing.T) {
 		if pr.State != PullRequestStateMerged || !pr.Merged {
 			t.Fatalf("merged pull request = %#v, want merged state", pr)
 		}
-		if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch {
+		if pr.AutoMergeEnabled || pr.AutoMergeDeleteBranch || pr.AutoMergeAdmin {
 			t.Fatalf("merged pull request flags = %#v, want cleared auto-merge flags", pr)
+		}
+		if pr.MergedByAdmin != adminMerge {
+			t.Fatalf("MergedByAdmin = %t, want %t", pr.MergedByAdmin, adminMerge)
 		}
 		if branch := repo.BranchByName("main"); branch == nil || branch.SHA != pr.HeadSHA {
 			t.Fatalf("main branch = %#v, want SHA %q", branch, pr.HeadSHA)

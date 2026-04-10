@@ -68,8 +68,12 @@ func sampleState() *dtu.State {
 				HeadBranch: "fix/issue-1-bug-one",
 				HeadSHA:    "abc12345deadbeef",
 				Labels:     []string{"queued"},
-				Reviews:    []dtu.Review{{ID: 41, State: dtu.ReviewStateApproved}},
-				Checks:     []dtu.Check{{ID: 51, Name: "ci", State: dtu.CheckStateFailure}},
+				Commits: []dtu.PullRequestCommit{
+					{OID: "abc12345deadbeef"},
+					{OID: "feedfacecafebeef"},
+				},
+				Reviews: []dtu.Review{{ID: 41, State: dtu.ReviewStateApproved}},
+				Checks:  []dtu.Check{{ID: 51, Name: "ci", State: dtu.CheckStateFailure}},
 			}, {
 				Number:     11,
 				Title:      "Merged PR",
@@ -164,6 +168,30 @@ func TestExecuteGHPRSurfacesUsedByXylem(t *testing.T) {
 	}
 	if strings.TrimSpace(viewOut.String()) != "abc12345deadbeef" {
 		t.Fatalf("pr view output = %q", viewOut.String())
+	}
+
+	var releaseOut, releaseErr bytes.Buffer
+	code = Execute(
+		context.Background(),
+		"gh",
+		[]string{"pr", "view", "10", "--repo", "owner/repo", "--json", "commits,statusCheckRollup,labels"},
+		nil,
+		&releaseOut,
+		&releaseErr,
+		env,
+	)
+	if code != 0 {
+		t.Fatalf("pr release view code = %d, stderr = %q", code, releaseErr.String())
+	}
+	releaseJSON := releaseOut.String()
+	if !strings.Contains(releaseJSON, `"commits":[{"oid":"abc12345deadbeef"},{"oid":"feedfacecafebeef"}]`) {
+		t.Fatalf("pr release view output = %s", releaseJSON)
+	}
+	if !strings.Contains(releaseJSON, `"statusCheckRollup":[{"conclusion":"FAILURE","name":"ci"}]`) {
+		t.Fatalf("pr release view output = %s", releaseJSON)
+	}
+	if !strings.Contains(releaseJSON, `"labels":[{"name":"queued"}]`) {
+		t.Fatalf("pr release view output = %s", releaseJSON)
 	}
 
 	var checksOut, checksErr bytes.Buffer
@@ -300,10 +328,45 @@ func TestSmoke_S2_GHPRMergeWithAutoQueuesUntilChecksPass(t *testing.T) {
 	assert.False(t, pr.Merged)
 	assert.True(t, pr.AutoMergeEnabled)
 	assert.True(t, pr.AutoMergeDeleteBranch)
+	assert.False(t, pr.AutoMergeAdmin)
 	main := repo.BranchByName("main")
 	require.NotNil(t, main)
 	assert.Equal(t, "1111111111111111111111111111111111111111", main.SHA)
 	assert.NotNil(t, repo.BranchByName(pr.HeadBranch))
+}
+
+func TestExecuteGHPRMergeWithAdminMarksState(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Repositories[0].PullRequests[0].Checks[0].State = dtu.CheckStateSuccess
+	state.Repositories[0].Branches = []dtu.Branch{
+		{Name: "main", SHA: "1111111111111111111111111111111111111111"},
+		{Name: "fix/issue-1-bug-one", SHA: "abc12345deadbeef"},
+	}
+	store, stateDir := testStore(t, state)
+	env := envForStore(store, stateDir, state.UniverseID)
+
+	var mergeErr bytes.Buffer
+	code := Execute(
+		context.Background(),
+		"gh",
+		[]string{"pr", "merge", "10", "--repo", "owner/repo", "--delete-branch", "--squash", "--admin"},
+		nil,
+		ioDiscard{},
+		&mergeErr,
+		env,
+	)
+	require.Zero(t, code, "stderr = %q", mergeErr.String())
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	pr := loaded.RepositoryBySlug("owner/repo").PullRequestByNumber(10)
+	require.NotNil(t, pr)
+	assert.True(t, pr.Merged)
+	assert.True(t, pr.MergedByAdmin)
+	assert.False(t, pr.AutoMergeEnabled)
+	assert.False(t, pr.AutoMergeAdmin)
 }
 
 func TestExecuteGHAPIAndIssueCommentUseStateStore(t *testing.T) {
@@ -754,4 +817,17 @@ func TestMainPackagesCompile(t *testing.T) {
 			t.Fatalf("expected %s to exist: %v", path, err)
 		}
 	}
+}
+
+func TestEncodePRCommitsAllEmptyOIDsFallsBackToHeadSHA(t *testing.T) {
+	t.Parallel()
+
+	commits := []dtu.PullRequestCommit{
+		{OID: ""},
+		{OID: "   "},
+	}
+
+	got := encodePRCommits(commits, "abc123fallback")
+	want := []map[string]any{{"oid": "abc123fallback"}}
+	assert.Equal(t, want, got)
 }
