@@ -4059,6 +4059,14 @@ func (r *Runner) CheckStalledVessels(ctx context.Context) []StallFinding {
 		if r.Config.Daemon.StallMonitor.OrphanCheckEnabled {
 			proc, ok := r.trackedProcess(vessel.ID)
 			if ok && (proc.Exited || !processAlive(proc.PID)) {
+				// Grace period: don't orphan-kill if the last phase completed
+				// recently. Between phases the subprocess is legitimately dead
+				// while the runner goroutine sets up the next phase.
+				if _, modifiedAt, phaseErr := r.latestPhaseActivity(vessel.ID); phaseErr == nil {
+					if r.runtimeSince(modifiedAt) < stallThreshold {
+						continue // recent phase activity, vessel is transitioning
+					}
+				}
 				msg := "vessel orphaned (no live subprocess)"
 				log.Printf("warn: %s for vessel %s", msg, vessel.ID)
 				if r.timeoutRunningVessel(ctx, vessel, msg) {
