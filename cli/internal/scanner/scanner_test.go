@@ -154,6 +154,43 @@ func TestScanFindsIssues(t *testing.T) {
 	}
 }
 
+func TestBacklogCountDeduplicatesAndSkipsExcludedIssues(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	srcCfg := cfg.Sources["github"]
+	srcCfg.Tasks["triage-incidents"] = config.Task{Labels: []string{"incident"}, Workflow: "triage"}
+	cfg.Sources["github"] = srcCfg
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	bugIssues := []ghIssue{
+		{Number: 1, Title: "fix null response", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+		{Number: 2, Title: "investigate prod incident", URL: "https://github.com/owner/repo/issues/2", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "incident"}}},
+		{Number: 3, Title: "skip duplicate backlog item", URL: "https://github.com/owner/repo/issues/3", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "wontfix"}}},
+	}
+	incidentIssues := []ghIssue{
+		{Number: 2, Title: "investigate prod incident", URL: "https://github.com/owner/repo/issues/2", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "incident"}}},
+		{Number: 4, Title: "on-call handoff", URL: "https://github.com/owner/repo/issues/4", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "incident"}}},
+	}
+	r.set(issueJSON(bugIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(incidentIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "incident")
+
+	s := New(cfg, q, r)
+	count, err := s.BacklogCount(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 3, count)
+}
+
 func TestScanExcludedLabel(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeConfig(dir)

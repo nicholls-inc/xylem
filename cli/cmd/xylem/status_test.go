@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/daemonhealth"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -74,11 +75,53 @@ func TestStatusTable(t *testing.T) {
 	if !strings.Contains(out, "completed") {
 		t.Errorf("expected 'completed' state in output, got: %s", out)
 	}
-	if !strings.Contains(out, "Summary:") {
-		t.Errorf("expected summary line, got: %s", out)
+	if !strings.Contains(out, "Queue:") {
+		t.Errorf("expected queue line, got: %s", out)
 	}
 	if !strings.Contains(out, "Info") {
 		t.Errorf("expected Info column header, got: %s", out)
+	}
+}
+
+func TestStatusShowsDaemonHealth(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	err := daemonhealth.Save(filepath.Join(dir, ".xylem"), daemonhealth.Snapshot{
+		PID:           os.Getpid(),
+		StartedAt:     now.Add(-2 * time.Hour),
+		UpdatedAt:     now,
+		Binary:        "f366e79d",
+		LastUpgradeAt: now.Add(-15 * time.Minute),
+		Checks: []daemonhealth.Check{
+			{
+				Code:      "idle_with_backlog",
+				Level:     daemonhealth.LevelWarning,
+				Message:   "Daemon idle with 4 backlog items on GitHub",
+				UpdatedAt: now,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("save daemon health: %v", err)
+	}
+
+	var statusErr error
+	out := captureStdout(func() { statusErr = cmdStatus(testStatusConfig(dir), q, false, "") })
+	if statusErr != nil {
+		t.Fatalf("unexpected error: %v", statusErr)
+	}
+	if !strings.Contains(out, "Health:") {
+		t.Fatalf("expected health section, got: %s", out)
+	}
+	if !strings.Contains(out, "Daemon alive") {
+		t.Fatalf("expected daemon alive line, got: %s", out)
+	}
+	if !strings.Contains(out, "Auto-upgrade current") {
+		t.Fatalf("expected auto-upgrade line, got: %s", out)
+	}
+	if !strings.Contains(out, "Daemon idle with 4 backlog items on GitHub") {
+		t.Fatalf("expected backlog warning, got: %s", out)
 	}
 }
 

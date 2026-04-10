@@ -2,13 +2,19 @@ package dtu_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	dtu "github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // reconcileStaleVesselsForTest replicates the daemon's stale-vessel
@@ -189,4 +195,50 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 	if len(events) == 0 {
 		t.Fatal("no DTU events recorded")
 	}
+}
+
+func TestSmoke_S4_DeterministicPhaseStallRecovery(t *testing.T) {
+	env := newScenarioEnv(t, "issue-daemon-recovery.yaml")
+	defer withWorkingDir(t, env.repoDir)()
+
+	cfg := baseScenarioConfig(env.stateDir)
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = false
+
+	now, err := dtu.RuntimeNow()
+	require.NoError(t, err)
+	enqueued, err := env.queue.Enqueue(queue.Vessel{
+		ID:        "stall-1",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	require.NoError(t, err)
+	require.True(t, enqueued)
+	vessel, err := env.queue.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	outputPath := filepath.Join(env.stateDir, "phases", vessel.ID, "analyze.output")
+	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+	require.NoError(t, os.WriteFile(outputPath, []byte(""), 0o644))
+	old := now.Add(-11 * time.Minute)
+	require.NoError(t, os.Chtimes(outputPath, old, old))
+	require.NoError(t, env.queue.UpdateVessel(*vessel))
+
+	r := runner.New(cfg, env.queue, nil, env.cmdRunner)
+	findings := r.CheckStalledVessels(context.Background())
+	require.Len(t, findings, 1)
+	assert.Equal(t, "phase_stalled", findings[0].Code)
+	assert.Equal(t, "analyze", findings[0].Phase)
+
+	updated, err := env.queue.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Contains(t, updated.Error, "phase stalled: no output for")
+	require.NotNil(t, updated.EndedAt)
+
+	events := readEvents(t, env.store)
+	assert.NotEmpty(t, events)
 }
