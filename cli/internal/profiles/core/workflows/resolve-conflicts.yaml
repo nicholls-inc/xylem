@@ -15,4 +15,4 @@ phases:
       retries: 2
   - name: push
     prompt_file: .xylem/prompts/resolve-conflicts/push.md
-    max_turns: 10
+    max_turns: 25

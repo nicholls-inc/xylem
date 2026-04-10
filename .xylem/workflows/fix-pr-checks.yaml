@@ -20,4 +20,4 @@ phases:
       retries: 3
   - name: push
     prompt_file: .xylem/prompts/fix-pr-checks/push.md
-    max_turns: 10
+    max_turns: 25
