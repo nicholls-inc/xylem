@@ -551,6 +551,7 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 		}
 		if found {
 			resumeSpan := r.startWaitTransitionSpan(ctx, vessel, "resumed", waitedDuration(vessel.WaitingSince, r.runtimeNow()))
+			r.warnOnWorkflowDrift(vessel)
 			// Advance past the gated phase — CurrentPhase was already incremented
 			// when the vessel entered waiting state. Resume via pending so Drain can
 			// pick the vessel back up through the normal dequeue flow.
@@ -1446,6 +1447,43 @@ func waitedDuration(since *time.Time, now time.Time) time.Duration {
 		return 0
 	}
 	return now.Sub(*since)
+}
+
+func (r *Runner) warnOnWorkflowDrift(vessel queue.Vessel) {
+	storedDigest, currentDigest := workflowDigestsForResume(vessel)
+	if !workflowDigestDrifted(storedDigest, currentDigest) {
+		return
+	}
+	log.Printf(
+		"warn: waiting vessel %s workflow %q drifted while waiting: stored=%s current=%s",
+		vessel.ID,
+		vessel.Workflow,
+		storedDigest,
+		currentDigest,
+	)
+}
+
+func workflowDigestsForResume(vessel queue.Vessel) (string, string) {
+	storedDigest := strings.TrimSpace(vessel.Meta[recovery.MetaWorkflowDigest])
+	currentDigest := currentWorkflowDigest(vessel.Workflow)
+	return storedDigest, currentDigest
+}
+
+func workflowDigestDrifted(storedDigest, currentDigest string) bool {
+	storedDigest = strings.TrimSpace(storedDigest)
+	currentDigest = strings.TrimSpace(currentDigest)
+	if storedDigest == "" || currentDigest == "" {
+		return false
+	}
+	return storedDigest != currentDigest
+}
+
+func currentWorkflowDigest(workflowName string) string {
+	workflowName = strings.TrimSpace(workflowName)
+	if workflowName == "" {
+		return ""
+	}
+	return recovery.DigestFile(filepath.Join(".xylem", "workflows", workflowName+".yaml"), "wf")
 }
 
 func (r *Runner) watchVesselCancellation(parent context.Context, vesselID string) (context.Context, context.CancelCauseFunc) {

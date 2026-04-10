@@ -26,6 +26,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
@@ -3191,6 +3192,131 @@ func TestCheckWaitingVesselsAppliesReadyLabelsOnResume(t *testing.T) {
 
 	if !hasRunOutputCallContaining(cmdRunner, "gh issue edit 1 --repo owner/repo", "--add-label ready-for-implementation", "--remove-label blocked") {
 		t.Fatalf("expected ready-label gh issue edit call, got %v", cmdRunner.outputArgs)
+	}
+}
+
+func TestSmoke_S1_WarnsOnWorkflowDriftDuringResume(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+	withTestWorkingDir(t, dir)
+
+	currentDigest := recovery.DigestFile(filepath.Join(".xylem", "workflows", "fix-bug.yaml"), "wf")
+	require.NotEmpty(t, currentDigest)
+
+	waitingSince := time.Now().UTC().Add(-time.Hour)
+	vessel := makeVessel(1, "fix-bug")
+	vessel.State = queue.StateWaiting
+	vessel.FailedPhase = "plan"
+	vessel.WaitingFor = "plan-approved"
+	vessel.WaitingSince = &waitingSince
+	vessel.CurrentPhase = 1
+	vessel.Meta[recovery.MetaWorkflowDigest] = "wf-stale"
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	cmdRunner := &mockCmdRunner{outputData: []byte(`{"labels":[{"name":"plan-approved"}]}`)}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldWriter)
+
+	r.CheckWaitingVessels(context.Background())
+
+	resumed, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	require.Equal(t, queue.StatePending, resumed.State)
+	assert.Contains(t, logBuf.String(), `warn: waiting vessel issue-1 workflow "fix-bug" drifted while waiting`)
+	assert.Contains(t, logBuf.String(), "stored=wf-stale")
+	assert.Contains(t, logBuf.String(), "current="+currentDigest)
+}
+
+func TestSmoke_S2_DoesNotWarnWhenWorkflowDigestMatches(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+	withTestWorkingDir(t, dir)
+
+	currentDigest := recovery.DigestFile(filepath.Join(".xylem", "workflows", "fix-bug.yaml"), "wf")
+	require.NotEmpty(t, currentDigest)
+
+	waitingSince := time.Now().UTC().Add(-time.Hour)
+	vessel := makeVessel(1, "fix-bug")
+	vessel.State = queue.StateWaiting
+	vessel.FailedPhase = "plan"
+	vessel.WaitingFor = "plan-approved"
+	vessel.WaitingSince = &waitingSince
+	vessel.CurrentPhase = 1
+	vessel.Meta[recovery.MetaWorkflowDigest] = currentDigest
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	cmdRunner := &mockCmdRunner{outputData: []byte(`{"labels":[{"name":"plan-approved"}]}`)}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	var logBuf bytes.Buffer
+	oldWriter := log.Writer()
+	log.SetOutput(&logBuf)
+	defer log.SetOutput(oldWriter)
+
+	r.CheckWaitingVessels(context.Background())
+
+	resumed, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	require.Equal(t, queue.StatePending, resumed.State)
+	assert.NotContains(t, logBuf.String(), "drifted while waiting")
+	assert.NotContains(t, logBuf.String(), "stored="+currentDigest)
+	assert.NotContains(t, logBuf.String(), "current="+currentDigest)
+}
+
+func TestWorkflowDigestDrifted(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		stored  string
+		current string
+		want    bool
+	}{
+		{name: "matching digests", stored: "wf-same", current: "wf-same", want: false},
+		{name: "mismatched digests", stored: "wf-old", current: "wf-new", want: true},
+		{name: "missing stored digest", stored: "", current: "wf-new", want: false},
+		{name: "missing current digest", stored: "wf-old", current: "", want: false},
+		{name: "whitespace is ignored", stored: " wf-same ", current: "wf-same", want: false},
+		{name: "whitespace only stored digest is not comparable", stored: " \t\n ", current: "wf-new", want: false},
+		{name: "whitespace only current digest is not comparable", stored: "wf-old", current: " \t\n ", want: false},
+		{name: "different after trimming still drifts", stored: "\twf-old\n", current: " wf-new ", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := workflowDigestDrifted(tt.stored, tt.current); got != tt.want {
+				t.Fatalf("workflowDigestDrifted(%q, %q) = %t, want %t", tt.stored, tt.current, got, tt.want)
+			}
+		})
 	}
 }
 
