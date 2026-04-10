@@ -727,7 +727,7 @@ sources:
 ### implement-harness (repo-specific)
 
 Implements a harness spec step with verification, testing, and smoke scenarios in 8 phases. Uses mixed LLM providers: Copilot (`gpt-5.4`) for implementation-heavy phases, and Claude for planning and verification.
-The YAML below mirrors the checked-in `.xylem/workflows/implement-harness.yaml`, including the deterministic `pr_create` command phase.
+The YAML below is an illustrative, repo-specific example based on the checked-in `.xylem/workflows/implement-harness.yaml`. Its `pr_create` command phase matches the checked-in workflow contract; other phase details are shown here to explain the flow.
 
 ```yaml
 name: implement-harness

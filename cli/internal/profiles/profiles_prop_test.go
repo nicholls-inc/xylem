@@ -67,7 +67,10 @@ func TestPropComposeCoreKeepsSecurityComplianceBundlePresent(t *testing.T) {
 		}
 
 		for _, want := range securityComplianceBundle(fresh) {
-			expectedFragment := securityComplianceExpectedFragments[want.name]
+			expectedFragment, ok := securityComplianceExpectedFragments[want.name]
+			if !ok {
+				t.Fatalf("missing expected fragment for %s", want.name)
+			}
 			if len(want.data) == 0 {
 				t.Fatalf("%s missing or empty", want.name)
 			}
