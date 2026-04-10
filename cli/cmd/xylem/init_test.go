@@ -38,6 +38,7 @@ var expectedCoreWorkflows = []string{
 
 var expectedSelfHostingWorkflows = []string{
 	"audit",
+	"continuous-refactoring",
 	"continuous-improvement",
 	"continuous-simplicity",
 	"diagnose-failures",
