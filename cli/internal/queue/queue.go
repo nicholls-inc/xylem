@@ -135,8 +135,8 @@ func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 			for _, v := range vessels {
 				if v.Ref == vessel.Ref {
 					switch v.State {
-					case StatePending, StateRunning, StateWaiting:
-						return nil // already active, skip silently
+					case StatePending, StateRunning, StateWaiting, StateCompleted:
+						return nil // already active or completed, skip silently
 					}
 				}
 			}
