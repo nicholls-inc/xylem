@@ -580,10 +580,11 @@ func daemonBacklogHealthCheck(now, lastActivityAt time.Time, idleThreshold time.
 	}
 }
 
-// reconcileStaleVessels transitions ALL running vessels to timed_out. The
+// reconcileStaleVessels requeues ALL running vessels as pending work. The
 // singleton daemon lock guarantees that no other daemon is executing vessels
-// when this runs, so every running vessel is orphaned by definition. The
-// timed_out state supports retry via `xylem retry`.
+// when this runs, so every running vessel is orphaned by definition. Restart
+// recovery preserves completed phase progress but clears crash-specific runtime
+// fields so the daemon can safely resume the vessel on the next drain tick.
 func reconcileStaleVessels(q *queue.Queue, wt *worktree.Manager) {
 	vessels, err := q.List()
 	if err != nil {
@@ -596,8 +597,8 @@ func reconcileStaleVessels(q *queue.Queue, wt *worktree.Manager) {
 		if v.State != queue.StateRunning {
 			continue
 		}
-		slog.Warn("daemon reconcile found orphaned running vessel", "vessel", v.ID, "target_state", queue.StateTimedOut)
-		if err := q.Update(v.ID, queue.StateTimedOut, "orphaned by daemon restart"); err != nil {
+		slog.Warn("daemon reconcile found orphaned running vessel", "vessel", v.ID, "target_state", queue.StatePending)
+		if err := q.Update(v.ID, queue.StatePending, ""); err != nil {
 			slog.Error("daemon reconcile failed to update vessel", "vessel", v.ID, "error", err)
 			continue
 		}
@@ -611,7 +612,7 @@ func reconcileStaleVessels(q *queue.Queue, wt *worktree.Manager) {
 		}
 	}
 	if recovered > 0 {
-		slog.Info("daemon reconcile recovered orphaned vessels", "recovered", recovered)
+		slog.Info("daemon reconcile requeued orphaned vessels", "recovered", recovered)
 	}
 }
 
