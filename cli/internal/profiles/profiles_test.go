@@ -176,17 +176,20 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Workflows), "implement-harness")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-refactoring")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-improvement")
+	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-style")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
 	assert.Contains(t, sortedKeys(composed.Workflows), "unblock-wave")
 	assert.Contains(t, sortedKeys(composed.Workflows), "diagnose-failures")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/report")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactoring-semantic")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-refactoring-file-diet")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
+	assert.Contains(t, sortedKeys(composed.Sources), "continuous-style")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
 	require.Len(t, composed.ConfigOverlays, 2)
@@ -236,6 +239,41 @@ func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkf
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/implement")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
+}
+
+func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousStyleScheduledWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	var source config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-style"], &source))
+	assert.Equal(t, "scheduled", source.Type)
+	assert.Equal(t, "{{ .Repo }}", source.Repo)
+	assert.Equal(t, "@daily", source.Schedule)
+	require.Contains(t, source.Tasks, "daily-continuous-style")
+	assert.Equal(t, "continuous-style", source.Tasks["daily-continuous-style"].Workflow)
+	assert.Equal(t, "continuous-style", source.Tasks["daily-continuous-style"].Ref)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["continuous-style"], &wf))
+	assert.Equal(t, "continuous-style", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 5)
+	assert.Equal(t, "ingest", wf.Phases[0].Name)
+	assert.Equal(t, ".xylem/prompts/continuous-style/ingest.md", wf.Phases[0].PromptFile)
+	assert.Equal(t, ".xylem/prompts/continuous-style/report.md", wf.Phases[2].PromptFile)
+	assert.Equal(t, "command", wf.Phases[3].Type)
+	assert.Contains(t, wf.Phases[3].Run, "continuous-style file-issues")
+	assert.Contains(t, wf.Phases[3].Run, "--repo {{ .Repo.Slug }}")
+	assert.Equal(t, "command", wf.Phases[4].Type)
+	assert.Contains(t, wf.Phases[4].Run, "continuous-style post-summary")
+	assert.Contains(t, wf.Phases[4].Run, "--repo {{ .Repo.Slug }}")
+
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/ingest")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/survey")
+	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-style/report")
 }
 
 func TestSelfHostingProfileScaffoldsContinuousRefactoringSchedules(t *testing.T) {
