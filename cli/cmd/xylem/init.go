@@ -138,18 +138,8 @@ func cmdInitWithProfileAndOptions(configPath string, force bool, profileValue st
 		return err
 	}
 
-	workflowNames := sortedKeys(composed.Workflows)
-	for _, name := range workflowNames {
-		if err := writeFileIfNeeded(filepath.Join(defaultStateDir, "workflows", name+".yaml"), composed.Workflows[name], force); err != nil {
-			return err
-		}
-	}
-
-	promptNames := sortedKeys(composed.Prompts)
-	for _, name := range promptNames {
-		if err := writeFileIfNeeded(filepath.Join(defaultStateDir, "prompts", filepath.FromSlash(name)+".md"), composed.Prompts[name], force); err != nil {
-			return err
-		}
+	if err := syncProfileAssets(defaultStateDir, composed, force); err != nil {
+		return err
 	}
 
 	if seed {
@@ -215,6 +205,26 @@ func writeFileIfNeeded(path string, content []byte, force bool) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	fmt.Printf("Created %s\n", path)
+	return nil
+}
+
+func syncProfileAssets(stateDir string, composed *profiles.ComposedProfile, force bool) error {
+	if composed == nil {
+		return fmt.Errorf("sync profile assets: composed profile is required")
+	}
+
+	for _, name := range sortedKeys(composed.Workflows) {
+		if err := writeFileIfNeeded(filepath.Join(stateDir, "workflows", name+".yaml"), composed.Workflows[name], force); err != nil {
+			return fmt.Errorf("sync workflow %q: %w", name, err)
+		}
+	}
+
+	for _, name := range sortedKeys(composed.Prompts) {
+		if err := writeFileIfNeeded(filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md"), composed.Prompts[name], force); err != nil {
+			return fmt.Errorf("sync prompt %q: %w", name, err)
+		}
+	}
+
 	return nil
 }
 

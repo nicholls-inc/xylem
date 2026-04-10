@@ -1,10 +1,13 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"pgregory.net/rapid"
 )
 
@@ -67,4 +70,168 @@ func expectedProfiles(raw string) ([]string, bool) {
 	default:
 		return nil, true
 	}
+}
+
+func TestPropSyncProfileAssetsPreservesExistingFilesWhenForceFalse(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		stateDir, err := os.MkdirTemp("", "xylem-sync-assets-*")
+		if err != nil {
+			rt.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(stateDir)
+
+		composed := &profiles.ComposedProfile{
+			Workflows: rapidWorkflowMap(rt, "workflow"),
+			Prompts:   rapidPromptMap(rt, "prompt"),
+		}
+
+		existingWorkflows := make(map[string][]byte)
+		for _, name := range sortedKeys(composed.Workflows) {
+			if !rapid.Bool().Draw(rt, "existing-workflow-"+name) {
+				continue
+			}
+			content := []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, "existing-workflow-content-"+name))
+			path := filepath.Join(stateDir, "workflows", name+".yaml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				rt.Fatalf("MkdirAll(%q) error = %v", path, err)
+			}
+			if err := os.WriteFile(path, content, 0o644); err != nil {
+				rt.Fatalf("WriteFile(%q) error = %v", path, err)
+			}
+			existingWorkflows[name] = content
+		}
+
+		existingPrompts := make(map[string][]byte)
+		for _, name := range sortedKeys(composed.Prompts) {
+			if !rapid.Bool().Draw(rt, "existing-prompt-"+name) {
+				continue
+			}
+			content := []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, "existing-prompt-content-"+name))
+			path := filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				rt.Fatalf("MkdirAll(%q) error = %v", path, err)
+			}
+			if err := os.WriteFile(path, content, 0o644); err != nil {
+				rt.Fatalf("WriteFile(%q) error = %v", path, err)
+			}
+			existingPrompts[name] = content
+		}
+
+		if err := syncProfileAssets(stateDir, composed, false); err != nil {
+			rt.Fatalf("syncProfileAssets() error = %v", err)
+		}
+
+		for name, want := range composed.Workflows {
+			got, err := os.ReadFile(filepath.Join(stateDir, "workflows", name+".yaml"))
+			if err != nil {
+				rt.Fatalf("ReadFile(workflow %q) error = %v", name, err)
+			}
+			if existing, ok := existingWorkflows[name]; ok {
+				if string(got) != string(existing) {
+					rt.Fatalf("workflow %q = %q, want preserved %q", name, string(got), string(existing))
+				}
+				continue
+			}
+			if string(got) != string(want) {
+				rt.Fatalf("workflow %q = %q, want %q", name, string(got), string(want))
+			}
+		}
+
+		for name, want := range composed.Prompts {
+			got, err := os.ReadFile(filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md"))
+			if err != nil {
+				rt.Fatalf("ReadFile(prompt %q) error = %v", name, err)
+			}
+			if existing, ok := existingPrompts[name]; ok {
+				if string(got) != string(existing) {
+					rt.Fatalf("prompt %q = %q, want preserved %q", name, string(got), string(existing))
+				}
+				continue
+			}
+			if string(got) != string(want) {
+				rt.Fatalf("prompt %q = %q, want %q", name, string(got), string(want))
+			}
+		}
+	})
+}
+
+func TestPropSyncProfileAssetsMaterializesComposedAssetsWhenForceTrue(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		stateDir, err := os.MkdirTemp("", "xylem-sync-assets-*")
+		if err != nil {
+			rt.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(stateDir)
+
+		composed := &profiles.ComposedProfile{
+			Workflows: rapidWorkflowMap(rt, "workflow"),
+			Prompts:   rapidPromptMap(rt, "prompt"),
+		}
+
+		for _, name := range sortedKeys(composed.Workflows) {
+			path := filepath.Join(stateDir, "workflows", name+".yaml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				rt.Fatalf("MkdirAll(%q) error = %v", path, err)
+			}
+			oldContent := []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, "old-workflow-content-"+name))
+			if err := os.WriteFile(path, oldContent, 0o644); err != nil {
+				rt.Fatalf("WriteFile(%q) error = %v", path, err)
+			}
+		}
+
+		for _, name := range sortedKeys(composed.Prompts) {
+			path := filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				rt.Fatalf("MkdirAll(%q) error = %v", path, err)
+			}
+			oldContent := []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, "old-prompt-content-"+name))
+			if err := os.WriteFile(path, oldContent, 0o644); err != nil {
+				rt.Fatalf("WriteFile(%q) error = %v", path, err)
+			}
+		}
+
+		if err := syncProfileAssets(stateDir, composed, true); err != nil {
+			rt.Fatalf("syncProfileAssets() error = %v", err)
+		}
+
+		for name, want := range composed.Workflows {
+			got, err := os.ReadFile(filepath.Join(stateDir, "workflows", name+".yaml"))
+			if err != nil {
+				rt.Fatalf("ReadFile(workflow %q) error = %v", name, err)
+			}
+			if string(got) != string(want) {
+				rt.Fatalf("workflow %q = %q, want %q", name, string(got), string(want))
+			}
+		}
+
+		for name, want := range composed.Prompts {
+			got, err := os.ReadFile(filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md"))
+			if err != nil {
+				rt.Fatalf("ReadFile(prompt %q) error = %v", name, err)
+			}
+			if string(got) != string(want) {
+				rt.Fatalf("prompt %q = %q, want %q", name, string(got), string(want))
+			}
+		}
+	})
+}
+
+func rapidWorkflowMap(rt *rapid.T, label string) map[string][]byte {
+	count := rapid.IntRange(0, 4).Draw(rt, label+"-count")
+	assets := make(map[string][]byte, count)
+	for len(assets) < count {
+		name := rapid.StringMatching(`[a-z0-9-]{1,8}`).Draw(rt, label+"-name")
+		assets[name] = []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, label+"-content-"+name))
+	}
+	return assets
+}
+
+func rapidPromptMap(rt *rapid.T, label string) map[string][]byte {
+	count := rapid.IntRange(0, 4).Draw(rt, label+"-count")
+	assets := make(map[string][]byte, count)
+	for len(assets) < count {
+		name := rapid.StringMatching(`[a-z0-9-]{1,8}/[a-z0-9-]{1,8}`).Draw(rt, label+"-name")
+		assets[name] = []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, label+"-content-"+name))
+	}
+	return assets
 }
