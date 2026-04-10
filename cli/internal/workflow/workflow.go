@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,18 +59,33 @@ const (
 
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
-	Name         string   `yaml:"name"`
-	Type         string   `yaml:"type,omitempty"` // "prompt" (default) or "command"
-	Run          string   `yaml:"run,omitempty"`  // shell command for type=command, supports template variables
-	PromptFile   string   `yaml:"prompt_file"`
-	MaxTurns     int      `yaml:"max_turns"`
-	LLM          *string  `yaml:"llm,omitempty"`
-	Model        *string  `yaml:"model,omitempty"`
-	Tier         *string  `yaml:"tier,omitempty"`
-	NoOp         *NoOp    `yaml:"noop,omitempty"`
-	Gate         *Gate    `yaml:"gate,omitempty"`
-	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
-	DependsOn    []string `yaml:"depends_on,omitempty"`
+	Name         string           `yaml:"name"`
+	Type         string           `yaml:"type,omitempty"` // "prompt" (default) or "command"
+	Run          string           `yaml:"run,omitempty"`  // shell command for type=command, supports template variables
+	PromptFile   string           `yaml:"prompt_file"`
+	MaxTurns     int              `yaml:"max_turns"`
+	LLM          *string          `yaml:"llm,omitempty"`
+	Model        *string          `yaml:"model,omitempty"`
+	Tier         *string          `yaml:"tier,omitempty"`
+	NoOp         *NoOp            `yaml:"noop,omitempty"`
+	Gate         *Gate            `yaml:"gate,omitempty"`
+	Evaluator    *EvaluatorConfig `yaml:"evaluator,omitempty"`
+	AllowedTools *string          `yaml:"allowed_tools,omitempty"`
+	DependsOn    []string         `yaml:"depends_on,omitempty"`
+}
+
+// EvaluatorConfig defines optional evaluator-loop configuration for a phase.
+type EvaluatorConfig struct {
+	Criteria      []EvaluatorCriterion `yaml:"criteria,omitempty"`
+	MaxRetries    int                  `yaml:"max_retries,omitempty"`
+	PassThreshold float64              `yaml:"pass_threshold,omitempty"`
+}
+
+// EvaluatorCriterion defines a single scored evaluator criterion.
+type EvaluatorCriterion struct {
+	Name      string  `yaml:"name"`
+	Weight    float64 `yaml:"weight"`
+	Threshold float64 `yaml:"threshold,omitempty"`
 }
 
 // NoOp defines an early-success completion rule for a phase.
@@ -275,6 +291,12 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			}
 		}
 
+		if p.Evaluator != nil {
+			if err := validateEvaluator(p.Name, p.Evaluator); err != nil {
+				return err
+			}
+		}
+
 		if p.NoOp != nil {
 			if err := validateNoOp(p.Name, p.NoOp); err != nil {
 				return err
@@ -306,6 +328,45 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 
 	if err := validateDependencyCycles(s.Phases); err != nil {
 		return err
+	}
+
+	return nil
+}
+
+const evaluatorWeightTolerance = 0.01
+
+func validateEvaluator(phaseName string, cfg *EvaluatorConfig) error {
+	if cfg == nil {
+		return nil
+	}
+
+	if cfg.MaxRetries < 0 {
+		return fmt.Errorf("phase %q: evaluator: max_retries must be non-negative, got %d", phaseName, cfg.MaxRetries)
+	}
+	if cfg.PassThreshold < 0 || cfg.PassThreshold > 1 {
+		return fmt.Errorf("phase %q: evaluator: pass_threshold must be in [0, 1], got %f", phaseName, cfg.PassThreshold)
+	}
+
+	seen := make(map[string]bool, len(cfg.Criteria))
+	var weightSum float64
+	for i, criterion := range cfg.Criteria {
+		if strings.TrimSpace(criterion.Name) == "" {
+			return fmt.Errorf("phase %q: evaluator: criteria[%d].name is required", phaseName, i)
+		}
+		if seen[criterion.Name] {
+			return fmt.Errorf("phase %q: evaluator: duplicate criterion name %q", phaseName, criterion.Name)
+		}
+		seen[criterion.Name] = true
+		if criterion.Weight < 0 {
+			return fmt.Errorf("phase %q: evaluator: criterion %q weight must be non-negative, got %f", phaseName, criterion.Name, criterion.Weight)
+		}
+		if criterion.Threshold < 0 || criterion.Threshold > 1 {
+			return fmt.Errorf("phase %q: evaluator: criterion %q threshold must be in [0, 1], got %f", phaseName, criterion.Name, criterion.Threshold)
+		}
+		weightSum += criterion.Weight
+	}
+	if len(cfg.Criteria) > 0 && math.Abs(weightSum-1.0) > evaluatorWeightTolerance {
+		return fmt.Errorf("phase %q: evaluator: criteria weights must sum to 1.0 +/- %.2f, got %f", phaseName, evaluatorWeightTolerance, weightSum)
 	}
 
 	return nil

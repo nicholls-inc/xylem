@@ -235,6 +235,225 @@ phases:
 	assert.Equal(t, "", e.TrustBoundary)
 }
 
+func TestSmoke_S15_PhaseEvaluatorConfigParsesAndValidates(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    evaluator:
+      max_retries: 2
+      pass_threshold: 0.8
+      criteria:
+        - name: coverage
+          weight: 0.6
+          threshold: 0.8
+        - name: correctness
+          weight: 0.4
+          threshold: 0.9
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Evaluator)
+
+	eval := got.Phases[0].Evaluator
+	assert.Equal(t, 2, eval.MaxRetries)
+	assert.Equal(t, 0.8, eval.PassThreshold)
+	require.Len(t, eval.Criteria, 2)
+	assert.Equal(t, "coverage", eval.Criteria[0].Name)
+	assert.Equal(t, 0.6, eval.Criteria[0].Weight)
+	assert.Equal(t, 0.8, eval.Criteria[0].Threshold)
+	assert.Equal(t, "correctness", eval.Criteria[1].Name)
+	assert.Equal(t, 0.4, eval.Criteria[1].Weight)
+	assert.Equal(t, 0.9, eval.Criteria[1].Threshold)
+}
+
+func TestSmoke_S16_PhaseEvaluatorRejectsCriteriaWeightSumsOutsideTolerance(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    evaluator:
+      criteria:
+        - name: coverage
+          weight: 0.7
+          threshold: 0.8
+        - name: correctness
+          weight: 0.2
+          threshold: 0.9
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `phase "analyze": evaluator: criteria weights must sum to 1.0 +/- 0.01`)
+}
+
+func TestSmoke_S17_PhaseEvaluatorRejectsThresholdsOutsideUnitInterval(t *testing.T) {
+	tests := []struct {
+		name          string
+		evaluatorYAML string
+		wantErr       string
+	}{
+		{
+			name: "criterion threshold out of range",
+			evaluatorYAML: `    evaluator:
+      criteria:
+        - name: coverage
+          weight: 1.0
+          threshold: 1.1
+`,
+			wantErr: `phase "analyze": evaluator: criterion "coverage" threshold must be in [0, 1]`,
+		},
+		{
+			name: "pass threshold out of range",
+			evaluatorYAML: `    evaluator:
+      pass_threshold: 1.1
+      criteria:
+        - name: coverage
+          weight: 1.0
+          threshold: 0.8
+`,
+			wantErr: `phase "analyze": evaluator: pass_threshold must be in [0, 1]`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+			createPromptFile(t, dir, "prompts/analyze.md")
+
+			path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`+tt.evaluatorYAML)
+
+			_, err := Load(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.wantErr)
+		})
+	}
+}
+
+func TestSmoke_S18_PhaseEvaluatorRejectsNegativeMaxRetries(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    evaluator:
+      max_retries: -1
+      criteria:
+        - name: coverage
+          weight: 1.0
+          threshold: 0.8
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `phase "analyze": evaluator: max_retries must be non-negative`)
+}
+
+func TestSmoke_S19_WorkflowWithoutEvaluatorStillLoadsWithNilEvaluator(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Len(t, got.Phases, 1)
+	assert.Nil(t, got.Phases[0].Evaluator)
+	assert.Equal(t, "analyze", got.Phases[0].Name)
+	assert.Equal(t, "prompts/analyze.md", got.Phases[0].PromptFile)
+	assert.Equal(t, 10, got.Phases[0].MaxTurns)
+}
+
+func TestLoadWorkflowEvaluatorRejectsInvalidConfig(t *testing.T) {
+	tests := []struct {
+		name          string
+		evaluatorYAML string
+		wantErr       string
+	}{
+		{
+			name: "negative criterion weight",
+			evaluatorYAML: `    evaluator:
+      criteria:
+        - name: coverage
+          weight: -0.1
+          threshold: 0.8
+        - name: correctness
+          weight: 1.1
+          threshold: 0.9
+`,
+			wantErr: `phase "analyze": evaluator: criterion "coverage" weight must be non-negative`,
+		},
+		{
+			name: "duplicate criterion name",
+			evaluatorYAML: `    evaluator:
+      criteria:
+        - name: coverage
+          weight: 0.5
+          threshold: 0.8
+        - name: coverage
+          weight: 0.5
+          threshold: 0.9
+`,
+			wantErr: `phase "analyze": evaluator: duplicate criterion name "coverage"`,
+		},
+		{
+			name: "blank criterion name",
+			evaluatorYAML: `    evaluator:
+      criteria:
+        - name: ""
+          weight: 1.0
+          threshold: 0.8
+`,
+			wantErr: `phase "analyze": evaluator: criteria[0].name is required`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+			createPromptFile(t, dir, "prompts/analyze.md")
+
+			path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`+tt.evaluatorYAML)
+
+			_, err := Load(path)
+			requireErrorContains(t, err, tt.wantErr)
+		})
+	}
+}
+
 func TestLoadWorkflowAllowAdditiveProtectedWritesDefaultsFalse(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)

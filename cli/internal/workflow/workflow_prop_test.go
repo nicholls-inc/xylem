@@ -1,6 +1,7 @@
 package workflow
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -44,6 +45,41 @@ func genInvalidWorkflowClass() *rapid.Generator[string] {
 			if err := validateClass(Class(class)); err != nil {
 				return class
 			}
+		}
+	})
+}
+
+func genValidEvaluatorConfig() *rapid.Generator[*EvaluatorConfig] {
+	return rapid.Custom(func(t *rapid.T) *EvaluatorConfig {
+		count := rapid.IntRange(1, 5).Draw(t, "criteria-count")
+		rawWeights := make([]float64, count)
+		var rawTotal float64
+		for i := 0; i < count; i++ {
+			raw := rapid.Float64Range(0.01, 1.0).Draw(t, fmt.Sprintf("raw-weight-%d", i))
+			rawWeights[i] = raw
+			rawTotal += raw
+		}
+
+		criteria := make([]EvaluatorCriterion, count)
+		normalizedSum := 0.0
+		for i := 0; i < count; i++ {
+			weight := rawWeights[i] / rawTotal
+			if i == count-1 {
+				weight = 1.0 - normalizedSum
+			} else {
+				normalizedSum += weight
+			}
+			criteria[i] = EvaluatorCriterion{
+				Name:      fmt.Sprintf("criterion_%d", i),
+				Weight:    weight,
+				Threshold: rapid.Float64Range(0, 1).Draw(t, fmt.Sprintf("threshold-%d", i)),
+			}
+		}
+
+		return &EvaluatorConfig{
+			Criteria:      criteria,
+			MaxRetries:    rapid.IntRange(0, 10).Draw(t, "max-retries"),
+			PassThreshold: rapid.Float64Range(0, 1).Draw(t, "pass-threshold"),
 		}
 	})
 }
@@ -118,6 +154,67 @@ func TestPropValidateClassRejectsUnknownClasses(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), class) {
 			t.Fatalf("validateClass(%q) error = %q, want mention of class", class, err.Error())
+		}
+	})
+}
+
+func TestPropValidateEvaluatorAcceptsNormalizedConfigs(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := genValidEvaluatorConfig().Draw(t, "config")
+		if err := validateEvaluator("analyze", cfg); err != nil {
+			t.Fatalf("validateEvaluator() error = %v for %+v", err, cfg)
+		}
+	})
+}
+
+func TestPropValidateEvaluatorRejectsThresholdsOutsideUnitInterval(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := genValidEvaluatorConfig().Draw(t, "config")
+		idx := rapid.IntRange(0, len(cfg.Criteria)-1).Draw(t, "criterion-index")
+
+		if rapid.Bool().Draw(t, "below-zero") {
+			cfg.Criteria[idx].Threshold = -rapid.Float64Range(0.001, 1.0).Draw(t, "negative-threshold")
+		} else {
+			cfg.Criteria[idx].Threshold = 1 + rapid.Float64Range(0.001, 1.0).Draw(t, "positive-threshold")
+		}
+
+		err := validateEvaluator("analyze", cfg)
+		if err == nil {
+			t.Fatalf("validateEvaluator() error = nil for %+v", cfg)
+		}
+		if !strings.Contains(err.Error(), cfg.Criteria[idx].Name) || !strings.Contains(err.Error(), "threshold must be in [0, 1]") {
+			t.Fatalf("validateEvaluator() error = %q, want criterion %q threshold failure", err.Error(), cfg.Criteria[idx].Name)
+		}
+	})
+}
+
+func TestPropValidateEvaluatorRejectsNegativeWeights(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := genValidEvaluatorConfig().Draw(t, "config")
+		idx := rapid.IntRange(0, len(cfg.Criteria)-1).Draw(t, "criterion-index")
+		cfg.Criteria[idx].Weight = -rapid.Float64Range(0.001, 1.0).Draw(t, "negative-weight")
+
+		err := validateEvaluator("analyze", cfg)
+		if err == nil {
+			t.Fatalf("validateEvaluator() error = nil for %+v", cfg)
+		}
+		if !strings.Contains(err.Error(), cfg.Criteria[idx].Name) || !strings.Contains(err.Error(), "weight must be non-negative") {
+			t.Fatalf("validateEvaluator() error = %q, want criterion %q weight failure", err.Error(), cfg.Criteria[idx].Name)
+		}
+	})
+}
+
+func TestPropValidateEvaluatorRejectsWeightSumsOutsideTolerance(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := genValidEvaluatorConfig().Draw(t, "config")
+		cfg.Criteria[0].Weight += rapid.Float64Range(evaluatorWeightTolerance+0.001, 0.5).Draw(t, "weight-delta")
+
+		err := validateEvaluator("analyze", cfg)
+		if err == nil {
+			t.Fatalf("validateEvaluator() error = nil for %+v", cfg)
+		}
+		if !strings.Contains(err.Error(), "criteria weights must sum to 1.0") {
+			t.Fatalf("validateEvaluator() error = %q, want weight-sum failure", err.Error())
 		}
 	})
 }
