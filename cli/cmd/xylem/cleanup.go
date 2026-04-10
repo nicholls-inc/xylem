@@ -29,7 +29,7 @@ func newCleanupCmd() *cobra.Command {
 }
 
 func cmdCleanup(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun bool) error {
-	if err := cleanupWorktrees(wt, dryRun); err != nil {
+	if err := cleanupWorktrees(wt, q, dryRun); err != nil {
 		return err
 	}
 
@@ -62,7 +62,7 @@ func compactQueue(q *queue.Queue, dryRun bool) {
 	}
 }
 
-func cleanupWorktrees(wt *worktree.Manager, dryRun bool) error {
+func cleanupWorktrees(wt *worktree.Manager, q *queue.Queue, dryRun bool) error {
 	ctx := context.Background()
 	trees, err := wt.ListXylem(ctx)
 	if err != nil {
@@ -73,8 +73,24 @@ func cleanupWorktrees(wt *worktree.Manager, dryRun bool) error {
 		return nil
 	}
 
+	// Build set of worktree paths for active vessels so we don't kill
+	// running work.
+	activeWorktrees := make(map[string]bool)
+	if vessels, listErr := q.List(); listErr == nil {
+		for _, v := range vessels {
+			if !v.State.IsTerminal() && v.WorktreePath != "" {
+				activeWorktrees[v.WorktreePath] = true
+			}
+		}
+	}
+
 	removed := 0
+	skipped := 0
 	for _, t := range trees {
+		if activeWorktrees[t.Path] {
+			skipped++
+			continue
+		}
 		if dryRun {
 			fmt.Printf("Would remove: %s\n", t.Path)
 			removed++
@@ -88,8 +104,11 @@ func cleanupWorktrees(wt *worktree.Manager, dryRun bool) error {
 		removed++
 	}
 
+	if skipped > 0 {
+		fmt.Printf("\nSkipped %d active vessel worktree(s)\n", skipped)
+	}
 	if dryRun {
-		fmt.Printf("\n%d worktree(s) would be removed (dry-run — no changes made)\n", removed)
+		fmt.Printf("%d worktree(s) would be removed (dry-run — no changes made)\n", removed)
 	} else {
 		fmt.Printf("\nRemoved %d worktree(s)\n", removed)
 	}
