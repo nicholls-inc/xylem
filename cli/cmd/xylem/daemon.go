@@ -153,6 +153,9 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		stallChecks = daemonChecksFromFindings(findings, daemonNow())
 		drainRunner.CheckWaitingVessels(ctx)
 		drainRunner.CheckHungVessels(ctx)
+		// Cancel pending vessels whose PRs are already merged/closed,
+		// freeing concurrency slots for real work.
+		drainRunner.CancelStalePRVessels(ctx)
 		// Auto-merge: best-effort request copilot review on merge-ready
 		// harness PRs, then admin-merge once deterministic safety checks
 		// are green.
