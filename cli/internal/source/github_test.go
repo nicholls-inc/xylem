@@ -638,6 +638,67 @@ func TestGitHubScanRetriesAfterCooldownWithoutArtifactFallsBackToStartedAt(t *te
 	assert.Equal(t, "cooldown", vessels[0].Meta[recovery.MetaUnlockedBy])
 }
 
+func TestGitHubScanLegacyRunningLabelDoesNotChangeRetryFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 42,
+		Title:  "flaky dependency",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/42",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "in-progress"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("flaky dependency", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-42",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "42",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-42", queue.StateFailed, "temporary failure from upstream 503"))
+
+	failed, err := q.FindByID("issue-42")
+	require.NoError(t, err)
+	endedAt := time.Now().UTC().Add(-2 * recovery.DefaultRetryCooldown)
+	failed.EndedAt = &endedAt
+	require.NoError(t, q.UpdateVessel(*failed))
+
+	g := &GitHub{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "issue-42-retry-1", vessels[0].ID)
+	assert.Equal(t, "issue-42", vessels[0].RetryOf)
+	assert.Equal(t, "cooldown", vessels[0].Meta[recovery.MetaUnlockedBy])
+}
+
 func TestGitHubScanRetriesWhenOnlySourceFingerprintChanges(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))

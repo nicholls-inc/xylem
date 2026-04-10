@@ -484,6 +484,9 @@ func issueFingerprintLabels(labels []struct {
 
 func managedIssueLabels(task GitHubTask) map[string]bool {
 	managed := make(map[string]bool, 7)
+	if task.StatusLabels == nil {
+		managed["in-progress"] = true
+	}
 	if task.StatusLabels != nil {
 		for _, label := range []string{
 			task.StatusLabels.Queued,
