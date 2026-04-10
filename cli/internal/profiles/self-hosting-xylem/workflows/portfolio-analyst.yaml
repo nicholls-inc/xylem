@@ -1,0 +1,44 @@
+name: portfolio-analyst
+class: harness-maintenance
+description: "Weekly analysis of token consumption patterns and throughput trends across the last 7 daily metrics reports"
+phases:
+  - name: collect
+    type: command
+    noop:
+      match: XYLEM_NOOP
+    run: |
+      set -euo pipefail
+      mkdir -p .xylem/state/metrics
+      ls .xylem/state/metrics/*-report.md 2>/dev/null | sort | tail -7 \
+        > .xylem/state/metrics/portfolio-inputs.txt || true
+      COUNT=$(wc -l < .xylem/state/metrics/portfolio-inputs.txt | tr -d ' ')
+      if [ "$COUNT" -eq 0 ]; then
+        echo "XYLEM_NOOP: no daily reports available yet"
+      fi
+  - name: analyze
+    prompt_file: .xylem/prompts/portfolio-analyst/analyze.md
+    max_turns: 40
+  - name: report
+    prompt_file: .xylem/prompts/portfolio-analyst/report.md
+    max_turns: 30
+  - name: post
+    type: command
+    run: |
+      set -euo pipefail
+      REPORT=".xylem/state/metrics/portfolio-report.md"
+      if [ ! -f "$REPORT" ]; then
+        echo "No portfolio report to post"
+        exit 0
+      fi
+      BODY=$(cat "$REPORT")
+      DATE=$(date -u +%Y-%m-%d)
+      EXISTING=$(gh issue list --repo nicholls-inc/xylem --search "[portfolio] Weekly tracking" --json number --jq 'length')
+      if [ "$EXISTING" -gt 0 ]; then
+        NUMBER=$(gh issue list --repo nicholls-inc/xylem --search "[portfolio] Weekly tracking" --json number --jq '.[0].number')
+        gh issue comment "$NUMBER" --repo nicholls-inc/xylem --body "$BODY"
+      else
+        gh issue create --repo nicholls-inc/xylem \
+          --title "[portfolio] Weekly tracking ${DATE}" \
+          --body "$BODY" \
+          --label harness-impl
+      fi
