@@ -83,10 +83,8 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	// P0-2: Reconcile any vessels left in running state from a previous daemon.
 	// The singleton lock guarantees no other daemon is running, so all running
 	// vessels are definitionally orphaned.
-	reconcileStaleVessels(q, wt)
-
-	if _, err := ensureAdaptRepoSeeded(context.Background(), cfg, newCmdRunner(cfg), adaptRepoSeededByDaemon); err != nil {
-		return fmt.Errorf("seed adapt-repo issue: %w", err)
+	if err := daemonStartup(context.Background(), cfg, q, wt, newCmdRunner(cfg)); err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -190,6 +188,15 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 
 	commandErr = daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, tickHook, scanInterval, drainInterval, upgradeInterval)
 	return commandErr
+}
+
+func daemonStartup(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, seedRunner adaptRepoSeedRunner) error {
+	reconcileStaleVessels(q, wt)
+
+	if _, err := ensureAdaptRepoSeeded(ctx, cfg, seedRunner, adaptRepoSeededByDaemon); err != nil {
+		slog.Warn("seed adapt-repo issue failed, continuing", "error", err)
+	}
+	return nil
 }
 
 // parseUpgradeInterval returns the effective periodic upgrade interval. If
