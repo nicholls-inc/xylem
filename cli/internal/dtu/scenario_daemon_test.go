@@ -20,10 +20,10 @@ import (
 // reconcileStaleVesselsForTest replicates the daemon's startup recovery
 // behavior (from cli/cmd/xylem/daemon.go) so the DTU scenario test can
 // exercise orphan recovery without importing the main package.
-func reconcileStaleVesselsForTest(q *queue.Queue) int {
+func reconcileStaleVesselsForTest(q *queue.Queue) (int, error) {
 	vessels, err := q.List()
 	if err != nil {
-		return 0
+		return 0, err
 	}
 
 	reconciled := 0
@@ -31,10 +31,12 @@ func reconcileStaleVesselsForTest(q *queue.Queue) int {
 		if v.State != queue.StateRunning {
 			continue
 		}
-		q.Update(v.ID, queue.StatePending, "") //nolint:errcheck
+		if err := q.Update(v.ID, queue.StatePending, ""); err != nil {
+			return reconciled, err
+		}
 		reconciled++
 	}
-	return reconciled
+	return reconciled, nil
 }
 
 func TestScenarioDaemonRecovery(t *testing.T) {
@@ -102,7 +104,10 @@ func TestScenarioDaemonRecovery(t *testing.T) {
 	// --- Phase 3: Daemon restarts and reconciles orphaned vessels ---
 	// No need to advance time — the singleton lock means all running vessels
 	// are orphaned by definition.
-	reconciled := reconcileStaleVesselsForTest(env.queue)
+	reconciled, err := reconcileStaleVesselsForTest(env.queue)
+	if err != nil {
+		t.Fatalf("reconcileStaleVesselsForTest() error = %v", err)
+	}
 	if reconciled != 1 {
 		t.Fatalf("reconciled = %d, want 1", reconciled)
 	}
