@@ -168,6 +168,8 @@ See the [Workflows Guide](docs/workflows.md) for template variables, custom work
 | `xylem drain` | Dequeue pending vessels and launch sessions |
 | `xylem review` | Roll up failures, evals, and pruning signals into a harness review |
 | `xylem daemon` | Continuous scan-drain loop |
+| `xylem daemon-supervisor` | Restart the daemon after unexpected exits |
+| `xylem daemon stop` | Stop the daemon and suppress supervisor restarts |
 | `xylem enqueue` | Manually enqueue a task |
 | `xylem retry` | Retry a failed vessel with failure context, or restart from scratch |
 | `xylem status` | Show queue state and vessel summary |
@@ -180,6 +182,8 @@ See the [Workflows Guide](docs/workflows.md) for template variables, custom work
 # Common patterns
 xylem scan && xylem drain           # One-shot scan and process
 xylem daemon                        # Continuous operation
+xylem daemon-supervisor             # Auto-restart wrapper around xylem daemon
+xylem daemon stop                   # Stop the daemon without triggering a restart
 xylem enqueue --workflow fix-bug \
   --ref "https://github.com/owner/repo/issues/99"  # Ad-hoc task
 xylem status --json | jq '.[] | select(.state == "failed")'  # Query failures
@@ -197,8 +201,9 @@ See the [CLI Reference](docs/cli-reference.md) for all flags, examples, and exit
 **Daemon mode** (recommended):
 
 ```bash
-xylem daemon
-# Or as a background service with systemd, launchd, etc.
+xylem daemon-supervisor
+# Loads .daemon-root/.env on each restart, waits 10s after unexpected exits,
+# and hands off clean shutdowns to `xylem daemon stop`.
 ```
 
 **Cron**:

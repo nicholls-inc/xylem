@@ -37,6 +37,7 @@ func newDaemonCmd() *cobra.Command {
 			return cmdDaemon(deps.cfg, deps.q, deps.wt)
 		},
 	}
+	cmd.AddCommand(newDaemonStopCmd())
 	return cmd
 }
 
@@ -53,8 +54,7 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	scanInterval, drainInterval := parseDaemonIntervals(cfg.Daemon)
 
 	// P0-3: Acquire singleton lock to prevent multiple daemons.
-	pidPath := filepath.Join(cfg.StateDir, "daemon.pid")
-	unlock, err := acquireDaemonLock(pidPath)
+	unlock, err := acquireDaemonLock(daemonPIDPath(cfg))
 	if err != nil {
 		return err
 	}
@@ -640,38 +640,46 @@ func daemonAfter(ctx context.Context, delay time.Duration) <-chan time.Time {
 // function. On failure (another daemon holds the lock) it returns an error
 // that includes the PID of the existing daemon.
 func acquireDaemonLock(pidPath string) (unlock func(), err error) {
+	return acquireProcessLock(pidPath, "daemon")
+}
+
+func acquireDaemonSupervisorLock(pidPath string) (unlock func(), err error) {
+	return acquireProcessLock(pidPath, "daemon supervisor")
+}
+
+func acquireProcessLock(pidPath, processName string) (unlock func(), err error) {
 	// Ensure the parent directory exists.
 	if mkErr := os.MkdirAll(filepath.Dir(pidPath), 0o755); mkErr != nil {
-		return nil, fmt.Errorf("daemon lock: create state dir: %w", mkErr)
+		return nil, fmt.Errorf("%s lock: create state dir: %w", processName, mkErr)
 	}
 
 	fl := flock.New(pidPath)
 	locked, err := fl.TryLock()
 	if err != nil {
-		return nil, fmt.Errorf("daemon lock: %w", err)
+		return nil, fmt.Errorf("%s lock: %w", processName, err)
 	}
 	if !locked {
 		// Try to read existing PID for a helpful error message.
 		if data, readErr := os.ReadFile(pidPath); readErr == nil {
 			if pid, parseErr := strconv.Atoi(string(data)); parseErr == nil {
-				return nil, fmt.Errorf("daemon already running (PID %d)", pid)
+				return nil, fmt.Errorf("%s already running (PID %d)", processName, pid)
 			}
 		}
-		return nil, fmt.Errorf("daemon already running (could not read PID)")
+		return nil, fmt.Errorf("%s already running (could not read PID)", processName)
 	}
 
 	// Write our PID to the file.
 	pid := os.Getpid()
 	if writeErr := os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0o644); writeErr != nil {
 		fl.Unlock() //nolint:errcheck
-		return nil, fmt.Errorf("daemon lock: write PID: %w", writeErr)
+		return nil, fmt.Errorf("%s lock: write PID: %w", processName, writeErr)
 	}
 
-	slog.Info("daemon acquired lock", "path", pidPath, "pid", pid)
+	slog.Info(processName+" acquired lock", "path", pidPath, "pid", pid)
 
 	return func() {
 		if unlockErr := fl.Unlock(); unlockErr != nil {
-			slog.Error("daemon failed to release lock", "path", pidPath, "error", unlockErr)
+			slog.Error(processName+" failed to release lock", "path", pidPath, "error", unlockErr)
 		}
 		os.Remove(pidPath) //nolint:errcheck
 	}, nil
