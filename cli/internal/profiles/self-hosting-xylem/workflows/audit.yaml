@@ -1,0 +1,42 @@
+name: audit
+class: harness-maintenance
+description: "Daily scan of failed vessels, pattern synthesis, and GitHub issue filing for systemic problems"
+phases:
+  - name: scan
+    prompt_file: .xylem/prompts/audit/scan.md
+    max_turns: 30
+  - name: cross_reference
+    prompt_file: .xylem/prompts/audit/cross_reference.md
+    max_turns: 30
+  - name: synthesize
+    prompt_file: .xylem/prompts/audit/synthesize.md
+    max_turns: 30
+    noop:
+      match: XYLEM_NOOP
+  - name: file_issues
+    type: command
+    run: |
+      set -euo pipefail
+      ISSUES_FILE=".xylem/state/audit/issues-to-file.json"
+      if [ ! -f "$ISSUES_FILE" ]; then
+        echo "No issues to file"
+        exit 0
+      fi
+      FILED=0
+      SKIPPED=0
+      while IFS= read -r issue; do
+        TITLE=$(echo "$issue" | jq -r '.title')
+        BODY=$(echo "$issue" | jq -r '.body')
+        EXISTING=$(gh issue list --repo nicholls-inc/xylem --search "$TITLE" --json number --jq 'length')
+        if [ "$EXISTING" -eq 0 ]; then
+          gh issue create --repo nicholls-inc/xylem \
+            --title "$TITLE" \
+            --body "$BODY" \
+            --label enhancement \
+            --label ready-for-work
+          FILED=$((FILED + 1))
+        else
+          SKIPPED=$((SKIPPED + 1))
+        fi
+      done < <(jq -c '.[]' "$ISSUES_FILE")
+      echo "Filed ${FILED} issues, skipped ${SKIPPED} duplicates"

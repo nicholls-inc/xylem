@@ -1,0 +1,28 @@
+name: metrics-collector
+class: harness-maintenance
+description: "Daily collection and aggregation of vessel run metrics from the JSONL queue and phase artifacts"
+phases:
+  - name: collect
+    type: command
+    run: |
+      set -euo pipefail
+      mkdir -p .xylem/state/metrics
+      DATE=$(date -u +%Y-%m-%d)
+      if [ -f .xylem/queue.jsonl ]; then
+        jq -c 'select(.state != null)' .xylem/queue.jsonl > ".xylem/state/metrics/${DATE}-raw.jsonl"
+      else
+        > ".xylem/state/metrics/${DATE}-raw.jsonl"
+      fi
+  - name: aggregate
+    prompt_file: .xylem/prompts/metrics-collector/aggregate.md
+    max_turns: 30
+  - name: persist
+    type: command
+    run: |
+      set -euo pipefail
+      DATE=$(date -u +%Y-%m-%d)
+      REPORT=".xylem/state/metrics/${DATE}-report.md"
+      if [ ! -f "$REPORT" ]; then
+        echo "ERROR: aggregate phase did not produce ${REPORT}"
+        exit 1
+      fi

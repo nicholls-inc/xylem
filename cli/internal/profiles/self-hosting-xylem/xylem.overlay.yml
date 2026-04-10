@@ -77,6 +77,36 @@ sources:
       daily-rotation:
         workflow: continuous-improvement
         ref: continuous-improvement
+  metrics-collector:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@daily"
+    timeout: "60m"
+    tasks:
+      daily-metrics:
+        workflow: metrics-collector
+        ref: metrics-collector
+
+  portfolio-analyst:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@weekly"
+    timeout: "60m"
+    tasks:
+      weekly-portfolio:
+        workflow: portfolio-analyst
+        ref: portfolio-analyst
+
+  audit:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@daily"
+    timeout: "60m"
+    tasks:
+      daily-audit:
+        workflow: audit
+        ref: audit
+
   harness-post-merge:
     type: github-merge
     repo: "{{ .Repo }}"
