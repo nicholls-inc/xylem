@@ -1,13 +1,41 @@
 name: resolve-conflicts
 description: "Resolve merge conflicts on a PR branch"
 phases:
+  - name: merge_main
+    type: command
+    run: |
+      set -eu
+      gh pr checkout {{ .Issue.Number }} --repo {{ .Repo.Slug }}
+      test "$(git branch --show-current)" = "$(gh pr view {{ .Issue.Number }} --repo {{ .Repo.Slug }} --json headRefName --jq '.headRefName')"
+      git fetch origin {{ .Repo.DefaultBranch }}
+      merge_log=$(mktemp)
+      set +e
+      git merge origin/{{ .Repo.DefaultBranch }} --no-commit --no-ff >"$merge_log" 2>&1
+      merge_status=$?
+      set -e
+      cat "$merge_log"
+      rm -f "$merge_log"
+      if [ "$merge_status" -eq 0 ]; then
+        if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+          git merge --abort
+        fi
+        printf '\nXYLEM_NOOP\n'
+        exit 0
+      fi
+      if git rev-parse -q --verify MERGE_HEAD >/dev/null 2>&1; then
+        if git diff --name-only --diff-filter=U | grep . >/dev/null 2>&1; then
+          exit 0
+        fi
+        git merge --abort
+      fi
+      exit "$merge_status"
+    noop:
+      match: XYLEM_NOOP
   - name: analyze
     prompt_file: .xylem/prompts/resolve-conflicts/analyze.md
     max_turns: 20
     llm: copilot
     model: gpt-5.4
-    noop:
-      match: XYLEM_NOOP
   - name: resolve
     prompt_file: .xylem/prompts/resolve-conflicts/resolve.md
     max_turns: 40
