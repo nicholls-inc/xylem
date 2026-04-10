@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1251,6 +1252,140 @@ phases:
 	requireErrorContains(t, err, `phase "analyze": noop: match is required`)
 }
 
+func TestSmoke_S8_PromptPhaseEvaluatorConfigParsesFromYAML(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    evaluator:
+      max_iterations: 4
+      pass_threshold: 0.8
+      criteria:
+        - name: correctness
+          description: Output is correct
+          weight: 0.6
+          threshold: 0.8
+        - name: completeness
+          description: Output is complete
+          weight: 0.4
+          threshold: 0.7
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Len(t, got.Phases, 1)
+	require.NotNil(t, got.Phases[0].Evaluator)
+	assert.Equal(t, "analyze", got.Phases[0].Name)
+	assert.Equal(t, &evaluator.EvalConfig{
+		MaxIterations: 4,
+		PassThreshold: 0.8,
+		Criteria: []evaluator.Criterion{
+			{Name: "correctness", Description: "Output is correct", Weight: 0.6, Threshold: 0.8},
+			{Name: "completeness", Description: "Output is complete", Weight: 0.4, Threshold: 0.7},
+		},
+	}, got.Phases[0].Evaluator)
+}
+
+func TestSmoke_S9_InvalidEvaluatorConfigIsRejectedWithClearError(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    evaluator:
+      pass_threshold: 1.5
+`)
+
+	got, err := Load(path)
+	require.Error(t, err)
+	require.Nil(t, got)
+	assert.Contains(t, err.Error(), `phase "analyze": evaluator:`)
+	assert.Contains(t, err.Error(), `pass_threshold must be in [0, 1]`)
+}
+
+func TestSmoke_S10_WorkflowWithoutEvaluatorBlockLoadsWithoutError(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Len(t, got.Phases, 1)
+	assert.Equal(t, "analyze", got.Phases[0].Name)
+	assert.Equal(t, 10, got.Phases[0].MaxTurns)
+	assert.Nil(t, got.Phases[0].Evaluator)
+}
+
+func TestLoadWorkflowPhaseEvaluatorAllowsEmptyConfigDefaults(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    evaluator: {}
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Evaluator)
+	assert.Equal(t, &evaluator.EvalConfig{}, got.Phases[0].Evaluator)
+}
+
+func TestLoadWorkflowPhaseEvaluatorRejectsInvalidConfig(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: analyze
+    prompt_file: prompts/analyze.md
+    max_turns: 10
+    evaluator:
+      pass_threshold: 1.5
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `phase "analyze": evaluator: validate config: pass_threshold must be in [0, 1]`)
+}
+
+func TestLoadWorkflowPhaseEvaluatorRejectsCommandPhase(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: apply
+    type: command
+    run: echo ok
+    evaluator:
+      max_iterations: 2
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `phase "apply": evaluator is only supported for prompt phases`)
+}
+
 func TestValidate(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -1689,6 +1824,79 @@ func TestValidate(t *testing.T) {
 					{Name: "build", Type: "command", Run: "make build", Gate: &Gate{Type: "command", Run: "make test"}},
 				},
 			},
+		},
+		{
+			name:             "prompt phase with valid evaluator config",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{
+						Name:       "plan",
+						PromptFile: "prompt.md",
+						MaxTurns:   5,
+						Evaluator: &evaluator.EvalConfig{
+							MaxIterations: 2,
+							PassThreshold: 0.75,
+							Criteria: []evaluator.Criterion{
+								{Name: "quality", Description: "Checks quality", Weight: 1, Threshold: 0.7},
+							},
+						},
+					},
+				},
+			},
+			prompts: []string{"prompt.md"},
+		},
+		{
+			name:             "prompt phase with empty evaluator config uses defaults",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{
+						Name:       "plan",
+						PromptFile: "prompt.md",
+						MaxTurns:   5,
+						Evaluator:  &evaluator.EvalConfig{},
+					},
+				},
+			},
+			prompts: []string{"prompt.md"},
+		},
+		{
+			name:             "prompt phase with invalid evaluator config",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{
+						Name:       "plan",
+						PromptFile: "prompt.md",
+						MaxTurns:   5,
+						Evaluator: &evaluator.EvalConfig{
+							MaxIterations: -1,
+						},
+					},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `phase "plan": evaluator: validate config: max_iterations must be non-negative, got -1`,
+		},
+		{
+			name:             "command phase rejects evaluator config",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name: "test",
+				Phases: []Phase{
+					{
+						Name:      "build",
+						Type:      "command",
+						Run:       "echo hello",
+						Evaluator: &evaluator.EvalConfig{MaxIterations: 1},
+					},
+				},
+			},
+			wantErr: `phase "build": evaluator is only supported for prompt phases`,
 		},
 		{
 			name:             "prompt phase default",
