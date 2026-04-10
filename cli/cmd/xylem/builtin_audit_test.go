@@ -59,7 +59,10 @@ func TestRunBuiltInScheduledVesselsCompletesBuiltInAudits(t *testing.T) {
 	testCases := []struct {
 		name             string
 		sourceName       string
+		sourceType       string
+		vesselSource     string
 		schedule         string
+		cadence          string
 		taskName         string
 		vesselID         string
 		workflow         string
@@ -70,6 +73,8 @@ func TestRunBuiltInScheduledVesselsCompletesBuiltInAudits(t *testing.T) {
 		{
 			name:            "context-weight-audit",
 			sourceName:      "scheduled-audit",
+			sourceType:      "scheduled",
+			vesselSource:    "scheduled",
 			schedule:        "24h",
 			taskName:        "context",
 			vesselID:        "scheduled-audit-1",
@@ -80,12 +85,28 @@ func TestRunBuiltInScheduledVesselsCompletesBuiltInAudits(t *testing.T) {
 		{
 			name:            "harness-gap-analysis",
 			sourceName:      "harness-gap",
+			sourceType:      "scheduled",
+			vesselSource:    "scheduled",
 			schedule:        "4h",
 			taskName:        "analyze-gaps",
 			vesselID:        "scheduled-gap-1",
 			workflow:        reviewpkg.HarnessGapAnalysisWorkflow,
 			reportFile:      "harness-gap-analysis.json",
 			wantCreateCount: 0,
+		},
+		{
+			name:            "workflow-health-report-schedule-source",
+			sourceName:      "workflow-health",
+			sourceType:      "schedule",
+			vesselSource:    "schedule",
+			cadence:         "@weekly",
+			vesselID:        "schedule-workflow-health-1",
+			workflow:        reviewpkg.WorkflowHealthReportWorkflow,
+			reportFile:      "workflow-health-report.json",
+			wantCreateCount: 1,
+			wantCreatePrefix: []string{
+				"gh", "issue", "create", "--repo", "owner/repo", "--title", "[xylem] weekly workflow health",
+			},
 		},
 	}
 
@@ -96,37 +117,51 @@ func TestRunBuiltInScheduledVesselsCompletesBuiltInAudits(t *testing.T) {
 
 			dir := t.TempDir()
 			cfg := &config.Config{
+				Repo:     "owner/repo",
 				StateDir: dir,
 				Claude: config.ClaudeConfig{
 					Command:      "claude",
 					DefaultModel: "claude-sonnet-4-6",
 				},
-				Sources: map[string]config.SourceConfig{
-					tc.sourceName: {
-						Type:     "scheduled",
-						Repo:     "owner/repo",
-						Schedule: tc.schedule,
-						Tasks: map[string]config.Task{
-							tc.taskName: {Workflow: tc.workflow},
-						},
+				Sources: map[string]config.SourceConfig{},
+			}
+			switch tc.sourceType {
+			case "scheduled":
+				cfg.Sources[tc.sourceName] = config.SourceConfig{
+					Type:     "scheduled",
+					Repo:     "owner/repo",
+					Schedule: tc.schedule,
+					Tasks: map[string]config.Task{
+						tc.taskName: {Workflow: tc.workflow},
 					},
-				},
+				}
+			case "schedule":
+				cfg.Sources[tc.sourceName] = config.SourceConfig{
+					Type:     "schedule",
+					Cadence:  tc.cadence,
+					Workflow: tc.workflow,
+				}
+			default:
+				t.Fatalf("unexpected sourceType %q", tc.sourceType)
 			}
 
 			q := queue.New(filepath.Join(dir, "queue.jsonl"))
+			meta := map[string]string{
+				"config_source": tc.sourceName,
+			}
+			if tc.sourceType == "scheduled" {
+				meta["scheduled_task_name"] = tc.taskName
+				meta["scheduled_bucket"] = "1"
+				meta["scheduled_config_name"] = tc.sourceName
+			}
 			_, err := q.Enqueue(queue.Vessel{
 				ID:        tc.vesselID,
-				Source:    "scheduled",
-				Ref:       "scheduled://" + tc.sourceName + "/" + tc.taskName + "@1",
+				Source:    tc.vesselSource,
+				Ref:       builtInAuditTestRef(tc.sourceType, tc.sourceName, tc.taskName),
 				Workflow:  tc.workflow,
 				State:     queue.StatePending,
 				CreatedAt: time.Now().UTC(),
-				Meta: map[string]string{
-					"config_source":         tc.sourceName,
-					"scheduled_task_name":   tc.taskName,
-					"scheduled_bucket":      "1",
-					"scheduled_config_name": tc.sourceName,
-				},
+				Meta:      meta,
 			})
 			if err != nil {
 				t.Fatalf("Enqueue() error = %v", err)
@@ -166,6 +201,46 @@ func TestRunBuiltInScheduledVesselsCompletesBuiltInAudits(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRunBuiltInScheduledVesselsFailsWithoutRepoFallback(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"workflow-health": {
+				Type:     "schedule",
+				Cadence:  "@weekly",
+				Workflow: reviewpkg.WorkflowHealthReportWorkflow,
+			},
+		},
+	}
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "schedule-workflow-health-missing-repo",
+		Source:    "schedule",
+		Ref:       "schedule://workflow-health/2026-04-10T00:00:00Z",
+		Workflow:  reviewpkg.WorkflowHealthReportWorkflow,
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+		Meta: map[string]string{
+			"config_source": "workflow-health",
+		},
+	})
+	require.NoError(t, err)
+
+	result, err := runBuiltInScheduledVessels(context.Background(), cfg, q, &auditTestRunner{})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Zero(t, result.Completed)
+
+	vessel, err := q.FindByID("schedule-workflow-health-missing-repo")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "requires a source repo")
 }
 
 func TestSmoke_S4_ScheduledWorkflowHealthVesselPublishesWeeklyReport(t *testing.T) {
@@ -224,4 +299,11 @@ func TestSmoke_S4_ScheduledWorkflowHealthVesselPublishesWeeklyReport(t *testing.
 	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(dir, "phases", "scheduled-health-1", "summary.json"))
 	require.NoError(t, err)
+}
+
+func builtInAuditTestRef(sourceType, sourceName, taskName string) string {
+	if sourceType == "schedule" {
+		return "schedule://" + sourceName + "/2026-04-10T00:00:00Z"
+	}
+	return "scheduled://" + sourceName + "/" + taskName + "@1"
 }
