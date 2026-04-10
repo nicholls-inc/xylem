@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	toml "github.com/pelletier/go-toml/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -272,6 +273,115 @@ func TestResolveProfiles(t *testing.T) {
 	profiles, err := resolveProfiles("core,self-hosting-xylem")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, profiles)
+}
+
+func TestSyncProfileAssetsWritesMissingWorkflowAndPromptFiles(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"merge-pr": []byte("run: gh pr merge\n"),
+		},
+		Prompts: map[string][]byte{
+			"merge-pr/check": []byte("review the merge preconditions\n"),
+		},
+	}
+
+	require.NoError(t, syncProfileAssets(stateDir, composed, false))
+
+	workflowData, err := os.ReadFile(filepath.Join(stateDir, "workflows", "merge-pr.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Workflows["merge-pr"], workflowData)
+
+	promptData, err := os.ReadFile(filepath.Join(stateDir, "prompts", "merge-pr", "check.md"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Prompts["merge-pr/check"], promptData)
+}
+
+func TestSyncProfileAssetsSkipsExistingFilesWithoutForce(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	workflowPath := filepath.Join(stateDir, "workflows", "merge-pr.yaml")
+	promptPath := filepath.Join(stateDir, "prompts", "merge-pr", "check.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(workflowPath), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(promptPath), 0o755))
+	require.NoError(t, os.WriteFile(workflowPath, []byte("existing workflow\n"), 0o644))
+	require.NoError(t, os.WriteFile(promptPath, []byte("existing prompt\n"), 0o644))
+
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"merge-pr": []byte("new workflow\n"),
+			"triage":   []byte("triage workflow\n"),
+		},
+		Prompts: map[string][]byte{
+			"merge-pr/check":     []byte("new prompt\n"),
+			"merge-pr/summarize": []byte("summarize prompt\n"),
+		},
+	}
+
+	require.NoError(t, syncProfileAssets(stateDir, composed, false))
+
+	workflowData, err := os.ReadFile(workflowPath)
+	require.NoError(t, err)
+	assert.Equal(t, "existing workflow\n", string(workflowData))
+
+	promptData, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+	assert.Equal(t, "existing prompt\n", string(promptData))
+
+	missingWorkflowData, err := os.ReadFile(filepath.Join(stateDir, "workflows", "triage.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Workflows["triage"], missingWorkflowData)
+
+	missingPromptData, err := os.ReadFile(filepath.Join(stateDir, "prompts", "merge-pr", "summarize.md"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Prompts["merge-pr/summarize"], missingPromptData)
+}
+
+func TestSyncProfileAssetsForceOverwritesExistingFiles(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	workflowPath := filepath.Join(stateDir, "workflows", "merge-pr.yaml")
+	promptPath := filepath.Join(stateDir, "prompts", "merge-pr", "check.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(workflowPath), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Dir(promptPath), 0o755))
+	require.NoError(t, os.WriteFile(workflowPath, []byte("existing workflow\n"), 0o644))
+	require.NoError(t, os.WriteFile(promptPath, []byte("existing prompt\n"), 0o644))
+
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"merge-pr": []byte("new workflow\n"),
+		},
+		Prompts: map[string][]byte{
+			"merge-pr/check": []byte("new prompt\n"),
+		},
+	}
+
+	require.NoError(t, syncProfileAssets(stateDir, composed, true))
+
+	workflowData, err := os.ReadFile(workflowPath)
+	require.NoError(t, err)
+	assert.Equal(t, composed.Workflows["merge-pr"], workflowData)
+
+	promptData, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+	assert.Equal(t, composed.Prompts["merge-pr/check"], promptData)
+}
+
+func TestSyncProfileAssetsRejectsNilProfile(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+
+	err := syncProfileAssets(stateDir, nil, false)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "composed profile is required")
+	assert.NoDirExists(t, filepath.Join(stateDir, "workflows"))
+	assert.NoDirExists(t, filepath.Join(stateDir, "prompts"))
+}
+
+func TestSyncProfileAssetsAllowsEmptyAssets(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+
+	require.NoError(t, syncProfileAssets(stateDir, &profiles.ComposedProfile{}, false))
+	assert.NoDirExists(t, filepath.Join(stateDir, "workflows"))
+	assert.NoDirExists(t, filepath.Join(stateDir, "prompts"))
 }
 
 func TestInitCreatesV2Files(t *testing.T) {
