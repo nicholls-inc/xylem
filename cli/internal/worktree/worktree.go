@@ -378,6 +378,26 @@ func (m *Manager) Remove(ctx context.Context, worktreePath string) error {
 	return nil
 }
 
+// NormalizePath resolves a worktree path into a comparable absolute path rooted
+// at the manager's repository root when the input is relative.
+func (m *Manager) NormalizePath(worktreePath string) string {
+	if strings.TrimSpace(worktreePath) == "" {
+		return ""
+	}
+
+	normalized := worktreePath
+	if !filepath.IsAbs(normalized) {
+		normalized = filepath.Join(m.RepoRoot, normalized)
+	}
+
+	absPath, err := filepath.Abs(normalized)
+	if err == nil {
+		normalized = absPath
+	}
+
+	return filepath.Clean(normalized)
+}
+
 // branchForWorktree looks up the branch name for a worktree path by parsing
 // `git worktree list --porcelain`. Returns empty string if not found.
 func (m *Manager) branchForWorktree(ctx context.Context, worktreePath string) string {
@@ -385,21 +405,10 @@ func (m *Manager) branchForWorktree(ctx context.Context, worktreePath string) st
 	if err != nil {
 		return ""
 	}
-	// Normalize the target path for comparison
-	absTarget := worktreePath
-	if !filepath.IsAbs(worktreePath) {
-		absTarget = filepath.Join(m.RepoRoot, worktreePath)
-	}
-	// Resolve to absolute path (handles relative RepoRoot like ".")
-	absTarget, err = filepath.Abs(absTarget)
-	if err != nil {
-		return ""
-	}
-	absTarget = filepath.Clean(absTarget)
+	targetPath := m.NormalizePath(worktreePath)
 
 	for _, wt := range parsePorcelain(string(out)) {
-		candidate := filepath.Clean(wt.Path)
-		if candidate == absTarget {
+		if m.NormalizePath(wt.Path) == targetPath {
 			return wt.Branch
 		}
 	}
