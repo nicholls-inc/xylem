@@ -7,6 +7,18 @@ import (
 	"pgregory.net/rapid"
 )
 
+var testClasses = []Class{Delivery, HarnessMaintenance, Ops}
+
+var testOperations = []Operation{
+	OpWriteControlPlane,
+	OpCommitDefaultBranch,
+	OpPushBranch,
+	OpCreatePR,
+	OpMergePR,
+	OpReloadDaemon,
+	OpReadSecrets,
+}
+
 func TestPropEvaluateStableUnderRuleReordering(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		rules := append([]rule(nil), defaultRules...)
@@ -16,8 +28,8 @@ func TestPropEvaluateStableUnderRuleReordering(t *testing.T) {
 			rules[i], rules[j] = rules[j], rules[i]
 		})
 
-		for _, class := range allClasses {
-			for _, op := range allOperations {
+		for _, class := range testClasses {
+			for _, op := range testOperations {
 				want := Evaluate(class, op)
 				got := evaluateWithRules(class, op, rules)
 				if got != want {

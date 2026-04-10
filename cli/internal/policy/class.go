@@ -67,18 +67,6 @@ var defaultRules = []rule{
 	{class: Ops, operation: OpReadSecrets, decision: Decision{Rule: "ops.read_secrets_denied"}},
 }
 
-var allClasses = []Class{Delivery, HarnessMaintenance, Ops}
-
-var allOperations = []Operation{
-	OpWriteControlPlane,
-	OpCommitDefaultBranch,
-	OpPushBranch,
-	OpCreatePR,
-	OpMergePR,
-	OpReloadDaemon,
-	OpReadSecrets,
-}
-
 func Evaluate(class Class, op Operation) Decision {
 	return evaluateWithRules(class, op, defaultRules)
 }

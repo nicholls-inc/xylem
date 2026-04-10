@@ -1281,6 +1281,38 @@ func TestValidate(t *testing.T) {
 			},
 		},
 		{
+			name:             "legacy protected writes default class to harness maintenance",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name:                         "test",
+				AllowAdditiveProtectedWrites: true,
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			check: func(t *testing.T, s Workflow) {
+				t.Helper()
+				if s.Class != policy.HarnessMaintenance {
+					t.Fatalf("Class = %q, want %q", s.Class, policy.HarnessMaintenance)
+				}
+			},
+		},
+		{
+			name:             "explicit class conflicts with direct legacy protected writes",
+			workflowFileName: "test",
+			wf: Workflow{
+				Name:                         "test",
+				Class:                        policy.Delivery,
+				AllowAdditiveProtectedWrites: true,
+				Phases: []Phase{
+					{Name: "step1", PromptFile: "prompt.md", MaxTurns: 5},
+				},
+			},
+			prompts: []string{"prompt.md"},
+			wantErr: `"class" "delivery" conflicts with legacy protected write flags: delivery requires both legacy flags to be false`,
+		},
+		{
 			name:             "no phases",
 			workflowFileName: "test",
 			wf: Workflow{

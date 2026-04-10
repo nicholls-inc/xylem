@@ -199,15 +199,14 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 		return fmt.Errorf(`"name" is required`)
 	}
 
-	if s.Class == "" {
-		s.Class = policy.Delivery
-	} else if parsedClass, err := policy.ParseClass(string(s.Class)); err != nil {
-		return fmt.Errorf(`"class" is invalid: %w`, err)
-	} else {
-		s.Class = parsedClass
+	classSpecified, legacyFlagsSpecified := workflowPolicyPresence(s)
+	normalizedClass, err := normalizeWorkflowClass(s.Class, classSpecified, s.AllowAdditiveProtectedWrites, s.AllowCanonicalProtectedWrites)
+	if err != nil {
+		return err
 	}
+	s.Class = normalizedClass
 
-	if err := validateLegacyClassConsistency(s); err != nil {
+	if err := validateLegacyClassConsistency(s, classSpecified, legacyFlagsSpecified); err != nil {
 		return err
 	}
 
@@ -326,32 +325,57 @@ func workflowFromYAML(raw workflowYAML) (*Workflow, error) {
 		s.allowCanonicalProtectedWritesSpecified = true
 	}
 
+	classSpecified := raw.Class != nil
 	if raw.Class != nil {
-		parsedClass, err := policy.ParseClass(*raw.Class)
-		if err != nil {
-			return nil, fmt.Errorf(`"class" is invalid: %w`, err)
-		}
-		s.Class = parsedClass
+		s.Class = policy.Class(*raw.Class)
 		s.classSpecified = true
-	} else if s.AllowAdditiveProtectedWrites || s.AllowCanonicalProtectedWrites {
-		s.Class = policy.HarnessMaintenance
-	} else {
-		s.Class = policy.Delivery
 	}
 
-	if err := validateLegacyClassConsistency(s); err != nil {
+	normalizedClass, err := normalizeWorkflowClass(s.Class, classSpecified, s.AllowAdditiveProtectedWrites, s.AllowCanonicalProtectedWrites)
+	if err != nil {
+		return nil, err
+	}
+	s.Class = normalizedClass
+
+	if err := validateLegacyClassConsistency(s, classSpecified, raw.AllowAdditiveProtectedWrites != nil || raw.AllowCanonicalProtectedWrites != nil); err != nil {
 		return nil, err
 	}
 
 	return s, nil
 }
 
-func validateLegacyClassConsistency(s *Workflow) error {
+func workflowPolicyPresence(s *Workflow) (classSpecified bool, legacyFlagsSpecified bool) {
 	if s == nil {
-		return nil
+		return false, false
 	}
 
-	if !s.classSpecified || (!s.allowAdditiveProtectedWritesSpecified && !s.allowCanonicalProtectedWritesSpecified) {
+	classSpecified = s.classSpecified || strings.TrimSpace(string(s.Class)) != ""
+	legacyFlagsSpecified = s.allowAdditiveProtectedWritesSpecified ||
+		s.allowCanonicalProtectedWritesSpecified ||
+		s.AllowAdditiveProtectedWrites ||
+		s.AllowCanonicalProtectedWrites
+
+	return classSpecified, legacyFlagsSpecified
+}
+
+func normalizeWorkflowClass(class policy.Class, classSpecified, allowAdditiveProtectedWrites, allowCanonicalProtectedWrites bool) (policy.Class, error) {
+	if !classSpecified {
+		if allowAdditiveProtectedWrites || allowCanonicalProtectedWrites {
+			return policy.HarnessMaintenance, nil
+		}
+		return policy.Delivery, nil
+	}
+
+	parsedClass, err := policy.ParseClass(string(class))
+	if err != nil {
+		return "", fmt.Errorf(`"class" is invalid: %w`, err)
+	}
+
+	return parsedClass, nil
+}
+
+func validateLegacyClassConsistency(s *Workflow, classSpecified, legacyFlagsSpecified bool) error {
+	if s == nil || !classSpecified || !legacyFlagsSpecified {
 		return nil
 	}
 
