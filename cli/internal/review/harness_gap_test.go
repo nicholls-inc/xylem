@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -138,6 +140,56 @@ func TestGenerateHarnessGapAnalysisNoSignalsWritesNoopReport(t *testing.T) {
 	if len(result.Report.Warnings) != 1 {
 		t.Fatalf("warnings = %+v, want daemon-log warning", result.Report.Warnings)
 	}
+}
+
+func TestDetectFailedFingerprintBacklogGapIgnoresRecordedRecoveryPolicy(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, time.April, 10, 1, 0, 0, 0, time.UTC)
+	issueURL := "https://example/issue/31"
+	q := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-31",
+		Source:   "github-issue",
+		Ref:      issueURL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "31",
+			"source_input_fingerprint": "src-fp",
+		},
+		State:     queue.StatePending,
+		CreatedAt: now.Add(-15 * time.Minute),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-31", queue.StateFailed, "temporary failure from upstream 503"))
+
+	artifact := recovery.Build(recovery.Input{
+		VesselID:  "issue-31",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		Ref:       issueURL,
+		State:     queue.StateFailed,
+		Error:     "temporary failure from upstream 503",
+		CreatedAt: now.Add(-10 * time.Minute),
+		Meta: map[string]string{
+			"source_input_fingerprint": "src-fp",
+		},
+	})
+	require.NoError(t, recovery.Save(stateDir, artifact))
+
+	runner := &harnessGapTestRunner{
+		responses: map[string][]byte{
+			commandKey("gh", "--repo", "owner/repo", "issue", "list", "--state", "open", "--label", "xylem-failed", "--limit", "100", "--json", "number,title,url,labels"): mustJSON(t, []map[string]any{
+				{"number": 31, "title": "failed one", "url": issueURL, "labels": []map[string]any{{"name": "xylem-failed"}}},
+			}),
+		},
+	}
+
+	finding, err := detectFailedFingerprintBacklogGap(context.Background(), stateDir, "owner/repo", runner)
+	require.NoError(t, err)
+	assert.Nil(t, finding)
 }
 
 func TestSmoke_S1_HarnessGapAnalysisFilesAutoAdminMergeIssue(t *testing.T) {

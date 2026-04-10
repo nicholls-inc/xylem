@@ -86,53 +86,17 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 				if seen[issue.Number] {
 					continue
 				}
-				fingerprint := githubSourceFingerprint(issue.Title, issue.Body, issueLabelNames(issue.Labels))
-				baseMeta := map[string]string{
-					"issue_num":                strconv.Itoa(issue.Number),
-					"issue_title":              issue.Title,
-					"issue_body":               issue.Body,
-					"issue_labels":             strings.Join(issueLabelNames(issue.Labels), ","),
-					"source_input_fingerprint": fingerprint,
-					// trigger_label records which of this task's configured
-					// labels matched on the source issue during scan. On
-					// vessel completion this label is removed so the issue
-					// no longer appears in the scanner's candidate set,
-					// preventing duplicate enqueue after PR lifecycle events
-					// (close/merge) and keeping the issue's UI state
-					// consistent with its workflow state.
-					"trigger_label": label,
-				}
-				baseMeta = applyCurrentRemediationMeta(baseMeta, nil, g.currentHarnessDigest(), g.currentWorkflowDigest(task.Workflow))
-				sl := task.StatusLabels
-				if sl != nil {
-					baseMeta["status_label_queued"] = sl.Queued
-					baseMeta["status_label_running"] = sl.Running
-					baseMeta["status_label_completed"] = sl.Completed
-					baseMeta["status_label_failed"] = sl.Failed
-					baseMeta["status_label_timed_out"] = sl.TimedOut
-				}
-				lgl := task.LabelGateLabels
-				if lgl != nil {
-					baseMeta["label_gate_label_waiting"] = lgl.Waiting
-					baseMeta["label_gate_label_ready"] = lgl.Ready
-				}
-				baseVessel := queue.Vessel{
-					ID:        fmt.Sprintf("issue-%d", issue.Number),
-					Source:    "github-issue",
-					Ref:       issue.URL,
-					Workflow:  task.Workflow,
-					Tier:      ResolveTaskTier(task.Tier, g.DefaultTier),
-					Meta:      baseMeta,
-					State:     queue.StatePending,
-					CreatedAt: sourceNow(),
-				}
-				if g.hasExcludedLabel(issue, excludeSet) {
+				baseVessel := g.newIssueCandidate(issue, label, task)
+				if g.hasHardExcludedLabel(issue, excludeSet, task) {
 					continue
 				}
 
 				retryVessel, blocked, err := g.retryCandidate(baseVessel)
 				if err != nil {
 					return vessels, err
+				}
+				if retryVessel == nil && g.hasFailureStatusLabel(issue, task) {
+					continue
 				}
 				if blocked {
 					continue
@@ -182,7 +146,21 @@ func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
 			}
 
 			for _, issue := range issues {
-				if _, ok := seen[issue.Number]; ok || g.hasExcludedLabel(issue, excludeSet) {
+				if _, ok := seen[issue.Number]; ok {
+					continue
+				}
+				baseVessel := g.newIssueCandidate(issue, label, task)
+				if g.hasHardExcludedLabel(issue, excludeSet, task) {
+					continue
+				}
+				retryVessel, blocked, err := g.retryCandidate(baseVessel)
+				if err != nil {
+					return 0, err
+				}
+				if retryVessel == nil && g.hasFailureStatusLabel(issue, task) {
+					continue
+				}
+				if blocked || g.scanBlockedByRepoState(ctx, issue.Number, retryVessel != nil) {
 					continue
 				}
 				seen[issue.Number] = struct{}{}
@@ -191,6 +169,45 @@ func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
 		}
 	}
 	return count, nil
+}
+
+func (g *GitHub) newIssueCandidate(issue ghIssue, triggerLabel string, task GitHubTask) queue.Vessel {
+	fingerprint := githubSourceFingerprint(issue.Title, issue.Body, issueFingerprintLabels(issue.Labels, task))
+	meta := map[string]string{
+		"issue_num":                strconv.Itoa(issue.Number),
+		"issue_title":              issue.Title,
+		"issue_body":               issue.Body,
+		"issue_labels":             strings.Join(issueLabelNames(issue.Labels), ","),
+		"source_input_fingerprint": fingerprint,
+		// trigger_label records which of this task's configured labels matched
+		// on the source issue during scan. On vessel completion this label is
+		// removed so the issue no longer appears in the scanner's candidate set,
+		// preventing duplicate enqueue after PR lifecycle events (close/merge)
+		// and keeping the issue's UI state consistent with its workflow state.
+		"trigger_label": triggerLabel,
+	}
+	meta = applyCurrentRemediationMeta(meta, nil, g.currentHarnessDigest(), g.currentWorkflowDigest(task.Workflow))
+	if sl := task.StatusLabels; sl != nil {
+		meta["status_label_queued"] = sl.Queued
+		meta["status_label_running"] = sl.Running
+		meta["status_label_completed"] = sl.Completed
+		meta["status_label_failed"] = sl.Failed
+		meta["status_label_timed_out"] = sl.TimedOut
+	}
+	if lgl := task.LabelGateLabels; lgl != nil {
+		meta["label_gate_label_waiting"] = lgl.Waiting
+		meta["label_gate_label_ready"] = lgl.Ready
+	}
+	return queue.Vessel{
+		ID:        fmt.Sprintf("issue-%d", issue.Number),
+		Source:    "github-issue",
+		Ref:       issue.URL,
+		Workflow:  task.Workflow,
+		Tier:      ResolveTaskTier(task.Tier, g.DefaultTier),
+		Meta:      meta,
+		State:     queue.StatePending,
+		CreatedAt: sourceNow(),
+	}
 }
 
 func (g *GitHub) OnEnqueue(ctx context.Context, vessel queue.Vessel) error {
@@ -311,9 +328,36 @@ func (g *GitHub) BranchName(vessel queue.Vessel) string {
 	return fmt.Sprintf("%s/issue-%s-%s", prefix, issueNum, slug)
 }
 
-func (g *GitHub) hasExcludedLabel(issue ghIssue, excluded map[string]bool) bool {
+func (g *GitHub) hasHardExcludedLabel(issue ghIssue, excluded map[string]bool, task GitHubTask) bool {
+	softExcluded := make(map[string]bool, 2)
+	if task.StatusLabels != nil {
+		if label := strings.TrimSpace(task.StatusLabels.Failed); label != "" {
+			softExcluded[label] = true
+		}
+		if label := strings.TrimSpace(task.StatusLabels.TimedOut); label != "" {
+			softExcluded[label] = true
+		}
+	}
 	for _, l := range issue.Labels {
-		if excluded[l.Name] {
+		if !excluded[l.Name] || softExcluded[l.Name] {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+func (g *GitHub) hasFailureStatusLabel(issue ghIssue, task GitHubTask) bool {
+	if task.StatusLabels == nil {
+		return false
+	}
+	failed := strings.TrimSpace(task.StatusLabels.Failed)
+	timedOut := strings.TrimSpace(task.StatusLabels.TimedOut)
+	if failed == "" && timedOut == "" {
+		return false
+	}
+	for _, l := range issue.Labels {
+		if l.Name == failed || l.Name == timedOut {
 			return true
 		}
 	}
@@ -419,6 +463,54 @@ func issueLabelNames(labels []struct {
 		names = append(names, l.Name)
 	}
 	return names
+}
+
+func issueFingerprintLabels(labels []struct {
+	Name string `json:"name"`
+}, task GitHubTask) []string {
+	managed := managedIssueLabels(task)
+	if len(managed) == 0 {
+		return issueLabelNames(labels)
+	}
+	names := make([]string, 0, len(labels))
+	for _, l := range labels {
+		if managed[l.Name] {
+			continue
+		}
+		names = append(names, l.Name)
+	}
+	return names
+}
+
+func managedIssueLabels(task GitHubTask) map[string]bool {
+	managed := make(map[string]bool, 7)
+	if task.StatusLabels == nil {
+		managed["in-progress"] = true
+	}
+	if task.StatusLabels != nil {
+		for _, label := range []string{
+			task.StatusLabels.Queued,
+			task.StatusLabels.Running,
+			task.StatusLabels.Completed,
+			task.StatusLabels.Failed,
+			task.StatusLabels.TimedOut,
+		} {
+			if label = strings.TrimSpace(label); label != "" {
+				managed[label] = true
+			}
+		}
+	}
+	if task.LabelGateLabels != nil {
+		for _, label := range []string{
+			task.LabelGateLabels.Waiting,
+			task.LabelGateLabels.Ready,
+		} {
+			if label = strings.TrimSpace(label); label != "" {
+				managed[label] = true
+			}
+		}
+	}
+	return managed
 }
 
 func githubSourceFingerprint(title, body string, labels []string) string {
