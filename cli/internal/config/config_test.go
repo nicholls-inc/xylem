@@ -243,6 +243,44 @@ claude:
 	requireErrorContains(t, err, "concurrency.global is required when concurrency is a map")
 }
 
+func TestResolveStateDir(t *testing.T) {
+	t.Run("rebases relative state dir under root", func(t *testing.T) {
+		root := filepath.Join("var", "tmp", "daemon-root")
+		got := ResolveStateDir(root, ".xylem")
+		want := filepath.Join(root, ".xylem")
+		if got != want {
+			t.Fatalf("ResolveStateDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("preserves absolute state dir", func(t *testing.T) {
+		abs := filepath.Join(string(filepath.Separator), "tmp", "xylem-state")
+		if got := ResolveStateDir("daemon-root", abs); got != abs {
+			t.Fatalf("ResolveStateDir() = %q, want %q", got, abs)
+		}
+	})
+
+	t.Run("trims root and state dir before rebasing", func(t *testing.T) {
+		got := ResolveStateDir(" daemon-root ", " .xylem ")
+		want := filepath.Join("daemon-root", ".xylem")
+		if got != want {
+			t.Fatalf("ResolveStateDir() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("returns trimmed state dir when root is empty", func(t *testing.T) {
+		if got := ResolveStateDir(" ", " .xylem "); got != ".xylem" {
+			t.Fatalf("ResolveStateDir() = %q, want %q", got, ".xylem")
+		}
+	})
+
+	t.Run("returns empty when state dir is empty", func(t *testing.T) {
+		if got := ResolveStateDir("daemon-root", " "); got != "" {
+			t.Fatalf("ResolveStateDir() = %q, want empty string", got)
+		}
+	})
+}
+
 func validConfig() *Config {
 	cfg := &Config{
 		Repo: "owner/name",

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -66,6 +67,25 @@ func TestPropObservabilitySampleRateDefaultForOutOfRange(t *testing.T) {
 
 		if got := cfg.ObservabilitySampleRate(); got != 1.0 {
 			t.Fatalf("ObservabilitySampleRate() = %v, want 1.0", got)
+		}
+	})
+}
+
+func TestPropResolveStateDirRebasesRelativePaths(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		root := filepath.Join(
+			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "root-a"),
+			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "root-b"),
+		)
+		stateDir := filepath.Join(
+			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "state-a"),
+			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "state-b"),
+		)
+
+		got := ResolveStateDir(root, stateDir)
+		want := filepath.Join(root, stateDir)
+		if got != want {
+			t.Fatalf("ResolveStateDir(%q, %q) = %q, want %q", root, stateDir, got, want)
 		}
 	})
 }
