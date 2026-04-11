@@ -15,6 +15,27 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+func stageProfileWorkflowAsset(t *testing.T, profile *Profile, workflowName string, promptNames []string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	for _, name := range promptNames {
+		data, err := fs.ReadFile(profile.FS, filepath.Join("prompts", workflowName, name))
+		require.NoError(t, err)
+
+		target := filepath.Join(dir, ".xylem", "prompts", workflowName, name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+		require.NoError(t, os.WriteFile(target, data, 0o644))
+	}
+
+	workflowData, err := fs.ReadFile(profile.FS, filepath.Join("workflows", workflowName+".yaml"))
+	require.NoError(t, err)
+
+	workflowPath := filepath.Join(dir, workflowName+".yaml")
+	require.NoError(t, os.WriteFile(workflowPath, workflowData, 0o644))
+	return workflowPath
+}
+
 func TestSmoke_S1_LoadCoreProfileReturnsEmbeddedAssets(t *testing.T) {
 	t.Parallel()
 
@@ -312,41 +333,83 @@ func TestSmoke_S6_SelfHostingProfileScaffoldsReleaseCadenceWorkflow(t *testing.T
 	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
 }
 
-func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {
+func TestSmoke_S4_AdaptRepoWorkflowBundleIsSeededInCoreProfile(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	workflowAsset, ok := composed.Workflows["adapt-repo"]
+	require.True(t, ok)
+	assert.Contains(t, string(workflowAsset), "name: adapt-repo")
+	assert.Contains(t, string(workflowAsset), "class: harness-maintenance")
+	assert.Contains(t, string(workflowAsset), "allow_additive_protected_writes: true")
+	assert.Contains(t, string(workflowAsset), "xylem bootstrap analyze-repo --output .xylem/state/bootstrap/repo-analysis.json")
+	assert.Contains(t, string(workflowAsset), "xylem validation run --from-config")
+
+	planPrompt, ok := composed.Prompts["adapt-repo/plan"]
+	require.True(t, ok)
+	assert.Contains(t, string(planPrompt), ".xylem/state/bootstrap/adapt-plan.json")
+	assert.Contains(t, string(planPrompt), `"schema_version": 1`)
+
+	applyPrompt, ok := composed.Prompts["adapt-repo/apply"]
+	require.True(t, ok)
+	assert.Contains(t, string(applyPrompt), "Use the `Edit` tool only.")
+
+	prPrompt, ok := composed.Prompts["adapt-repo/pr"]
+	require.True(t, ok)
+	assert.Contains(t, string(prPrompt), `[xylem] adapt harness to this repository`)
+	assert.Contains(t, string(prPrompt), `--label "ready-to-merge"`)
+}
+
+func TestSmoke_S5_AdaptRepoWorkflowParsesAsSevenPhaseHarnessMaintenanceWorkflow(t *testing.T) {
 	t.Parallel()
 
 	profile, err := Load("core")
 	require.NoError(t, err)
 
-	dir := t.TempDir()
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(dir))
-	t.Cleanup(func() {
-		require.NoError(t, os.Chdir(oldWd))
-	})
-
-	for _, name := range []string{"plan.md", "apply.md", "pr.md"} {
-		data, readErr := fs.ReadFile(profile.FS, filepath.Join("prompts", "adapt-repo", name))
-		require.NoError(t, readErr)
-		target := filepath.Join(dir, ".xylem", "prompts", "adapt-repo", name)
-		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
-		require.NoError(t, os.WriteFile(target, data, 0o644))
-	}
-
-	workflowData, err := fs.ReadFile(profile.FS, filepath.Join("workflows", "adapt-repo.yaml"))
-	require.NoError(t, err)
-	workflowPath := filepath.Join(dir, "adapt-repo.yaml")
-	require.NoError(t, os.WriteFile(workflowPath, workflowData, 0o644))
-
+	workflowPath := stageProfileWorkflowAsset(t, profile, "adapt-repo", []string{"plan.md", "apply.md", "pr.md"})
 	wf, err := workflowpkg.Load(workflowPath)
 	require.NoError(t, err)
 	assert.Equal(t, "adapt-repo", wf.Name)
 	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	assert.True(t, wf.AllowAdditiveProtectedWrites)
 	require.Len(t, wf.Phases, 7)
+
+	assert.Equal(t, "analyze", wf.Phases[0].Name)
+	assert.Equal(t, "command", wf.Phases[0].Type)
+	assert.Contains(t, wf.Phases[0].Run, "xylem bootstrap analyze-repo")
+	assert.Contains(t, wf.Phases[0].Run, ".xylem/state/bootstrap/repo-analysis.json")
+
+	assert.Equal(t, "legibility", wf.Phases[1].Name)
+	assert.Equal(t, "command", wf.Phases[1].Type)
+	assert.Contains(t, wf.Phases[1].Run, "xylem bootstrap audit-legibility")
+	assert.Contains(t, wf.Phases[1].Run, ".xylem/state/bootstrap/legibility-report.json")
+
+	assert.Equal(t, "plan", wf.Phases[2].Name)
+	assert.Equal(t, ".xylem/prompts/adapt-repo/plan.md", wf.Phases[2].PromptFile)
+	require.NotNil(t, wf.Phases[2].NoOp)
+	assert.Equal(t, "XYLEM_NOOP", wf.Phases[2].NoOp.Match)
+
+	assert.Equal(t, "validate", wf.Phases[3].Name)
+	assert.Equal(t, "command", wf.Phases[3].Type)
+	assert.Contains(t, wf.Phases[3].Run, "xylem config validate --proposed .xylem/state/bootstrap/adapt-plan.json")
+	assert.Contains(t, wf.Phases[3].Run, "xylem workflow validate --proposed .xylem/state/bootstrap/adapt-plan.json")
+
+	assert.Equal(t, "apply", wf.Phases[4].Name)
+	assert.Equal(t, ".xylem/prompts/adapt-repo/apply.md", wf.Phases[4].PromptFile)
+	require.NotNil(t, wf.Phases[4].AllowedTools)
+	assert.Equal(t, "Edit", *wf.Phases[4].AllowedTools)
+
+	assert.Equal(t, "verify", wf.Phases[5].Name)
+	assert.Equal(t, "command", wf.Phases[5].Type)
+	assert.Equal(t, "xylem validation run --from-config", wf.Phases[5].Run)
+
+	assert.Equal(t, "pr", wf.Phases[6].Name)
+	assert.Equal(t, ".xylem/prompts/adapt-repo/pr.md", wf.Phases[6].PromptFile)
 }
 
-func TestAdaptRepoPromptAssetsEnforceGuardrails(t *testing.T) {
+func TestSmoke_S6_AdaptRepoPromptsEnforceBootstrapAndMergeReadyContracts(t *testing.T) {
 	t.Parallel()
 
 	profile, err := Load("core")
@@ -358,6 +421,7 @@ func TestAdaptRepoPromptAssetsEnforceGuardrails(t *testing.T) {
 	assert.Contains(t, string(planPrompt), `"schema_version": 1`)
 	assert.Contains(t, string(planPrompt), "`planned_changes[].op` must be one of `patch`, `replace`, `create`, or `delete`.")
 	assert.Contains(t, string(planPrompt), "`planned_changes[].path` must stay within `.xylem/`, `.xylem.yml`, `AGENTS.md`, or `docs/`.")
+	assert.Contains(t, string(planPrompt), "Fail closed")
 
 	applyPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "adapt-repo", "apply.md"))
 	require.NoError(t, err)
@@ -373,6 +437,7 @@ func TestAdaptRepoPromptAssetsEnforceGuardrails(t *testing.T) {
 	assert.Contains(t, string(prPrompt), "Inline every `planned_changes` entry from `adapt-plan.json`.")
 	assert.Contains(t, string(prPrompt), "Inline every `skipped` entry from `adapt-plan.json`.")
 	assert.Contains(t, string(prPrompt), "remain PR-gated")
+	assert.Contains(t, string(prPrompt), `--label "ready-to-merge"`)
 }
 
 func TestSmoke_S4_SecurityComplianceWorkflowBundleIsSeededInCoreProfile(t *testing.T) {
@@ -435,27 +500,7 @@ func TestSmoke_S5_DocGardenWorkflowParsesAsFourPhaseMaintenanceWorkflow(t *testi
 	profile, err := Load("core")
 	require.NoError(t, err)
 
-	dir := t.TempDir()
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(dir))
-	t.Cleanup(func() {
-		require.NoError(t, os.Chdir(oldWd))
-	})
-
-	for _, name := range []string{"analyze.md", "implement.md", "verify.md", "pr.md"} {
-		data, readErr := fs.ReadFile(profile.FS, filepath.Join("prompts", "doc-garden", name))
-		require.NoError(t, readErr)
-		target := filepath.Join(dir, ".xylem", "prompts", "doc-garden", name)
-		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
-		require.NoError(t, os.WriteFile(target, data, 0o644))
-	}
-
-	workflowData, err := fs.ReadFile(profile.FS, filepath.Join("workflows", "doc-garden.yaml"))
-	require.NoError(t, err)
-	workflowPath := filepath.Join(dir, "doc-garden.yaml")
-	require.NoError(t, os.WriteFile(workflowPath, workflowData, 0o644))
-
+	workflowPath := stageProfileWorkflowAsset(t, profile, "doc-garden", []string{"analyze.md", "implement.md", "verify.md", "pr.md"})
 	wf, err := workflowpkg.Load(workflowPath)
 	require.NoError(t, err)
 	assert.Equal(t, "doc-garden", wf.Name)
@@ -509,30 +554,12 @@ func TestSmoke_S7_DocGardenScheduledSourceUsesDailyCadence(t *testing.T) {
 }
 
 func TestSmoke_S5_SecurityComplianceWorkflowParsesAsFourPhaseAudit(t *testing.T) {
+	t.Parallel()
+
 	profile, err := Load("core")
 	require.NoError(t, err)
 
-	dir := t.TempDir()
-	oldWd, err := os.Getwd()
-	require.NoError(t, err)
-	require.NoError(t, os.Chdir(dir))
-	t.Cleanup(func() {
-		require.NoError(t, os.Chdir(oldWd))
-	})
-
-	for _, name := range []string{"scan_secrets.md", "static_analysis.md", "dependency_audit.md", "synthesize.md"} {
-		data, readErr := fs.ReadFile(profile.FS, filepath.Join("prompts", "security-compliance", name))
-		require.NoError(t, readErr)
-		target := filepath.Join(dir, ".xylem", "prompts", "security-compliance", name)
-		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
-		require.NoError(t, os.WriteFile(target, data, 0o644))
-	}
-
-	workflowData, err := fs.ReadFile(profile.FS, filepath.Join("workflows", "security-compliance.yaml"))
-	require.NoError(t, err)
-	workflowPath := filepath.Join(dir, "security-compliance.yaml")
-	require.NoError(t, os.WriteFile(workflowPath, workflowData, 0o644))
-
+	workflowPath := stageProfileWorkflowAsset(t, profile, "security-compliance", []string{"scan_secrets.md", "static_analysis.md", "dependency_audit.md", "synthesize.md"})
 	wf, err := workflowpkg.Load(workflowPath)
 	require.NoError(t, err)
 	assert.Equal(t, "security-compliance", wf.Name)
