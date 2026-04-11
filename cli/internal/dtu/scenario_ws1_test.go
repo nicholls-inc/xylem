@@ -377,8 +377,8 @@ phases:
 	if vessel.State != queue.StateFailed {
 		t.Fatalf("vessel.State = %q, want %q", vessel.State, queue.StateFailed)
 	}
-	if !strings.Contains(vessel.Error, "violated protected surfaces") {
-		t.Fatalf("vessel.Error = %q, want to contain %q", vessel.Error, "violated protected surfaces")
+	if !strings.Contains(vessel.Error, "denied by policy") {
+		t.Fatalf("vessel.Error = %q, want to contain %q", vessel.Error, "denied by policy")
 	}
 	if !strings.Contains(vessel.Error, ".xylem.yml") {
 		t.Fatalf("vessel.Error = %q, want to contain %q", vessel.Error, ".xylem.yml")
@@ -388,14 +388,8 @@ phases:
 	if summary.State != string(queue.StateFailed) {
 		t.Fatalf("summary.State = %q, want %q", summary.State, queue.StateFailed)
 	}
-	if len(summary.Phases) != 1 {
-		t.Fatalf("len(summary.Phases) = %d, want 1", len(summary.Phases))
-	}
-	if summary.Phases[0].Name != "tamper" {
-		t.Fatalf("summary.Phases[0].Name = %q, want %q", summary.Phases[0].Name, "tamper")
-	}
-	if summary.Phases[0].Status != "failed" {
-		t.Fatalf("summary.Phases[0].Status = %q, want failed", summary.Phases[0].Status)
+	if len(summary.Phases) != 0 {
+		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
 	}
 	if summary.EvidenceManifestPath != "" {
 		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
@@ -415,14 +409,15 @@ phases:
 	foundViolation := false
 	for _, entry := range entries {
 		if entry.Decision == intermediary.Deny &&
-			strings.Contains(entry.Error, "violated protected surfaces") &&
-			strings.Contains(entry.Error, ".xylem.yml") {
+			entry.Operation == "write_control_plane" &&
+			entry.RuleMatched == "delivery.no_control_plane_writes" &&
+			strings.Contains(entry.Intent.Resource, ".xylem.yml") {
 			foundViolation = true
 			break
 		}
 	}
 	if !foundViolation {
-		t.Fatalf("audit log entries = %+v, want a deny entry describing the protected surface violation", entries)
+		t.Fatalf("audit log entries = %+v, want a deny write_control_plane entry for .xylem.yml", entries)
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
@@ -172,6 +173,43 @@ func TestPropHarnessReviewOutputDirRejectsTraversal(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "harness.review.output_dir") {
 			t.Fatalf("validateHarness() error = %v, want harness.review.output_dir", err)
+		}
+	})
+}
+
+func TestPropHarnessPolicyModeDefaultsToWarn(t *testing.T) {
+	// Contract:
+	//   - Empty / whitespace-only / invalid modes resolve to warn (the zero-
+	//     value default per docs/plans/sota-gap-implementation-2026-04-11.md).
+	//   - "enforce" (case-insensitive, trimmed) resolves to enforce.
+	//   - "warn" (case-insensitive, trimmed) resolves to warn.
+	rapid.Check(t, func(t *rapid.T) {
+		mode := rapid.SampledFrom([]string{
+			"",
+			"warn",
+			"enforce",
+			" WARN ",
+			" ENFORCE ",
+			"observe",
+			" warn-only ",
+			"enforced",
+		}).Draw(t, "mode")
+		cfg := Config{
+			Harness: HarnessConfig{
+				Policy: PolicyConfig{Mode: mode},
+			},
+		}
+
+		got := cfg.HarnessPolicyMode()
+		switch strings.TrimSpace(strings.ToLower(mode)) {
+		case "enforce":
+			if got != intermediary.PolicyModeEnforce {
+				t.Fatalf("HarnessPolicyMode() = %q, want %q", got, intermediary.PolicyModeEnforce)
+			}
+		default:
+			if got != intermediary.PolicyModeWarn {
+				t.Fatalf("HarnessPolicyMode() = %q, want %q", got, intermediary.PolicyModeWarn)
+			}
 		}
 	})
 }

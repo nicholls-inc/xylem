@@ -408,6 +408,26 @@ func TestProp_ResolvePhaseProviderChainPrefersMostSpecificTier(t *testing.T) {
 	})
 }
 
+func TestProp_PushTargetsDefaultBranchNormalizesRefspecs(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		branch := rapid.StringMatching(`[a-z0-9][a-z0-9._/-]{0,19}`).Draw(t, "branch")
+		resource := rapid.SampledFrom([]string{
+			branch,
+			"refs/heads/" + branch,
+			"HEAD:" + branch,
+			"refs/heads/source:refs/heads/" + branch,
+			" '" + branch + "' ",
+		}).Draw(t, "resource")
+
+		if !pushTargetsDefaultBranch(resource, branch) {
+			t.Fatalf("pushTargetsDefaultBranch(%q, %q) = false, want true", resource, branch)
+		}
+		if pushTargetsDefaultBranch(resource, branch+"-other") {
+			t.Fatalf("pushTargetsDefaultBranch(%q, %q) = true, want false", resource, branch+"-other")
+		}
+	})
+}
+
 func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(rapid.Float64Range(0.0, 1.0), 1, 20).Draw(t, "costs")

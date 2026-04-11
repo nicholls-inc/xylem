@@ -130,6 +130,7 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 	auditLog := intermediary.NewAuditLog(auditLogPath)
 
 	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+	r.Intermediary.SetMode(cfg.HarnessPolicyMode())
 	r.AuditLog = auditLog
 	r.Tracer = tracer
 }
