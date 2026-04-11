@@ -35,17 +35,17 @@ Covers spec sections 5 (observability integration) and 6 (cost estimation and bu
 
 ---
 
-### S3: PhaseSpanAttributes includes name, index, type, provider, and model
+### S3: PhaseSpanAttributes includes resolved phase and LLM routing fields
 
 **Spec ref:** Section 5.3
 
 **Preconditions:** `PhaseSpanAttributes` implemented.
 
-**Action:** Call `PhaseSpanAttributes("analyse", 0, "prompt", "anthropic", "claude-sonnet-4-20250514")`.
+**Action:** Call `PhaseSpanAttributes(PhaseSpanData{Name: "analyse", Index: 0, Type: "prompt", Workflow: "fix-bug", Provider: "anthropic", Model: "claude-sonnet-4-20250514", Tier: "med", RetryAttempt: 2, SandboxMode: "dangerously-skip-permissions"})`.
 
-**Expected outcome:** Returns a slice of five `SpanAttribute` values: `xylem.phase.name = "analyse"`, `xylem.phase.index = "0"`, `xylem.phase.type = "prompt"`, `xylem.phase.provider = "anthropic"`, `xylem.phase.model = "claude-sonnet-4-20250514"`. The index field is stringified, not numeric.
+**Expected outcome:** Returns a slice of ten `SpanAttribute` values: `xylem.phase.name = "analyse"`, `xylem.phase.index = "0"`, `xylem.phase.type = "prompt"`, `xylem.phase.workflow = "fix-bug"`, `xylem.phase.provider = "anthropic"`, `xylem.phase.model = "claude-sonnet-4-20250514"`, `xylem.phase.retry_attempt = "2"`, `xylem.phase.sandbox_mode = "dangerously-skip-permissions"`, `llm.provider = "anthropic"`, and `llm.tier = "med"`. The index field is stringified, not numeric.
 
-**Verification:** Unit test asserting length == 5 and all five key/value pairs are present with correct string values.
+**Verification:** Unit test asserting length == 10 and all ten key/value pairs are present with correct string values.
 
 ---
 

@@ -91,6 +91,35 @@ func TestNewCmdRunner_MixedEnv(t *testing.T) {
 	}
 }
 
+func TestNewCmdRunner_BuildsPerProviderEnvMap(t *testing.T) {
+	t.Setenv("XYLEM_TEST_ANTHROPIC", "anthropic-secret")
+	t.Setenv("XYLEM_TEST_COPILOT", "copilot-secret")
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"claude": {
+				Kind: "claude",
+				Env: map[string]string{
+					"ANTHROPIC_API_KEY": "${XYLEM_TEST_ANTHROPIC}",
+				},
+			},
+			"copilot": {
+				Kind: "copilot",
+				Env: map[string]string{
+					"GITHUB_TOKEN": "${XYLEM_TEST_COPILOT}",
+				},
+			},
+		},
+	}
+
+	runner := newCmdRunner(cfg)
+	if got := runner.providerEnv["claude"]; len(got) != 1 || got[0] != "ANTHROPIC_API_KEY=anthropic-secret" {
+		t.Fatalf("claude provider env = %v", got)
+	}
+	if got := runner.providerEnv["copilot"]; len(got) != 1 || got[0] != "GITHUB_TOKEN=copilot-secret" {
+		t.Fatalf("copilot provider env = %v", got)
+	}
+}
+
 // TestRealCmdRunner_RunOutputInheritsEnv verifies that the non-phase
 // Run* methods now propagate extraEnv into the subprocess. Before the
 // fix, `gh`/`copilot` calls from the scanner and source commands
@@ -139,6 +168,45 @@ func TestRealCmdRunner_RunPhaseInheritsBaseEnv(t *testing.T) {
 	got := strings.TrimSpace(string(out))
 	if got != "inherited" {
 		t.Fatalf("expected RunPhase subprocess to see XYLEM_TEST_BASE_PROBE=inherited, got %q", got)
+	}
+}
+
+func TestRealCmdRunner_RunPhaseWithEnvIsolatesProviderEnv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("sh unavailable on windows")
+	}
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"claude": {
+				Kind: "claude",
+				Env: map[string]string{
+					"CLAUDE_ONLY_TOKEN": "anthropic-secret",
+				},
+			},
+			"copilot": {
+				Kind: "copilot",
+				Env: map[string]string{
+					"COPILOT_ONLY_TOKEN": "copilot-secret",
+				},
+			},
+		},
+	}
+	runner := newCmdRunner(cfg)
+
+	claudeOut, err := runner.RunPhaseWithEnv(context.Background(), ".", runner.providerEnv["claude"], nil, "sh", "-c", "printf '%s|%s' \"$CLAUDE_ONLY_TOKEN\" \"$COPILOT_ONLY_TOKEN\"")
+	if err != nil {
+		t.Fatalf("claude RunPhaseWithEnv failed: %v (output: %q)", err, string(claudeOut))
+	}
+	if got := strings.TrimSpace(string(claudeOut)); got != "anthropic-secret|" {
+		t.Fatalf("claude env = %q, want anthropic-secret|", got)
+	}
+
+	copilotOut, err := runner.RunPhaseWithEnv(context.Background(), ".", runner.providerEnv["copilot"], nil, "sh", "-c", "printf '%s|%s' \"$CLAUDE_ONLY_TOKEN\" \"$COPILOT_ONLY_TOKEN\"")
+	if err != nil {
+		t.Fatalf("copilot RunPhaseWithEnv failed: %v (output: %q)", err, string(copilotOut))
+	}
+	if got := strings.TrimSpace(string(copilotOut)); got != "|copilot-secret" {
+		t.Fatalf("copilot env = %q, want |copilot-secret", got)
 	}
 }
 

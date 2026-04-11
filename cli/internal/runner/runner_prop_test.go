@@ -258,6 +258,66 @@ func TestProp_SplitRepoSlugRejectsMalformedInput(t *testing.T) {
 	})
 }
 
+func TestProp_ResolvePhaseProviderChainPrefersMostSpecificTier(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		phaseWins := rapid.Bool().Draw(t, "phaseWins")
+		workflowWins := rapid.Bool().Draw(t, "workflowWins")
+		vesselWins := rapid.Bool().Draw(t, "vesselWins")
+		phaseTier := "phase-tier"
+		workflowTier := "workflow-tier"
+		vesselTier := "vessel-tier"
+		defaultTier := "default-tier"
+
+		cfg := &config.Config{
+			LLMRouting: config.LLMRoutingConfig{
+				DefaultTier: defaultTier,
+				Tiers: map[string]config.TierRouting{
+					phaseTier:    {Providers: []string{"phase-provider", "fallback-provider"}},
+					workflowTier: {Providers: []string{"workflow-provider"}},
+					vesselTier:   {Providers: []string{"vessel-provider"}},
+					defaultTier:  {Providers: []string{"default-provider"}},
+				},
+			},
+		}
+
+		vessel := queue.Vessel{Tier: vesselTier}
+		var wf *workflow.Workflow
+		if workflowWins || phaseWins {
+			wf = &workflow.Workflow{Tier: strPtr(workflowTier)}
+		}
+		var p *workflow.Phase
+		if phaseWins {
+			p = &workflow.Phase{Tier: strPtr(phaseTier)}
+		}
+		if !phaseWins && !workflowWins && !vesselWins {
+			vessel.Tier = ""
+		}
+
+		gotTier, gotProviders := resolvePhaseProviderChain(cfg, nil, vessel, wf, p)
+
+		wantTier := defaultTier
+		wantProviders := []string{"default-provider"}
+		switch {
+		case phaseWins:
+			wantTier = phaseTier
+			wantProviders = []string{"phase-provider", "fallback-provider"}
+		case workflowWins:
+			wantTier = workflowTier
+			wantProviders = []string{"workflow-provider"}
+		case vesselWins:
+			wantTier = vesselTier
+			wantProviders = []string{"vessel-provider"}
+		}
+
+		if gotTier != wantTier {
+			t.Fatalf("resolvePhaseProviderChain() tier = %q, want %q", gotTier, wantTier)
+		}
+		if !reflect.DeepEqual(gotProviders, wantProviders) {
+			t.Fatalf("resolvePhaseProviderChain() providers = %#v, want %#v", gotProviders, wantProviders)
+		}
+	})
+}
+
 func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(rapid.Float64Range(0.0, 1.0), 1, 20).Draw(t, "costs")

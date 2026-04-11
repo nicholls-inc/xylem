@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"sync"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -72,8 +73,12 @@ func (lw *limitedWriter) Len() int {
 
 type realCmdRunner struct {
 	// extraEnv holds additional KEY=VALUE pairs merged into the subprocess
-	// environment. Populated from claude.env and copilot.env in config.
+	// environment for non-phase subprocesses. Populated from all provider env
+	// blocks in config.
 	extraEnv []string
+	// providerEnv holds provider-scoped env vars for phase subprocesses so each
+	// LLM only receives its own credentials.
+	providerEnv map[string][]string
 }
 
 // newCmdRunner creates a realCmdRunner with extra env vars merged from
@@ -100,21 +105,49 @@ func newCmdRunner(cfg *config.Config) *realCmdRunner {
 	if cfg == nil {
 		return &realCmdRunner{}
 	}
-	var env []string
-	addEnv := func(k, v string) {
+	addEnv := func(dst *[]string, k, v string) {
 		expanded := os.ExpandEnv(v)
 		if expanded == "" {
 			return
 		}
-		env = append(env, k+"="+expanded)
+		*dst = append(*dst, k+"="+expanded)
 	}
-	for k, v := range cfg.Claude.Env {
-		addEnv(k, v)
+
+	providerEnv := make(map[string][]string, len(cfg.Providers))
+	var env []string
+	for name, provider := range cfg.Providers {
+		keys := make([]string, 0, len(provider.Env))
+		for k := range provider.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			v := provider.Env[k]
+			addEnv(&env, k, v)
+			providerSlice := providerEnv[name]
+			addEnv(&providerSlice, k, v)
+			providerEnv[name] = providerSlice
+		}
 	}
-	for k, v := range cfg.Copilot.Env {
-		addEnv(k, v)
+	if len(providerEnv) == 0 {
+		keys := make([]string, 0, len(cfg.Claude.Env))
+		for k := range cfg.Claude.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			addEnv(&env, k, cfg.Claude.Env[k])
+		}
+		keys = keys[:0]
+		for k := range cfg.Copilot.Env {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			addEnv(&env, k, cfg.Copilot.Env[k])
+		}
 	}
-	return &realCmdRunner{extraEnv: env}
+	return &realCmdRunner{extraEnv: env, providerEnv: providerEnv}
 }
 
 // cmdEnv returns the environment to use for a subprocess: the daemon's
@@ -166,18 +199,26 @@ func (r *realCmdRunner) RunProcessWithEnv(ctx context.Context, dir string, extra
 }
 
 func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
-	return r.runPhaseInternal(ctx, dir, stdin, nil, name, args...)
+	return r.runPhaseInternal(ctx, dir, r.cmdEnv(), stdin, nil, name, args...)
+}
+
+func (r *realCmdRunner) RunPhaseWithEnv(ctx context.Context, dir string, extraEnv []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return r.runPhaseInternal(ctx, dir, append(os.Environ(), extraEnv...), stdin, nil, name, args...)
 }
 
 func (r *realCmdRunner) RunPhaseObserved(ctx context.Context, dir string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
-	return r.runPhaseInternal(ctx, dir, stdin, observer, name, args...)
+	return r.runPhaseInternal(ctx, dir, r.cmdEnv(), stdin, observer, name, args...)
 }
 
-func (r *realCmdRunner) runPhaseInternal(ctx context.Context, dir string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
+func (r *realCmdRunner) RunPhaseObservedWithEnv(ctx context.Context, dir string, extraEnv []string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
+	return r.runPhaseInternal(ctx, dir, append(os.Environ(), extraEnv...), stdin, observer, name, args...)
+}
+
+func (r *realCmdRunner) runPhaseInternal(ctx context.Context, dir string, env []string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Dir = dir
 	cmd.Stdin = stdin
-	cmd.Env = r.cmdEnv()
+	cmd.Env = env
 
 	var stdout bytes.Buffer
 	stderr := newLimitedWriter(maxStderrBytes)

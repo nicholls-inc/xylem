@@ -257,6 +257,10 @@ func (s *vesselRunState) recordPhaseTokens(
 }
 
 func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, harnessContent string, inputTokensEst, outputTokensEst int, costUSDEst float64, duration time.Duration, status string, gatePassed *bool, errMsg string) PhaseSummary {
+	return s.phaseSummaryWithLLM(cfg, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, duration, status, gatePassed, errMsg, "", "")
+}
+
+func (s *vesselRunState) phaseSummaryWithLLM(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, harnessContent string, inputTokensEst, outputTokensEst int, costUSDEst float64, duration time.Duration, status string, gatePassed *bool, errMsg, provider, model string) PhaseSummary {
 	summary := PhaseSummary{
 		Name:       p.Name,
 		Type:       phaseTypeLabel(p),
@@ -275,8 +279,12 @@ func (s *vesselRunState) phaseSummary(cfg *config.Config, srcCfg *config.SourceC
 		return summary
 	}
 
-	provider := resolveProvider(cfg, srcCfg, wf, &p)
-	model := resolveModel(cfg, srcCfg, wf, &p, provider)
+	if provider == "" {
+		provider = resolveLegacyProvider(cfg, srcCfg, wf, &p)
+	}
+	if model == "" {
+		model = resolveLegacyModel(cfg, srcCfg, wf, &p, provider)
+	}
 	summary.Provider = provider
 	summary.Model = model
 	summary.InputTokensEst = inputTokensEst

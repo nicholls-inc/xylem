@@ -140,6 +140,7 @@ func TestProp_PhaseSpanAttributesNeverEmpty(t *testing.T) {
 				Type:     "prompt",
 				Provider: provider,
 				Model:    model,
+				Tier:     "med",
 			}),
 			observability.PhaseResultAttributes(observability.PhaseResultData{
 				InputTokensEst:  inputTokens,
@@ -153,8 +154,8 @@ func TestProp_PhaseSpanAttributesNeverEmpty(t *testing.T) {
 			t.Fatal("expected non-empty phase attributes")
 		}
 		for _, attr := range attrs {
-			if !strings.HasPrefix(attr.Key, "xylem.phase.") {
-				t.Fatalf("attribute key %q does not use xylem.phase namespace", attr.Key)
+			if !strings.HasPrefix(attr.Key, "xylem.phase.") && !strings.HasPrefix(attr.Key, "llm.") {
+				t.Fatalf("attribute key %q does not use xylem.phase or llm namespace", attr.Key)
 			}
 		}
 	})

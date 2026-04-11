@@ -119,6 +119,10 @@ func (m *mockCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...s
 }
 
 func (m *mockCmdRunner) RunPhase(_ context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return m.RunPhaseWithEnv(context.Background(), dir, nil, stdin, name, args...)
+}
+
+func (m *mockCmdRunner) RunPhaseWithEnv(_ context.Context, dir string, _ []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 	prompt, _ := io.ReadAll(stdin)
 	m.mu.Lock()
 	m.phaseCalls = append(m.phaseCalls, phaseCall{
@@ -188,6 +192,10 @@ func (c *countingCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ 
 }
 
 func (c *countingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	return c.RunPhaseWithEnv(context.Background(), "", nil, stdin, "")
+}
+
+func (c *countingCmdRunner) RunPhaseWithEnv(_ context.Context, _ string, _ []string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
 	io.ReadAll(stdin)
 	cur := atomic.AddInt32(&c.concurrent, 1)
 	for {
@@ -224,6 +232,10 @@ func (c *classCountingCmdRunner) RunProcess(_ context.Context, _ string, _ strin
 }
 
 func (c *classCountingCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	return c.RunPhaseWithEnv(context.Background(), "", nil, stdin, "")
+}
+
+func (c *classCountingCmdRunner) RunPhaseWithEnv(_ context.Context, _ string, _ []string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
 	prompt, _ := io.ReadAll(stdin)
 	class := "unknown"
 	switch {
@@ -287,6 +299,10 @@ func (b *blockingPhaseCmdRunner) RunProcess(_ context.Context, _ string, _ strin
 }
 
 func (b *blockingPhaseCmdRunner) RunPhase(ctx context.Context, _ string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	return b.RunPhaseWithEnv(ctx, "", nil, stdin, "")
+}
+
+func (b *blockingPhaseCmdRunner) RunPhaseWithEnv(ctx context.Context, _ string, _ []string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
 	prompt, _ := io.ReadAll(stdin)
 	promptText := string(prompt)
 
@@ -335,6 +351,10 @@ func (b *observedBlockingPhaseCmdRunner) RunPhase(ctx context.Context, dir strin
 	return b.RunPhaseObserved(ctx, dir, stdin, nil, name, args...)
 }
 
+func (b *observedBlockingPhaseCmdRunner) RunPhaseWithEnv(ctx context.Context, dir string, _ []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return b.RunPhaseObserved(ctx, dir, stdin, nil, name, args...)
+}
+
 func (b *observedBlockingPhaseCmdRunner) RunPhaseObserved(ctx context.Context, _ string, stdin io.Reader, observer PhaseProcessObserver, _ string, _ ...string) ([]byte, error) {
 	if _, err := io.ReadAll(stdin); err != nil {
 		return nil, err
@@ -351,6 +371,10 @@ func (b *observedBlockingPhaseCmdRunner) RunPhaseObserved(ctx context.Context, _
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+func (b *observedBlockingPhaseCmdRunner) RunPhaseObservedWithEnv(ctx context.Context, dir string, _ []string, stdin io.Reader, observer PhaseProcessObserver, name string, args ...string) ([]byte, error) {
+	return b.RunPhaseObserved(ctx, dir, stdin, observer, name, args...)
 }
 
 type mockWorktree struct {
@@ -2134,10 +2158,6 @@ func assertCancelledVesselStopsRunningPhaseAndDropsInFlight(t *testing.T) {
 	summary := loadSummary(t, cfg.StateDir, vessel.ID)
 	assert.Equal(t, "cancelled", summary.State)
 	assert.Equal(t, vessel.ID, summary.VesselID)
-}
-
-func TestDrainCancelledVesselStopsRunningPhaseAndDropsInFlight(t *testing.T) {
-	assertCancelledVesselStopsRunningPhaseAndDropsInFlight(t)
 }
 
 func TestSmoke_S38_CancelledVesselStopsRunningPhaseAndDropsInFlight(t *testing.T) {
@@ -4431,7 +4451,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 			Claude: config.ClaudeConfig{Command: "claude"},
 		}
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
-		args := buildPhaseArgs(cfg, nil, nil, p, "")
+		args := buildPhaseArgs(cfg, "claude", mustProviderConfigForTest(t, cfg, "claude"), nil, nil, p, "med", "")
 
 		if args[0] != "-p" {
 			t.Errorf("expected -p, got %s", args[0])
@@ -4446,7 +4466,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 			Claude: config.ClaudeConfig{Command: "claude", Flags: "--bare --dangerously-skip-permissions"},
 		}
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
-		args := buildPhaseArgs(cfg, nil, nil, p, "")
+		args := buildPhaseArgs(cfg, "claude", mustProviderConfigForTest(t, cfg, "claude"), nil, nil, p, "med", "")
 
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, "--bare") {
@@ -4463,7 +4483,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 		}
 		allowedTools := "Read,Edit"
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5, AllowedTools: &allowedTools}
-		args := buildPhaseArgs(cfg, nil, nil, p, "")
+		args := buildPhaseArgs(cfg, "claude", mustProviderConfigForTest(t, cfg, "claude"), nil, nil, p, "med", "")
 
 		// Should have both phase-level and config-level tools
 		toolCount := 0
@@ -4482,7 +4502,7 @@ func TestBuildPhaseArgs(t *testing.T) {
 			Claude: config.ClaudeConfig{Command: "claude"},
 		}
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
-		args := buildPhaseArgs(cfg, nil, nil, p, "harness content")
+		args := buildPhaseArgs(cfg, "claude", mustProviderConfigForTest(t, cfg, "claude"), nil, nil, p, "med", "harness content")
 
 		found := false
 		for i, a := range args {
@@ -4500,91 +4520,74 @@ func strPtr(s string) *string {
 	return &s
 }
 
+func mustProviderConfigForTest(t *testing.T, cfg *config.Config, name string) config.ProviderConfig {
+	t.Helper()
+	provider, ok := providerConfigForName(cfg, name)
+	if !ok {
+		t.Fatalf("provider %q not configured", name)
+	}
+	return provider
+}
+
 func TestBuildPhaseArgsModelResolution(t *testing.T) {
 	tests := []struct {
 		name      string
 		cfg       *config.Config
 		wf        *workflow.Workflow
 		phase     *workflow.Phase
-		wantModel string // expected --model value; empty means no --model flag
+		tier      string
+		wantModel string
 	}{
 		{
-			name: "phase model takes priority",
+			name: "tier model comes from provider tiers",
 			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
+				Providers: map[string]config.ProviderConfig{
+					"claude": {Kind: "claude", Command: "claude", Tiers: map[string]string{"med": "claude-med"}},
+				},
 			},
-			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
-			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5, Model: strPtr("phase-model")},
-			wantModel: "phase-model",
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			tier:      "med",
+			wantModel: "claude-med",
 		},
 		{
-			name: "workflow model when phase has no model",
+			name: "legacy workflow model overrides provider tier when tier unset",
 			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
+				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "claude-default"},
 			},
 			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
 			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
+			tier:      "med",
 			wantModel: "workflow-model",
 		},
 		{
-			name: "config default model when neither phase nor workflow set",
+			name: "phase tier suppresses legacy model override",
 			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
+				Providers: map[string]config.ProviderConfig{
+					"claude": {Kind: "claude", Command: "claude", Tiers: map[string]string{"high": "claude-high"}},
+				},
 			},
-			wf:        &workflow.Workflow{},
-			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
-			wantModel: "config-model",
-		},
-		{
-			name: "no model when nothing set",
-			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude"},
-			},
-			wf:        &workflow.Workflow{},
-			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
-			wantModel: "",
-		},
-		{
-			name: "nil workflow still falls back to config",
-			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude", DefaultModel: "config-model"},
-			},
-			wf:        nil,
-			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
-			wantModel: "config-model",
+			wf:        &workflow.Workflow{Model: strPtr("legacy-workflow-model")},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5, Tier: strPtr("high")},
+			tier:      "high",
+			wantModel: "claude-high",
 		},
 		{
 			name: "flags --model stripped when hierarchy resolves model",
 			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude", Flags: "--bare --model old-model --dangerously-skip-permissions"},
+				Providers: map[string]config.ProviderConfig{
+					"claude": {Kind: "claude", Command: "claude", Flags: "--bare --model old-model --dangerously-skip-permissions", Tiers: map[string]string{"med": "workflow-model"}},
+				},
 			},
-			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
-			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
-			wantModel: "workflow-model",
-		},
-		{
-			name: "flags --model preserved when hierarchy does not resolve",
-			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude", Flags: "--bare --model flags-model"},
-			},
-			wf:        &workflow.Workflow{},
-			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5},
-			wantModel: "flags-model",
-		},
-		{
-			name: "empty string phase model falls through to workflow",
-			cfg: &config.Config{
-				Claude: config.ClaudeConfig{Command: "claude"},
-			},
-			wf:        &workflow.Workflow{Model: strPtr("workflow-model")},
-			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5, Model: strPtr("")},
+			wf:        &workflow.Workflow{Tier: strPtr("med")},
+			phase:     &workflow.Phase{Name: "analyze", MaxTurns: 5, Tier: strPtr("med")},
+			tier:      "med",
 			wantModel: "workflow-model",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args := buildPhaseArgs(tt.cfg, nil, tt.wf, tt.phase, "")
+			args := buildPhaseArgs(tt.cfg, "claude", mustProviderConfigForTest(t, tt.cfg, "claude"), nil, tt.wf, tt.phase, tt.tier, "")
 
 			// Find --model in args
 			foundModel := ""
@@ -4600,7 +4603,8 @@ func TestBuildPhaseArgsModelResolution(t *testing.T) {
 			}
 
 			// When hierarchy resolves a model, --model from flags should be stripped
-			if tt.wantModel != "" && strings.Contains(tt.cfg.Claude.Flags, "--model") {
+			flags := mustProviderConfigForTest(t, tt.cfg, "claude").Flags
+			if tt.wantModel != "" && strings.Contains(flags, "--model") {
 				// Count --model occurrences; should be exactly 1
 				count := 0
 				for _, a := range args {
@@ -4648,164 +4652,88 @@ func TestDrainTimeoutV2Phase(t *testing.T) {
 	}
 }
 
-func TestResolveProvider(t *testing.T) {
-	claude := "claude"
-	copilot := "copilot"
-
+func TestResolveTier(t *testing.T) {
 	tests := []struct {
-		name     string
-		cfgLLM   string
-		wfLLM    *string
-		phaseLLM *string
-		want     string
+		name   string
+		cfg    *config.Config
+		vessel queue.Vessel
+		wf     *workflow.Workflow
+		phase  *workflow.Phase
+		want   string
 	}{
-		{"all nil defaults to claude", "", nil, nil, "claude"},
-		{"config claude", "claude", nil, nil, "claude"},
-		{"config copilot", "copilot", nil, nil, "copilot"},
-		{"workflow overrides config", "claude", &copilot, nil, "copilot"},
-		{"phase overrides workflow", "claude", &claude, &copilot, "copilot"},
-		{"phase overrides config", "claude", nil, &copilot, "copilot"},
-		{"workflow override wins when config empty", "", &copilot, nil, "copilot"},
+		{
+			name:   "phase tier wins",
+			cfg:    &config.Config{LLMRouting: config.LLMRoutingConfig{DefaultTier: "med"}},
+			vessel: queue.Vessel{Tier: "low"},
+			wf:     &workflow.Workflow{Tier: strPtr("high")},
+			phase:  &workflow.Phase{Tier: strPtr("urgent")},
+			want:   "urgent",
+		},
+		{
+			name:   "workflow tier beats vessel",
+			cfg:    &config.Config{LLMRouting: config.LLMRoutingConfig{DefaultTier: "med"}},
+			vessel: queue.Vessel{Tier: "low"},
+			wf:     &workflow.Workflow{Tier: strPtr("high")},
+			want:   "high",
+		},
+		{
+			name:   "vessel tier beats config default",
+			cfg:    &config.Config{LLMRouting: config.LLMRoutingConfig{DefaultTier: "med"}},
+			vessel: queue.Vessel{Tier: "low"},
+			want:   "low",
+		},
+		{
+			name: "config default used when no higher source",
+			cfg:  &config.Config{LLMRouting: config.LLMRoutingConfig{DefaultTier: "high"}},
+			want: "high",
+		},
+		{
+			name: "hard default is med",
+			cfg:  &config.Config{},
+			want: "med",
+		},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{LLM: tt.cfgLLM}
-			var wf *workflow.Workflow
-			if tt.wfLLM != nil {
-				wf = &workflow.Workflow{LLM: tt.wfLLM}
-			}
-			var p *workflow.Phase
-			if tt.phaseLLM != nil {
-				p = &workflow.Phase{LLM: tt.phaseLLM}
-			}
-			got := resolveProvider(cfg, nil, wf, p)
-			if got != tt.want {
-				t.Errorf("resolveProvider() = %q, want %q", got, tt.want)
-			}
+			got := resolveTier(tt.cfg, tt.vessel, tt.wf, tt.phase)
+			require.Equal(t, tt.want, got)
 		})
 	}
 }
 
-func TestResolveModel(t *testing.T) {
+func TestResolveProviderChain(t *testing.T) {
 	cfg := &config.Config{
-		Claude:  config.ClaudeConfig{DefaultModel: "claude-default"},
-		Copilot: config.CopilotConfig{DefaultModel: "copilot-default"},
+		LLMRouting: config.LLMRoutingConfig{
+			DefaultTier: "med",
+			Tiers: map[string]config.TierRouting{
+				"med":  {Providers: []string{"claude", "copilot"}},
+				"high": {Providers: []string{"claude"}},
+			},
+		},
 	}
 
-	phaseModel := "phase-model"
-	wfModel := "wf-model"
+	require.Equal(t, []string{"claude"}, resolveProviderChain(cfg, "high"))
+	require.Equal(t, []string{"claude", "copilot"}, resolveProviderChain(cfg, "missing"))
 
-	tests := []struct {
-		name       string
-		wfModel    *string
-		phaseModel *string
-		provider   string
-		want       string
-	}{
-		{"phase model wins", &wfModel, &phaseModel, "claude", "phase-model"},
-		{"workflow model wins over default", &wfModel, nil, "claude", "wf-model"},
-		{"claude default when no override", nil, nil, "claude", "claude-default"},
-		{"copilot default when provider copilot", nil, nil, "copilot", "copilot-default"},
-		{"workflow model wins for copilot", &wfModel, nil, "copilot", "wf-model"},
-		{"phase model wins for copilot", &wfModel, &phaseModel, "copilot", "phase-model"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var wf *workflow.Workflow
-			if tt.wfModel != nil {
-				wf = &workflow.Workflow{Model: tt.wfModel}
-			}
-			var p *workflow.Phase
-			if tt.phaseModel != nil {
-				p = &workflow.Phase{Model: tt.phaseModel}
-			}
-			got := resolveModel(cfg, nil, wf, p, tt.provider)
-			if got != tt.want {
-				t.Errorf("resolveModel() = %q, want %q", got, tt.want)
-			}
-		})
-	}
+	legacy := &config.Config{LLM: "copilot"}
+	require.Equal(t, []string{"copilot"}, resolveProviderChain(legacy, "med"))
 }
 
-func TestResolveProviderWithSource(t *testing.T) {
-	copilot := "copilot"
-	tests := []struct {
-		name     string
-		cfgLLM   string
-		srcLLM   string
-		wfLLM    *string
-		phaseLLM *string
-		want     string
-	}{
-		{"source overrides config", "claude", "copilot", nil, nil, "copilot"},
-		{"workflow overrides source", "claude", "copilot", strPtrRunner("claude"), nil, "claude"},
-		{"phase overrides source", "claude", "copilot", nil, &copilot, "copilot"},
-		{"empty source falls to config", "copilot", "", nil, nil, "copilot"},
+func TestModelForProvider(t *testing.T) {
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"claude":  {Kind: "claude", Tiers: map[string]string{"high": "claude-opus"}},
+			"copilot": {Kind: "copilot", Tiers: map[string]string{"med": "gpt-5.2-codex"}},
+		},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{LLM: tt.cfgLLM}
-			var srcCfg *config.SourceConfig
-			if tt.srcLLM != "" {
-				srcCfg = &config.SourceConfig{LLM: tt.srcLLM}
-			}
-			var wf *workflow.Workflow
-			if tt.wfLLM != nil {
-				wf = &workflow.Workflow{LLM: tt.wfLLM}
-			}
-			var p *workflow.Phase
-			if tt.phaseLLM != nil {
-				p = &workflow.Phase{LLM: tt.phaseLLM}
-			}
-			got := resolveProvider(cfg, srcCfg, wf, p)
-			if got != tt.want {
-				t.Errorf("resolveProvider() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
+	require.Equal(t, "claude-opus", modelForProvider(cfg, "claude", "high"))
+	require.Equal(t, "gpt-5.2-codex", modelForProvider(cfg, "copilot", "med"))
 
-func TestResolveModelWithSourceAndConfigModel(t *testing.T) {
-	tests := []struct {
-		name       string
-		srcModel   string
-		wfModel    *string
-		phaseModel *string
-		provider   string
-		want       string
-	}{
-		{"provider default used when no phase/wf/src for claude", "", nil, nil, "claude", "claude-default"},
-		{"provider default used when no phase/wf/src for copilot", "", nil, nil, "copilot", "copilot-default"},
-		{"source model beats provider default", "src-model", nil, nil, "claude", "src-model"},
-		{"workflow model beats source model", "src-model", strPtrRunner("wf-model"), nil, "claude", "wf-model"},
-		{"phase model beats all", "src-model", strPtrRunner("wf-model"), strPtrRunner("phase-model"), "claude", "phase-model"},
+	legacy := &config.Config{
+		LLMRouting: config.LLMRoutingConfig{DefaultTier: "med"},
+		Claude:     config.ClaudeConfig{DefaultModel: "claude-default"},
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &config.Config{
-				Claude:  config.ClaudeConfig{DefaultModel: "claude-default"},
-				Copilot: config.CopilotConfig{DefaultModel: "copilot-default"},
-			}
-			var srcCfg *config.SourceConfig
-			if tt.srcModel != "" {
-				srcCfg = &config.SourceConfig{Model: tt.srcModel}
-			}
-			var wf *workflow.Workflow
-			if tt.wfModel != nil {
-				wf = &workflow.Workflow{Model: tt.wfModel}
-			}
-			var p *workflow.Phase
-			if tt.phaseModel != nil {
-				p = &workflow.Phase{Model: tt.phaseModel}
-			}
-			got := resolveModel(cfg, srcCfg, wf, p, tt.provider)
-			if got != tt.want {
-				t.Errorf("resolveModel() = %q, want %q", got, tt.want)
-			}
-		})
-	}
+	require.Equal(t, "claude-default", modelForProvider(legacy, "claude", "med"))
 }
 
 func TestBuildCopilotPhaseArgs(t *testing.T) {
@@ -4842,6 +4770,7 @@ func TestBuildCopilotPhaseArgs(t *testing.T) {
 		{
 			name: "copilot with model from phase overrides default",
 			cfg: &config.Config{
+				LLM:     "copilot",
 				Copilot: config.CopilotConfig{Command: "copilot", DefaultModel: "gpt-4o"},
 			},
 			phase:          &workflow.Phase{MaxTurns: maxTurns, Model: strPtrRunner("phase-model")},
@@ -4905,7 +4834,7 @@ func TestBuildCopilotPhaseArgs(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			args := buildCopilotPhaseArgs(tt.cfg, nil, tt.wf, tt.phase, tt.harness, tt.prompt)
+			args := buildCopilotPhaseArgs(tt.cfg, "copilot", mustProviderConfigForTest(t, tt.cfg, "copilot"), nil, tt.wf, tt.phase, "med", tt.harness, tt.prompt)
 
 			for _, want := range tt.wantContains {
 				found := false
@@ -4967,7 +4896,7 @@ func TestBuildCopilotPhaseArgs(t *testing.T) {
 	t.Run("harness prepended to prompt in -p value", func(t *testing.T) {
 		cfg := &config.Config{Copilot: config.CopilotConfig{Command: "copilot"}}
 		phase := &workflow.Phase{MaxTurns: maxTurns}
-		args := buildCopilotPhaseArgs(cfg, nil, nil, phase, "harness text", "user prompt")
+		args := buildCopilotPhaseArgs(cfg, "copilot", mustProviderConfigForTest(t, cfg, "copilot"), nil, nil, phase, "med", "harness text", "user prompt")
 		if len(args) < 2 {
 			t.Fatalf("expected at least 2 args, got %d: %v", len(args), args)
 		}
@@ -4992,16 +4921,20 @@ func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
 	copilotCmd := "copilot"
 
 	cfg := &config.Config{
-		Claude:  config.ClaudeConfig{Command: claudeCmd},
-		Copilot: config.CopilotConfig{Command: copilotCmd},
+		Providers: map[string]config.ProviderConfig{
+			"claude":  {Kind: "claude", Command: claudeCmd, Tiers: map[string]string{"med": "claude-med"}},
+			"copilot": {Kind: "copilot", Command: copilotCmd, Tiers: map[string]string{"med": "gpt-med"}},
+		},
 	}
 	phase := &workflow.Phase{MaxTurns: 5}
 
 	t.Run("claude provider returns claude command and stdin", func(t *testing.T) {
-		cmd, args, stdin := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "test prompt", 1)
+		cmd, args, stdin, model, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "med", "test prompt", 1)
+		require.NoError(t, err)
 		if cmd != claudeCmd {
 			t.Errorf("cmd = %q, want %q", cmd, claudeCmd)
 		}
+		require.Equal(t, "claude-med", model)
 		if len(args) == 0 || args[0] != "-p" {
 			t.Errorf("claude args[0] = %q, want -p (args: %v)", args[0], args)
 		}
@@ -5017,10 +4950,12 @@ func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
 	})
 
 	t.Run("copilot provider returns copilot command and nil stdin", func(t *testing.T) {
-		cmd, args, stdin := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "test prompt", 1)
+		cmd, args, stdin, model, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "med", "test prompt", 1)
+		require.NoError(t, err)
 		if cmd != copilotCmd {
 			t.Errorf("cmd = %q, want %q", cmd, copilotCmd)
 		}
+		require.Equal(t, "gpt-med", model)
 		if len(args) == 0 || args[0] != "-p" {
 			t.Errorf("copilot args[0] = %q, want -p (args: %v)", args[0], args)
 		}
@@ -5040,8 +4975,10 @@ func TestBuildProviderPhaseArgsAddsDTUMetadataWhenDTUActive(t *testing.T) {
 	t.Setenv("XYLEM_DTU_STATE_PATH", "/tmp/dtu/state.json")
 
 	cfg := &config.Config{
-		Claude:  config.ClaudeConfig{Command: "claude"},
-		Copilot: config.CopilotConfig{Command: "copilot"},
+		Providers: map[string]config.ProviderConfig{
+			"claude":  {Kind: "claude", Command: "claude", Tiers: map[string]string{"med": "claude-med"}},
+			"copilot": {Kind: "copilot", Command: "copilot", Tiers: map[string]string{"med": "gpt-med"}},
+		},
 	}
 	phase := &workflow.Phase{
 		Name:       "implement",
@@ -5049,7 +4986,8 @@ func TestBuildProviderPhaseArgsAddsDTUMetadataWhenDTUActive(t *testing.T) {
 		MaxTurns:   5,
 	}
 
-	_, claudeArgs, _ := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "prompt", 2)
+	_, claudeArgs, _, _, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "med", "prompt", 2)
+	require.NoError(t, err)
 	if !containsArgSequence(claudeArgs, "--dtu-phase", "implement") {
 		t.Fatalf("claude args missing DTU phase: %v", claudeArgs)
 	}
@@ -5060,7 +4998,8 @@ func TestBuildProviderPhaseArgsAddsDTUMetadataWhenDTUActive(t *testing.T) {
 		t.Fatalf("claude args missing DTU attempt: %v", claudeArgs)
 	}
 
-	_, copilotArgs, _ := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "prompt", 3)
+	_, copilotArgs, _, _, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "med", "prompt", 3)
+	require.NoError(t, err)
 	if !containsArgSequence(copilotArgs, "--dtu-attempt", "3") {
 		t.Fatalf("copilot args missing DTU attempt: %v", copilotArgs)
 	}
@@ -5186,7 +5125,7 @@ func TestBuildPromptOnlyCmdArgsCopilotFlagStripping(t *testing.T) {
 				Flags:   "--headless --verbose",
 			},
 		}
-		_, args := buildPromptOnlyCmdArgs(cfg, "test prompt")
+		_, args := buildPromptOnlyCmdArgs(cfg, "copilot", "med", "test prompt")
 		// --headless should be fully stripped
 		for _, a := range args {
 			if a == "--headless" {
@@ -5214,7 +5153,7 @@ func TestBuildPromptOnlyCmdArgsCopilotFlagStripping(t *testing.T) {
 				Flags:   "-p old-prompt --verbose",
 			},
 		}
-		_, args := buildPromptOnlyCmdArgs(cfg, "new prompt")
+		_, args := buildPromptOnlyCmdArgs(cfg, "copilot", "med", "new prompt")
 		// -p should appear exactly once with "new prompt" value
 		pCount := 0
 		for _, a := range args {
@@ -5943,6 +5882,10 @@ func (m *perPhaseCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ 
 }
 
 func (m *perPhaseCmdRunner) RunPhase(_ context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return m.RunPhaseWithEnv(context.Background(), dir, nil, stdin, name, args...)
+}
+
+func (m *perPhaseCmdRunner) RunPhaseWithEnv(_ context.Context, dir string, _ []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
 	prompt, _ := io.ReadAll(stdin)
 	m.mu.Lock()
 	m.calls = append(m.calls, phaseCall{dir: dir, prompt: string(prompt), name: name, args: args})
@@ -8824,6 +8767,39 @@ func TestSmoke_S14_PhaseSpanGetsResultAttributesAddedAfterExecution(t *testing.T
 	costParts := strings.Split(attrs["xylem.phase.cost_usd_est"], ".")
 	require.Len(t, costParts, 2)
 	assert.Len(t, costParts[1], 6)
+}
+
+func TestSmoke_PhaseSpanCarriesResolvedLLMProviderAndTier(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze": []byte("analysis complete"),
+		},
+	}
+	r := newWorkflowRunner(t, "trace-basic", []testPhase{
+		{name: "analyze", promptContent: "Analyze", maxTurns: 5},
+	}, cmdRunner, tracer)
+	r.Config.Providers = map[string]config.ProviderConfig{
+		"claude": {
+			Kind:    "claude",
+			Command: "claude",
+			Tiers:   map[string]string{"med": "claude-sonnet-4"},
+		},
+	}
+	r.Config.LLMRouting = config.LLMRoutingConfig{
+		DefaultTier: "med",
+		Tiers: map[string]config.TierRouting{
+			"med": {Providers: []string{"claude"}},
+		},
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+
+	attrs := spanAttrMap(endedSpanByName(t, rec, "phase:analyze"))
+	assert.Equal(t, "claude", attrs["llm.provider"])
+	assert.Equal(t, "med", attrs["llm.tier"])
 }
 
 func TestSmoke_S15_PhaseSpanRecordsErrorOnPhaseFailure(t *testing.T) {

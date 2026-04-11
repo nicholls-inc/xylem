@@ -196,16 +196,28 @@ func (r *dtuScenarioCmdRunner) RunProcess(ctx context.Context, _ string, name st
 }
 
 func (r *dtuScenarioCmdRunner) RunPhase(ctx context.Context, _ string, stdin io.Reader, name string, args ...string) ([]byte, error) {
-	return r.execute(ctx, stdin, name, args...)
+	return r.RunPhaseWithEnv(ctx, "", nil, stdin, name, args...)
 }
 
-func (r *dtuScenarioCmdRunner) execute(ctx context.Context, stdin io.Reader, name string, args ...string) ([]byte, error) {
+func (r *dtuScenarioCmdRunner) RunPhaseWithEnv(ctx context.Context, _ string, extraEnv []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	if len(extraEnv) == 0 {
+		return r.execute(ctx, stdin, name, args...)
+	}
+	env := append(append([]string(nil), r.env...), extraEnv...)
+	return r.executeWithEnv(ctx, stdin, env, name, args...)
+}
+
+func (r *dtuScenarioCmdRunner) executeWithEnv(ctx context.Context, stdin io.Reader, env []string, name string, args ...string) ([]byte, error) {
 	var stdout, stderr bytes.Buffer
-	code := dtushim.Execute(ctx, name, args, stdin, &stdout, &stderr, r.env)
+	code := dtushim.Execute(ctx, name, args, stdin, &stdout, &stderr, env)
 	if code != 0 {
 		return stdout.Bytes(), &dtuExitError{code: code, stderr: stderr.String()}
 	}
 	return stdout.Bytes(), nil
+}
+
+func (r *dtuScenarioCmdRunner) execute(ctx context.Context, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return r.executeWithEnv(ctx, stdin, r.env, name, args...)
 }
 
 func withWorkingDir(t *testing.T, dir string) func() {

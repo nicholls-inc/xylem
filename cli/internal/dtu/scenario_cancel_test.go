@@ -49,6 +49,10 @@ func (r *blockingResolveScenarioCmdRunner) RunProcess(ctx context.Context, dir s
 }
 
 func (r *blockingResolveScenarioCmdRunner) RunPhase(ctx context.Context, _ string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	return r.RunPhaseWithEnv(ctx, "", nil, stdin, "")
+}
+
+func (r *blockingResolveScenarioCmdRunner) RunPhaseWithEnv(ctx context.Context, _ string, _ []string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
 	promptBytes, err := io.ReadAll(stdin)
 	if err != nil {
 		return nil, err

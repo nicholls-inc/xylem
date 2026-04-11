@@ -50,7 +50,7 @@ func TestSmoke_S2_VesselSpanAttributesOmitsEmptyRef(t *testing.T) {
 	}
 }
 
-func TestSmoke_S3_PhaseSpanAttributesIncludesAllFields(t *testing.T) {
+func TestSmoke_S3_PhaseSpanAttributesIncludesResolvedPhaseAndLLMRoutingFields(t *testing.T) {
 	attrs := PhaseSpanAttributes(PhaseSpanData{
 		Name:         "analyse",
 		Index:        0,
@@ -58,14 +58,13 @@ func TestSmoke_S3_PhaseSpanAttributesIncludesAllFields(t *testing.T) {
 		Workflow:     "fix-bug",
 		Provider:     "anthropic",
 		Model:        "claude-sonnet-4-20250514",
+		Tier:         "med",
 		RetryAttempt: 2,
 		SandboxMode:  "dangerously-skip-permissions",
 	})
 	got := attrMap(attrs)
 
-	if len(attrs) != 8 {
-		t.Fatalf("expected 8 attributes, got %d", len(attrs))
-	}
+	require.Len(t, attrs, 10)
 
 	want := map[string]string{
 		"xylem.phase.name":          "analyse",
@@ -76,11 +75,23 @@ func TestSmoke_S3_PhaseSpanAttributesIncludesAllFields(t *testing.T) {
 		"xylem.phase.model":         "claude-sonnet-4-20250514",
 		"xylem.phase.retry_attempt": "2",
 		"xylem.phase.sandbox_mode":  "dangerously-skip-permissions",
+		"llm.provider":              "anthropic",
+		"llm.tier":                  "med",
 	}
 	for key, value := range want {
-		if got[key] != value {
-			t.Fatalf("%s = %q, want %q", key, got[key], value)
-		}
+		assert.Equal(t, value, got[key], key)
+	}
+}
+
+func TestPhaseSpanAttributesOmitsLLMProviderAndTierWhenUnset(t *testing.T) {
+	attrs := PhaseSpanAttributes(PhaseSpanData{Name: "analyse"})
+	got := attrMap(attrs)
+
+	if _, ok := got["llm.provider"]; ok {
+		t.Fatal("did not expect llm.provider attribute when provider is empty")
+	}
+	if _, ok := got["llm.tier"]; ok {
+		t.Fatal("did not expect llm.tier attribute when tier is empty")
 	}
 }
 
@@ -113,6 +124,34 @@ func TestSmoke_S4_PhaseResultAttributesFormatsTokensAndCost(t *testing.T) {
 		if got[key] != value {
 			t.Fatalf("%s = %q, want %q", key, got[key], value)
 		}
+	}
+}
+
+func TestPhaseResultAttributesIncludesResolvedLLMProviderAndTier(t *testing.T) {
+	attrs := PhaseResultAttributes(PhaseResultData{
+		InputTokensEst:     1200,
+		OutputTokensEst:    300,
+		CostUSDEst:         0.0081,
+		DurationMS:         4500,
+		Status:             "completed",
+		LLMProvider:        "copilot",
+		LLMModel:           "gpt-5-mini",
+		LLMTier:            "med",
+		OutputArtifactPath: "phases/vessel-1/analyse.output",
+	})
+	got := attrMap(attrs)
+
+	if got["xylem.phase.provider"] != "copilot" {
+		t.Fatalf("xylem.phase.provider = %q, want %q", got["xylem.phase.provider"], "copilot")
+	}
+	if got["xylem.phase.model"] != "gpt-5-mini" {
+		t.Fatalf("xylem.phase.model = %q, want %q", got["xylem.phase.model"], "gpt-5-mini")
+	}
+	if got["llm.provider"] != "copilot" {
+		t.Fatalf("llm.provider = %q, want %q", got["llm.provider"], "copilot")
+	}
+	if got["llm.tier"] != "med" {
+		t.Fatalf("llm.tier = %q, want %q", got["llm.tier"], "med")
 	}
 }
 
