@@ -27,6 +27,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
+	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
@@ -58,9 +59,10 @@ type mockCmdRunner struct {
 	runOutputHook   func(name string, args ...string) ([]byte, error, bool)
 	runPhaseHook    func(dir, prompt, name string, args ...string) ([]byte, error, bool)
 	// Track calls for assertion
-	phaseCalls []phaseCall
-	outputArgs [][]string
-	lastBody   string
+	phaseCalls    []phaseCall
+	outputArgs    [][]string
+	commentBodies []string
+	lastBody      string
 }
 
 type gateCallResult struct {
@@ -78,9 +80,14 @@ type phaseCall struct {
 func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string) ([]byte, error) {
 	m.mu.Lock()
 	m.outputArgs = append(m.outputArgs, append([]string{name}, args...))
+	isIssueComment := name == "gh" && len(args) >= 3 && args[0] == "issue" && args[1] == "comment"
 	for i, arg := range args {
 		if arg == "--body" && i+1 < len(args) {
-			m.lastBody = args[i+1]
+			body := args[i+1]
+			m.lastBody = body
+			if isIssueComment {
+				m.commentBodies = append(m.commentBodies, body)
+			}
 		}
 	}
 	m.mu.Unlock()
@@ -568,6 +575,13 @@ func hasRunOutputCallContaining(m *mockCmdRunner, fragments ...string) bool {
 		}
 	}
 	return false
+}
+
+func issueCommentBodies(m *mockCmdRunner) []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	return append([]string(nil), m.commentBodies...)
 }
 
 func loadSingleVessel(t *testing.T, q *queue.Queue) queue.Vessel {
@@ -3355,6 +3369,88 @@ func TestDrainCommandGateFailsWithRetries(t *testing.T) {
 			t.Errorf("phase call %d args = %v, want --dtu-attempt %s", i, call.args, wantAttempt)
 		}
 	}
+}
+
+func TestSmoke_S39_GateRetryFailurePostsOnlyFinalFailedComment(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name:          "implement",
+			promptContent: "Implement fix\n{{.GateResult}}",
+			maxTurns:      10,
+			gate:          "      type: command\n      run: \"make test\"\n      retries: 2\n      retry_delay: \"0s\"",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("FAIL: TestFoo"),
+		gateErr:    &mockExitError{code: 1},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+	r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Len(t, cmdRunner.phaseCalls, 3)
+
+	bodies := issueCommentBodies(cmdRunner)
+	require.Len(t, bodies, 1)
+	assert.Contains(t, bodies[0], "failed at phase `implement`")
+	assert.NotContains(t, bodies[0], "phase `implement` completed")
+}
+
+func TestSmoke_S40_GateRetrySuccessPostsCompletedOnceAfterGatePass(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "fix-bug"))
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name:          "implement",
+			promptContent: "Implement fix\n{{.GateResult}}",
+			maxTurns:      10,
+			gate:          "      type: command\n      run: \"make test\"\n      retries: 2\n      retry_delay: \"0s\"",
+		},
+		{name: "pr", promptContent: "Create PR", maxTurns: 3},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		gateCallResults: []gateCallResult{
+			{output: []byte("FAIL: TestFoo"), err: &mockExitError{code: 1}},
+			{output: []byte("ok"), err: nil},
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+	r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+	assert.Len(t, cmdRunner.phaseCalls, 3)
+
+	bodies := issueCommentBodies(cmdRunner)
+	require.Len(t, bodies, 3)
+	assert.Contains(t, bodies[0], "phase `implement` completed")
+	assert.Contains(t, bodies[1], "phase `pr` completed")
+	assert.Contains(t, bodies[2], "**xylem — all phases completed**")
+	assert.Equal(t, 1, strings.Count(bodies[2], "| implement |"))
+	assert.Equal(t, 1, strings.Count(bodies[2], "| pr |"))
 }
 
 func TestSmoke_S31_ResolveConflictsGateFailsBeforePushWhenOriginMainIsNotAncestor(t *testing.T) {
@@ -8576,6 +8672,57 @@ func TestRunVesselOrchestratedGateTimeoutStopsDependentPhases(t *testing.T) {
 	assert.Contains(t, cmdRunner.phaseCalls[0].prompt, "Root phase")
 	assert.True(t, wt.removeCalled)
 	assert.Equal(t, wt.path, wt.removePath)
+}
+
+func TestSmoke_S41_OrchestratedGateRetryFailurePostsOnlyFinalFailedComment(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	writeWorkflowFile(t, dir, "orchestrated-gate-fail", []testPhase{
+		{
+			name:          "root",
+			promptContent: "Root phase\n{{.GateResult}}",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make test\"\n      retries: 2\n      retry_delay: \"0s\"",
+		},
+		{
+			name:          "child",
+			promptContent: "Child phase {{.PreviousOutputs.root}}",
+			maxTurns:      5,
+			dependsOn:     []string{"root"},
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, "orchestrated-gate-fail"))
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Root phase": []byte("root output"),
+		},
+		gateOutput: []byte("FAIL: TestFoo"),
+		gateErr:    &mockExitError{code: 1},
+	}
+	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+	r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
+
+	outcome := r.runVessel(context.Background(), *vessel)
+	assert.Equal(t, "failed", outcome)
+	assert.Len(t, cmdRunner.phaseCalls, 3)
+	require.Len(t, issueCommentBodies(cmdRunner), 1)
+	assert.Contains(t, issueCommentBodies(cmdRunner)[0], "failed at phase `root`")
+	assert.NotContains(t, issueCommentBodies(cmdRunner)[0], "phase `root` completed")
 }
 
 func TestCheckStalledVesselsDoesNotTimeoutUntrackedRecentPhase(t *testing.T) {

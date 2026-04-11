@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
+	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/surface"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
@@ -254,6 +256,94 @@ func TestProp_SplitRepoSlugRejectsMalformedInput(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "owner/repo form") {
 			t.Fatalf("splitRepoSlug(%q) error = %q, want owner/repo guidance", malformed, err.Error())
+		}
+	})
+}
+
+func TestProp_CommandGateFailuresNeverEmitCompletedComments(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		retries := rapid.IntRange(0, 4).Draw(t, "retries")
+
+		dir, err := os.MkdirTemp("", "runner-gate-comments-*")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(dir)
+
+		cfg := makeTestConfig(dir, 1)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+		if _, err := q.Enqueue(makeVessel(1, "fix-bug")); err != nil {
+			t.Fatalf("Enqueue() error = %v", err)
+		}
+
+		promptPath := filepath.Join(dir, ".xylem", "prompts", "fix-bug", "implement.md")
+		if err := os.MkdirAll(filepath.Dir(promptPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll(prompt dir) error = %v", err)
+		}
+		if err := os.WriteFile(promptPath, []byte("Implement fix\n{{.GateResult}}"), 0o644); err != nil {
+			t.Fatalf("WriteFile(prompt) error = %v", err)
+		}
+		workflowPath := filepath.Join(dir, ".xylem", "workflows", "fix-bug.yaml")
+		if err := os.MkdirAll(filepath.Dir(workflowPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll(workflow dir) error = %v", err)
+		}
+		workflowBody := "name: fix-bug\nphases:\n" +
+			"  - name: implement\n" +
+			"    prompt_file: " + promptPath + "\n" +
+			"    max_turns: 5\n" +
+			"    gate:\n" +
+			"      type: command\n" +
+			"      run: \"make test\"\n" +
+			"      retries: " + strconv.Itoa(retries) + "\n" +
+			"      retry_delay: \"0s\"\n"
+		if err := os.WriteFile(workflowPath, []byte(workflowBody), 0o644); err != nil {
+			t.Fatalf("WriteFile(workflow) error = %v", err)
+		}
+
+		oldWd, err := os.Getwd()
+		if err != nil {
+			t.Fatalf("Getwd() error = %v", err)
+		}
+		if err := os.Chdir(dir); err != nil {
+			t.Fatalf("Chdir(%q) error = %v", dir, err)
+		}
+		defer func() {
+			if err := os.Chdir(oldWd); err != nil {
+				t.Fatalf("restore working directory: %v", err)
+			}
+		}()
+
+		cmdRunner := &mockCmdRunner{
+			gateOutput: []byte("FAIL: TestFoo"),
+			gateErr:    &mockExitError{code: 1},
+		}
+		r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+		r.Sources = map[string]source.Source{
+			"github-issue": makeGitHubSource(),
+		}
+		r.Reporter = &reporter.Reporter{Runner: cmdRunner, Repo: "owner/repo"}
+
+		result, err := r.DrainAndWait(context.Background())
+		if err != nil {
+			t.Fatalf("DrainAndWait() error = %v", err)
+		}
+		if result.Failed != 1 {
+			t.Fatalf("result.Failed = %d, want 1", result.Failed)
+		}
+		if got := len(cmdRunner.phaseCalls); got != retries+1 {
+			t.Fatalf("len(phaseCalls) = %d, want %d", got, retries+1)
+		}
+
+		bodies := issueCommentBodies(cmdRunner)
+		if len(bodies) != 1 {
+			t.Fatalf("len(issueCommentBodies) = %d, want 1", len(bodies))
+		}
+		if strings.Contains(bodies[0], "phase `implement` completed") {
+			t.Fatalf("issue comment = %q, want no completed phase comment", bodies[0])
+		}
+		if !strings.Contains(bodies[0], "failed at phase `implement`") {
+			t.Fatalf("issue comment = %q, want final failure comment", bodies[0])
 		}
 	})
 }

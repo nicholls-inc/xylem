@@ -1030,14 +1030,10 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				phaseReport.UsageSource = cost.UsageSourceNotApplicable
 				phaseReport.UsageUnavailableReason = "non-llm phase"
 			}
-			phaseResults = append(phaseResults, phaseReport)
-			if issueNum > 0 && r.Reporter != nil {
-				r.logReporterError("post phase-complete comment", vessel.ID,
-					r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
-			}
-
 			if phaseStatus == "no-op" {
 				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, "", provider, model))
+				phaseResults = append(phaseResults, phaseReport)
+				r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 				log.Printf("%sphase %q triggered no-op; completing workflow early", vesselLabel(vessel), p.Name)
 				finishCurrentPhaseSpan(nil)
 				if r.vesselCancelled(ctx, vessel.ID) {
@@ -1049,6 +1045,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			// Handle gate
 			if p.Gate == nil {
 				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, "", provider, model))
+				phaseResults = append(phaseResults, phaseReport)
+				r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 				finishCurrentPhaseSpan(nil)
 				break // no gate, proceed to next phase
 			}
@@ -1082,6 +1080,8 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					if gateResultExec.evidenceClaim != nil {
 						claims = append(claims, *gateResultExec.evidenceClaim)
 					}
+					phaseResults = append(phaseResults, phaseReport)
+					r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 					finishCurrentPhaseSpan(nil)
 					break // gate passed, proceed to next phase
 				}
@@ -1159,6 +1159,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					RetryAttempt: retryAttempt,
 				}, nil)
 				log.Printf("%swaiting for label %q after phase %q", vesselLabel(vessel), p.Gate.WaitFor, p.Name)
+				r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 				// Set vessel to waiting state
 				vessel.FailedPhase = p.Name
 				vessel.WaitingFor = p.Gate.WaitFor
@@ -1362,8 +1363,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	}
 	issueNum := r.parseIssueNum(vessel)
 	if issueNum > 0 && r.Reporter != nil && len(phaseResults) > 0 {
-		r.logReporterError("post phase-complete comment", vessel.ID,
-			r.Reporter.PhaseComplete(ctx, issueNum, phaseResults[0], string(output)))
+		r.reportPhaseComplete(ctx, vessel, phaseResults[0], string(output))
 	}
 
 	if r.vesselCancelled(ctx, vessel.ID) {
@@ -2562,10 +2562,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 		if phaseMatchedNoOp(&p, string(output)) {
 			phaseReport.Status = "no-op"
-			if issueNum > 0 && r.Reporter != nil {
-				r.logReporterError("post phase-complete comment", vessel.ID,
-					r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
-			}
+			r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 			phaseSpanStatus = "no-op"
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{
@@ -2578,13 +2575,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 
 		phaseReport.Status = "completed"
-		if issueNum > 0 && r.Reporter != nil {
-			r.logReporterError("post phase-complete comment", vessel.ID,
-				r.Reporter.PhaseComplete(ctx, issueNum, phaseReport, string(output)))
-		}
 
 		// Handle gate.
 		if p.Gate == nil {
+			r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 			phaseSpanStatus = "completed"
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{
@@ -2624,6 +2618,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			}
 			if passed {
 				log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
+				r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 				phaseSpanStatus = "completed"
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
@@ -2700,6 +2695,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				RetryAttempt: retryAttempt,
 			}, nil)
 			log.Printf("%swaiting for label %q after phase %q", vesselLabel(vessel), p.Gate.WaitFor, p.Name)
+			r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 			vessel.FailedPhase = p.Name
 			vessel.WaitingFor = p.Gate.WaitFor
 			now := r.runtimeNow()
@@ -2730,6 +2726,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		}
 
 		// Unknown gate type: treat as passed.
+		r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
 		phaseSpanStatus = "completed"
 		finishCurrentPhaseSpan(nil)
 		return singlePhaseResult{
@@ -3774,6 +3771,15 @@ func (r *Runner) logReporterError(action string, vesselID string, err error) {
 	if err != nil {
 		log.Printf("warn: %s for vessel %s: %v", action, vesselID, err)
 	}
+}
+
+func (r *Runner) reportPhaseComplete(ctx context.Context, vessel queue.Vessel, phaseResult reporter.PhaseResult, output string) {
+	issueNum := r.parseIssueNum(vessel)
+	if issueNum <= 0 || r.Reporter == nil {
+		return
+	}
+	r.logReporterError("post phase-complete comment", vessel.ID,
+		r.Reporter.PhaseComplete(ctx, issueNum, phaseResult, output))
 }
 
 // sourceConfigFromMeta returns the SourceConfig for a vessel by looking up
