@@ -23,7 +23,7 @@ func TestSmoke_S1_LoadCoreProfileReturnsEmbeddedAssets(t *testing.T) {
 
 	require.NotNil(t, profile)
 	assert.Equal(t, "core", profile.Name)
-	assert.Equal(t, 2, profile.Version)
+	assert.Equal(t, 3, profile.Version)
 
 	harnessTemplate, err := fs.ReadFile(profile.FS, "HARNESS.md.tmpl")
 	require.NoError(t, err)
@@ -56,11 +56,12 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	require.NotNil(t, composed)
 	require.Len(t, composed.Profiles, 1)
 	assert.Equal(t, "core", composed.Profiles[0].Name)
-	assert.Equal(t, 2, composed.Profiles[0].Version)
+	assert.Equal(t, 3, composed.Profiles[0].Version)
 
 	assert.Equal(t, []string{
 		"adapt-repo",
 		"context-weight-audit",
+		"doc-garden",
 		"field-report",
 		"fix-bug",
 		"fix-pr-checks",
@@ -77,8 +78,10 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	}, sortedKeys(composed.Workflows))
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/pr")
+	assert.Contains(t, sortedKeys(composed.Prompts), "doc-garden/analyze")
 	assert.Contains(t, sortedKeys(composed.Prompts), "security-compliance/synthesize")
 	assert.Contains(t, sortedKeys(composed.Prompts), "workflow-health-report/report")
+	assert.Contains(t, sortedKeys(composed.Sources), "doc-gardener")
 	assert.Contains(t, sortedKeys(composed.Sources), "pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "security-compliance")
 	assert.Contains(t, sortedKeys(composed.Sources), "field-report")
@@ -86,6 +89,7 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 
 	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
 	assert.Contains(t, string(composed.Workflows["implement-feature"]), "name: implement-feature")
+	assert.Contains(t, string(composed.Workflows["doc-garden"]), "name: doc-garden")
 	assert.Contains(t, string(composed.Prompts["adapt-repo/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "Create a pull request")
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), `--label "ready-to-merge"`)
@@ -396,6 +400,112 @@ func TestSmoke_S4_SecurityComplianceWorkflowBundleIsSeededInCoreProfile(t *testi
 	assert.Contains(t, string(sourceAsset), "type: schedule")
 	assert.Contains(t, string(sourceAsset), "cadence: '@daily'")
 	assert.Contains(t, string(sourceAsset), "workflow: security-compliance")
+}
+
+func TestSmoke_S4_DocGardenWorkflowBundleIsSeededInCoreProfile(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	workflowAsset, ok := composed.Workflows["doc-garden"]
+	require.True(t, ok)
+	assert.Contains(t, string(workflowAsset), "name: doc-garden")
+	assert.Contains(t, string(workflowAsset), "class: harness-maintenance")
+
+	analyzePrompt, ok := composed.Prompts["doc-garden/analyze"]
+	require.True(t, ok)
+	assert.Contains(t, string(analyzePrompt), "XYLEM_NOOP")
+	assert.Contains(t, string(analyzePrompt), "cheap heuristics")
+
+	verifyPrompt, ok := composed.Prompts["doc-garden/verify"]
+	require.True(t, ok)
+	assert.Contains(t, string(verifyPrompt), "current checked-in defaults and behavior")
+
+	sourceAsset, ok := composed.Sources["doc-gardener"]
+	require.True(t, ok)
+	assert.Contains(t, string(sourceAsset), "type: schedule")
+	assert.Contains(t, string(sourceAsset), "cadence: '@daily'")
+	assert.Contains(t, string(sourceAsset), "workflow: doc-garden")
+}
+
+func TestSmoke_S5_DocGardenWorkflowParsesAsFourPhaseMaintenanceWorkflow(t *testing.T) {
+	t.Parallel()
+
+	profile, err := Load("core")
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	oldWd, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(dir))
+	t.Cleanup(func() {
+		require.NoError(t, os.Chdir(oldWd))
+	})
+
+	for _, name := range []string{"analyze.md", "implement.md", "verify.md", "pr.md"} {
+		data, readErr := fs.ReadFile(profile.FS, filepath.Join("prompts", "doc-garden", name))
+		require.NoError(t, readErr)
+		target := filepath.Join(dir, ".xylem", "prompts", "doc-garden", name)
+		require.NoError(t, os.MkdirAll(filepath.Dir(target), 0o755))
+		require.NoError(t, os.WriteFile(target, data, 0o644))
+	}
+
+	workflowData, err := fs.ReadFile(profile.FS, filepath.Join("workflows", "doc-garden.yaml"))
+	require.NoError(t, err)
+	workflowPath := filepath.Join(dir, "doc-garden.yaml")
+	require.NoError(t, os.WriteFile(workflowPath, workflowData, 0o644))
+
+	wf, err := workflowpkg.Load(workflowPath)
+	require.NoError(t, err)
+	assert.Equal(t, "doc-garden", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 4)
+	assert.Equal(t, "analyze", wf.Phases[0].Name)
+	assert.Equal(t, ".xylem/prompts/doc-garden/analyze.md", wf.Phases[0].PromptFile)
+	require.NotNil(t, wf.Phases[0].NoOp)
+	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
+	assert.Equal(t, "implement", wf.Phases[1].Name)
+	assert.Equal(t, "verify", wf.Phases[2].Name)
+	assert.Equal(t, "pr", wf.Phases[3].Name)
+	assert.Equal(t, ".xylem/prompts/doc-garden/pr.md", wf.Phases[3].PromptFile)
+}
+
+func TestSmoke_S6_DocGardenPromptsDocumentHeuristicAndPRContract(t *testing.T) {
+	t.Parallel()
+
+	profile, err := Load("core")
+	require.NoError(t, err)
+
+	analyzePrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "doc-garden", "analyze.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(analyzePrompt), "This is a recurring documentation-maintenance vessel")
+	assert.Contains(t, string(analyzePrompt), "cheap heuristics")
+	assert.Contains(t, string(analyzePrompt), "CANDIDATE_FILES:")
+	assert.Contains(t, string(analyzePrompt), "XYLEM_NOOP")
+
+	implementPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "doc-garden", "implement.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(implementPrompt), "Prefer documentation-only changes.")
+	assert.Contains(t, string(implementPrompt), "Do not change production behavior just to match stale docs.")
+
+	prPrompt, err := fs.ReadFile(profile.FS, filepath.Join("prompts", "doc-garden", "pr.md"))
+	require.NoError(t, err)
+	assert.Contains(t, string(prPrompt), "scheduled `doc-garden` workflow")
+	assert.Contains(t, string(prPrompt), "[xylem] refresh repository documentation")
+	assert.Contains(t, string(prPrompt), "{{.Vessel.Ref}}")
+}
+
+func TestSmoke_S7_DocGardenScheduledSourceUsesDailyCadence(t *testing.T) {
+	t.Parallel()
+
+	profile, err := Load("core")
+	require.NoError(t, err)
+
+	configTemplate, err := fs.ReadFile(profile.FS, "xylem.yml.tmpl")
+	require.NoError(t, err)
+
+	assert.Contains(t, string(configTemplate), "doc-gardener:\n    type: schedule\n    cadence: \"@daily\"\n    workflow: doc-garden")
 }
 
 func TestSmoke_S5_SecurityComplianceWorkflowParsesAsFourPhaseAudit(t *testing.T) {

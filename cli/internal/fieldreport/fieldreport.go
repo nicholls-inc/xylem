@@ -34,7 +34,9 @@ type Options struct {
 	// XylemVersion is the build version string of the running binary.
 	XylemVersion string
 
-	// ProfileVersion is the profile schema version from profile.lock.
+	// ProfileVersion is the seeded profile bundle version associated with
+	// the installation that produced the report (for example, the core
+	// profile version written into adapt-repo bootstrap markers).
 	ProfileVersion int
 
 	// Extended enables the extended telemetry level (hashed repo ID,

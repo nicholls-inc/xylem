@@ -1,0 +1,18 @@
+name: doc-garden
+class: harness-maintenance
+description: "Detect and repair stale documentation drift on a recurring cadence"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doc-garden/analyze.md
+    max_turns: 30
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/doc-garden/implement.md
+    max_turns: 50
+  - name: verify
+    prompt_file: .xylem/prompts/doc-garden/verify.md
+    max_turns: 30
+  - name: pr
+    prompt_file: .xylem/prompts/doc-garden/pr.md
+    max_turns: 20

@@ -78,6 +78,38 @@ func TestPropComposeCoreKeepsSecurityComplianceBundlePresent(t *testing.T) {
 	})
 }
 
+func TestPropComposeCoreKeepsDocGardenBundlePresent(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		composed, err := Compose("core")
+		if err != nil {
+			t.Fatalf("Compose(core) error = %v", err)
+		}
+
+		checks := docGardenBundle(composed)
+		check := checks[rapid.IntRange(0, len(checks)-1).Draw(t, "checkIndex")]
+		if len(check.data) == 0 {
+			t.Fatalf("%s missing or empty", check.name)
+		}
+		byteIndex := rapid.IntRange(0, len(check.data)-1).Draw(t, "byteIndex")
+		check.data[byteIndex] ^= 0xff
+
+		fresh, err := Compose("core")
+		if err != nil {
+			t.Fatalf("Compose(core) fresh call error = %v", err)
+		}
+
+		for _, want := range docGardenBundle(fresh) {
+			expectedFragment := docGardenExpectedFragments[want.name]
+			if len(want.data) == 0 {
+				t.Fatalf("%s missing or empty", want.name)
+			}
+			if !strings.Contains(string(want.data), expectedFragment) {
+				t.Fatalf("%s = %q, want fragment %q", want.name, string(want.data), expectedFragment)
+			}
+		}
+	})
+}
+
 func TestPropComposeSelfHostingXylemImplementHarnessWorkflowKeepsPRCreateContract(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		composed, err := Compose("core", "self-hosting-xylem")
@@ -120,6 +152,13 @@ var securityComplianceExpectedFragments = map[string]string{
 	"source:security-compliance":              "workflow: security-compliance",
 }
 
+var docGardenExpectedFragments = map[string]string{
+	"workflow:doc-garden":       "name: doc-garden",
+	"prompt:doc-garden/analyze": "cheap heuristics",
+	"prompt:doc-garden/verify":  "current checked-in defaults and behavior",
+	"source:doc-gardener":       "workflow: doc-garden",
+}
+
 var implementHarnessPRCreateContract = []string{
 	`gh pr create`,
 	`--repo nicholls-inc/xylem`,
@@ -138,6 +177,15 @@ func securityComplianceBundle(composed *ComposedProfile) []assetRef {
 		{name: "prompt:security-compliance/scan_secrets", data: composed.Prompts["security-compliance/scan_secrets"]},
 		{name: "prompt:security-compliance/synthesize", data: composed.Prompts["security-compliance/synthesize"]},
 		{name: "source:security-compliance", data: composed.Sources["security-compliance"]},
+	}
+}
+
+func docGardenBundle(composed *ComposedProfile) []assetRef {
+	return []assetRef{
+		{name: "workflow:doc-garden", data: composed.Workflows["doc-garden"]},
+		{name: "prompt:doc-garden/analyze", data: composed.Prompts["doc-garden/analyze"]},
+		{name: "prompt:doc-garden/verify", data: composed.Prompts["doc-garden/verify"]},
+		{name: "source:doc-gardener", data: composed.Sources["doc-gardener"]},
 	}
 }
 

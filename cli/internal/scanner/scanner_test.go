@@ -377,7 +377,7 @@ func TestScanExistingPR(t *testing.T) {
 	}
 }
 
-func TestScanScheduleSource(t *testing.T) {
+func TestSmoke_S5_ScannerEnqueuesDocGardenerScheduleSource(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
 		Concurrency: 2,
@@ -397,35 +397,19 @@ func TestScanScheduleSource(t *testing.T) {
 
 	s := New(cfg, q, newMock())
 	result, err := s.Scan(context.Background())
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if result.Added != 1 {
-		t.Fatalf("expected 1 added, got %d", result.Added)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Added)
 
 	vessels, err := q.List()
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if len(vessels) != 1 {
-		t.Fatalf("expected 1 vessel, got %d", len(vessels))
-	}
-	if vessels[0].Source != "schedule" {
-		t.Errorf("Source = %q, want schedule", vessels[0].Source)
-	}
-	if vessels[0].Workflow != "doc-garden" {
-		t.Errorf("Workflow = %q, want doc-garden", vessels[0].Workflow)
-	}
-	if vessels[0].Meta["config_source"] != "doc-gardener" {
-		t.Errorf("config_source = %q, want doc-gardener", vessels[0].Meta["config_source"])
-	}
-	if vessels[0].Meta["schedule.cadence"] != "1h" {
-		t.Errorf("schedule.cadence = %q, want 1h", vessels[0].Meta["schedule.cadence"])
-	}
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "schedule", vessels[0].Source)
+	assert.Equal(t, "doc-garden", vessels[0].Workflow)
+	assert.Equal(t, "doc-gardener", vessels[0].Meta["config_source"])
+	assert.Equal(t, "1h", vessels[0].Meta["schedule.cadence"])
 }
 
-func TestScanMultipleScheduleSourcesKeepConfigNamesDistinct(t *testing.T) {
+func TestSmoke_S6_ScannerKeepsMultipleScheduleSourcesDistinct(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
 		Concurrency: 2,
@@ -450,53 +434,29 @@ func TestScanMultipleScheduleSourcesKeepConfigNamesDistinct(t *testing.T) {
 
 	s := New(cfg, q, newMock())
 	result, err := s.Scan(context.Background())
-	if err != nil {
-		t.Fatalf("Scan() error = %v", err)
-	}
-	if result.Added != 2 {
-		t.Fatalf("Added = %d, want 2", result.Added)
-	}
+	require.NoError(t, err)
+	require.Equal(t, 2, result.Added)
 
 	vessels, err := q.List()
-	if err != nil {
-		t.Fatalf("List() error = %v", err)
-	}
-	if len(vessels) != 2 {
-		t.Fatalf("len(vessels) = %d, want 2", len(vessels))
-	}
+	require.NoError(t, err)
+	require.Len(t, vessels, 2)
 
 	byConfigSource := make(map[string]queue.Vessel, len(vessels))
 	for _, vessel := range vessels {
 		byConfigSource[vessel.Meta["config_source"]] = vessel
-		if vessel.Source != "schedule" {
-			t.Fatalf("vessel.Source = %q, want schedule", vessel.Source)
-		}
+		assert.Equal(t, "schedule", vessel.Source)
 	}
 
 	docGardener, ok := byConfigSource["doc-gardener"]
-	if !ok {
-		t.Fatal("missing doc-gardener vessel")
-	}
-	if docGardener.Workflow != "doc-garden" {
-		t.Fatalf("doc-gardener workflow = %q, want doc-garden", docGardener.Workflow)
-	}
-	if docGardener.Meta["schedule.cadence"] != "1h" {
-		t.Fatalf("doc-gardener cadence = %q, want 1h", docGardener.Meta["schedule.cadence"])
-	}
+	require.True(t, ok, "missing doc-gardener vessel")
+	assert.Equal(t, "doc-garden", docGardener.Workflow)
+	assert.Equal(t, "1h", docGardener.Meta["schedule.cadence"])
 
 	doctor, ok := byConfigSource["doctor"]
-	if !ok {
-		t.Fatal("missing doctor vessel")
-	}
-	if doctor.Workflow != "doctor" {
-		t.Fatalf("doctor workflow = %q, want doctor", doctor.Workflow)
-	}
-	if doctor.Meta["schedule.cadence"] != "@daily" {
-		t.Fatalf("doctor cadence = %q, want @daily", doctor.Meta["schedule.cadence"])
-	}
-	if doctor.Ref == docGardener.Ref {
-		t.Fatalf("schedule refs collided: %q", doctor.Ref)
-	}
+	require.True(t, ok, "missing doctor vessel")
+	assert.Equal(t, "doctor", doctor.Workflow)
+	assert.Equal(t, "@daily", doctor.Meta["schedule.cadence"])
+	assert.NotEqual(t, docGardener.Ref, doctor.Ref)
 }
 
 func TestScanSkipsUnchangedFailedIssue(t *testing.T) {
