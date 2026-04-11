@@ -425,7 +425,7 @@ func AppendLedger(repoRoot, ledgerPath string, proposals []Proposal, filed *File
 		existing.WriteString("\n")
 	}
 	existing.WriteString("\n")
-	existing.WriteString(fmt.Sprintf("## %s\n\n", now.Format(time.RFC3339)))
+	fmt.Fprintf(&existing, "## %s\n\n", now.Format(time.RFC3339))
 
 	if len(proposals) == 0 {
 		existing.WriteString("- No fuzzy or mixed phases were promoted to issue proposals in this run.\n")
@@ -449,12 +449,12 @@ func AppendLedger(repoRoot, ledgerPath string, proposals []Proposal, filed *File
 					status = fmt.Sprintf("matched existing issue #%d", item.Number)
 				}
 			}
-			existing.WriteString(fmt.Sprintf("- `%s` — %s\n", proposal.PhaseID, status))
-			existing.WriteString(fmt.Sprintf("  - Proposed CLI: `%s`\n", strings.TrimSpace(proposal.CLISignature)))
-			existing.WriteString(fmt.Sprintf("  - Package: `%s`\n", strings.TrimSpace(proposal.PackageLocation)))
-			existing.WriteString(fmt.Sprintf("  - Estimated complexity: `%s`\n", strings.TrimSpace(proposal.EstimatedComplexity)))
+			fmt.Fprintf(&existing, "- `%s` — %s\n", proposal.PhaseID, status)
+			fmt.Fprintf(&existing, "  - Proposed CLI: `%s`\n", strings.TrimSpace(proposal.CLISignature))
+			fmt.Fprintf(&existing, "  - Package: `%s`\n", strings.TrimSpace(proposal.PackageLocation))
+			fmt.Fprintf(&existing, "  - Estimated complexity: `%s`\n", strings.TrimSpace(proposal.EstimatedComplexity))
 			for _, testCase := range proposal.TestCases {
-				existing.WriteString(fmt.Sprintf("  - Test case: %s\n", strings.TrimSpace(testCase)))
+				fmt.Fprintf(&existing, "  - Test case: %s\n", strings.TrimSpace(testCase))
 			}
 		}
 	}
