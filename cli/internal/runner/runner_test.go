@@ -358,6 +358,45 @@ func (tw *trackingWorktree) Remove(_ context.Context, _ string) error {
 	return nil
 }
 
+type recordingSource struct {
+	startCalls    atomic.Int32
+	completeCalls atomic.Int32
+	failCalls     atomic.Int32
+}
+
+func (s *recordingSource) Name() string { return "github-issue" }
+
+func (s *recordingSource) Scan(context.Context) ([]queue.Vessel, error) { return nil, nil }
+
+func (s *recordingSource) OnEnqueue(context.Context, queue.Vessel) error { return nil }
+
+func (s *recordingSource) OnStart(context.Context, queue.Vessel) error {
+	s.startCalls.Add(1)
+	return nil
+}
+
+func (s *recordingSource) OnWait(context.Context, queue.Vessel) error { return nil }
+
+func (s *recordingSource) OnResume(context.Context, queue.Vessel) error { return nil }
+
+func (s *recordingSource) OnComplete(context.Context, queue.Vessel) error {
+	s.completeCalls.Add(1)
+	return nil
+}
+
+func (s *recordingSource) OnFail(context.Context, queue.Vessel) error {
+	s.failCalls.Add(1)
+	return nil
+}
+
+func (s *recordingSource) OnTimedOut(context.Context, queue.Vessel) error { return nil }
+
+func (s *recordingSource) RemoveRunningLabel(context.Context, queue.Vessel) error { return nil }
+
+func (s *recordingSource) BranchName(vessel queue.Vessel) string {
+	return "task/" + vessel.ID
+}
+
 // --- Helpers ---
 
 func makeTestConfig(dir string, concurrency int) *config.Config {
@@ -8086,11 +8125,8 @@ func TestCheckHungVessels_CleansUpWorktree(t *testing.T) {
 
 	wt.mu.Lock()
 	defer wt.mu.Unlock()
-	if !wt.removeCalled {
-		t.Error("expected worktree cleanup for timed out vessel")
-	}
-	if wt.removePath != "/tmp/some-worktree" {
-		t.Errorf("expected worktree path /tmp/some-worktree, got %s", wt.removePath)
+	if wt.removeCalled {
+		t.Errorf("expected timed out vessel worktree cleanup to wait for run exit, got %s", wt.removePath)
 	}
 }
 
@@ -8225,6 +8261,243 @@ func TestTimeoutRunningVesselReturnsFalseWhenStateAlreadyChanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, queue.StateCompleted, updated.State)
 	assert.Empty(t, updated.Error)
+}
+
+func TestCheckHungVesselsDoesNotRemoveWorktreeMidFlight(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Timeout = "1s"
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:           "hung-1",
+		Source:       "manual",
+		State:        queue.StatePending,
+		CreatedAt:    now,
+		WorktreePath: filepath.Join(dir, ".claude", "worktrees", "hung-1"),
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+	startedAt := now.Add(-2 * time.Minute)
+	vessel.StartedAt = &startedAt
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	wt := &mockWorktree{}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+	r.CheckHungVessels(context.Background())
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.False(t, wt.removeCalled)
+}
+
+func TestRunVesselPromptOnlyTimeoutKeepsTimedOutStateAndCleansWorktreeAfterExit(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "prompt-timeout-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+		Prompt:    "solve it",
+	})
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", "prompt-timeout-1")}
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(_ string, _ string, _ string, _ ...string) ([]byte, error, bool) {
+			updateErr := q.Update(vessel.ID, queue.StateTimedOut, "phase stalled: no output for 11m0s")
+			require.NoError(t, updateErr)
+			return nil, context.DeadlineExceeded, true
+		},
+	}
+
+	r := New(cfg, q, wt, cmdRunner)
+	outcome := r.runVessel(context.Background(), *vessel)
+	assert.Equal(t, "timed_out", outcome)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Equal(t, "phase stalled: no output for 11m0s", updated.Error)
+	assert.True(t, wt.removeCalled)
+	assert.Equal(t, wt.path, wt.removePath)
+}
+
+func TestRunVesselOrchestratedTimeoutKeepsTimedOutStateAndCleansWorktreeAfterExit(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	writeWorkflowFile(t, dir, "orchestrated-timeout", []testPhase{
+		{name: "root", promptContent: "Root phase", maxTurns: 5},
+		{name: "child", promptContent: "Child phase {{.PreviousOutputs.root}}", maxTurns: 5, dependsOn: []string{"root"}},
+	})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, "orchestrated-timeout"))
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(_ string, prompt string, _ string, _ ...string) ([]byte, error, bool) {
+			if !strings.Contains(prompt, "Root phase") {
+				return nil, nil, false
+			}
+			updateErr := q.Update(vessel.ID, queue.StateTimedOut, "phase stalled: no output for 11m0s")
+			require.NoError(t, updateErr)
+			return nil, context.DeadlineExceeded, true
+		},
+	}
+
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	outcome := r.runVessel(context.Background(), *vessel)
+	assert.Equal(t, "timed_out", outcome)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Equal(t, "phase stalled: no output for 11m0s", updated.Error)
+	assert.Len(t, cmdRunner.phaseCalls, 1)
+	assert.True(t, wt.removeCalled)
+	assert.Equal(t, wt.path, wt.removePath)
+}
+
+func TestRunVesselGateTimeoutSkipsCompletionHooks(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	writeWorkflowFile(t, dir, "gate-timeout", []testPhase{
+		{
+			name:          "implement",
+			promptContent: "Implement change",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make test\"",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, "gate-timeout"))
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement change": []byte("implemented"),
+		},
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "sh" || len(args) < 2 || args[0] != "-c" || !strings.Contains(args[1], "make test") {
+				return nil, nil, false
+			}
+			updateErr := q.Update(vessel.ID, queue.StateTimedOut, "phase stalled: no output for 11m0s")
+			require.NoError(t, updateErr)
+			return []byte("gate passed"), nil, true
+		},
+	}
+	src := &recordingSource{}
+
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": src,
+	}
+
+	outcome := r.runVessel(context.Background(), *vessel)
+	assert.Equal(t, "timed_out", outcome)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Equal(t, int32(1), src.startCalls.Load())
+	assert.Zero(t, src.completeCalls.Load())
+	assert.Zero(t, src.failCalls.Load())
+	assert.True(t, wt.removeCalled)
+	assert.Equal(t, wt.path, wt.removePath)
+}
+
+func TestRunVesselOrchestratedGateTimeoutStopsDependentPhases(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	writeWorkflowFile(t, dir, "orchestrated-gate-timeout", []testPhase{
+		{
+			name:          "root",
+			promptContent: "Root phase",
+			maxTurns:      5,
+			gate:          "      type: command\n      run: \"make test\"",
+		},
+		{
+			name:          "child",
+			promptContent: "Child phase {{.PreviousOutputs.root}}",
+			maxTurns:      5,
+			dependsOn:     []string{"root"},
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, "orchestrated-gate-timeout"))
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Root phase": []byte("root output"),
+		},
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "sh" || len(args) < 2 || args[0] != "-c" || !strings.Contains(args[1], "make test") {
+				return nil, nil, false
+			}
+			updateErr := q.Update(vessel.ID, queue.StateTimedOut, "phase stalled: no output for 11m0s")
+			require.NoError(t, updateErr)
+			return []byte("gate passed"), nil, true
+		},
+	}
+
+	r := New(cfg, q, wt, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	outcome := r.runVessel(context.Background(), *vessel)
+	assert.Equal(t, "timed_out", outcome)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Len(t, cmdRunner.phaseCalls, 1)
+	assert.Contains(t, cmdRunner.phaseCalls[0].prompt, "Root phase")
+	assert.True(t, wt.removeCalled)
+	assert.Equal(t, wt.path, wt.removePath)
 }
 
 func TestCheckStalledVesselsDoesNotTimeoutUntrackedRecentPhase(t *testing.T) {
