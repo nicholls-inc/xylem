@@ -1,6 +1,8 @@
 package workflow
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -190,6 +192,73 @@ func TestPropValidatePhaseOutputRejectsUnknownOutputTypes(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), output) {
 			t.Fatalf("validatePhaseOutput() error = %q, want mention of %q", err.Error(), output)
+		}
+	})
+}
+
+func TestPropResolvePromptFilePathAnchorsToRepoRoot(t *testing.T) {
+	baseDir := t.TempDir()
+
+	rapid.Check(t, func(t *rapid.T) {
+		caseDir, err := os.MkdirTemp(baseDir, "resolve-prompt-")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+		repoRoot := filepath.Join(caseDir, "repo")
+		if err := os.MkdirAll(filepath.Join(repoRoot, ".xylem"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(.xylem) error = %v", err)
+		}
+
+		workflowDepth := rapid.IntRange(0, 4).Draw(t, "workflow-depth")
+		workflowParts := make([]string, 0, workflowDepth+2)
+		workflowParts = append(workflowParts, repoRoot)
+		for i := 0; i < workflowDepth; i++ {
+			workflowParts = append(workflowParts, rapid.StringMatching(`[a-z][a-z0-9-]{0,7}`).Draw(t, "workflow-dir"))
+		}
+		workflowParts = append(workflowParts, "workflow.yaml")
+		workflowPath := filepath.Join(workflowParts...)
+
+		promptPath := filepath.Join(
+			".xylem",
+			"prompts",
+			rapid.StringMatching(`[a-z][a-z0-9-]{0,7}`).Draw(t, "workflow-name"),
+			rapid.StringMatching(`[a-z][a-z0-9_-]{0,7}`).Draw(t, "phase-name")+".md",
+		)
+
+		got, err := resolvePromptFilePath(workflowPath, promptPath)
+		if err != nil {
+			t.Fatalf("resolvePromptFilePath() error = %v", err)
+		}
+
+		want := filepath.Join(repoRoot, filepath.Clean(promptPath))
+		if got != want {
+			t.Fatalf("resolvePromptFilePath() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestPropResolvePromptFilePathFallsBackWithoutRepoMarker(t *testing.T) {
+	baseDir := t.TempDir()
+
+	rapid.Check(t, func(t *rapid.T) {
+		caseDir, err := os.MkdirTemp(baseDir, "resolve-prompt-fallback-")
+		if err != nil {
+			t.Fatalf("MkdirTemp() error = %v", err)
+		}
+
+		workflowPath := filepath.Join(caseDir, "workflow.yaml")
+		promptPath := filepath.Join(
+			"prompts",
+			rapid.StringMatching(`[a-z][a-z0-9-]{0,7}`).Draw(t, "workflow-name"),
+			rapid.StringMatching(`[a-z][a-z0-9_-]{0,7}`).Draw(t, "phase-name")+".md",
+		)
+
+		got, err := resolvePromptFilePath(workflowPath, promptPath)
+		if err != nil {
+			t.Fatalf("resolvePromptFilePath() error = %v", err)
+		}
+		if got != promptPath {
+			t.Fatalf("resolvePromptFilePath() = %q, want legacy path %q", got, promptPath)
 		}
 	})
 }

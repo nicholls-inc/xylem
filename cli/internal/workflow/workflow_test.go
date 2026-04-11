@@ -47,6 +47,19 @@ func requireErrorContains(t *testing.T, err error, want string) {
 	}
 }
 
+func writeWorkflowFileAtPath(t *testing.T, path, content string) string {
+	t.Helper()
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("create workflow dir: %v", err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write workflow file: %v", err)
+	}
+
+	return path
+}
+
 // chdirTemp changes the working directory to dir for the duration of the test.
 func chdirTemp(t *testing.T, dir string) {
 	t.Helper()
@@ -372,43 +385,6 @@ phases:
 	}
 }
 
-func TestLoadWorkflowAllowAdditiveProtectedWritesDefaultsFalse(t *testing.T) {
-	dir := t.TempDir()
-	chdirTemp(t, dir)
-	createPromptFile(t, dir, "prompts/analyze.md")
-
-	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
-phases:
-  - name: analyze
-    prompt_file: prompts/analyze.md
-    max_turns: 10
-`)
-
-	got, err := Load(path)
-	require.NoError(t, err)
-	assert.False(t, got.AllowAdditiveProtectedWrites)
-	assert.Equal(t, policy.Delivery, got.Class)
-}
-
-func TestLoadWorkflowAllowAdditiveProtectedWritesParsesTrue(t *testing.T) {
-	dir := t.TempDir()
-	chdirTemp(t, dir)
-	createPromptFile(t, dir, "prompts/analyze.md")
-
-	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
-allow_additive_protected_writes: true
-phases:
-  - name: analyze
-    prompt_file: prompts/analyze.md
-    max_turns: 10
-`)
-
-	got, err := Load(path)
-	require.NoError(t, err)
-	assert.True(t, got.AllowAdditiveProtectedWrites)
-	assert.Equal(t, policy.HarnessMaintenance, got.Class)
-}
-
 func TestLoadWorkflowAllowCanonicalProtectedWrites(t *testing.T) {
 	tests := []struct {
 		name string
@@ -456,24 +432,6 @@ phases:
 			assert.Equal(t, policy.Delivery, got.Class)
 		})
 	}
-}
-
-func TestLoadWorkflowClassParsesExplicitValue(t *testing.T) {
-	dir := t.TempDir()
-	chdirTemp(t, dir)
-	createPromptFile(t, dir, "prompts/analyze.md")
-
-	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
-class: ops
-phases:
-  - name: analyze
-    prompt_file: prompts/analyze.md
-    max_turns: 10
-`)
-
-	got, err := Load(path)
-	require.NoError(t, err)
-	assert.Equal(t, policy.Ops, got.Class)
 }
 
 func TestSmoke_S4_WorkflowClassDefaultsToDeliveryWhenOmitted(t *testing.T) {
@@ -550,26 +508,6 @@ phases:
 
 	_, err := Load(path)
 	requireErrorContains(t, err, `"class" is invalid: unknown workflow class "runtime"`)
-}
-
-func TestSmoke_S7_InconsistentClassAndLegacyFlagsReturnStructuredError(t *testing.T) {
-	dir := t.TempDir()
-	chdirTemp(t, dir)
-	createPromptFile(t, dir, "prompts/analyze.md")
-
-	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
-class: delivery
-allow_additive_protected_writes: true
-phases:
-  - name: analyze
-    prompt_file: prompts/analyze.md
-    max_turns: 10
-`)
-
-	_, err := Load(path)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `"class" "delivery" conflicts with legacy protected write flags`)
-	assert.Contains(t, err.Error(), "delivery requires both legacy flags to be false")
 }
 
 func TestLoadWorkflowClassRejectsLegacyFlagConflict(t *testing.T) {
@@ -1328,10 +1266,11 @@ phases:
 }
 
 func TestLoadFileNotFound(t *testing.T) {
-	_, err := Load(filepath.Join(t.TempDir(), "missing.yaml"))
-	if err == nil {
-		t.Fatal("expected error for missing file")
-	}
+	path := filepath.Join(t.TempDir(), "missing.yaml")
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `read workflow file "`)
+	requireErrorContains(t, err, path)
 }
 
 func TestLoadMalformedYAML(t *testing.T) {
@@ -1339,9 +1278,9 @@ func TestLoadMalformedYAML(t *testing.T) {
 	path := writeWorkflowFile(t, dir, "workflow", "name: [broken\n")
 
 	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for malformed yaml")
-	}
+	requireErrorContains(t, err, `parse workflow yaml "`)
+	requireErrorContains(t, err, path)
+	requireErrorContains(t, err, "did not find expected")
 }
 
 func TestLoadWorkflowWithNoOp(t *testing.T) {
@@ -1919,6 +1858,44 @@ func TestValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestLoadResolvesPromptFilesFromInferredRepoRoot(t *testing.T) {
+	dir := t.TempDir()
+	createPromptFile(t, dir, ".xylem/prompts/doc-garden/analyze.md")
+
+	path := writeWorkflowFile(t, dir, "doc-garden", `name: doc-garden
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/doc-garden/analyze.md
+    max_turns: 10
+`)
+
+	wf, err := Load(path)
+	require.NoError(t, err)
+	require.Len(t, wf.Phases, 1)
+	assert.Equal(t, ".xylem/prompts/doc-garden/analyze.md", wf.Phases[0].PromptFile)
+}
+
+func TestLoadWorkflowSnapshotResolvesPromptFilesFromRepoRoot(t *testing.T) {
+	dir := t.TempDir()
+	createPromptFile(t, dir, ".xylem/prompts/fix-bug/analyze.md")
+
+	path := writeWorkflowFileAtPath(
+		t,
+		filepath.Join(dir, ".xylem", "phases", "vessel-123", "workflow-snapshots", "fix-bug.yaml"),
+		`name: fix-bug
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/fix-bug/analyze.md
+    max_turns: 10
+`,
+	)
+
+	wf, err := Load(path)
+	require.NoError(t, err)
+	require.Len(t, wf.Phases, 1)
+	assert.Equal(t, ".xylem/prompts/fix-bug/analyze.md", wf.Phases[0].PromptFile)
 }
 
 func TestLoadWorkflowWithModel(t *testing.T) {

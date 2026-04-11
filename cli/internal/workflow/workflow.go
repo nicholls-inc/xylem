@@ -218,8 +218,9 @@ func digestWorkflowData(data []byte) string {
 
 // Validate checks that the workflow definition is well-formed. workflowFilePath is
 // the path to the workflow YAML file, used to verify the workflow name matches the
-// filename. Prompt file paths are resolved relative to the current working
-// directory (repo root).
+// filename. Prompt file paths are resolved from the repo root inferred from
+// workflowFilePath when possible, with a fallback to legacy cwd-relative
+// resolution when no .xylem repo marker can be found.
 func (s *Workflow) Validate(workflowFilePath string) error {
 	if s.Name == "" {
 		return fmt.Errorf(`"name" is required`)
@@ -277,7 +278,11 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 				return fmt.Errorf("phase %q: prompt_file is required", p.Name)
 			}
 
-			if _, err := os.Stat(p.PromptFile); err != nil {
+			promptPath, err := resolvePromptFilePath(workflowFilePath, p.PromptFile)
+			if err != nil {
+				return fmt.Errorf("phase %q: resolve prompt_file %q: %w", p.Name, p.PromptFile, err)
+			}
+			if _, err := os.Stat(promptPath); err != nil {
 				return fmt.Errorf("phase %q: prompt_file not found: %s", p.Name, p.PromptFile)
 			}
 
@@ -336,6 +341,53 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 	}
 
 	return nil
+}
+
+func resolvePromptFilePath(workflowFilePath, promptFile string) (string, error) {
+	if filepath.IsAbs(promptFile) {
+		return promptFile, nil
+	}
+
+	repoRoot, err := inferRepoRootFromWorkflowPath(workflowFilePath)
+	if err != nil {
+		return "", err
+	}
+	if repoRoot == "" {
+		return promptFile, nil
+	}
+
+	return filepath.Join(repoRoot, filepath.Clean(promptFile)), nil
+}
+
+func inferRepoRootFromWorkflowPath(workflowFilePath string) (string, error) {
+	startDir := filepath.Dir(workflowFilePath)
+	if startDir == "" {
+		startDir = "."
+	}
+
+	dir, err := filepath.Abs(startDir)
+	if err != nil {
+		return "", fmt.Errorf("abs workflow directory %q: %w", startDir, err)
+	}
+
+	for {
+		marker := filepath.Join(dir, ".xylem")
+		info, err := os.Stat(marker)
+		switch {
+		case err == nil && info.IsDir():
+			return dir, nil
+		case err == nil:
+			return "", fmt.Errorf("repo marker %q is not a directory", marker)
+		case !os.IsNotExist(err):
+			return "", fmt.Errorf("stat repo marker %q: %w", marker, err)
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "", nil
+		}
+		dir = parent
+	}
 }
 
 func workflowFromYAML(raw workflowYAML) (*Workflow, error) {
