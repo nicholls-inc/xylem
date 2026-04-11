@@ -255,18 +255,11 @@ func TestPropNormalizeLegacyProvidersPreservesDefaultTierModels(t *testing.T) {
 	})
 }
 
-func TestPropValidationRequirementAcceptsAnyNonEmptyValidationCommand(t *testing.T) {
+func TestPropValidationRequirementAcceptsAnyNonEmptyNonGoimportsValidationCommand(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		cfg.Sources = map[string]SourceConfig{
-			"github": {
-				Type: "github",
-				Repo: "owner/name",
-				Tasks: map[string]Task{
-					"fix-checks": {Labels: []string{"ci"}, Workflow: "fix-pr-checks"},
-				},
-			},
-		}
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		cfg.Sources = validationRequiredSourceConfig(workflow)
 		commands := []*string{
 			&cfg.Validation.Format,
 			&cfg.Validation.Lint,
@@ -274,7 +267,43 @@ func TestPropValidationRequirementAcceptsAnyNonEmptyValidationCommand(t *testing
 			&cfg.Validation.Test,
 		}
 		idx := rapid.IntRange(0, len(commands)-1).Draw(t, "command-index")
-		*commands[idx] = rapid.StringMatching(`[a-z0-9 ./_-]{4,32}`).Draw(t, "command")
+		*commands[idx] = rapid.StringMatching(`(go test|go vet|make|just|npm run) [a-z0-9./:_-]{1,24}`).Draw(t, "command")
+
+		if err := cfg.validateWorkflowRequirements(); err != nil {
+			t.Fatalf("validateWorkflowRequirements() error = %v", err)
+		}
+	})
+}
+
+func TestPropValidationRequirementRejectsGoimportsPackagePatternTargets(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := validConfig()
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		cfg.Sources = validationRequiredSourceConfig(workflow)
+		target := rapid.SampledFrom([]string{"./...", "./cli/...", "./internal/...", "cli/..."}).Draw(t, "target")
+		cfg.Validation.Format = "goimports -l " + target
+
+		err := cfg.validateWorkflowRequirements()
+		if err == nil {
+			t.Fatalf("validateWorkflowRequirements() unexpectedly accepted %q", cfg.Validation.Format)
+		}
+		if !strings.Contains(err.Error(), target) {
+			t.Fatalf("validateWorkflowRequirements() error = %v, want target %q in error", err, target)
+		}
+	})
+}
+
+func TestPropValidationRequirementAcceptsGoimportsDirectoryTargets(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := validConfig()
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		cfg.Sources = validationRequiredSourceConfig(workflow)
+		target := rapid.StringMatching(`[./a-z0-9_-]{1,16}`).Draw(t, "target")
+		target = strings.TrimSpace(target)
+		if target == "" || strings.Contains(target, "...") || strings.HasPrefix(target, "-") {
+			target = "."
+		}
+		cfg.Validation.Format = "goimports -l " + target
 
 		if err := cfg.validateWorkflowRequirements(); err != nil {
 			t.Fatalf("validateWorkflowRequirements() error = %v", err)

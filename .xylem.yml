@@ -198,7 +198,7 @@ observability:
   sample_rate: 1.0
 
 validation:
-  format: "goimports -l ./cli/..."
+  format: "goimports -l ."
   lint: "go vet ./cli/..."
   build: "go build ./cli/cmd/xylem"
   test: "go test ./cli/..."
