@@ -11,6 +11,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/nicholls-inc/xylem/cli/internal/cadence"
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -225,7 +226,7 @@ func (s *Schedule) readStateUnlocked() (scheduleStateFile, error) {
 }
 
 func (s *Schedule) statePath() string {
-	return filepath.Join(s.StateDir, "state", "schedule.json")
+	return config.RuntimePath(s.StateDir, "schedule.json")
 }
 
 func (s *Schedule) legacyStatePath() string {

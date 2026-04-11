@@ -732,7 +732,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			}
 
 			// Create phases dir early
-			phasesDir := filepath.Join(r.Config.StateDir, "phases", vessel.ID)
+			phasesDir := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID)
 			if err := os.MkdirAll(phasesDir, 0o755); err != nil {
 				finishCurrentPhaseSpan(err)
 				r.failVessel(vessel.ID, fmt.Sprintf("create phases dir: %v", err))
@@ -1243,7 +1243,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		return "failed"
 	}
 
-	outputPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, "prompt.output")
+	outputPath := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID, "prompt.output")
 	if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
 		log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
 	}
@@ -1795,7 +1795,7 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	}
 
 	if vrs.costTracker != nil {
-		reportPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, costReportFileName)
+		reportPath := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID, costReportFileName)
 		report := vrs.buildCostReport(summary)
 		if err := os.MkdirAll(filepath.Dir(reportPath), 0o755); err != nil {
 			log.Printf("warn: save cost report: %v", fmt.Errorf("create dir: %w", err))
@@ -1806,7 +1806,7 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 			reviewArtifacts.CostReport = summary.CostReportPath
 		}
 
-		alertsPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, budgetAlertsFileName)
+		alertsPath := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID, budgetAlertsFileName)
 		if err := saveJSONArtifact(alertsPath, vrs.costTracker.Alerts()); err != nil {
 			log.Printf("warn: save budget alerts: %v", err)
 		} else {
@@ -1815,7 +1815,7 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 		}
 	}
 
-	evalPath := filepath.Join(r.Config.StateDir, "phases", vessel.ID, evalReportFileName)
+	evalPath := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID, evalReportFileName)
 	if info, err := os.Stat(evalPath); err == nil && !info.IsDir() {
 		summary.EvalReportPath = evalReportRelativePath(vessel.ID)
 		reviewArtifacts.EvalReport = summary.EvalReportPath
@@ -2246,7 +2246,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			phaseSpanEnded = true
 		}
 
-		phasesDir := filepath.Join(r.Config.StateDir, "phases", vessel.ID)
+		phasesDir := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID)
 		if err := os.MkdirAll(phasesDir, 0o755); err != nil {
 			finishCurrentPhaseSpan(err)
 			r.failVessel(vessel.ID, fmt.Sprintf("create phases dir: %v", err))
@@ -3828,7 +3828,7 @@ func (r *Runner) workflowSnapshotPath(vesselID, workflowName string) string {
 	if r == nil || r.Config == nil || r.Config.StateDir == "" || strings.TrimSpace(vesselID) == "" || strings.TrimSpace(workflowName) == "" {
 		return ""
 	}
-	return filepath.Join(r.Config.StateDir, "phases", vesselID, workflowSnapshotDirName, workflowName+".yaml")
+	return config.RuntimePath(r.Config.StateDir, "phases", vesselID, workflowSnapshotDirName, workflowName+".yaml")
 }
 
 func (r *Runner) readHarness() string {
@@ -3969,7 +3969,7 @@ func (r *Runner) fetchGitHubData(ctx context.Context, vessel *queue.Vessel, ghCm
 
 func (r *Runner) rebuildPreviousOutputs(vesselID string, sk *workflow.Workflow) map[string]string {
 	outputs := make(map[string]string)
-	phasesDir := filepath.Join(r.Config.StateDir, "phases", vesselID)
+	phasesDir := config.RuntimePath(r.Config.StateDir, "phases", vesselID)
 	for _, p := range sk.Phases {
 		outputPath := filepath.Join(phasesDir, p.Name+".output")
 		data, err := os.ReadFile(outputPath)
@@ -3999,7 +3999,7 @@ func (r *Runner) touchPhaseActivity(path string) error {
 }
 
 func (r *Runner) latestPhaseActivity(vesselID string) (string, time.Time, error) {
-	phasesDir := filepath.Join(r.Config.StateDir, "phases", vesselID)
+	phasesDir := config.RuntimePath(r.Config.StateDir, "phases", vesselID)
 	entries, err := os.ReadDir(phasesDir)
 	if err != nil {
 		return "", time.Time{}, err

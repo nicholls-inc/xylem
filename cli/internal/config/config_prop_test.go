@@ -2,11 +2,13 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
 
@@ -86,6 +88,27 @@ func TestPropResolveStateDirRebasesRelativePaths(t *testing.T) {
 		want := filepath.Join(root, stateDir)
 		if got != want {
 			t.Fatalf("ResolveStateDir(%q, %q) = %q, want %q", root, stateDir, got, want)
+		}
+	})
+}
+
+func TestPropRuntimePathAddsSingleStatePrefixForControlPlane(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		root, err := os.MkdirTemp("", "runtime-path-control-plane-*")
+		require.NoError(t, err)
+		defer os.RemoveAll(root)
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("state/\n"), 0o644))
+
+		segments := []string{
+			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-a"),
+			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-b"),
+			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-c"),
+		}
+
+		got := RuntimePath(root, segments...)
+		want := filepath.Join(append([]string{root, "state"}, segments...)...)
+		if got != want {
+			t.Fatalf("RuntimePath(%q, %#v) = %q, want %q", root, segments, got, want)
 		}
 	})
 }

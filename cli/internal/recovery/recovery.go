@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
@@ -444,7 +445,7 @@ func ApplyToMeta(meta map[string]string, artifact *Artifact) map[string]string {
 }
 
 func Path(stateDir, vesselID string) string {
-	return filepath.Join(stateDir, "phases", vesselID, artifactFileName)
+	return config.RuntimePath(stateDir, "phases", vesselID, artifactFileName)
 }
 
 func RelativePath(vesselID string) string {

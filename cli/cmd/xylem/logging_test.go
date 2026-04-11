@@ -12,6 +12,8 @@ import (
 	"testing"
 
 	"github.com/spf13/cobra"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/contrib/bridges/otelslog"
 	otellog "go.opentelemetry.io/otel/log"
 	otelglobal "go.opentelemetry.io/otel/log/global"
@@ -95,6 +97,13 @@ func TestNewConfiguredLoggerDaemonWritesToFile(t *testing.T) {
 	if !strings.Contains(got, "component=daemon") {
 		t.Fatalf("daemon log file missing structured attribute: %q", got)
 	}
+}
+
+func TestDaemonLogPathUsesRuntimeStateForControlPlaneDirectories(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("state/\n"), 0o644))
+
+	assert.Equal(t, config.RuntimePath(dir, daemonLogFileName), daemonLogPath(dir))
 }
 
 func TestNewConfiguredLoggerWithoutDaemonFileSkipsLogFile(t *testing.T) {

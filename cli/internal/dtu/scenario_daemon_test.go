@@ -198,7 +198,7 @@ func TestSmoke_S4_DeterministicPhaseStallRecovery(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, vessel)
 
-	outputPath := filepath.Join(env.stateDir, "phases", vessel.ID, "analyze.output")
+	outputPath := config.RuntimePath(env.stateDir, "phases", vessel.ID, "analyze.output")
 	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
 	require.NoError(t, os.WriteFile(outputPath, []byte(""), 0o644))
 	old := now.Add(-11 * time.Minute)

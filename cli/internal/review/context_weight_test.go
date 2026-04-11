@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
 
@@ -326,5 +327,27 @@ func TestPublishContextWeightIssuesDedupsRepeatedFindings(t *testing.T) {
 	}
 	if !strings.Contains(renderContextWeightIssueBody(report.Findings[0], report.Baseline), "xylem:context-weight-fingerprint=deadbeef") {
 		t.Fatal("issue body missing fingerprint marker")
+	}
+}
+
+func TestGenerateContextWeightAuditUsesRuntimeStateForControlPlaneDirectories(t *testing.T) {
+	stateDir := newControlPlaneStateDir(t)
+	now := time.Date(2026, time.April, 9, 14, 0, 0, 0, time.UTC)
+
+	result, err := GenerateContextWeightAudit(stateDir, ContextWeightOptions{
+		OutputDir: "reviews",
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("GenerateContextWeightAudit() error = %v", err)
+	}
+
+	expectedJSON := config.RuntimePath(stateDir, "reviews", contextWeightReportJSONName)
+	expectedMarkdown := config.RuntimePath(stateDir, "reviews", contextWeightReportMarkdownName)
+	if result.JSONPath != expectedJSON {
+		t.Fatalf("JSONPath = %q, want %q", result.JSONPath, expectedJSON)
+	}
+	if result.MarkdownPath != expectedMarkdown {
+		t.Fatalf("MarkdownPath = %q, want %q", result.MarkdownPath, expectedMarkdown)
 	}
 }

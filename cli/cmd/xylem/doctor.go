@@ -69,7 +69,7 @@ func doctorDepsForRoot(base *appDeps, root string) (*appDeps, error) {
 	wt.DefaultBranch = cfg.DefaultBranch
 	return &appDeps{
 		cfg: &cfg,
-		q:   queue.New(filepath.Join(cfg.StateDir, "queue.jsonl")),
+		q:   queue.New(config.RuntimePath(cfg.StateDir, "queue.jsonl")),
 		wt:  wt,
 	}, nil
 }

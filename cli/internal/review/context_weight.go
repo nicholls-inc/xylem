@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 )
 
 const (
@@ -160,7 +162,7 @@ func GenerateContextWeightAudit(stateDir string, opts ContextWeightOptions) (*Co
 		Warnings:          append([]string(nil), warnings...),
 	}
 
-	outputDir := filepath.Join(stateDir, opts.OutputDir)
+	outputDir := config.RuntimePath(stateDir, opts.OutputDir)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("generate context-weight audit: create output dir: %w", err)
 	}
@@ -214,7 +216,7 @@ func PublishContextWeightIssues(ctx context.Context, stateDir, repo string, runn
 		now = now.UTC()
 	}
 
-	statePath := filepath.Join(stateDir, outputDir, contextWeightIssueStateName)
+	statePath := config.RuntimePath(stateDir, outputDir, contextWeightIssueStateName)
 	state, err := loadContextWeightIssueState(statePath)
 	if err != nil {
 		return nil, err

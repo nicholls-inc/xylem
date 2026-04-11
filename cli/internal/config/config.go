@@ -20,6 +20,7 @@ const minTimeout = 30 * time.Second
 const DefaultAuditLogPath = "audit.jsonl"
 const DefaultLLMRoutingTier = "med"
 const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
+const runtimeStateDirName = "state"
 
 // DefaultProtectedSurfaces is the default list of paths that xylem's
 // runtime verifier treats as off-limits to vessel modifications.
@@ -346,6 +347,101 @@ func ResolveStateDir(root, stateDir string) string {
 		return stateDir
 	}
 	return filepath.Join(root, stateDir)
+}
+
+// RuntimeRoot returns the resolved runtime-state root for a control-plane
+// state_dir. It prefers the profile-ready .xylem/state/ layout, but keeps the
+// legacy flat layout alive while those artifacts still exist.
+func RuntimeRoot(stateDir string) string {
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		return ""
+	}
+	if !looksLikeControlPlaneDir(stateDir) {
+		return stateDir
+	}
+
+	runtimeRoot := filepath.Join(stateDir, runtimeStateDirName)
+	if pathExists(runtimeRoot) {
+		return runtimeRoot
+	}
+	if hasLegacyRuntimeArtifacts(stateDir) {
+		return stateDir
+	}
+	return runtimeRoot
+}
+
+// RuntimePath resolves a runtime-state path beneath state_dir. Control-plane
+// directories use the new .xylem/state/ subtree by default, but legacy flat
+// artifacts are still honored during the migration window.
+func RuntimePath(stateDir string, elems ...string) string {
+	stateDir = strings.TrimSpace(stateDir)
+	if stateDir == "" {
+		return filepath.Join(elems...)
+	}
+	if !looksLikeControlPlaneDir(stateDir) {
+		return filepath.Join(append([]string{stateDir}, elems...)...)
+	}
+	if hasRuntimePrefix(elems...) {
+		return filepath.Join(append([]string{stateDir}, elems...)...)
+	}
+	runtimePath := filepath.Join(append([]string{stateDir, runtimeStateDirName}, elems...)...)
+	legacyPath := filepath.Join(append([]string{stateDir}, elems...)...)
+	if pathExists(runtimePath) {
+		return runtimePath
+	}
+	if pathExists(legacyPath) {
+		return legacyPath
+	}
+	return runtimePath
+}
+
+func hasRuntimePrefix(elems ...string) bool {
+	if len(elems) == 0 {
+		return false
+	}
+	clean := filepath.ToSlash(filepath.Clean(filepath.Join(elems...)))
+	return clean == runtimeStateDirName || strings.HasPrefix(clean, runtimeStateDirName+"/")
+}
+
+func looksLikeControlPlaneDir(stateDir string) bool {
+	if filepath.Base(filepath.Clean(stateDir)) == ".xylem" {
+		return true
+	}
+	for _, marker := range []string{".gitignore", "HARNESS.md", "profile.lock", "workflows", "prompts"} {
+		if pathExists(filepath.Join(stateDir, marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLegacyRuntimeArtifacts(stateDir string) bool {
+	for _, marker := range []string{
+		"queue.jsonl",
+		"phases",
+		"schedules",
+		"reviews",
+		"locks",
+		"traces",
+		"dtu",
+		"paused",
+		"daemon.pid",
+		"daemon.log",
+		"daemon-supervisor.pid",
+		"daemon-supervisor.stop",
+		"schedule-state.json",
+	} {
+		if pathExists(filepath.Join(stateDir, marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // normalize migrates legacy top-level Repo/Tasks/Exclude into the Sources map.

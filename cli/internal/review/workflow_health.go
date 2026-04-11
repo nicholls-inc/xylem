@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 )
@@ -207,7 +208,7 @@ func GenerateWorkflowHealthReport(stateDir string, opts WorkflowHealthOptions) (
 		Warnings:            append([]string(nil), warnings...),
 	}
 
-	outputDir := filepath.Join(stateDir, opts.OutputDir)
+	outputDir := config.RuntimePath(stateDir, opts.OutputDir)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("generate workflow-health report: create output dir: %w", err)
 	}
@@ -262,7 +263,7 @@ func PublishWorkflowHealthIssues(ctx context.Context, stateDir, repo string, cmd
 	}
 
 	weekKey := workflowHealthWeekKey(report.WindowEnd)
-	statePath := filepath.Join(stateDir, outputDir, workflowHealthIssueStateName)
+	statePath := config.RuntimePath(stateDir, outputDir, workflowHealthIssueStateName)
 	state, err := loadWorkflowHealthIssueState(statePath)
 	if err != nil {
 		return nil, err
@@ -376,7 +377,7 @@ func PublishWorkflowHealthIssues(ctx context.Context, stateDir, repo string, cmd
 }
 
 func loadWorkflowHealthFleet(stateDir string) (int, runner.FleetStatusReport, error) {
-	q := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	q := queue.New(config.RuntimePath(stateDir, "queue.jsonl"))
 	vessels, err := q.List()
 	if err != nil {
 		return 0, runner.FleetStatusReport{}, fmt.Errorf("load queue: %w", err)

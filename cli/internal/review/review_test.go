@@ -370,6 +370,13 @@ func requireSummaryOnly(t *testing.T, stateDir string, summary runner.VesselSumm
 	}
 }
 
+func newControlPlaneStateDir(t *testing.T) string {
+	t.Helper()
+	stateDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, ".gitignore"), []byte("state/\n"), 0o644))
+	return stateDir
+}
+
 func findGroup(t *testing.T, groups []GroupReview, source, workflow, phase string) GroupReview {
 	t.Helper()
 	for _, group := range groups {

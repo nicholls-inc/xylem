@@ -3,12 +3,12 @@ package runner
 import (
 	"encoding/json"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"pgregory.net/rapid"
 )
@@ -84,7 +84,7 @@ func TestProp_SaveVesselSummaryNeverWritesNullPhases(t *testing.T) {
 			t.Fatalf("SaveVesselSummary() error = %v", err)
 		}
 
-		data, err := os.ReadFile(filepath.Join(stateDir, "phases", vesselID, summaryFileName))
+		data, err := os.ReadFile(config.RuntimePath(stateDir, "phases", vesselID, summaryFileName))
 		if err != nil {
 			t.Fatalf("read summary: %v", err)
 		}

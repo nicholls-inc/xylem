@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
@@ -246,4 +247,21 @@ func TestSmoke_S3_WriteReportWhenWindowHasNoRecentRuns(t *testing.T) {
 	assert.Empty(t, result.Report.EscalationFindings)
 	assert.Contains(t, result.Markdown, "No completed or failed vessel runs landed in the reporting window")
 	assert.NotContains(t, strings.Join(result.Report.Warnings, "\n"), "error")
+}
+
+func TestGenerateWorkflowHealthReportUsesRuntimeStateForControlPlaneDirectories(t *testing.T) {
+	stateDir := newControlPlaneStateDir(t)
+	now := time.Date(2026, time.April, 10, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, os.MkdirAll(filepath.Dir(config.RuntimePath(stateDir, "queue.jsonl")), 0o755))
+
+	result, err := GenerateWorkflowHealthReport(stateDir, WorkflowHealthOptions{
+		OutputDir: "reviews",
+		Now:       now,
+	})
+	require.NoError(t, err)
+
+	expectedJSON := config.RuntimePath(stateDir, "reviews", workflowHealthReportJSONName)
+	expectedMarkdown := config.RuntimePath(stateDir, "reviews", workflowHealthReportMarkdownName)
+	assert.Equal(t, expectedJSON, result.JSONPath)
+	assert.Equal(t, expectedMarkdown, result.MarkdownPath)
 }

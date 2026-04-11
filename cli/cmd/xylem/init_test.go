@@ -80,6 +80,9 @@ func TestInitCreatesConfigAndStateDir(t *testing.T) {
 	if _, err := os.Stat(stateDir); err != nil {
 		t.Errorf("state dir not created: %v", err)
 	}
+	if _, err := os.Stat(filepath.Join(stateDir, "state")); err != nil {
+		t.Errorf("runtime state dir not created: %v", err)
+	}
 
 	// .gitignore created
 	gitignore := filepath.Join(stateDir, ".gitignore")
@@ -640,6 +643,8 @@ func TestSmoke_S4_CoreInitScaffoldsTrackedControlPlane(t *testing.T) {
 
 	workflows := scaffoldedWorkflowNames(t, dir)
 	assert.Equal(t, expectedCoreWorkflows, workflows)
+
+	assert.DirExists(t, filepath.Join(dir, ".xylem", "state"))
 
 	gitignoreData, err := os.ReadFile(filepath.Join(dir, ".xylem", ".gitignore"))
 	require.NoError(t, err)

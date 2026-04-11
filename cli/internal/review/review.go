@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
@@ -124,7 +125,7 @@ func Generate(stateDir string, opts Options) (*Result, error) {
 	report.Groups, report.CostAnomalies = buildGroupReviews(runs, opts.MinSamples)
 	report.Summary = summarizeRecommendations(report.Groups)
 
-	outputDir := filepath.Join(stateDir, opts.OutputDir)
+	outputDir := config.RuntimePath(stateDir, opts.OutputDir)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("generate review: create output dir: %w", err)
 	}
@@ -156,7 +157,7 @@ func LoadLatestReport(stateDir, outputDir string) (*Report, error) {
 	if strings.TrimSpace(outputDir) == "" {
 		outputDir = defaultOutputDir
 	}
-	path := filepath.Join(stateDir, outputDir, reportJSONName)
+	path := config.RuntimePath(stateDir, outputDir, reportJSONName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

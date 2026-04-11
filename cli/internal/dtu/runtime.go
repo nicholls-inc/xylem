@@ -3,6 +3,8 @@ package dtu
 import (
 	"fmt"
 	"path/filepath"
+
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 )
 
 const (
@@ -35,7 +37,7 @@ func UniverseDir(stateDir, universeID string) (string, error) {
 	if err := validatePathComponent(universeID); err != nil {
 		return "", fmt.Errorf("resolve DTU universe dir: invalid universe ID: %w", err)
 	}
-	return filepath.Join(stateDir, "dtu", universeID), nil
+	return config.RuntimePath(stateDir, "dtu", universeID), nil
 }
 
 // DefaultEventLogPath returns the conventional event log path for a DTU universe.
@@ -49,7 +51,7 @@ func DefaultEventLogPath(stateDir, universeID string) (string, error) {
 
 // DefaultShimDir returns the conventional shim directory for a DTU state root.
 func DefaultShimDir(stateDir string) string {
-	return filepath.Join(stateDir, "dtu", "shims")
+	return config.RuntimePath(stateDir, "dtu", "shims")
 }
 
 // RecordRuntimeEvent appends a DTU event to the active runtime store when one is configured.

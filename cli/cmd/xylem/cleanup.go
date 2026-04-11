@@ -107,7 +107,7 @@ func cleanupWorktrees(wt *worktree.Manager, q *queue.Queue, dryRun bool) error {
 }
 
 func cleanupPhaseOutputs(cfg *config.Config, q *queue.Queue, dryRun bool) {
-	phasesDir := filepath.Join(cfg.StateDir, "phases")
+	phasesDir := config.RuntimePath(cfg.StateDir, "phases")
 	if _, err := os.Stat(phasesDir); os.IsNotExist(err) {
 		return // no phases directory yet
 	}

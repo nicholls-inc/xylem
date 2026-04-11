@@ -95,8 +95,8 @@ func rewritePhaseOutputs(outputs map[string]string, oldID, newID string) map[str
 // copyPhaseOutputFiles copies all files from the original vessel's phase output
 // directory to the retry vessel's phase output directory.
 func copyPhaseOutputFiles(stateDir, oldID, newID string) error {
-	srcDir := filepath.Join(stateDir, "phases", oldID)
-	dstDir := filepath.Join(stateDir, "phases", newID)
+	srcDir := config.RuntimePath(stateDir, "phases", oldID)
+	dstDir := config.RuntimePath(stateDir, "phases", newID)
 
 	entries, err := os.ReadDir(srcDir)
 	if err != nil {

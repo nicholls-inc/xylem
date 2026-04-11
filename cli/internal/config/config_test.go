@@ -281,6 +281,46 @@ func TestResolveStateDir(t *testing.T) {
 	})
 }
 
+func TestSmoke_S2_RuntimePathPrefersProfileReadyStateWhenPresent(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("state/\n"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "state"), 0o755))
+
+	got := RuntimePath(root, "queue.jsonl")
+	want := filepath.Join(root, "state", "queue.jsonl")
+	assert.Equal(t, want, got)
+	assert.Equal(t, filepath.Join(root, "state"), RuntimeRoot(root))
+}
+
+func TestSmoke_S3_RuntimePathFallsBackToLegacyFlatArtifact(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("state/\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "queue.jsonl"), []byte("{}\n"), 0o644))
+
+	got := RuntimePath(root, "queue.jsonl")
+	want := filepath.Join(root, "queue.jsonl")
+	assert.Equal(t, want, got)
+	assert.Equal(t, root, RuntimeRoot(root))
+}
+
+func TestRuntimePathDoesNotDoubleNestExplicitStatePaths(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("state/\n"), 0o644))
+
+	got := RuntimePath(root, "state", "bootstrap", "marker.json")
+	want := filepath.Join(root, "state", "bootstrap", "marker.json")
+	assert.Equal(t, want, got)
+}
+
+func TestRuntimePathPreservesNonControlPlaneRoots(t *testing.T) {
+	root := t.TempDir()
+
+	got := RuntimePath(root, "phases", "issue-1", "summary.json")
+	want := filepath.Join(root, "phases", "issue-1", "summary.json")
+	assert.Equal(t, want, got)
+	assert.Equal(t, root, RuntimeRoot(root))
+}
+
 func validConfig() *Config {
 	cfg := &Config{
 		Repo: "owner/name",
