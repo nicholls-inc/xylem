@@ -617,6 +617,8 @@ xylem retry <vessel-id> [flags]
 
 This failure context is available to prompt templates so the retried session can avoid repeating the same mistakes.
 
+If retry is blocked by a persisted `failure-review.json` decision such as `human_escalation` with `requires_decision_refresh: true`, run `xylem recovery refresh <vessel-id>` first to replace the suppressed decision with an explicit retry-authorized refresh.
+
 ### Examples
 
 ```bash
@@ -630,6 +632,42 @@ xylem retry issue-42 --from-scratch
 # Retry again after another failure
 xylem retry issue-42
 # Created retry vessel issue-42-retry-2 (retrying issue-42)
+```
+
+---
+
+## xylem recovery refresh
+
+Refresh a persisted `failure-review.json` decision for a failed vessel so retries are allowed again after a human reviews the cited artifacts and confirms the relevant fix landed.
+
+### Usage
+
+```
+xylem recovery refresh <vessel-id>
+```
+
+### Arguments
+
+| Argument | Required | Description |
+|----------|----------|-------------|
+| `vessel-id` | Yes | The failed or timed-out vessel whose persisted recovery decision should be refreshed. |
+
+### Behavior
+
+1. Loads `<state_dir>/phases/<vessel-id>/failure-review.json`.
+2. Rewrites the persisted decision to `recovery_action: retry` with explicit retry preconditions.
+3. Clears `retry_suppressed` and `requires_decision_refresh`.
+4. Writes a new decision digest so remediation-aware scanner dedup logic can see that the decision changed.
+5. Leaves the failed vessel's queue record untouched; the next retry or scan consumes the refreshed artifact.
+
+### Examples
+
+```bash
+# Re-enable retry for a previously suppressed vessel after reviewing the failure artifacts
+xylem recovery refresh issue-158-fresh-retry-1
+
+# Then retry it immediately
+xylem retry issue-158-fresh-retry-1 --from-scratch
 ```
 
 ---

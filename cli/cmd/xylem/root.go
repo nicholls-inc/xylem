@@ -44,6 +44,8 @@ func newRootCmd() *cobra.Command {
 			skipTooling := cmd.Name() == "visualize" ||
 				strings.HasPrefix(commandPath, "xylem visualize") ||
 				cmd.Name() == "review" ||
+				cmd.Name() == "recovery" ||
+				strings.HasPrefix(commandPath, "xylem recovery") ||
 				commandPath == "xylem continuous-improvement select" ||
 				commandPath == "xylem harden inventory" ||
 				commandPath == "xylem harden score" ||
@@ -103,6 +105,7 @@ func newRootCmd() *cobra.Command {
 		newReviewCmd(),
 		newGapReportCmd(),
 		newLessonsCmd(),
+		newRecoveryCmd(),
 		newEnqueueCmd(),
 		newStatusCmd(),
 		newPauseCmd(),
