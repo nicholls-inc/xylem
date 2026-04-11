@@ -1,7 +1,7 @@
 Refine the GitHub issues created in the previous phase.
 
 ## Created Issues
-{{.PreviousOutputs.create-issues}}
+{{.PreviousOutputs.create_issues}}
 
 ## Instructions
 
