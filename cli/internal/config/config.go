@@ -314,7 +314,7 @@ func Load(path string) (*Config, error) {
 			ScanInterval:  "60s",
 			DrainInterval: "30s",
 			StallMonitor: StallMonitorConfig{
-				PhaseStallThreshold:  "10m",
+				PhaseStallThreshold:  "30m",
 				ScannerIdleThreshold: "5m",
 				OrphanCheckEnabled:   true,
 			},

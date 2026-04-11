@@ -4057,6 +4057,14 @@ func (r *Runner) trackedProcess(vesselID string) (trackedProcess, bool) {
 	return proc, ok
 }
 
+func (r *Runner) liveTrackedProcess(vesselID string) (trackedProcess, bool) {
+	proc, ok := r.trackedProcess(vesselID)
+	if !ok || proc.Exited || !processAlive(proc.PID) {
+		return trackedProcess{}, false
+	}
+	return proc, true
+}
+
 func processAlive(pid int) bool {
 	if pid <= 0 {
 		return false
@@ -4359,6 +4367,10 @@ func (r *Runner) CheckStalledVessels(ctx context.Context) []StallFinding {
 				}
 				continue
 			}
+		}
+
+		if _, ok := r.liveTrackedProcess(vessel.ID); ok {
+			continue
 		}
 
 		phaseName, modifiedAt, err := r.latestPhaseActivity(vessel.ID)

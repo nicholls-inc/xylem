@@ -108,7 +108,7 @@ daemon:
   scan_interval: "60s"   # how often the daemon scans for new work
   drain_interval: "30s"  # how often the daemon drains pending vessels
   stall_monitor:
-    phase_stall_threshold: "10m"   # mark running vessels timed_out after no phase output activity
+    phase_stall_threshold: "30m"   # mark untracked running vessels timed_out after stale phase output activity
     scanner_idle_threshold: "5m"   # warn when queue stays idle while GitHub backlog exists
     orphan_check_enabled: true      # repair running vessels with no live tracked subprocess
 ```
@@ -151,7 +151,7 @@ daemon:
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
-| `phase_stall_threshold` | string | `"10m"` | No | Maximum time since the most recent `*.output` activity for a running vessel before it is marked `timed_out`. Must be a valid Go duration string. |
+| `phase_stall_threshold` | string | `"30m"` | No | Maximum time since the most recent `*.output` activity for a running vessel that has no live tracked subprocess before it is marked `timed_out`. Must be a valid Go duration string. |
 | `scanner_idle_threshold` | string | `"5m"` | No | How long the queue may remain idle before xylem warns that GitHub backlog still exists. Must be a valid Go duration string. |
 | `orphan_check_enabled` | boolean | `true` | No | When enabled, the daemon repairs running vessels that have no live tracked subprocess by transitioning them to `timed_out`. |
 
