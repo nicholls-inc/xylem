@@ -48,6 +48,7 @@ type CommandRunner interface {
 	RunOutput(ctx context.Context, name string, args ...string) ([]byte, error)
 	RunProcess(ctx context.Context, dir string, name string, args ...string) error
 	RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error)
+	RunPhaseWithEnv(ctx context.Context, dir string, extraEnv []string, stdin io.Reader, name string, args ...string) ([]byte, error)
 }
 
 type PhaseProcessObserver interface {
@@ -57,6 +58,10 @@ type PhaseProcessObserver interface {
 
 type PhaseProcessRunner interface {
 	RunPhaseObserved(ctx context.Context, dir string, stdin io.Reader, observer PhaseProcessObserver, name string, args ...string) ([]byte, error)
+}
+
+type PhaseProcessEnvRunner interface {
+	RunPhaseObservedWithEnv(ctx context.Context, dir string, extraEnv []string, stdin io.Reader, observer PhaseProcessObserver, name string, args ...string) ([]byte, error)
 }
 
 // WorktreeManager abstracts worktree lifecycle for testing.
@@ -706,13 +711,18 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			var beforeSnapshot surface.Snapshot
 			var checkProtectedSurfaces bool
 			var promptForCost string
-			provider := resolveProvider(r.Config, srcCfg, sk, &p)
-			model := resolveModel(r.Config, srcCfg, sk, &p, provider)
+			tier, providerChain := resolvePhaseProviderChain(r.Config, srcCfg, vessel, sk, &p)
+			provider := ""
+			model := ""
+			if len(providerChain) > 0 {
+				provider = providerChain[0]
+				model = resolvePhaseModel(r.Config, srcCfg, sk, &p, provider, tier)
+			}
 			retryAttempt := 0
 			if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 				retryAttempt = providerAttempt(&p, vessel.GateRetries)
 			}
-			phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, sk, p, i, retryAttempt)
+			phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, sk, p, i, retryAttempt, "", "", tier)
 			phaseSpanEnded := false
 			var phaseDuration time.Duration
 			phaseSpanStatus := "running"
@@ -727,7 +737,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if phaseDuration == 0 {
 					phaseDuration = r.runtimeSince(phaseStart)
 				}
-				finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, srcCfg, sk, p, promptForCost, string(output), phaseDuration, phaseSpanStatus, phaseOutputArtifactPath), err)
+				finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, p, promptForCost, string(output), phaseDuration, phaseSpanStatus, phaseOutputArtifactPath, provider, model, tier), err)
 				phaseSpanEnded = true
 			}
 
@@ -853,16 +863,28 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					return "failed"
 				}
 				attempt := providerAttempt(&p, vessel.GateRetries)
-				cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, sk, &p, harnessContent, provider, rendered, attempt)
-				var stdinContent string
-				if phaseStdin != nil {
-					stdinContent = rendered
-				}
 				outputPath := filepath.Join(phasesDir, p.Name+".output")
 				if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
 					log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
 				}
-				output, runErr = r.runPhaseWithRateLimitRetry(ctx, vessel.ID, p.Name, worktreePath, stdinContent, cmd, args)
+				output, provider, model, runErr = r.runPhaseWithProviderFallback(ctx, vessel.ID, p.Name, worktreePath, providerChain, func(provider string) (providerInvocation, error) {
+					cmd, args, phaseStdin, model, err := buildProviderPhaseArgs(r.Config, srcCfg, sk, &p, harnessContent, provider, tier, rendered, attempt)
+					if err != nil {
+						return providerInvocation{}, err
+					}
+					stdinContent := ""
+					if phaseStdin != nil {
+						stdinContent = rendered
+					}
+					return providerInvocation{
+						Provider:     provider,
+						Model:        model,
+						Env:          providerEnvForName(r.Config, provider),
+						Command:      cmd,
+						Args:         args,
+						StdinContent: stdinContent,
+					}, nil
+				})
 			}
 
 			if r.vesselCancelled(ctx, vessel.ID) {
@@ -887,7 +909,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(runErr)
 				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
+				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error(), provider, model))
 				vessel.FailedPhase = p.Name
 				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, runErr))
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -906,7 +928,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 					phaseSpanStatus = "failed"
 					finishCurrentPhaseSpan(err)
 					log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
+					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error(), provider, model))
 					vessel.FailedPhase = p.Name
 					r.failUpdatedVessel(&vessel, err.Error())
 					if err := src.OnFail(ctx, vessel); err != nil {
@@ -926,7 +948,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
 				errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
 					p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg))
+				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg, provider, model))
 				vessel.FailedPhase = p.Name
 				r.failUpdatedVessel(&vessel, errMsg)
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -946,7 +968,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(err)
 				log.Printf("%sphase %q failed while publishing output: %v", vesselLabel(vessel), p.Name, err)
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error()))
+				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error(), provider, model))
 				vessel.FailedPhase = p.Name
 				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, err))
 				if err := src.OnFail(ctx, vessel); err != nil {
@@ -1015,7 +1037,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			}
 
 			if phaseStatus == "no-op" {
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, ""))
+				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, "", provider, model))
 				log.Printf("%sphase %q triggered no-op; completing workflow early", vesselLabel(vessel), p.Name)
 				finishCurrentPhaseSpan(nil)
 				if r.vesselCancelled(ctx, vessel.ID) {
@@ -1026,7 +1048,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 			// Handle gate
 			if p.Gate == nil {
-				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, ""))
+				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, "", provider, model))
 				finishCurrentPhaseSpan(nil)
 				break // no gate, proceed to next phase
 			}
@@ -1045,7 +1067,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
 				if gateErr != nil {
 					phaseSpanStatus = "failed"
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()))
+					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error(), provider, model))
 					finishCurrentPhaseSpan(nil)
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
 					if err := src.OnFail(ctx, vessel); err != nil {
@@ -1056,7 +1078,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if passed {
 					log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
 					phaseSpanStatus = phaseStatus
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, gatePassedPointer(true), ""))
+					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, gatePassedPointer(true), "", provider, model))
 					if gateResultExec.evidenceClaim != nil {
 						claims = append(claims, *gateResultExec.evidenceClaim)
 					}
@@ -1075,7 +1097,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				if vessel.GateRetries <= 0 {
 					log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
 					phaseSpanStatus = "failed"
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted"))
+					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted", provider, model))
 					finishCurrentPhaseSpan(nil)
 					vessel.FailedPhase = p.Name
 					vessel.GateOutput = gateOut
@@ -1116,7 +1138,7 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 						finishCurrentPhaseSpan(context.DeadlineExceeded)
 						return "timed_out"
 					}
-					vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error()))
+					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error(), provider, model))
 					phaseSpanStatus = "failed"
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
@@ -1220,16 +1242,20 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 		return r.cancelVessel(vessel, worktreePath, vrs, nil)
 	}
 
-	cmd, args := buildPromptOnlyCmdArgs(r.Config, prompt)
-	provider := resolveProvider(r.Config, nil, nil, nil)
-	model := resolveModel(r.Config, nil, nil, nil, provider)
+	tier, providerChain := resolvePhaseProviderChain(r.Config, nil, vessel, nil, nil)
+	if len(providerChain) == 0 {
+		r.failVessel(vessel.ID, "no providers configured")
+		return "failed"
+	}
+	provider := providerChain[0]
+	model := resolvePhaseModel(r.Config, nil, nil, nil, provider, tier)
 	phaseDef := workflow.Phase{Name: "prompt"}
 	phaseStartedAt := r.runtimeNow()
 	beforeSnapshot, checkProtectedSurfaces, err := r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
 	if err != nil {
 		snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
 		if vrs != nil {
-			vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, r.runtimeSince(phaseStartedAt), "failed", nil, snapErr.Error()))
+			vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, r.runtimeSince(phaseStartedAt), "failed", nil, snapErr.Error(), provider, model))
 		}
 		r.failVessel(vessel.ID, snapErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
@@ -1247,7 +1273,17 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
 		log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
 	}
-	output, runErr := r.runPhaseWithRateLimitRetry(ctx, vessel.ID, "prompt", worktreePath, prompt, cmd, args)
+	output, provider, model, runErr := r.runPhaseWithProviderFallback(ctx, vessel.ID, "prompt", worktreePath, providerChain, func(provider string) (providerInvocation, error) {
+		cmd, args := buildPromptOnlyCmdArgs(r.Config, provider, tier, prompt)
+		return providerInvocation{
+			Provider:     provider,
+			Model:        modelForProvider(r.Config, provider, tier),
+			Env:          providerEnvForName(r.Config, provider),
+			Command:      cmd,
+			Args:         args,
+			StdinContent: prompt,
+		}, nil
+	})
 	phaseDuration := r.runtimeSince(phaseStartedAt)
 	if r.vesselCancelled(ctx, vessel.ID) {
 		return r.cancelVessel(vessel, worktreePath, vrs, nil)
@@ -1257,7 +1293,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	}
 	if runErr != nil {
 		if vrs != nil {
-			vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()))
+			vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error(), provider, model))
 		}
 		r.failVessel(vessel.ID, runErr.Error())
 		if err := src.OnFail(ctx, vessel); err != nil {
@@ -1273,7 +1309,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	if checkProtectedSurfaces {
 		if err := r.verifyProtectedSurfaces(vessel, workflow.Phase{Name: "prompt-only"}, worktreePath, beforeSnapshot); err != nil {
 			if vrs != nil {
-				vrs.addPhase(vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()))
+				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, nil, nil, phaseDef, "", 0, 0, 0.0, phaseDuration, "failed", nil, err.Error(), provider, model))
 			}
 			r.failVessel(vessel.ID, err.Error())
 			if err := src.OnFail(ctx, vessel); err != nil {
@@ -1291,7 +1327,7 @@ func (r *Runner) runPromptOnly(ctx context.Context, vessel queue.Vessel, worktre
 	var phaseResults []reporter.PhaseResult
 	if vrs != nil {
 		inputTokensEst, outputTokensEst, costUSDEst := vrs.recordLLMUsage(model, prompt, string(output), recordedAt)
-		phaseSummary := vrs.phaseSummary(r.Config, nil, nil, phaseDef, "", inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "")
+		phaseSummary := vrs.phaseSummaryWithLLM(r.Config, nil, nil, phaseDef, "", inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "", provider, model)
 		phaseReport := reporter.PhaseResult{
 			Name:                   phaseDef.Name,
 			Duration:               phaseDuration,
@@ -1461,18 +1497,24 @@ func (r *Runner) resolveSourceForVessel(vessel queue.Vessel) source.Source {
 // buildCommand constructs the LLM command and args from config and vessel.
 func buildCommand(cfg *config.Config, vessel *queue.Vessel) (string, []string, error) {
 	// Direct prompt mode
+	tier := resolveTier(cfg, *vessel, nil, nil)
+	_, providerChain := resolvePhaseProviderChain(cfg, nil, *vessel, nil, nil)
+	if len(providerChain) == 0 {
+		return "", nil, fmt.Errorf("no providers configured")
+	}
+	provider := providerChain[0]
 	if vessel.Prompt != "" {
 		prompt := vessel.Prompt
 		if vessel.Ref != "" {
 			prompt = fmt.Sprintf("Ref: %s\n\n%s", vessel.Ref, vessel.Prompt)
 		}
-		cmd, args := buildPromptOnlyCmdArgs(cfg, prompt)
+		cmd, args := buildPromptOnlyCmdArgs(cfg, provider, tier, prompt)
 		return cmd, args, nil
 	}
 
 	// Workflow-based mode: build command from flags (v2 phase-based execution will replace this)
 	wfPrompt := fmt.Sprintf("/%s %s", vessel.Workflow, vessel.Ref)
-	cmd, args := buildPromptOnlyCmdArgs(cfg, wfPrompt)
+	cmd, args := buildPromptOnlyCmdArgs(cfg, provider, tier, wfPrompt)
 	return cmd, args, nil
 }
 
@@ -2221,13 +2263,18 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		var beforeSnapshot surface.Snapshot
 		var checkProtectedSurfaces bool
 		var promptForCost string
-		provider := resolveProvider(r.Config, srcCfg, wf, &p)
-		model := resolveModel(r.Config, srcCfg, wf, &p, provider)
+		tier, providerChain := resolvePhaseProviderChain(r.Config, srcCfg, vessel, wf, &p)
+		provider := ""
+		model := ""
+		if len(providerChain) > 0 {
+			provider = providerChain[0]
+			model = resolvePhaseModel(r.Config, srcCfg, wf, &p, provider, tier)
+		}
 		retryAttempt := 0
 		if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
 			retryAttempt = providerAttempt(&p, gateRetries)
 		}
-		phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, srcCfg, wf, p, phaseIdx, retryAttempt)
+		phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, wf, p, phaseIdx, retryAttempt, "", "", tier)
 		phaseSpanEnded := false
 		var phaseDuration time.Duration
 		phaseSpanStatus := "running"
@@ -2242,7 +2289,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if phaseDuration == 0 {
 				phaseDuration = r.runtimeSince(phaseStart)
 			}
-			finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, srcCfg, wf, p, promptForCost, string(output), phaseDuration, phaseSpanStatus, phaseOutputArtifactPath), err)
+			finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, p, promptForCost, string(output), phaseDuration, phaseSpanStatus, phaseOutputArtifactPath, provider, model, tier), err)
 			phaseSpanEnded = true
 		}
 
@@ -2365,16 +2412,28 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
 			attempt := providerAttempt(&p, gateRetries)
-			cmd, args, phaseStdin := buildProviderPhaseArgs(r.Config, srcCfg, wf, &p, harnessContent, provider, rendered, attempt)
-			var stdinContent string
-			if phaseStdin != nil {
-				stdinContent = rendered
-			}
 			outputPath := filepath.Join(phasesDir, p.Name+".output")
 			if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
 				log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
 			}
-			output, runErr = r.runPhaseWithRateLimitRetry(ctx, vessel.ID, p.Name, worktreePath, stdinContent, cmd, args)
+			output, provider, model, runErr = r.runPhaseWithProviderFallback(ctx, vessel.ID, p.Name, worktreePath, providerChain, func(provider string) (providerInvocation, error) {
+				cmd, args, phaseStdin, model, err := buildProviderPhaseArgs(r.Config, srcCfg, wf, &p, harnessContent, provider, tier, rendered, attempt)
+				if err != nil {
+					return providerInvocation{}, err
+				}
+				stdinContent := ""
+				if phaseStdin != nil {
+					stdinContent = rendered
+				}
+				return providerInvocation{
+					Provider:     provider,
+					Model:        model,
+					Env:          providerEnvForName(r.Config, provider),
+					Command:      cmd,
+					Args:         args,
+					StdinContent: stdinContent,
+				}, nil
+			})
 		}
 
 		if r.vesselCancelled(ctx, vessel.ID) {
@@ -2412,7 +2471,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			return singlePhaseResult{
 				status:       "failed",
 				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error()),
+				phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error(), provider, model),
 			}
 		}
 
@@ -2434,7 +2493,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				return singlePhaseResult{
 					status:       "failed",
 					duration:     phaseDuration,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error()),
+					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error(), provider, model),
 				}
 			}
 		}
@@ -2459,7 +2518,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			return singlePhaseResult{
 				status:       "failed",
 				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg),
+				phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg, provider, model),
 			}
 		}
 
@@ -2480,7 +2539,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			return singlePhaseResult{
 				status:       "failed",
 				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error()),
+				phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error(), provider, model),
 			}
 		}
 
@@ -2513,7 +2572,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				output:        string(output),
 				status:        "no-op",
 				duration:      phaseDuration,
-				phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "no-op", nil, ""),
+				phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "no-op", nil, "", provider, model),
 				evidenceClaim: nil,
 			}
 		}
@@ -2532,7 +2591,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				output:        string(output),
 				status:        "completed",
 				duration:      phaseDuration,
-				phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, ""),
+				phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "", provider, model),
 				evidenceClaim: nil,
 			}
 		}
@@ -2560,7 +2619,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					status:       "failed",
 					duration:     phaseDuration,
 					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error()),
+					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error(), provider, model),
 				}
 			}
 			if passed {
@@ -2571,7 +2630,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					output:        string(output),
 					status:        "completed",
 					duration:      phaseDuration,
-					phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", gatePassedPointer(true), ""),
+					phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", gatePassedPointer(true), "", provider, model),
 					evidenceClaim: gateResultExec.evidenceClaim,
 				}
 			}
@@ -2601,7 +2660,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					status:       "failed",
 					duration:     phaseDuration,
 					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted"),
+					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted", provider, model),
 				}
 			}
 			gateRetries--
@@ -2626,7 +2685,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					status:       "failed",
 					duration:     phaseDuration,
 					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error()),
+					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error(), provider, model),
 				}
 			}
 			phaseSpanStatus = "retrying"
@@ -2677,19 +2736,16 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			output:        string(output),
 			status:        "completed",
 			duration:      phaseDuration,
-			phaseSummary:  vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, ""),
+			phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "", provider, model),
 			evidenceClaim: nil,
 		}
 	}
 }
 
-func startPhaseSpan(tracer *observability.Tracer, ctx context.Context, cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, phaseIdx int, retryAttempt int) observability.SpanContext {
+func startPhaseSpan(tracer *observability.Tracer, ctx context.Context, cfg *config.Config, wf *workflow.Workflow, p workflow.Phase, phaseIdx int, retryAttempt int, provider, model, tier string) observability.SpanContext {
 	if tracer == nil {
 		return observability.SpanContext{}
 	}
-
-	provider := resolveProvider(cfg, srcCfg, wf, &p)
-	model := resolveModel(cfg, srcCfg, wf, &p, provider)
 
 	return tracer.StartSpan(ctx, "phase:"+p.Name, observability.PhaseSpanAttributes(observability.PhaseSpanData{
 		Name:         p.Name,
@@ -2698,6 +2754,7 @@ func startPhaseSpan(tracer *observability.Tracer, ctx context.Context, cfg *conf
 		Workflow:     workflowName(wf),
 		Provider:     provider,
 		Model:        model,
+		Tier:         tier,
 		RetryAttempt: retryAttempt,
 		SandboxMode:  sandboxModeFromFlags(cfg),
 	}))
@@ -2845,11 +2902,14 @@ func (r *Runner) executeVerificationGate(ctx context.Context, phaseSpan observab
 	}
 }
 
-func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p workflow.Phase, renderedPrompt, output string, duration time.Duration, status string, outputArtifactPath string) observability.PhaseResultData {
+func buildPhaseResultData(cfg *config.Config, p workflow.Phase, renderedPrompt, output string, duration time.Duration, status string, outputArtifactPath, provider, model, tier string) observability.PhaseResultData {
 	data := observability.PhaseResultData{
 		DurationMS:         duration.Milliseconds(),
 		Status:             status,
 		OutputArtifactPath: outputArtifactPath,
+		LLMProvider:        provider,
+		LLMModel:           model,
+		LLMTier:            tier,
 	}
 	if phaseTypeLabel(p) != "prompt" {
 		data.UsageSource = string(cost.UsageSourceNotApplicable)
@@ -2857,8 +2917,6 @@ func buildPhaseResultData(cfg *config.Config, srcCfg *config.SourceConfig, wf *w
 		return data
 	}
 
-	provider := resolveProvider(cfg, srcCfg, wf, &p)
-	model := resolveModel(cfg, srcCfg, wf, &p, provider)
 	data.InputTokensEst = cost.EstimateTokens(renderedPrompt)
 	data.OutputTokensEst = cost.EstimateTokens(output)
 	data.CostUSDEst = cost.EstimateCost(data.InputTokensEst, data.OutputTokensEst, cost.LookupPricing(model))
@@ -4472,6 +4530,15 @@ const (
 	rateLimitBaseBackoff = 30 * time.Second
 )
 
+type providerInvocation struct {
+	Provider     string
+	Model        string
+	Env          []string
+	Command      string
+	Args         []string
+	StdinContent string
+}
+
 // isRateLimitError reports whether the error indicates a transient LLM
 // provider error that should be retried with backoff. This includes HTTP 429
 // rate limits (rate_limit_error), insufficient credit balance, and generic
@@ -4516,7 +4583,7 @@ func isRateLimitError(err error) bool {
 // stdinContent is re-wrapped in a fresh strings.Reader for each attempt;
 // pass "" for nil stdin.
 func (r *Runner) runPhaseWithRateLimitRetry(
-	ctx context.Context, vesselID, phaseName, dir, stdinContent, cmd string, args []string,
+	ctx context.Context, vesselID, phaseName, dir, stdinContent string, extraEnv []string, cmd string, args []string,
 ) ([]byte, error) {
 	for attempt := 0; attempt <= rateLimitMaxRetries; attempt++ {
 		var stdin io.Reader
@@ -4527,14 +4594,14 @@ func (r *Runner) runPhaseWithRateLimitRetry(
 			output []byte
 			err    error
 		)
-		if observedRunner, ok := r.Runner.(PhaseProcessRunner); ok {
-			output, err = observedRunner.RunPhaseObserved(ctx, dir, stdin, vesselProcessObserver{
+		if observedRunner, ok := r.Runner.(PhaseProcessEnvRunner); ok {
+			output, err = observedRunner.RunPhaseObservedWithEnv(ctx, dir, extraEnv, stdin, vesselProcessObserver{
 				r:         r,
 				vesselID:  vesselID,
 				phaseName: phaseName,
 			}, cmd, args...)
 		} else {
-			output, err = r.Runner.RunPhase(ctx, dir, stdin, cmd, args...)
+			output, err = r.Runner.RunPhaseWithEnv(ctx, dir, extraEnv, stdin, cmd, args...)
 		}
 		if err == nil || !isRateLimitError(err) {
 			return output, err
@@ -4553,18 +4620,116 @@ func (r *Runner) runPhaseWithRateLimitRetry(
 	return nil, nil
 }
 
-// buildPhaseArgs constructs the claude CLI arguments for a phase invocation.
-// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > ClaudeConfig.DefaultModel.
-// When a model is resolved from the hierarchy, any --model flag in Claude.Flags is stripped to avoid duplication.
-func buildPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent string) []string {
+func (r *Runner) runPhaseWithProviderFallback(
+	ctx context.Context, vesselID, phaseName, dir string, providers []string, build func(provider string) (providerInvocation, error),
+) ([]byte, string, string, error) {
+	if len(providers) == 0 {
+		return nil, "", "", fmt.Errorf("no providers configured for phase %s", phaseName)
+	}
+	for idx, provider := range providers {
+		invocation, err := build(provider)
+		if err != nil {
+			return nil, "", "", err
+		}
+		output, err := r.runPhaseWithRateLimitRetry(
+			ctx,
+			vesselID,
+			phaseName,
+			dir,
+			invocation.StdinContent,
+			invocation.Env,
+			invocation.Command,
+			invocation.Args,
+		)
+		if err == nil {
+			return output, invocation.Provider, invocation.Model, nil
+		}
+		if !isRateLimitError(err) || idx == len(providers)-1 {
+			return output, invocation.Provider, invocation.Model, err
+		}
+		log.Printf("provider %s rate-limited, falling back to %s", invocation.Provider, providers[idx+1])
+	}
+	return nil, "", "", nil
+}
+
+func defaultRoutingTier(cfg *config.Config) string {
+	if cfg != nil && strings.TrimSpace(cfg.LLMRouting.DefaultTier) != "" {
+		return strings.TrimSpace(cfg.LLMRouting.DefaultTier)
+	}
+	return config.DefaultLLMRoutingTier
+}
+
+func providerConfigForName(cfg *config.Config, providerName string) (config.ProviderConfig, bool) {
+	if cfg == nil {
+		return config.ProviderConfig{}, false
+	}
+	if cfg.Providers != nil {
+		if provider, ok := cfg.Providers[providerName]; ok {
+			return provider, true
+		}
+	}
+	defaultTier := defaultRoutingTier(cfg)
+	switch providerName {
+	case "claude":
+		return config.ProviderConfig{
+			Kind:         "claude",
+			Command:      cfg.Claude.Command,
+			Flags:        cfg.Claude.Flags,
+			Tiers:        map[string]string{defaultTier: cfg.Claude.DefaultModel},
+			Env:          maps.Clone(cfg.Claude.Env),
+			AllowedTools: append([]string(nil), cfg.Claude.AllowedTools...),
+		}, cfg.Claude.Command != "" || cfg.Claude.DefaultModel != "" || len(cfg.Claude.Env) > 0 || len(cfg.Claude.AllowedTools) > 0
+	case "copilot":
+		return config.ProviderConfig{
+			Kind:    "copilot",
+			Command: cfg.Copilot.Command,
+			Flags:   cfg.Copilot.Flags,
+			Tiers:   map[string]string{defaultTier: cfg.Copilot.DefaultModel},
+			Env:     maps.Clone(cfg.Copilot.Env),
+		}, cfg.Copilot.Command != "" || cfg.Copilot.DefaultModel != "" || len(cfg.Copilot.Env) > 0
+	default:
+		return config.ProviderConfig{}, false
+	}
+}
+
+func expandedProviderEnv(env map[string]string) []string {
+	if len(env) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(env))
+	for key := range env {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := os.ExpandEnv(env[key])
+		if value == "" {
+			continue
+		}
+		out = append(out, key+"="+value)
+	}
+	return out
+}
+
+func providerEnvForName(cfg *config.Config, providerName string) []string {
+	provider, ok := providerConfigForName(cfg, providerName)
+	if !ok {
+		return nil
+	}
+	return expandedProviderEnv(provider.Env)
+}
+
+// buildPhaseArgs constructs the claude-style CLI arguments for a phase invocation.
+func buildPhaseArgs(cfg *config.Config, providerName string, provider config.ProviderConfig, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, tier, harnessContent string) []string {
 	args := []string{"-p"}
 	args = append(args, "--max-turns", fmt.Sprintf("%d", p.MaxTurns))
 
-	model := resolveModel(cfg, srcCfg, wf, p, "claude")
+	model := resolvePhaseModel(cfg, srcCfg, wf, p, providerName, tier)
 
 	// Add flags, stripping --model if we resolved one from the hierarchy
-	if cfg.Claude.Flags != "" {
-		fields := strings.Fields(cfg.Claude.Flags)
+	if provider.Flags != "" {
+		fields := strings.Fields(provider.Flags)
 		if model != "" {
 			fields = stripModelFlag(fields)
 		}
@@ -4580,7 +4745,7 @@ func buildPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflo
 		args = append(args, "--allowedTools", *p.AllowedTools)
 	}
 
-	for _, tool := range cfg.Claude.AllowedTools {
+	for _, tool := range provider.AllowedTools {
 		args = append(args, "--allowedTools", tool)
 	}
 
@@ -4593,10 +4758,7 @@ func buildPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflo
 }
 
 // buildCopilotPhaseArgs constructs the GitHub Copilot CLI arguments for a phase invocation.
-// Model resolution follows the hierarchy: Phase.Model > Workflow.Model > Source.Model > CopilotConfig.DefaultModel.
-// The rendered prompt and harness content are combined into the -p flag value because
-// copilot has no --system-prompt equivalent.
-func buildCopilotPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, renderedPrompt string) []string {
+func buildCopilotPhaseArgs(cfg *config.Config, providerName string, provider config.ProviderConfig, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, tier, harnessContent, renderedPrompt string) []string {
 	// Combine harness + prompt into a single prompt text for -p.
 	// Copilot has no --system-prompt or --append-system-prompt flag.
 	promptText := renderedPrompt
@@ -4606,12 +4768,12 @@ func buildCopilotPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *
 
 	args := []string{"-p", promptText, "-s"}
 
-	model := resolveModel(cfg, srcCfg, wf, p, "copilot")
+	model := resolvePhaseModel(cfg, srcCfg, wf, p, providerName, tier)
 
 	// Add user flags, stripping flags we always prepend to avoid duplication.
 	// -p/--prompt is value-aware (strips flag + its value); -s/--headless are boolean.
-	if cfg.Copilot.Flags != "" {
-		fields := strings.Fields(cfg.Copilot.Flags)
+	if provider.Flags != "" {
+		fields := strings.Fields(provider.Flags)
 		fields = stripPromptFlag(fields)
 		fields = stripBoolFlag(fields, "-s")
 		fields = stripBoolFlag(fields, "--silent")
@@ -4639,16 +4801,21 @@ func buildCopilotPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *
 // and returns the command binary, argument slice, and stdin reader for the phase invocation.
 // For providers that embed the prompt in CLI args (copilot -p <text>), stdin is nil.
 // For providers that read the prompt from stdin (claude -p), stdin carries the prompt.
-func buildProviderPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, renderedPrompt string, attempt int) (string, []string, io.Reader) {
-	switch provider {
+func buildProviderPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, tier, renderedPrompt string, attempt int) (string, []string, io.Reader, string, error) {
+	providerCfg, ok := providerConfigForName(cfg, provider)
+	if !ok {
+		return "", nil, nil, "", fmt.Errorf("provider %q is not configured", provider)
+	}
+	model := resolvePhaseModel(cfg, srcCfg, wf, p, provider, tier)
+	switch providerCfg.Kind {
 	case "copilot":
-		return cfg.Copilot.Command, appendDTUProviderArgs(buildCopilotPhaseArgs(cfg, srcCfg, wf, p, harnessContent, renderedPrompt), p, attempt), nil
-	default: // "claude"
+		return providerCfg.Command, appendDTUProviderArgs(buildCopilotPhaseArgs(cfg, provider, providerCfg, srcCfg, wf, p, tier, harnessContent, renderedPrompt), p, attempt), nil, model, nil
+	default:
 		var stdin io.Reader
 		if renderedPrompt != "" {
 			stdin = strings.NewReader(renderedPrompt)
 		}
-		return cfg.Claude.Command, appendDTUProviderArgs(buildPhaseArgs(cfg, srcCfg, wf, p, harnessContent), p, attempt), stdin
+		return providerCfg.Command, appendDTUProviderArgs(buildPhaseArgs(cfg, provider, providerCfg, srcCfg, wf, p, tier, harnessContent), p, attempt), stdin, model, nil
 	}
 }
 
@@ -4702,9 +4869,7 @@ func resolveTimeout(cfg *config.Config, srcCfg *config.SourceConfig) (time.Durat
 	return time.ParseDuration(raw)
 }
 
-// resolveProvider determines which LLM provider to use for a phase invocation.
-// Resolution order: Phase.LLM > Workflow.LLM > Source.LLM > Config.LLM, defaulting to "claude".
-func resolveProvider(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase) string {
+func resolveLegacyProvider(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase) string {
 	if p != nil && p.LLM != nil && *p.LLM != "" {
 		return *p.LLM
 	}
@@ -4720,11 +4885,7 @@ func resolveProvider(cfg *config.Config, srcCfg *config.SourceConfig, wf *workfl
 	return "claude"
 }
 
-// resolveModel determines the model string for a phase invocation.
-// Resolution order: Phase.Model > Workflow.Model > Source.Model > provider's DefaultModel.
-// The provider's DefaultModel ensures the fallback is always compatible with the
-// resolved provider, avoiding cross-provider model leaks (e.g. gpt-* sent to claude).
-func resolveModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, provider string) string {
+func resolveLegacyModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, provider string) string {
 	if p != nil && p.Model != nil && *p.Model != "" {
 		return *p.Model
 	}
@@ -4745,6 +4906,93 @@ func resolveModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.
 	}
 }
 
+func resolveTier(cfg *config.Config, vessel queue.Vessel, wf *workflow.Workflow, p *workflow.Phase) string {
+	if p != nil && p.Tier != nil && strings.TrimSpace(*p.Tier) != "" {
+		return strings.TrimSpace(*p.Tier)
+	}
+	if wf != nil && wf.Tier != nil && strings.TrimSpace(*wf.Tier) != "" {
+		return strings.TrimSpace(*wf.Tier)
+	}
+	if strings.TrimSpace(vessel.Tier) != "" {
+		return strings.TrimSpace(vessel.Tier)
+	}
+	return defaultRoutingTier(cfg)
+}
+
+func resolveProviderChain(cfg *config.Config, tier string) []string {
+	if cfg == nil {
+		return []string{"claude"}
+	}
+	if len(cfg.LLMRouting.Tiers) == 0 {
+		return []string{resolveLegacyProvider(cfg, nil, nil, nil)}
+	}
+	if routing, ok := cfg.LLMRouting.Tiers[tier]; ok && len(routing.Providers) > 0 {
+		return append([]string(nil), routing.Providers...)
+	}
+	defaultTier := defaultRoutingTier(cfg)
+	if tier != defaultTier {
+		log.Printf("warn: llm routing tier %q missing, falling back to default tier %q", tier, defaultTier)
+	}
+	if routing, ok := cfg.LLMRouting.Tiers[defaultTier]; ok && len(routing.Providers) > 0 {
+		return append([]string(nil), routing.Providers...)
+	}
+	return []string{resolveLegacyProvider(cfg, nil, nil, nil)}
+}
+
+func modelForProvider(cfg *config.Config, providerName, tier string) string {
+	provider, ok := providerConfigForName(cfg, providerName)
+	if !ok {
+		return ""
+	}
+	return provider.Tiers[tier]
+}
+
+func usesLegacyProviderOverride(srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase) bool {
+	if p != nil && p.Tier != nil {
+		return false
+	}
+	if wf != nil && wf.Tier != nil {
+		return false
+	}
+	if srcCfg != nil {
+		if strings.TrimSpace(srcCfg.LLM) != "" || strings.TrimSpace(srcCfg.Model) != "" {
+			return true
+		}
+	}
+	if p != nil {
+		if p.LLM != nil && strings.TrimSpace(*p.LLM) != "" {
+			return true
+		}
+		if p.Model != nil && strings.TrimSpace(*p.Model) != "" {
+			return true
+		}
+	}
+	if wf != nil {
+		if wf.LLM != nil && strings.TrimSpace(*wf.LLM) != "" {
+			return true
+		}
+		if wf.Model != nil && strings.TrimSpace(*wf.Model) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func resolvePhaseProviderChain(cfg *config.Config, srcCfg *config.SourceConfig, vessel queue.Vessel, wf *workflow.Workflow, p *workflow.Phase) (string, []string) {
+	tier := resolveTier(cfg, vessel, wf, p)
+	if usesLegacyProviderOverride(srcCfg, wf, p) {
+		return tier, []string{resolveLegacyProvider(cfg, srcCfg, wf, p)}
+	}
+	return tier, resolveProviderChain(cfg, tier)
+}
+
+func resolvePhaseModel(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, provider, tier string) string {
+	if usesLegacyProviderOverride(srcCfg, wf, p) && provider == resolveLegacyProvider(cfg, srcCfg, wf, p) {
+		return resolveLegacyModel(cfg, srcCfg, wf, p, provider)
+	}
+	return modelForProvider(cfg, provider, tier)
+}
+
 // stripBoolFlag removes all occurrences of a boolean flag (no value) from a slice of CLI tokens.
 func stripBoolFlag(fields []string, flag string) []string {
 	var out []string
@@ -4759,35 +5007,52 @@ func stripBoolFlag(fields []string, flag string) []string {
 // buildPromptOnlyCmdArgs returns the command and args for a prompt-only invocation.
 // For claude, the prompt is a positional argument after the -p boolean flag.
 // For copilot, the prompt is the value of the -p flag (-p <text>).
-func buildPromptOnlyCmdArgs(cfg *config.Config, prompt string) (string, []string) {
-	provider := resolveProvider(cfg, nil, nil, nil)
-	switch provider {
+func buildPromptOnlyCmdArgs(cfg *config.Config, provider, tier, prompt string) (string, []string) {
+	providerCfg, ok := providerConfigForName(cfg, provider)
+	if !ok {
+		return "", nil
+	}
+	model := modelForProvider(cfg, provider, tier)
+	switch providerCfg.Kind {
 	case "copilot":
-		cmd := cfg.Copilot.Command
+		cmd := providerCfg.Command
 		var args []string
 		if prompt != "" {
 			args = append(args, "-p", prompt, "-s")
 		}
-		if cfg.Copilot.Flags != "" {
-			fields := strings.Fields(cfg.Copilot.Flags)
+		if providerCfg.Flags != "" {
+			fields := strings.Fields(providerCfg.Flags)
 			fields = stripPromptFlag(fields)
 			fields = stripBoolFlag(fields, "-s")
 			fields = stripBoolFlag(fields, "--silent")
 			fields = stripBoolFlag(fields, "--headless") // legacy: strip if present
+			if model != "" {
+				fields = stripModelFlag(fields)
+			}
 			args = append(args, fields...)
 		}
+		if model != "" {
+			args = append(args, "--model", model)
+		}
 		return cmd, args
-	default: // "claude"
-		cmd := cfg.Claude.Command
+	default:
+		cmd := providerCfg.Command
 		args := []string{"-p"}
 		if prompt != "" {
 			args = append(args, prompt)
 		}
 		args = append(args, "--max-turns", fmt.Sprintf("%d", cfg.MaxTurns))
-		if cfg.Claude.Flags != "" {
-			args = append(args, strings.Fields(cfg.Claude.Flags)...)
+		if providerCfg.Flags != "" {
+			fields := strings.Fields(providerCfg.Flags)
+			if model != "" {
+				fields = stripModelFlag(fields)
+			}
+			args = append(args, fields...)
 		}
-		for _, tool := range cfg.Claude.AllowedTools {
+		if model != "" {
+			args = append(args, "--model", model)
+		}
+		for _, tool := range providerCfg.AllowedTools {
 			args = append(args, "--allowedTools", tool)
 		}
 		return cmd, args

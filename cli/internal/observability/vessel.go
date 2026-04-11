@@ -85,6 +85,7 @@ type PhaseSpanData struct {
 	Workflow     string `json:"workflow"`
 	Provider     string `json:"provider"`
 	Model        string `json:"model"`
+	Tier         string `json:"tier,omitempty"`
 	RetryAttempt int    `json:"retry_attempt"`
 	SandboxMode  string `json:"sandbox_mode"`
 }
@@ -92,7 +93,7 @@ type PhaseSpanData struct {
 // PhaseSpanAttributes returns span attributes for a phase span.
 // The index is stringified, not stored as a numeric attribute.
 func PhaseSpanAttributes(data PhaseSpanData) []SpanAttribute {
-	return []SpanAttribute{
+	attrs := []SpanAttribute{
 		{Key: "xylem.phase.name", Value: data.Name},
 		{Key: "xylem.phase.index", Value: fmt.Sprintf("%d", data.Index)},
 		{Key: "xylem.phase.type", Value: data.Type},
@@ -102,6 +103,13 @@ func PhaseSpanAttributes(data PhaseSpanData) []SpanAttribute {
 		{Key: "xylem.phase.retry_attempt", Value: fmt.Sprintf("%d", data.RetryAttempt)},
 		{Key: "xylem.phase.sandbox_mode", Value: data.SandboxMode},
 	}
+	if data.Provider != "" {
+		attrs = append(attrs, SpanAttribute{Key: "llm.provider", Value: data.Provider})
+	}
+	if data.Tier != "" {
+		attrs = append(attrs, SpanAttribute{Key: "llm.tier", Value: data.Tier})
+	}
+	return attrs
 }
 
 // PhaseResultData holds phase result information for attribute extraction.
@@ -111,6 +119,9 @@ type PhaseResultData struct {
 	CostUSDEst             float64 `json:"cost_usd_est"`
 	DurationMS             int64   `json:"duration_ms"`
 	Status                 string  `json:"status"`
+	LLMProvider            string  `json:"llm_provider,omitempty"`
+	LLMModel               string  `json:"llm_model,omitempty"`
+	LLMTier                string  `json:"llm_tier,omitempty"`
 	UsageSource            string  `json:"usage_source,omitempty"`
 	UsageUnavailableReason string  `json:"usage_unavailable_reason,omitempty"`
 	OutputArtifactPath     string  `json:"output_artifact_path,omitempty"`
@@ -119,7 +130,7 @@ type PhaseResultData struct {
 // PhaseResultAttributes returns span attributes added to a phase span
 // after execution completes. Cost is formatted to six decimal places.
 func PhaseResultAttributes(data PhaseResultData) []SpanAttribute {
-	return []SpanAttribute{
+	attrs := []SpanAttribute{
 		{Key: "xylem.phase.input_tokens_est", Value: fmt.Sprintf("%d", data.InputTokensEst)},
 		{Key: "xylem.phase.output_tokens_est", Value: fmt.Sprintf("%d", data.OutputTokensEst)},
 		{Key: "xylem.phase.cost_usd_est", Value: fmt.Sprintf("%.6f", data.CostUSDEst)},
@@ -129,6 +140,17 @@ func PhaseResultAttributes(data PhaseResultData) []SpanAttribute {
 		{Key: "xylem.phase.usage_unavailable_reason", Value: data.UsageUnavailableReason},
 		{Key: "xylem.phase.output_artifact_path", Value: data.OutputArtifactPath},
 	}
+	if data.LLMProvider != "" {
+		attrs = append(attrs, SpanAttribute{Key: "xylem.phase.provider", Value: data.LLMProvider})
+		attrs = append(attrs, SpanAttribute{Key: "llm.provider", Value: data.LLMProvider})
+	}
+	if data.LLMModel != "" {
+		attrs = append(attrs, SpanAttribute{Key: "xylem.phase.model", Value: data.LLMModel})
+	}
+	if data.LLMTier != "" {
+		attrs = append(attrs, SpanAttribute{Key: "llm.tier", Value: data.LLMTier})
+	}
+	return attrs
 }
 
 // VesselCostData holds vessel-level cost telemetry attributes.

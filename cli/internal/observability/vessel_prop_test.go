@@ -25,7 +25,7 @@ func genGateType() *rapid.Generator[string] {
 }
 
 func combinedAttrs() []SpanAttribute {
-	attrs := make([]SpanAttribute, 0, 16)
+	attrs := make([]SpanAttribute, 0, 18)
 	attrs = append(attrs, VesselSpanAttributes(VesselSpanData{
 		ID:       "vessel-1",
 		Source:   "github",
@@ -39,6 +39,7 @@ func combinedAttrs() []SpanAttribute {
 		Workflow:     "fix-bug",
 		Provider:     "anthropic",
 		Model:        "claude-sonnet",
+		Tier:         "med",
 		RetryAttempt: 1,
 		SandboxMode:  "default",
 	})...)
@@ -131,20 +132,79 @@ func TestPropVesselAttrsKeysNamespaced(t *testing.T) {
 	})
 }
 
-func TestPropPhaseAttrsAlwaysEight(t *testing.T) {
+func TestPropPhaseAttrsCarryResolvedLLMFieldsWhenProviderAndTierSet(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		name := genVesselString().Draw(t, "name")
+		index := rapid.IntRange(0, 100).Draw(t, "index")
+		phaseType := genPhaseType().Draw(t, "phase_type")
+		workflow := genVesselString().Draw(t, "workflow")
+		provider := genNonEmptyVesselString().Draw(t, "provider")
+		model := genVesselString().Draw(t, "model")
+		tier := genNonEmptyVesselString().Draw(t, "tier")
+		retryAttempt := rapid.IntRange(0, 10).Draw(t, "retry_attempt")
+		sandboxMode := genVesselString().Draw(t, "sandbox_mode")
+		attrs := PhaseSpanAttributes(PhaseSpanData{
+			Name:         name,
+			Index:        index,
+			Type:         phaseType,
+			Workflow:     workflow,
+			Provider:     provider,
+			Model:        model,
+			Tier:         tier,
+			RetryAttempt: retryAttempt,
+			SandboxMode:  sandboxMode,
+		})
+		got := attrMap(attrs)
+		if got["xylem.phase.name"] != name {
+			t.Fatalf("xylem.phase.name = %q, want %q", got["xylem.phase.name"], name)
+		}
+		if got["xylem.phase.index"] != strconv.Itoa(index) {
+			t.Fatalf("xylem.phase.index = %q, want %q", got["xylem.phase.index"], strconv.Itoa(index))
+		}
+		if got["xylem.phase.type"] != phaseType {
+			t.Fatalf("xylem.phase.type = %q, want %q", got["xylem.phase.type"], phaseType)
+		}
+		if got["xylem.phase.workflow"] != workflow {
+			t.Fatalf("xylem.phase.workflow = %q, want %q", got["xylem.phase.workflow"], workflow)
+		}
+		if got["xylem.phase.provider"] != provider {
+			t.Fatalf("xylem.phase.provider = %q, want %q", got["xylem.phase.provider"], provider)
+		}
+		if got["xylem.phase.model"] != model {
+			t.Fatalf("xylem.phase.model = %q, want %q", got["xylem.phase.model"], model)
+		}
+		if got["xylem.phase.retry_attempt"] != strconv.Itoa(retryAttempt) {
+			t.Fatalf("xylem.phase.retry_attempt = %q, want %q", got["xylem.phase.retry_attempt"], strconv.Itoa(retryAttempt))
+		}
+		if got["xylem.phase.sandbox_mode"] != sandboxMode {
+			t.Fatalf("xylem.phase.sandbox_mode = %q, want %q", got["xylem.phase.sandbox_mode"], sandboxMode)
+		}
+		if got["llm.provider"] != provider {
+			t.Fatalf("llm.provider = %q, want %q", got["llm.provider"], provider)
+		}
+		if got["llm.tier"] != tier {
+			t.Fatalf("llm.tier = %q, want %q", got["llm.tier"], tier)
+		}
+	})
+}
+
+func TestPropPhaseAttrsOmitLLMKeysWhenProviderAndTierEmpty(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		attrs := PhaseSpanAttributes(PhaseSpanData{
 			Name:         genVesselString().Draw(t, "name"),
 			Index:        rapid.IntRange(0, 100).Draw(t, "index"),
 			Type:         genPhaseType().Draw(t, "phase_type"),
 			Workflow:     genVesselString().Draw(t, "workflow"),
-			Provider:     genVesselString().Draw(t, "provider"),
 			Model:        genVesselString().Draw(t, "model"),
 			RetryAttempt: rapid.IntRange(0, 10).Draw(t, "retry_attempt"),
 			SandboxMode:  genVesselString().Draw(t, "sandbox_mode"),
 		})
-		if len(attrs) != 8 {
-			t.Fatalf("expected 8 attributes, got %d", len(attrs))
+		got := attrMap(attrs)
+		if _, ok := got["llm.provider"]; ok {
+			t.Fatalf("llm.provider should be omitted, got %#v", got)
+		}
+		if _, ok := got["llm.tier"]; ok {
+			t.Fatalf("llm.tier should be omitted, got %#v", got)
 		}
 	})
 }
