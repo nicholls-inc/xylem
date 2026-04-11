@@ -2173,6 +2173,24 @@ func TestSmoke_S36_ScheduledSourceLoads(t *testing.T) {
 	assert.Equal(t, "sota-gap-analysis", sourceCfg.Tasks["weekly"].Ref)
 }
 
+func TestSmoke_S36b_ScheduledSourceAllowsMonthlyAlias(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"hardening-audit": {
+			Type:     "scheduled",
+			Repo:     "owner/repo",
+			Schedule: "@monthly",
+			Tasks: map[string]Task{
+				"monthly": {Workflow: "hardening-audit", Ref: "hardening-audit"},
+			},
+		},
+	}
+
+	err := cfg.Validate()
+	require.NoError(t, err)
+	assert.Equal(t, "@monthly", cfg.Sources["hardening-audit"].Schedule)
+}
+
 func TestSmoke_S37_ScheduledSourceAllowsMissingRef(t *testing.T) {
 	cfg := validConfig()
 	cfg.Sources = map[string]SourceConfig{

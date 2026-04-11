@@ -1261,6 +1261,8 @@ func parseScheduleValue(value string) (time.Duration, error) {
 		return 24 * time.Hour, nil
 	case "@weekly":
 		return 7 * 24 * time.Hour, nil
+	case "@monthly":
+		return 30 * 24 * time.Hour, nil
 	}
 	interval, err := time.ParseDuration(value)
 	if err != nil {

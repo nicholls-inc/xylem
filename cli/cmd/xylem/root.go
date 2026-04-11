@@ -40,11 +40,14 @@ func newRootCmd() *cobra.Command {
 			// local-only commands that only parse config, workflow YAML, and
 			// local state; they don't shell out to git or gh.
 			// continuous-improvement select is another local-only helper used
-			// by a command phase.
+			// by a command phase. harden inventory/score/track are the same.
 			skipTooling := cmd.Name() == "visualize" ||
 				strings.HasPrefix(commandPath, "xylem visualize") ||
 				cmd.Name() == "review" ||
 				commandPath == "xylem continuous-improvement select" ||
+				commandPath == "xylem harden inventory" ||
+				commandPath == "xylem harden score" ||
+				commandPath == "xylem harden track" ||
 				commandPath == "xylem field-report generate" ||
 				commandPath == "xylem daemon stop"
 
@@ -92,6 +95,7 @@ func newRootCmd() *cobra.Command {
 		newBootstrapCmd(),
 		newContinuousImprovementCmd(),
 		newContinuousSimplicityCmd(),
+		newHardenCmd(),
 		newDtuCmd(),
 		newShimDispatchCmd(),
 		newScanCmd(),
