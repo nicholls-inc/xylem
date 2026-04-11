@@ -202,6 +202,62 @@ func TestProp_PromptOnlyUsageAccumulatesEstimatedTotals(t *testing.T) {
 	})
 }
 
+func TestProp_SplitRepoSlugRoundTripsOwnerAndRepo(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		owner := rapid.StringMatching(`[a-z0-9][a-z0-9-]{0,15}`).Draw(t, "owner")
+		repo := rapid.StringMatching(`[a-z0-9][a-z0-9._-]{0,20}`).Draw(t, "repo")
+		gotOwner, gotRepo, err := splitRepoSlug(owner + "/" + repo)
+		if err != nil {
+			t.Fatalf("splitRepoSlug() error = %v", err)
+		}
+		if gotOwner != owner || gotRepo != repo {
+			t.Fatalf("splitRepoSlug() = (%q, %q), want (%q, %q)", gotOwner, gotRepo, owner, repo)
+		}
+	})
+}
+
+func TestProp_SplitRepoSlugTrimsSurroundingWhitespace(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		owner := rapid.StringMatching(`[a-z0-9][a-z0-9-]{0,15}`).Draw(t, "owner")
+		repo := rapid.StringMatching(`[a-z0-9][a-z0-9._-]{0,20}`).Draw(t, "repo")
+		gotOwner, gotRepo, err := splitRepoSlug(" \t" + owner + "/" + repo + "\n ")
+		if err != nil {
+			t.Fatalf("splitRepoSlug() error = %v", err)
+		}
+		if gotOwner != owner || gotRepo != repo {
+			t.Fatalf("splitRepoSlug() = (%q, %q), want (%q, %q)", gotOwner, gotRepo, owner, repo)
+		}
+	})
+}
+
+func TestProp_SplitRepoSlugRejectsMalformedInput(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		owner := rapid.StringMatching(`[a-z0-9][a-z0-9-]{0,15}`).Draw(t, "owner")
+		repo := rapid.StringMatching(`[a-z0-9][a-z0-9._-]{0,20}`).Draw(t, "repo")
+		malformed := rapid.SampledFrom([]string{
+			"",
+			owner,
+			repo,
+			"/" + repo,
+			owner + "/",
+			owner + "//" + repo,
+			owner + "/" + repo + "/extra",
+			owner + "/ ",
+			" /" + repo,
+		}).Draw(t, "malformed")
+		gotOwner, gotRepo, err := splitRepoSlug(malformed)
+		if err == nil {
+			t.Fatalf("splitRepoSlug(%q) error = nil, want error", malformed)
+		}
+		if gotOwner != "" || gotRepo != "" {
+			t.Fatalf("splitRepoSlug(%q) = (%q, %q), want empty parts on error", malformed, gotOwner, gotRepo)
+		}
+		if !strings.Contains(err.Error(), "owner/repo form") {
+			t.Fatalf("splitRepoSlug(%q) error = %q, want owner/repo guidance", malformed, err.Error())
+		}
+	})
+}
+
 func TestProp_BudgetExceededIsMonotonic(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		records := rapid.SliceOfN(rapid.Float64Range(0.0, 1.0), 1, 20).Draw(t, "costs")

@@ -536,6 +536,21 @@ func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
 			phaseYAML.WriteString("    noop:\n")
 			fmt.Fprintf(&phaseYAML, "      match: %q\n", p.noopMatch)
 		}
+		if p.output != "" {
+			fmt.Fprintf(&phaseYAML, "    output: %s\n", p.output)
+		}
+		if p.discussionCategory != "" || p.discussionTitleTemplate != "" || p.discussionTitleSearchTemplate != "" {
+			phaseYAML.WriteString("    discussion:\n")
+			if p.discussionCategory != "" {
+				fmt.Fprintf(&phaseYAML, "      category: %q\n", p.discussionCategory)
+			}
+			if p.discussionTitleTemplate != "" {
+				fmt.Fprintf(&phaseYAML, "      title_template: %q\n", p.discussionTitleTemplate)
+			}
+			if p.discussionTitleSearchTemplate != "" {
+				fmt.Fprintf(&phaseYAML, "      title_search_template: %q\n", p.discussionTitleSearchTemplate)
+			}
+		}
 		if p.gate != "" {
 			fmt.Fprintf(&phaseYAML, "    gate:\n%s\n", p.gate)
 		}
@@ -849,15 +864,19 @@ func TestBuildCommandWorkflowBased(t *testing.T) {
 }
 
 type testPhase struct {
-	name          string
-	promptContent string
-	maxTurns      int
-	noopMatch     string
-	gate          string
-	allowedTools  string
-	phaseType     string   // "command" or "" for prompt (default)
-	run           string   // shell command for type=command
-	dependsOn     []string // explicit phase dependencies
+	name                          string
+	promptContent                 string
+	maxTurns                      int
+	noopMatch                     string
+	gate                          string
+	allowedTools                  string
+	phaseType                     string // "command" or "" for prompt (default)
+	run                           string // shell command for type=command
+	output                        string
+	discussionCategory            string
+	discussionTitleTemplate       string
+	discussionTitleSearchTemplate string
+	dependsOn                     []string // explicit phase dependencies
 }
 
 // --- Tests ---
@@ -937,6 +956,247 @@ func TestPhasePolicyIntents_ClassifiesHighRiskPromptActions(t *testing.T) {
 	assert.Equal(t, "pr_create", intents[3].Action)
 	assert.Equal(t, "owner/repo", intents[3].Resource)
 	assert.Equal(t, "prompt", intents[1].Metadata["classified_from"])
+}
+
+func TestSmoke_S5_DiscussionOutputCreatesDiscussion(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Sources["scheduled"] = config.SourceConfig{Type: "scheduled", Repo: "owner/repo"}
+
+	writeWorkflowFile(t, dir, "weekly-report", []testPhase{{
+		name:                    "report",
+		promptContent:           "Generate weekly report",
+		maxTurns:                5,
+		output:                  "discussion",
+		discussionCategory:      "Reports",
+		discussionTitleTemplate: "Velocity Report — {{.Date}}",
+	}})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "scheduled-1",
+		Source:    "scheduled",
+		Workflow:  "weekly-report",
+		Meta:      map[string]string{"config_source": "scheduled"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+
+	var discussionTitle string
+	var discussionBody string
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Generate weekly report": []byte("## Weekly report\n\nAll green."),
+		},
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "gh" {
+				return nil, nil, false
+			}
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, discussionResolveQuery):
+				return []byte(`{"data":{"repository":{"id":"R_1","discussionCategories":{"nodes":[{"id":"C_1","name":"Reports"}]}}}}`), nil, true
+			case strings.Contains(joined, discussionSearchQuery):
+				return []byte(`{"data":{"node":{"discussions":{"nodes":[]}}}}`), nil, true
+			case strings.Contains(joined, discussionCreateMutation):
+				for i := 0; i+1 < len(args); i++ {
+					switch {
+					case args[i] == "-f" && strings.HasPrefix(args[i+1], "title="):
+						discussionTitle = strings.TrimPrefix(args[i+1], "title=")
+					case args[i] == "-f" && strings.HasPrefix(args[i+1], "body="):
+						discussionBody = strings.TrimPrefix(args[i+1], "body=")
+					}
+				}
+				return []byte(`{"data":{"createDiscussion":{"discussion":{"id":"D_1","title":"Velocity Report — 2026-04-11","url":"https://github.com/owner/repo/discussions/1"}}}}`), nil, true
+			default:
+				return nil, nil, false
+			}
+		},
+	}
+
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"scheduled": &source.Scheduled{Repo: "owner/repo"},
+	}
+
+	outcome := r.runVessel(context.Background(), *dequeued)
+	assert.Equal(t, "completed", outcome)
+	assert.Equal(t, queue.StateCompleted, loadSingleVessel(t, q).State)
+	assert.Equal(t, "## Weekly report\n\nAll green.", discussionBody)
+	assert.Contains(t, discussionTitle, "Velocity Report — ")
+	assert.NotContains(t, discussionTitle, "{{")
+	assert.True(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "discussionCategories"))
+	assert.True(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "discussions(first: 20"))
+	assert.True(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "createDiscussion"))
+}
+
+func TestSmoke_S6_DiscussionOutputCommentsExistingDiscussionByTitlePrefix(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Sources["scheduled"] = config.SourceConfig{Type: "scheduled", Repo: "owner/repo"}
+
+	writeWorkflowFile(t, dir, "weekly-report", []testPhase{{
+		name:                          "report",
+		promptContent:                 "Generate weekly report",
+		maxTurns:                      5,
+		output:                        "discussion",
+		discussionCategory:            "Reports",
+		discussionTitleTemplate:       "Velocity Report — {{.Date}}",
+		discussionTitleSearchTemplate: "Velocity Report",
+	}})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "scheduled-2",
+		Source:    "scheduled",
+		Workflow:  "weekly-report",
+		Meta:      map[string]string{"config_source": "scheduled"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Generate weekly report": []byte("## Weekly report\n\nExisting thread."),
+		},
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name != "gh" {
+				return nil, nil, false
+			}
+			joined := strings.Join(args, " ")
+			switch {
+			case strings.Contains(joined, discussionResolveQuery):
+				return []byte(`{"data":{"repository":{"id":"R_1","discussionCategories":{"nodes":[{"id":"C_1","name":"Reports"}]}}}}`), nil, true
+			case strings.Contains(joined, discussionSearchQuery):
+				return []byte(`{"data":{"node":{"discussions":{"nodes":[{"id":"D_1","title":"Velocity Report — 2026-04-01","url":"https://github.com/owner/repo/discussions/1"}]}}}}`), nil, true
+			case strings.Contains(joined, discussionCommentMutation):
+				return []byte(`{"data":{"addDiscussionComment":{"comment":{"url":"https://github.com/owner/repo/discussions/1#discussioncomment-1"}}}}`), nil, true
+			default:
+				return nil, nil, false
+			}
+		},
+	}
+
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"scheduled": &source.Scheduled{Repo: "owner/repo"},
+	}
+
+	outcome := r.runVessel(context.Background(), *dequeued)
+	assert.Equal(t, "completed", outcome)
+	assert.Equal(t, queue.StateCompleted, loadSingleVessel(t, q).State)
+	assert.True(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "addDiscussionComment"))
+	assert.False(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "createDiscussion"))
+}
+
+func TestSmoke_S7_DiscussionOutputFailsWithoutRepoSlug(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Sources["manual-scheduled"] = config.SourceConfig{Type: "scheduled"}
+
+	writeWorkflowFile(t, dir, "weekly-report", []testPhase{{
+		name:                    "report",
+		promptContent:           "Generate weekly report",
+		maxTurns:                5,
+		output:                  "discussion",
+		discussionCategory:      "Reports",
+		discussionTitleTemplate: "Velocity Report — {{.Date}}",
+	}})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "scheduled-3",
+		Source:    "manual",
+		Workflow:  "weekly-report",
+		Meta:      map[string]string{"config_source": "manual-scheduled"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Generate weekly report": []byte("## Weekly report\n\nMissing repo."),
+		},
+	}
+
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+
+	outcome := r.runVessel(context.Background(), *dequeued)
+	assert.Equal(t, "failed", outcome)
+
+	final := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, final.State)
+	assert.Contains(t, final.Error, `phase report: publish discussion for phase report: repo slug "" must be in owner/repo form`)
+	assert.False(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "createDiscussion"))
+}
+
+func TestSmoke_S8_DiscussionOutputSkipsPublishOnNoOp(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Sources["scheduled"] = config.SourceConfig{Type: "scheduled", Repo: "owner/repo"}
+
+	writeWorkflowFile(t, dir, "weekly-report", []testPhase{{
+		name:                    "post",
+		phaseType:               "command",
+		run:                     "cat .xylem/state/report.md",
+		noopMatch:               "XYLEM_NOOP",
+		output:                  "discussion",
+		discussionCategory:      "Reports",
+		discussionTitleTemplate: "Velocity Report — {{.Date}}",
+	}})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "scheduled-4",
+		Source:    "scheduled",
+		Workflow:  "weekly-report",
+		Meta:      map[string]string{"config_source": "scheduled"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+
+	cmdRunner := &mockCmdRunner{
+		gateOutput: []byte("XYLEM_NOOP: no weekly report available yet\n"),
+	}
+
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"scheduled": &source.Scheduled{Repo: "owner/repo"},
+	}
+
+	outcome := r.runVessel(context.Background(), *dequeued)
+	assert.Equal(t, "completed", outcome)
+	assert.Equal(t, queue.StateCompleted, loadSingleVessel(t, q).State)
+	assert.False(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "createDiscussion"))
+	assert.False(t, hasRunOutputCallContaining(cmdRunner, "gh api graphql", "addDiscussionComment"))
 }
 
 func TestPhasePolicyIntents_IgnoresHighRiskPhrasesFromRenderedPromptContext(t *testing.T) {

@@ -10,7 +10,7 @@ The `analyze` phase has written its findings to:
 
 ## Your Task
 
-Read `.xylem/state/metrics/portfolio-analysis.md` and produce a polished, concise markdown summary suitable for posting as a GitHub issue comment.
+Read `.xylem/state/metrics/portfolio-analysis.md` and produce a polished, concise markdown summary suitable for posting to GitHub Discussions.
 
 Write the report to:
 

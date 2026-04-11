@@ -23,19 +23,18 @@ phases:
     max_turns: 30
   - name: post
     type: command
+    noop:
+      match: XYLEM_NOOP
+    output: discussion
+    discussion:
+      category: Reports
+      title_template: "[portfolio] Weekly tracking {{.Date}}"
+      title_search_template: "[portfolio] Weekly tracking"
     run: |
       set -euo pipefail
       REPORT=".xylem/state/metrics/portfolio-report.md"
       if [ ! -f "$REPORT" ]; then
-        echo "No portfolio report to post"
+        echo "XYLEM_NOOP: no portfolio report to post"
         exit 0
       fi
-      BODY=$(cat "$REPORT")
-      DATE=$(date -u +%Y-%m-%d)
-      .xylem/scripts/post-discussion.sh \
-        --owner nicholls-inc \
-        --repo xylem \
-        --category Reports \
-        --title "[portfolio] Weekly tracking ${DATE}" \
-        --title-search "[portfolio] Weekly tracking" \
-        --body "$BODY"
+      cat "$REPORT"

@@ -235,6 +235,143 @@ phases:
 	assert.Equal(t, "", e.TrustBoundary)
 }
 
+func TestSmoke_S1_DiscussionOutputParsesTemplates(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/report.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: report
+    prompt_file: prompts/report.md
+    max_turns: 10
+    output: discussion
+    discussion:
+      category: Reports
+      title_template: "Velocity Report — {{.Date}}"
+      title_search_template: "Velocity Report"
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.Equal(t, "discussion", got.Phases[0].Output)
+	require.NotNil(t, got.Phases[0].Discussion)
+	assert.Equal(t, "Reports", got.Phases[0].Discussion.Category)
+	assert.Equal(t, "Velocity Report — {{.Date}}", got.Phases[0].Discussion.TitleTemplate)
+	assert.Equal(t, "Velocity Report", got.Phases[0].Discussion.TitleSearchTemplate)
+}
+
+func TestSmoke_S2_DiscussionOutputRequiresConfig(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/report.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: report
+    prompt_file: prompts/report.md
+    max_turns: 10
+    output: discussion
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `phase "report": discussion config is required when output is "discussion"`)
+}
+
+func TestSmoke_S3_DiscussionConfigRequiresOutputDiscussion(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/report.md")
+
+	path := writeWorkflowFile(t, dir, "test-workflow", `name: test-workflow
+phases:
+  - name: report
+    prompt_file: prompts/report.md
+    max_turns: 10
+    discussion:
+      category: Reports
+      title_template: "Velocity Report — {{.Date}}"
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, `phase "report": discussion config requires output: discussion`)
+}
+
+func TestSmoke_S4_DiscussionOutputRequiresCategoryAndTitle(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want string
+	}{
+		{
+			name: "missing category",
+			yaml: `name: test-workflow
+phases:
+  - name: report
+    prompt_file: prompts/report.md
+    max_turns: 10
+    output: discussion
+    discussion:
+      title_template: "Velocity Report — {{.Date}}"
+`,
+			want: `phase "report": discussion.category is required when output is "discussion"`,
+		},
+		{
+			name: "blank category",
+			yaml: `name: test-workflow
+phases:
+  - name: report
+    prompt_file: prompts/report.md
+    max_turns: 10
+    output: discussion
+    discussion:
+      category: "   "
+      title_template: "Velocity Report — {{.Date}}"
+`,
+			want: `phase "report": discussion.category is required when output is "discussion"`,
+		},
+		{
+			name: "missing title template",
+			yaml: `name: test-workflow
+phases:
+  - name: report
+    prompt_file: prompts/report.md
+    max_turns: 10
+    output: discussion
+    discussion:
+      category: Reports
+`,
+			want: `phase "report": discussion.title_template is required when output is "discussion"`,
+		},
+		{
+			name: "blank title template",
+			yaml: `name: test-workflow
+phases:
+  - name: report
+    prompt_file: prompts/report.md
+    max_turns: 10
+    output: discussion
+    discussion:
+      category: Reports
+      title_template: "   "
+`,
+			want: `phase "report": discussion.title_template is required when output is "discussion"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			chdirTemp(t, dir)
+			createPromptFile(t, dir, "prompts/report.md")
+
+			path := writeWorkflowFile(t, dir, "test-workflow", tt.yaml)
+			_, err := Load(path)
+			requireErrorContains(t, err, tt.want)
+		})
+	}
+}
+
 func TestLoadWorkflowAllowAdditiveProtectedWritesDefaultsFalse(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)

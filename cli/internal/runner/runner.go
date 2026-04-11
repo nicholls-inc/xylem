@@ -929,6 +929,24 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 				return "failed"
 			}
 
+			if err := r.publishPhaseOutput(ctx, vessel, p, td, string(output)); err != nil {
+				phaseSpanStatus = "failed"
+				finishCurrentPhaseSpan(err)
+				log.Printf("%sphase %q failed while publishing output: %v", vesselLabel(vessel), p.Name, err)
+				vrs.addPhase(vrs.phaseSummary(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error()))
+				vessel.FailedPhase = p.Name
+				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, err))
+				if err := src.OnFail(ctx, vessel); err != nil {
+					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+				}
+				issueNum := r.parseIssueNum(vessel)
+				if issueNum > 0 && r.Reporter != nil {
+					r.logReporterError("post vessel-failed comment", vessel.ID,
+						r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+				}
+				return "failed"
+			}
+
 			// Store output for subsequent phases
 			previousOutputs[p.Name] = string(output)
 
@@ -2344,6 +2362,27 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				status:       "failed",
 				duration:     phaseDuration,
 				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg),
+			}
+		}
+
+		if err := r.publishPhaseOutput(ctx, vessel, p, td, string(output)); err != nil {
+			phaseSpanStatus = "failed"
+			finishCurrentPhaseSpan(err)
+			log.Printf("%sphase %q failed while publishing output: %v", vesselLabel(vessel), p.Name, err)
+			vessel.FailedPhase = p.Name
+			r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, err))
+			if err := src.OnFail(ctx, vessel); err != nil {
+				log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+			}
+			issueNum := r.parseIssueNum(vessel)
+			if issueNum > 0 && r.Reporter != nil {
+				r.logReporterError("post vessel-failed comment", vessel.ID,
+					r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
+			}
+			return singlePhaseResult{
+				status:       "failed",
+				duration:     phaseDuration,
+				phaseSummary: vrs.phaseSummary(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error()),
 			}
 		}
 
@@ -4032,6 +4071,7 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 		}
 	}
 	return phase.TemplateData{
+		Date:  r.runtimeNow().UTC().Format("2006-01-02"),
 		Issue: issueData,
 		Phase: phase.PhaseData{
 			Name:  phaseName,

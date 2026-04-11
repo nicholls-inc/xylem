@@ -59,23 +59,32 @@ const (
 
 // Phase represents a single step in a workflow's execution pipeline.
 type Phase struct {
-	Name         string   `yaml:"name"`
-	Type         string   `yaml:"type,omitempty"` // "prompt" (default) or "command"
-	Run          string   `yaml:"run,omitempty"`  // shell command for type=command, supports template variables
-	PromptFile   string   `yaml:"prompt_file"`
-	MaxTurns     int      `yaml:"max_turns"`
-	LLM          *string  `yaml:"llm,omitempty"`
-	Model        *string  `yaml:"model,omitempty"`
-	Tier         *string  `yaml:"tier,omitempty"`
-	NoOp         *NoOp    `yaml:"noop,omitempty"`
-	Gate         *Gate    `yaml:"gate,omitempty"`
-	AllowedTools *string  `yaml:"allowed_tools,omitempty"`
-	DependsOn    []string `yaml:"depends_on,omitempty"`
+	Name         string            `yaml:"name"`
+	Type         string            `yaml:"type,omitempty"` // "prompt" (default) or "command"
+	Run          string            `yaml:"run,omitempty"`  // shell command for type=command, supports template variables
+	PromptFile   string            `yaml:"prompt_file"`
+	MaxTurns     int               `yaml:"max_turns"`
+	LLM          *string           `yaml:"llm,omitempty"`
+	Model        *string           `yaml:"model,omitempty"`
+	Tier         *string           `yaml:"tier,omitempty"`
+	Output       string            `yaml:"output,omitempty"`
+	Discussion   *DiscussionOutput `yaml:"discussion,omitempty"`
+	NoOp         *NoOp             `yaml:"noop,omitempty"`
+	Gate         *Gate             `yaml:"gate,omitempty"`
+	AllowedTools *string           `yaml:"allowed_tools,omitempty"`
+	DependsOn    []string          `yaml:"depends_on,omitempty"`
 }
 
 // NoOp defines an early-success completion rule for a phase.
 type NoOp struct {
 	Match string `yaml:"match"`
+}
+
+// DiscussionOutput defines GitHub Discussions publishing for a phase output.
+type DiscussionOutput struct {
+	Category            string `yaml:"category"`
+	TitleTemplate       string `yaml:"title_template"`
+	TitleSearchTemplate string `yaml:"title_search_template,omitempty"`
 }
 
 // GateEvidence describes the verification evidence metadata attached to a gate.
@@ -295,6 +304,10 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			}
 		}
 
+		if err := validatePhaseOutput(p); err != nil {
+			return err
+		}
+
 		if p.AllowedTools != nil && *p.AllowedTools == "" {
 			return fmt.Errorf("phase %q: allowed_tools must not be empty when specified", p.Name)
 		}
@@ -458,6 +471,32 @@ func validateDependencyCycles(phases []Phase) error {
 func validateNoOp(phaseName string, n *NoOp) error {
 	if strings.TrimSpace(n.Match) == "" {
 		return fmt.Errorf("phase %q: noop: match is required", phaseName)
+	}
+	return nil
+}
+
+func validatePhaseOutput(p Phase) error {
+	switch p.Output {
+	case "", "discussion":
+	default:
+		return fmt.Errorf("phase %q: output must be \"discussion\" when specified, got %q", p.Name, p.Output)
+	}
+
+	if p.Output == "" {
+		if p.Discussion != nil {
+			return fmt.Errorf("phase %q: discussion config requires output: discussion", p.Name)
+		}
+		return nil
+	}
+
+	if p.Discussion == nil {
+		return fmt.Errorf("phase %q: discussion config is required when output is %q", p.Name, p.Output)
+	}
+	if strings.TrimSpace(p.Discussion.Category) == "" {
+		return fmt.Errorf("phase %q: discussion.category is required when output is %q", p.Name, p.Output)
+	}
+	if strings.TrimSpace(p.Discussion.TitleTemplate) == "" {
+		return fmt.Errorf("phase %q: discussion.title_template is required when output is %q", p.Name, p.Output)
 	}
 	return nil
 }
