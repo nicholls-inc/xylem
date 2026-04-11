@@ -48,6 +48,17 @@ func genInvalidWorkflowClass() *rapid.Generator[string] {
 	})
 }
 
+func genInvalidPhaseOutputType() *rapid.Generator[string] {
+	return rapid.Custom(func(t *rapid.T) string {
+		for {
+			output := rapid.StringMatching(`[a-z][a-z-]{0,15}`).Draw(t, "output")
+			if output != "discussion" {
+				return output
+			}
+		}
+	})
+}
+
 func TestPropValidateGateAcceptsRecognizedEvidenceLevels(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		level := genRecognizedGateEvidenceLevel().Draw(t, "level")
@@ -167,5 +178,18 @@ func TestPropWorkflowTierYAMLRoundTripPreservesPointerSemantics(t *testing.T) {
 
 		assertOptional("workflow tier", wf.Tier, roundTripped.Tier)
 		assertOptional("phase tier", wf.Phases[0].Tier, roundTripped.Phases[0].Tier)
+	})
+}
+
+func TestPropValidatePhaseOutputRejectsUnknownOutputTypes(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		output := genInvalidPhaseOutputType().Draw(t, "output")
+		err := validatePhaseOutput(Phase{Name: "report", Output: output})
+		if err == nil {
+			t.Fatalf("validatePhaseOutput() error = nil for output %q", output)
+		}
+		if !strings.Contains(err.Error(), output) {
+			t.Fatalf("validatePhaseOutput() error = %q, want mention of %q", err.Error(), output)
+		}
 	})
 }

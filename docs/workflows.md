@@ -27,6 +27,8 @@ Workflow (YAML definition)
 
 Each phase produces output that subsequent phases can reference. Gates act as checkpoints -- if a gate fails and retries are exhausted, the vessel is marked as failed. If a gate is a label gate, the vessel enters a `waiting` state until a human applies the required label on GitHub. Live gates also persist step evidence under `.xylem/phases/<vessel-id>/evidence/`.
 
+Phases can also publish their final output to GitHub Discussions by setting `output: discussion`. In that mode, xylem uses the phase output as the discussion body and renders the configured discussion title templates with the same Go-template data available to prompts. If the phase also declares a `noop` matcher and the output matches it, xylem skips publication and completes early just like any other no-op phase.
+
 The built-in workflows scaffolded by `xylem init` are profile-driven. The core profile seeds delivery workflows such as `fix-bug` and `implement-feature`, plus recurring operator workflows such as `lessons`, `context-weight-audit`, `workflow-health-report`, and `security-compliance`. Repo-specific overlays such as `implement-harness` and `continuous-improvement` are not part of the base core scaffold and must be added through an overlay profile or checked-in repo assets. The workflow format also supports `type: command` phases for deterministic shell steps inside the same execution pipeline.
 
 In this repository, `continuous-improvement` is a concrete example of mixing both styles: a deterministic `select_focus` command phase picks the next focus area and persists rotation state, then prompt phases analyze, plan, implement, and verify one small scheduled improvement.
@@ -80,6 +82,15 @@ phases:
   - name: smoke_test
     type: command                                  # Optional shell-command phase
     run: "make smoke-test"
+
+  - name: weekly_report
+    type: command
+    run: "cat .xylem/state/weekly-report.md"
+    output: discussion
+    discussion:
+      category: Reports
+      title_template: "Weekly Report — {{.Date}}"
+      title_search_template: "Weekly Report"
 ```
 
 ### Field reference
@@ -110,6 +121,8 @@ Protected-surface write allowances are intentionally narrow. `allow_additive_pro
 | `llm` | No | Provider override for this prompt phase. Valid values: `claude`, `copilot`. |
 | `model` | No | Model override for this prompt phase. Provider-specific string. |
 | `noop` | No | Early-success completion rule checked against the phase output before any gate runs. |
+| `output` | No | Optional post-phase output target. Supported values: `discussion`. |
+| `discussion` | No | GitHub Discussions publishing config. Requires `output: discussion`. |
 | `allowed_tools` | No | Tool restriction string for prompt phases. Passed through to the provider CLI. Use this instead of top-level `claude.allowed_tools`, which is rejected by config validation. |
 | `gate` | No | Quality gate that must pass after this phase completes. |
 | `depends_on` | No | List of phase names this phase depends on. Enables parallel execution -- phases without dependency relationships can execute concurrently. Validated for duplicate entries, self-references, references to unknown phase names, and dependency cycles. |
@@ -119,6 +132,16 @@ Protected-surface write allowances are intentionally narrow. `allow_additive_pro
 | Field | Required | Description |
 |-------|----------|-------------|
 | `match` | Yes | Substring marker that, when present in successful phase output, completes the workflow early. |
+
+**Discussion output fields (when `output: discussion`):**
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `discussion.category` | Yes | GitHub Discussions category name to post into. |
+| `discussion.title_template` | Yes | Go template rendered into the discussion title. |
+| `discussion.title_search_template` | No | Prefix used to find an existing discussion to comment on instead of creating a new one. Defaults to the rendered title. |
+
+Discussion title templates can use the normal phase template data plus `{{.Date}}`, which resolves to the current UTC date in `YYYY-MM-DD` form.
 
 **Gate fields (when `type: command`):**
 

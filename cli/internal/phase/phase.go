@@ -17,6 +17,7 @@ const (
 
 // TemplateData holds all data available to phase prompt templates.
 type TemplateData struct {
+	Date            string
 	Issue           IssueData
 	Phase           PhaseData
 	PreviousOutputs map[string]string // phase name → output text
