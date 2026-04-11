@@ -2556,7 +2556,9 @@ func buildGateClaim(p workflow.Phase, passed bool, artifactPath string, recorded
 			}
 			claim.TrustBoundary = "Running system observation"
 		default:
+			claim.Level = evidence.BehaviorallyChecked
 			claim.Checker = p.Gate.Run
+			claim.TrustBoundary = "Command gate output"
 		}
 	}
 	if p.Gate == nil || p.Gate.Evidence == nil {
