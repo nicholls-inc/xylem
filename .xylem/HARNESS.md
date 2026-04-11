@@ -95,3 +95,21 @@ when they carry the required merge labels:
 Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
 `harness-impl` pull requests, so self-hosted harness PRs carry both
 `harness-impl` and `ready-to-merge`.
+
+### Do not finish `merge-pr` work with phase `merge` still failing due to `exit status`. <!-- xylem-lesson:lesson-c1f590566a94 -->
+- Rationale: This failure pattern recurred in 6 failed vessels for `merge-pr` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `pr-366-merge-pr` (2026-04-11T12:39:49Z) — `phases/pr-366-merge-pr/merge.output`
+  - `pr-366-merge-pr-retry-1` (2026-04-11T13:30:42Z) — `phases/pr-366-merge-pr-retry-1/merge.output`
+  - `pr-372-merge-pr` (2026-04-11T15:15:23Z) — `phases/pr-372-merge-pr/merge.output`
+  - `pr-366-merge-pr-retry-1-retry-1` (2026-04-11T15:30:18Z) — `phases/pr-366-merge-pr-retry-1-retry-1/merge.output`
+  - `pr-366-merge-pr-retry-1-retry-1-retry-1` (2026-04-11T16:30:48Z) — `phases/pr-366-merge-pr-retry-1-retry-1-retry-1/merge.output`
+
+
+### Do not finish `merge-pr` work with phase `merge` still failing due to `exit status`. <!-- xylem-lesson:lesson-c1f590566a94 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `merge-pr` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `pr-372-merge-pr-retry-1-retry-1` (2026-04-11T18:26:00Z) — `phases/pr-372-merge-pr-retry-1-retry-1/merge.output`
+  - `pr-366-merge-pr-retry-1-retry-1-retry-1-retry-1` (2026-04-11T18:26:03Z) — `phases/pr-366-merge-pr-retry-1-retry-1-retry-1-retry-1/merge.output`
