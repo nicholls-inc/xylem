@@ -15,7 +15,7 @@ import (
 var profileFS embed.FS
 
 var profileVersions = map[string]int{
-	"core":               2,
+	"core":               3,
 	"self-hosting-xylem": 2,
 }
 

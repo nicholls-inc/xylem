@@ -231,7 +231,7 @@ Behavior:
 - Later scans enqueue only when the cadence boundary has elapsed since the last successful enqueue.
 - Scheduled sources do not use `tasks`.
 - Vessel metadata includes `schedule.cadence`, `schedule.fired_at`, and the configured source name.
-- Built-in scheduled workflows such as `lessons`, `workflow-health-report`, and `security-compliance` fit this source type directly.
+- Built-in scheduled workflows such as `lessons`, `doc-garden`, `workflow-health-report`, and `security-compliance` fit this source type directly.
 
 ### `scheduled`
 

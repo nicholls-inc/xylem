@@ -22,6 +22,7 @@ import (
 var expectedCoreWorkflows = []string{
 	"adapt-repo",
 	"context-weight-audit",
+	"doc-garden",
 	"field-report",
 	"fix-bug",
 	"fix-pr-checks",
@@ -459,7 +460,7 @@ func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
 	assert.Equal(t, 12, marker.IssueNumber)
 	assert.Equal(t, "https://github.com/owner/name/issues/12", marker.IssueURL)
 	assert.Equal(t, adaptRepoSeededByInit, marker.SeededBy)
-	assert.Equal(t, 2, marker.ProfileVersion)
+	assert.Equal(t, 3, marker.ProfileVersion)
 	assert.Len(t, runner.calls, 3)
 }
 

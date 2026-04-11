@@ -6,6 +6,7 @@ import (
 	"os"
 
 	"github.com/nicholls-inc/xylem/cli/internal/fieldreport"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/spf13/cobra"
 )
 
@@ -32,6 +33,10 @@ Exit code 0 on success, 2 if there is insufficient data to produce
 a meaningful report (fewer than 5 vessel summaries).`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := deps.cfg
+			profileVersion, ok := profiles.Version("core")
+			if !ok {
+				return fmt.Errorf("field report: core profile version is unknown")
+			}
 
 			if !cfg.TelemetryEnabled() {
 				fmt.Fprintln(os.Stderr, "telemetry is disabled; skipping field report generation")
@@ -40,7 +45,7 @@ a meaningful report (fewer than 5 vessel summaries).`,
 
 			opts := fieldreport.Options{
 				XylemVersion:   buildInfo(),
-				ProfileVersion: 2,
+				ProfileVersion: profileVersion,
 				Extended:       cfg.Telemetry.Extended,
 			}
 
