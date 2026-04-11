@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -47,7 +48,7 @@ func TestSmoke_S1_SummaryFileWrittenOnVesselCompletion(t *testing.T) {
 	outcome := r.completeVessel(context.Background(), vessel, "", nil, vrs, nil)
 	assert.Equal(t, "completed", outcome)
 
-	path := filepath.Join(cfg.StateDir, "phases", vessel.ID, summaryFileName)
+	path := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, summaryFileName)
 	info, err := os.Stat(path)
 	require.NoError(t, err)
 	assert.Greater(t, info.Size(), int64(0))
@@ -81,41 +82,39 @@ func TestSmoke_S2_SummaryFileWrittenOnVesselFailurePartialSummary(t *testing.T) 
 
 func TestSmoke_S3_SummaryContainsTheDisclaimerNote(t *testing.T) {
 	stateDir := t.TempDir()
-
-	err := SaveVesselSummary(stateDir, &VesselSummary{
+	summary := &VesselSummary{
 		VesselID: "vessel-note",
 		Source:   "manual",
 		State:    "completed",
 		Phases:   []PhaseSummary{},
-	})
+	}
+
+	err := SaveVesselSummary(stateDir, summary)
 	require.NoError(t, err)
 
-	summary := loadSummary(t, stateDir, "vessel-note")
 	assert.Equal(t, summaryDisclaimer, summary.Note)
+	data := readSummaryBytes(t, stateDir, "vessel-note")
+	assert.Contains(t, string(data), "\"note\": "+strconv.Quote(summaryDisclaimer))
+	assert.Equal(t, summaryDisclaimer, loadSummary(t, stateDir, "vessel-note").Note)
 }
 
-func TestSmoke_S4_SummaryJSONIsPrettyPrinted(t *testing.T) {
+func TestSmoke_S4_SaveVesselSummaryOverridesCallerProvidedNote(t *testing.T) {
 	stateDir := t.TempDir()
-
-	err := SaveVesselSummary(stateDir, &VesselSummary{
-		VesselID: "vessel-pretty",
+	summary := &VesselSummary{
+		VesselID: "vessel-note-override",
 		Source:   "manual",
 		State:    "completed",
 		Phases:   []PhaseSummary{},
-	})
+		Note:     "caller supplied note",
+	}
+
+	err := SaveVesselSummary(stateDir, summary)
 	require.NoError(t, err)
 
-	data := readSummaryBytes(t, stateDir, "vessel-pretty")
-	lines := strings.Split(string(data), "\n")
-	require.GreaterOrEqual(t, len(lines), 2)
-
-	assert.Contains(t, string(data), "\n  \"")
-	assert.Equal(t, "{", lines[0])
-	assert.True(t, strings.HasPrefix(lines[1], "  \""))
-
-	var summary VesselSummary
-	require.NoError(t, json.Unmarshal(data, &summary))
 	assert.Equal(t, summaryDisclaimer, summary.Note)
+	data := readSummaryBytes(t, stateDir, "vessel-note-override")
+	assert.Contains(t, string(data), "\"note\": "+strconv.Quote(summaryDisclaimer))
+	assert.NotContains(t, string(data), "caller supplied note")
 }
 
 func TestSmoke_S9_BuildSummaryComputesTotalTokensEstAsSumOfPhaseTokenFields(t *testing.T) {
@@ -257,7 +256,7 @@ func TestSmoke_S14_SaveVesselSummaryFailureIsNonFatalCallerContinues(t *testing.
 		require.NoError(t, os.Chdir(oldWd))
 	}()
 
-	summaryAsDir := filepath.Join(cfg.StateDir, "phases", vessel.ID, summaryFileName)
+	summaryAsDir := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, summaryFileName)
 	require.NoError(t, os.MkdirAll(summaryAsDir, 0o755))
 
 	buf := captureStandardLogger(t)
@@ -306,7 +305,7 @@ func TestSmoke_S17_CompleteVesselSavesEvidenceManifestWhenClaimsArePresent(t *te
 	outcome := r.completeVessel(context.Background(), vessel, "", nil, vrs, claims)
 	assert.Equal(t, "completed", outcome)
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
 	_, err = os.Stat(manifestPath)
 	require.NoError(t, err)
 
@@ -338,7 +337,7 @@ func TestSmoke_S18_EvidenceManifestPathIsEmptyInSummaryWhenNoClaimsProvided(t *t
 	outcome := r.completeVessel(context.Background(), vessel, "", nil, vrs, nil)
 	assert.Equal(t, "completed", outcome)
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
 	_, err = os.Stat(manifestPath)
 	require.Error(t, err)
 	require.True(t, os.IsNotExist(err))
@@ -383,12 +382,12 @@ func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testin
 	assert.Equal(t, summary.CostReportPath, summary.ReviewArtifacts.CostReport)
 	assert.Equal(t, summary.BudgetAlertsPath, summary.ReviewArtifacts.BudgetAlerts)
 
-	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", vessel.ID, costReportFileName))
+	report, err := cost.LoadReport(config.RuntimePath(cfg.StateDir, "phases", vessel.ID, costReportFileName))
 	require.NoError(t, err)
 	assert.Equal(t, vessel.ID, report.MissionID)
 	assert.Equal(t, cost.UsageSourceEstimated, report.UsageSource)
 
-	alertsData, err := os.ReadFile(filepath.Join(cfg.StateDir, "phases", vessel.ID, budgetAlertsFileName))
+	alertsData, err := os.ReadFile(config.RuntimePath(cfg.StateDir, "phases", vessel.ID, budgetAlertsFileName))
 	require.NoError(t, err)
 	assert.JSONEq(t, "[]", string(alertsData))
 	assert.Zero(t, summary.BudgetAlertCount)
@@ -426,7 +425,7 @@ func TestPersistRunArtifactsSummarizesBudgetWarnings(t *testing.T) {
 	assert.False(t, summary.BudgetExceeded)
 	assert.Equal(t, 1, summary.BudgetAlertCount)
 
-	alertsData, err := os.ReadFile(filepath.Join(cfg.StateDir, "phases", vessel.ID, budgetAlertsFileName))
+	alertsData, err := os.ReadFile(config.RuntimePath(cfg.StateDir, "phases", vessel.ID, budgetAlertsFileName))
 	require.NoError(t, err)
 	assert.Contains(t, string(alertsData), `"type": "warning"`)
 }
@@ -438,7 +437,7 @@ func TestSmoke_S18b_PersistRunArtifactsLinksExistingEvalReport(t *testing.T) {
 
 	startedAt := time.Date(2026, time.April, 8, 20, 32, 45, 0, time.UTC)
 	vessel := runningSmokeVessel("vessel-eval-artifact", "github", "fix-bug", startedAt)
-	evalPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, evalReportFileName)
+	evalPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, evalReportFileName)
 	require.NoError(t, os.MkdirAll(filepath.Dir(evalPath), 0o755))
 	require.NoError(t, os.WriteFile(evalPath, []byte(`{"iterations":1}`), 0o644))
 
@@ -621,7 +620,7 @@ func TestSaveVesselSummaryWritesEmptyPhasesArray(t *testing.T) {
 		t.Fatalf("SaveVesselSummary() error = %v", err)
 	}
 
-	data, err := os.ReadFile(filepath.Join(stateDir, "phases", "vessel-empty-phases", summaryFileName))
+	data, err := os.ReadFile(summaryPath(stateDir, "vessel-empty-phases"))
 	if err != nil {
 		t.Fatalf("read summary file: %v", err)
 	}
@@ -893,7 +892,7 @@ func TestSmoke_S6_EvidenceCollectionFailureIsNonFatal(t *testing.T) {
 	assert.Equal(t, queue.StateCompleted, queueVesselByID(t, q, vessel.ID).State)
 	assert.Contains(t, buf.String(), "warn: save evidence manifest:")
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
 	assert.NoFileExists(t, manifestPath)
 
 	summary := loadSummary(t, cfg.StateDir, vessel.ID)
@@ -912,7 +911,7 @@ func TestSmoke_S7_SummaryWriteFailureIsNonFatal(t *testing.T) {
 	_, err := q.Enqueue(vessel)
 	require.NoError(t, err)
 
-	summaryAsDir := filepath.Join(cfg.StateDir, "phases", vessel.ID, summaryFileName)
+	summaryAsDir := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, summaryFileName)
 	require.NoError(t, os.MkdirAll(summaryAsDir, 0o755))
 
 	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
@@ -975,7 +974,7 @@ func TestDrainPromptOnlyWritesSummaryArtifact(t *testing.T) {
 		t.Fatalf("EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
 	}
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
 	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
 		t.Fatalf("expected no evidence manifest, got err=%v", err)
 	}
@@ -1113,7 +1112,7 @@ func TestSmoke_S18_EvidenceClaimsAreAccumulatedAcrossMultiplePhases(t *testing.T
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
 	assert.FileExists(t, manifestPath)
 
 	manifest, err := evidence.LoadManifest(cfg.StateDir, vessel.ID)
@@ -1295,7 +1294,7 @@ func TestSmoke_S9_ClaimsFromAFailedPhaseAreDiscarded(t *testing.T) {
 	assert.Equal(t, 1, result.Failed)
 	assert.Equal(t, queue.StateFailed, queueVesselByID(t, q, "issue-9").State)
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", "issue-9", "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", "issue-9", "evidence-manifest.json")
 	if _, err := os.Stat(manifestPath); err == nil {
 		manifest, loadErr := evidence.LoadManifest(cfg.StateDir, "issue-9")
 		require.NoError(t, loadErr)
@@ -1448,7 +1447,7 @@ func TestDrainWorkflowWithoutGateOmitsEvidenceFromCompletionComment(t *testing.T
 		t.Fatalf("EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
 	}
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", "issue-7", "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", "issue-7", "evidence-manifest.json")
 	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
 		t.Fatalf("expected no evidence manifest, got err=%v", err)
 	}
@@ -1464,7 +1463,7 @@ func TestDrainWorkflowWithoutGateOmitsEvidenceFromCompletionComment(t *testing.T
 func loadSummary(t *testing.T, stateDir, vesselID string) VesselSummary {
 	t.Helper()
 
-	data, err := os.ReadFile(filepath.Join(stateDir, "phases", vesselID, summaryFileName))
+	data, err := os.ReadFile(summaryPath(stateDir, vesselID))
 	require.NoError(t, err)
 
 	var summary VesselSummary
@@ -1486,7 +1485,7 @@ func loadSummaryJSON(t *testing.T, stateDir, vesselID string) map[string]any {
 func readSummaryBytes(t *testing.T, stateDir, vesselID string) []byte {
 	t.Helper()
 
-	data, err := os.ReadFile(filepath.Join(stateDir, "phases", vesselID, summaryFileName))
+	data, err := os.ReadFile(summaryPath(stateDir, vesselID))
 	require.NoError(t, err)
 
 	return data

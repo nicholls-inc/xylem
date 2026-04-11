@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 )
 
 const manifestFileName = "evidence-manifest.json"
@@ -238,7 +240,7 @@ func SaveManifest(stateDir, vesselID string, manifest *Manifest) error {
 		return fmt.Errorf("save manifest: %w", err)
 	}
 
-	path := filepath.Join(stateDir, "phases", manifest.VesselID, manifestFileName)
+	path := config.RuntimePath(stateDir, "phases", manifest.VesselID, manifestFileName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("save manifest: create dir: %w", err)
 	}
@@ -261,7 +263,7 @@ func LoadManifest(stateDir, vesselID string) (*Manifest, error) {
 		return nil, fmt.Errorf("load manifest: invalid vessel ID: %w", err)
 	}
 
-	path := filepath.Join(stateDir, "phases", vesselID, manifestFileName)
+	path := config.RuntimePath(stateDir, "phases", vesselID, manifestFileName)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("load manifest: read: %w", err)
@@ -292,7 +294,7 @@ func SaveArtifact(stateDir, vesselID, name string, data []byte, mediaType, descr
 		return Artifact{}, fmt.Errorf("save artifact: %w", err)
 	}
 
-	path := filepath.Join(stateDir, "phases", vesselID, "evidence", filepath.FromSlash(cleanName))
+	path := config.RuntimePath(stateDir, "phases", vesselID, "evidence", filepath.FromSlash(cleanName))
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return Artifact{}, fmt.Errorf("save artifact: create dir: %w", err)
 	}

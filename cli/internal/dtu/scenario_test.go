@@ -172,7 +172,7 @@ func newScenarioEnv(t *testing.T, fixtureName string) *dtuScenarioEnv {
 		stateDir:     stateDir,
 		manifestPath: manifestPath,
 		store:        store,
-		queue:        queue.New(filepath.Join(stateDir, "queue.jsonl")),
+		queue:        queue.New(config.RuntimePath(stateDir, "queue.jsonl")),
 		cmdRunner:    cmdRunner,
 	}
 }
@@ -356,7 +356,7 @@ func loadState(t *testing.T, store *dtu.Store) *dtu.State {
 func loadVesselSummary(t *testing.T, stateDir, vesselID string) runnerpkg.VesselSummary {
 	t.Helper()
 
-	data, err := os.ReadFile(filepath.Join(stateDir, "phases", vesselID, "summary.json"))
+	data, err := os.ReadFile(config.RuntimePath(stateDir, "phases", vesselID, "summary.json"))
 	if err != nil {
 		t.Fatalf("read summary.json for %q: %v", vesselID, err)
 	}

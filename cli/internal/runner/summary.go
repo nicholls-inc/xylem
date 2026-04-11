@@ -448,7 +448,7 @@ func SaveVesselSummary(stateDir string, summary *VesselSummary) error {
 }
 
 func summaryPath(stateDir, vesselID string) string {
-	return filepath.Join(stateDir, "phases", vesselID, summaryFileName)
+	return config.RuntimePath(stateDir, "phases", vesselID, summaryFileName)
 }
 
 func validateSummaryPathComponent(component string) error {

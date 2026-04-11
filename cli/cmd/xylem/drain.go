@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
@@ -127,7 +126,7 @@ func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeMana
 }
 
 func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observability.Tracer) {
-	auditLogPath := filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath())
+	auditLogPath := config.RuntimePath(cfg.StateDir, cfg.EffectiveAuditLogPath())
 	auditLog := intermediary.NewAuditLog(auditLogPath)
 
 	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)

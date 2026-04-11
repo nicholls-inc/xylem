@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/review"
 )
@@ -211,7 +212,7 @@ func Generate(ctx context.Context, stateDir string, opts Options, prClient PRCli
 		Warnings:           warnings,
 	}
 
-	outputDir := filepath.Join(stateDir, opts.OutputDir)
+	outputDir := config.RuntimePath(stateDir, opts.OutputDir)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("generate lessons: create output dir: %w", err)
 	}

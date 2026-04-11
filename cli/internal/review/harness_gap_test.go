@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/stretchr/testify/assert"
@@ -336,6 +337,37 @@ func TestPublishHarnessGapIssuesDedupsRepeatedFindings(t *testing.T) {
 	}
 	if !strings.Contains(runner.createBody, harnessGapFindingMarkerPrefix+report.Findings[0].Fingerprint) {
 		t.Fatalf("create body missing fingerprint marker: %q", runner.createBody)
+	}
+}
+
+func TestGenerateHarnessGapAnalysisUsesRuntimeStateForControlPlaneDirectories(t *testing.T) {
+	stateDir := newControlPlaneStateDir(t)
+	now := time.Date(2026, time.April, 10, 1, 0, 0, 0, time.UTC)
+	runner := &harnessGapTestRunner{
+		responses: map[string][]byte{
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "merged", "--limit", "100", "--json", "number,title,url,headRefName,mergedAt,mergedBy,labels"):                        []byte("[]"),
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--label", "needs-conflict-resolution", "--limit", "100", "--json", "number,title,url,mergeable,headRefName"): []byte("[]"),
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,createdAt"):                                         []byte("[]"),
+			commandKey("git", "rev-list", "--left-right", "--count", "origin/main...HEAD"):                                                                                                          []byte("0\t0\n"),
+			commandKey("gh", "--repo", "owner/repo", "issue", "list", "--state", "open", "--label", "xylem-failed", "--limit", "100", "--json", "number,title,url,labels"):                          []byte("[]"),
+		},
+	}
+
+	result, err := GenerateHarnessGapAnalysis(context.Background(), stateDir, "owner/repo", runner, HarnessGapOptions{
+		OutputDir: "reviews",
+		Now:       now,
+	})
+	if err != nil {
+		t.Fatalf("GenerateHarnessGapAnalysis() error = %v", err)
+	}
+
+	expectedJSON := config.RuntimePath(stateDir, "reviews", harnessGapReportJSONName)
+	expectedMarkdown := config.RuntimePath(stateDir, "reviews", harnessGapReportMarkdownName)
+	if result.JSONPath != expectedJSON {
+		t.Fatalf("JSONPath = %q, want %q", result.JSONPath, expectedJSON)
+	}
+	if result.MarkdownPath != expectedMarkdown {
+		t.Fatalf("MarkdownPath = %q, want %q", result.MarkdownPath, expectedMarkdown)
 	}
 }
 

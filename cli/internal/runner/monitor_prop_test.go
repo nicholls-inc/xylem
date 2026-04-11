@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"pgregory.net/rapid"
 )
@@ -24,7 +25,7 @@ func TestProp_LatestPhaseActivityReturnsNewestOutput(t *testing.T) {
 
 		vesselID := rapid.StringMatching(`[a-z0-9-]{1,16}`).Draw(t, "vesselID")
 		phaseCount := rapid.IntRange(1, 8).Draw(t, "phaseCount")
-		phasesDir := filepath.Join(cfg.StateDir, "phases", vesselID)
+		phasesDir := config.RuntimePath(cfg.StateDir, "phases", vesselID)
 		if err := os.MkdirAll(phasesDir, 0o755); err != nil {
 			t.Fatalf("MkdirAll(%q): %v", phasesDir, err)
 		}

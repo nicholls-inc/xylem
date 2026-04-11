@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"syscall"
@@ -194,7 +193,7 @@ func formatSummaryCost(summary *runner.VesselSummary) string {
 }
 
 func pauseMarkerPath(cfg *config.Config) string {
-	return filepath.Join(cfg.StateDir, "paused")
+	return config.RuntimePath(cfg.StateDir, "paused")
 }
 
 func isPaused(cfg *config.Config) bool {

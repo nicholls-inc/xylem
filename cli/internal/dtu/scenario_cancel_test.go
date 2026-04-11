@@ -3,7 +3,6 @@ package dtu_test
 import (
 	"context"
 	"io"
-	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -154,5 +153,5 @@ func TestScenarioIssueCancelDuringResolveStopsRunner(t *testing.T) {
 
 	summary := loadVesselSummary(t, env.stateDir, "issue-181")
 	assert.Equal(t, "cancelled", summary.State)
-	assert.FileExists(t, filepath.Join(env.stateDir, "phases", "issue-181", "summary.json"))
+	assert.FileExists(t, config.RuntimePath(env.stateDir, "phases", "issue-181", "summary.json"))
 }

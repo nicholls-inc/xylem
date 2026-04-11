@@ -114,7 +114,7 @@ func newConfiguredLogger(cfg *config.Config, opts loggerOptions) (*slog.Logger, 
 }
 
 func daemonLogPath(stateDir string) string {
-	return filepath.Join(stateDir, daemonLogFileName)
+	return config.RuntimePath(stateDir, daemonLogFileName)
 }
 
 func openDaemonLogFile(stateDir string) (*os.File, error) {

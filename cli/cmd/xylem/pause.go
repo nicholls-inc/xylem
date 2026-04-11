@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 
@@ -25,7 +26,7 @@ func cmdPause(cfg *config.Config) error {
 		fmt.Println("Already paused.")
 		return nil
 	}
-	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(marker), 0o755); err != nil {
 		return fmt.Errorf("error creating state dir: %w", err)
 	}
 	if err := os.WriteFile(marker, []byte{}, 0o644); err != nil {

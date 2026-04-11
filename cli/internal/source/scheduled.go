@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
 
@@ -219,7 +220,7 @@ func (s *Scheduled) saveState(state *scheduleState) error {
 }
 
 func (s *Scheduled) statePath() string {
-	return filepath.Join(s.StateDir, "schedules", sanitizeScheduledComponent(s.scope())+".json")
+	return config.RuntimePath(s.StateDir, "schedules", sanitizeScheduledComponent(s.scope())+".json")
 }
 
 func (s *Scheduled) scope() string {

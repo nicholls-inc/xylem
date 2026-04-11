@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/releasecadence"
@@ -135,7 +136,7 @@ func GenerateHarnessGapAnalysis(ctx context.Context, stateDir, repo string, runn
 		Warnings:    warnings,
 	}
 
-	outputDir := filepath.Join(stateDir, opts.OutputDir)
+	outputDir := config.RuntimePath(stateDir, opts.OutputDir)
 	if err := os.MkdirAll(outputDir, 0o755); err != nil {
 		return nil, fmt.Errorf("generate harness-gap analysis: create output dir: %w", err)
 	}
@@ -189,7 +190,7 @@ func PublishHarnessGapIssues(ctx context.Context, stateDir, repo string, runner 
 		now = now.UTC()
 	}
 
-	statePath := filepath.Join(stateDir, outputDir, harnessGapIssueStateName)
+	statePath := config.RuntimePath(stateDir, outputDir, harnessGapIssueStateName)
 	state, err := loadHarnessGapIssueState(statePath)
 	if err != nil {
 		return nil, err
@@ -315,7 +316,7 @@ func buildHarnessGapFindings(ctx context.Context, stateDir, repo string, runner 
 }
 
 func buildHarnessGapLocalFindings(stateDir string, now time.Time) ([]HarnessGapFinding, []string, error) {
-	path := filepath.Join(stateDir, harnessGapDaemonLogFileName)
+	path := config.RuntimePath(stateDir, harnessGapDaemonLogFileName)
 	entries, err := loadHarnessGapDaemonLog(path)
 	if err != nil {
 		return nil, nil, err
@@ -581,7 +582,7 @@ func detectFailedFingerprintBacklogGap(ctx context.Context, stateDir, repo strin
 
 	var q *queue.Queue
 	if strings.TrimSpace(stateDir) != "" {
-		q = queue.New(filepath.Join(stateDir, "queue.jsonl"))
+		q = queue.New(config.RuntimePath(stateDir, "queue.jsonl"))
 	}
 	evidence := make([]string, 0, len(issues))
 	count := 0

@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
@@ -26,7 +27,7 @@ type LoadedRun struct {
 }
 
 func LoadRuns(stateDir string, lookbackRuns int) ([]LoadedRun, int, []string, error) {
-	phaseDir := filepath.Join(stateDir, "phases")
+	phaseDir := config.RuntimePath(stateDir, "phases")
 	entries, err := os.ReadDir(phaseDir)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -160,7 +161,7 @@ func resolveArtifactPath(stateDir, legacyPath, reviewPath string) string {
 	if rel == "" {
 		return ""
 	}
-	return filepath.Join(stateDir, filepath.FromSlash(rel))
+	return config.RuntimePath(stateDir, filepath.FromSlash(rel))
 }
 
 func reviewArtifactValue(artifacts *runner.ReviewArtifacts, selectPath func(*runner.ReviewArtifacts) string) string {

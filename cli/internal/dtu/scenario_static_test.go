@@ -249,7 +249,7 @@ func TestScenarioIssueCommandGateRetryPassesOnRetry(t *testing.T) {
 	env := newScenarioEnv(t, "issue-command-gate-retry.yaml")
 	defer withWorkingDir(t, env.repoDir)()
 
-	gateTarget := filepath.Join(env.stateDir, "phases", "issue-7", "implement.output")
+	gateTarget := config.RuntimePath(env.stateDir, "phases", "issue-7", "implement.output")
 	writeScenarioWorkflow(t, env.repoDir, "fix-bug", []scenarioPhase{
 		{
 			name:           "implement",
@@ -301,7 +301,7 @@ func TestScenarioIssueCommandGateRetryPassesOnRetry(t *testing.T) {
 	// Trigger label "bug" removed by OnComplete; only terminal status remains.
 	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 7), []string{"done"})
 
-	phasesDir := filepath.Join(env.stateDir, "phases", "issue-7")
+	phasesDir := config.RuntimePath(env.stateDir, "phases", "issue-7")
 	promptPath := filepath.Join(phasesDir, "implement.prompt")
 	prompt := readScenarioFile(t, promptPath)
 	if !strings.Contains(prompt, "gate check failed") {

@@ -431,15 +431,15 @@ func daemonSupervisorSleepWithContext(ctx context.Context, delay time.Duration) 
 }
 
 func daemonPIDPath(cfg *config.Config) string {
-	return filepath.Join(cfg.StateDir, "daemon.pid")
+	return config.RuntimePath(cfg.StateDir, "daemon.pid")
 }
 
 func daemonSupervisorPIDPath(cfg *config.Config) string {
-	return filepath.Join(cfg.StateDir, "daemon-supervisor.pid")
+	return config.RuntimePath(cfg.StateDir, "daemon-supervisor.pid")
 }
 
 func daemonSupervisorStopPath(cfg *config.Config) string {
-	return filepath.Join(cfg.StateDir, "daemon-supervisor.stop")
+	return config.RuntimePath(cfg.StateDir, "daemon-supervisor.stop")
 }
 
 func daemonSupervisorStopRequested(cfg *config.Config) bool {
@@ -451,7 +451,7 @@ func requestDaemonSupervisorStop(cfg *config.Config) error {
 	if cfg == nil {
 		return fmt.Errorf("request daemon supervisor stop: nil config")
 	}
-	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(daemonSupervisorStopPath(cfg)), 0o755); err != nil {
 		return fmt.Errorf("request daemon supervisor stop: create state dir: %w", err)
 	}
 	if err := os.WriteFile(daemonSupervisorStopPath(cfg), []byte(time.Now().UTC().Format(time.RFC3339Nano)), 0o644); err != nil {

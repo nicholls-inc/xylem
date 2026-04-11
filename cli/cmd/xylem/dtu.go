@@ -311,7 +311,10 @@ func resolveDTUOptions(opts *dtuOptions, manifestPath string) (*resolvedDTUOptio
 		absManifest = state.ManifestPath
 	}
 
-	runtimeDir := filepath.Join(stateDir, "dtu", universeID)
+	runtimeDir, err := dtu.UniverseDir(stateDir, universeID)
+	if err != nil {
+		return nil, err
+	}
 	workDir := strings.TrimSpace(opts.WorkDir)
 	if workDir == "" {
 		workDir = filepath.Join(runtimeDir, "workdir")

@@ -1357,7 +1357,7 @@ func TestSmoke_S1_PolicyDenialShortCircuitsBeforeSurfaceSnapshot(t *testing.T) {
 	assert.Contains(t, vessel.Error, "denied by policy")
 	assert.Len(t, cmdRunner.phaseCalls, 0)
 
-	_, statErr := os.Stat(filepath.Join(cfg.StateDir, "phases", "issue-1", "solve.output"))
+	_, statErr := os.Stat(config.RuntimePath(cfg.StateDir, "phases", "issue-1", "solve.output"))
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
@@ -1388,7 +1388,7 @@ func TestSmoke_S2_SurfacePreSnapshotFailureShortCircuitsBeforePhaseExecution(t *
 	assert.Contains(t, vessel.Error, "snapshot failed")
 	assert.Len(t, cmdRunner.phaseCalls, 0)
 
-	_, statErr := os.Stat(filepath.Join(cfg.StateDir, "phases", "issue-1", "plan.output"))
+	_, statErr := os.Stat(config.RuntimePath(cfg.StateDir, "phases", "issue-1", "plan.output"))
 	assert.ErrorIs(t, statErr, os.ErrNotExist)
 }
 
@@ -1806,7 +1806,7 @@ func TestEnsureWorktreeRecreatesMissingInheritedPath(t *testing.T) {
 		CreatedAt:    time.Now().UTC(),
 		CurrentPhase: 2,
 		WorktreePath: filepath.Join(dir, "missing-worktree"),
-		PhaseOutputs: map[string]string{"plan": filepath.Join(dir, ".xylem", "phases", "issue-99", "plan.output")},
+		PhaseOutputs: map[string]string{"plan": config.RuntimePath(filepath.Join(dir, ".xylem"), "phases", "issue-99", "plan.output")},
 	}
 	_, err := q.Enqueue(vessel)
 	require.NoError(t, err)
@@ -2280,7 +2280,7 @@ func TestDrainMultiPhaseWorkflow(t *testing.T) {
 
 	// Verify output files exist
 	for _, pName := range []string{"analyze", "implement", "pr"} {
-		outputPath := filepath.Join(dir, ".xylem", "phases", "issue-1", pName+".output")
+		outputPath := config.RuntimePath(filepath.Join(dir, ".xylem"), "phases", "issue-1", pName+".output")
 		if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 			t.Errorf("expected output file %s to exist", outputPath)
 		}
@@ -2354,11 +2354,11 @@ func TestDrainPhaseNoOpCompletesWorkflowEarly(t *testing.T) {
 		t.Fatalf("expected analyze output path to be persisted, got %v", vessels[0].PhaseOutputs)
 	}
 
-	analyzeOutputPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "analyze.output")
+	analyzeOutputPath := config.RuntimePath(filepath.Join(dir, ".xylem"), "phases", "issue-1", "analyze.output")
 	if _, err := os.Stat(analyzeOutputPath); err != nil {
 		t.Fatalf("expected analyze output file to exist: %v", err)
 	}
-	implementOutputPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "implement.output")
+	implementOutputPath := config.RuntimePath(filepath.Join(dir, ".xylem"), "phases", "issue-1", "implement.output")
 	if _, err := os.Stat(implementOutputPath); !os.IsNotExist(err) {
 		t.Fatalf("expected implement output file not to exist, got err=%v", err)
 	}
@@ -2966,12 +2966,12 @@ func TestSmoke_S6_WorkflowDigestSnapshotPopulatedAtLaunch(t *testing.T) {
 	assert.NotEqual(t, "wf-stale-scan-digest", final.WorkflowDigest)
 	assert.NotEqual(t, recovery.DigestFile(workflowPath, "wf"), final.WorkflowDigest)
 
-	snapshotPath := filepath.Join(cfg.StateDir, "phases", final.ID, workflowSnapshotDirName, final.Workflow+".yaml")
+	snapshotPath := config.RuntimePath(cfg.StateDir, "phases", final.ID, workflowSnapshotDirName, final.Workflow+".yaml")
 	snapshotBytes, err := os.ReadFile(snapshotPath)
 	require.NoError(t, err)
 	assert.Equal(t, originalWorkflow, snapshotBytes)
 
-	artifact, err := recovery.Load(filepath.Join(cfg.StateDir, "phases", final.ID, "failure-review.json"))
+	artifact, err := recovery.Load(config.RuntimePath(cfg.StateDir, "phases", final.ID, "failure-review.json"))
 	require.NoError(t, err)
 	assert.Equal(t, expectedDigest, artifact.WorkflowDigest)
 }
@@ -3040,7 +3040,7 @@ func TestSmoke_S7_WaitingVesselResumesAgainstFrozenWorkflowSnapshot(t *testing.T
 	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Implement after approval")
 	assert.NotContains(t, cmdRunner.phaseCalls[1].prompt, "Mutated after approval")
 
-	snapshotPath := filepath.Join(cfg.StateDir, "phases", done.ID, workflowSnapshotDirName, done.Workflow+".yaml")
+	snapshotPath := config.RuntimePath(cfg.StateDir, "phases", done.ID, workflowSnapshotDirName, done.Workflow+".yaml")
 	_, snapshotDigest, err := workflow.LoadWithDigest(snapshotPath)
 	require.NoError(t, err)
 	assert.Equal(t, expectedDigest, snapshotDigest)
@@ -3093,7 +3093,7 @@ func TestSmoke_WS6_S16_PromptOnlyVesselNoEvidence(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
-	manifestPath := filepath.Join(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
+	manifestPath := config.RuntimePath(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
 	assert.NoFileExists(t, manifestPath)
 }
 
@@ -3111,7 +3111,7 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, result.Completed)
 
-	assert.FileExists(t, filepath.Join(cfg.StateDir, "phases", "prompt-1", summaryFileName))
+	assert.FileExists(t, config.RuntimePath(cfg.StateDir, "phases", "prompt-1", summaryFileName))
 	summary := loadSummary(t, cfg.StateDir, "prompt-1")
 	assert.Equal(t, "completed", summary.State)
 	assert.Equal(t, "prompt-1", summary.VesselID)
@@ -3126,7 +3126,7 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	assert.Equal(t, summary.TotalTokensEst, summary.Phases[0].InputTokensEst+summary.Phases[0].OutputTokensEst)
 	assert.Equal(t, summary.TotalCostUSDEst, summary.Phases[0].CostUSDEst)
 
-	report, err := cost.LoadReport(filepath.Join(cfg.StateDir, "phases", "prompt-1", costReportFileName))
+	report, err := cost.LoadReport(config.RuntimePath(cfg.StateDir, "phases", "prompt-1", costReportFileName))
 	require.NoError(t, err)
 	require.Len(t, report.Phases, 1)
 	assert.Equal(t, "prompt", report.Phases[0].Name)
@@ -5275,7 +5275,7 @@ func TestDrainCommandPhase(t *testing.T) {
 	}
 
 	// Verify output file was written
-	outputPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "build.output")
+	outputPath := config.RuntimePath(filepath.Join(dir, ".xylem"), "phases", "issue-1", "build.output")
 	if _, err := os.Stat(outputPath); os.IsNotExist(err) {
 		t.Errorf("expected output file %s to exist", outputPath)
 	}
@@ -5288,7 +5288,7 @@ func TestDrainCommandPhase(t *testing.T) {
 	}
 
 	// Verify command file was written
-	commandPath := filepath.Join(dir, ".xylem", "phases", "issue-1", "build.command")
+	commandPath := config.RuntimePath(filepath.Join(dir, ".xylem"), "phases", "issue-1", "build.command")
 	if _, err := os.Stat(commandPath); os.IsNotExist(err) {
 		t.Errorf("expected command file %s to exist", commandPath)
 	}
@@ -5746,7 +5746,7 @@ func TestDrainOrchestratedDiamondWorkflow(t *testing.T) {
 
 	// Verify output files were written.
 	for _, name := range []string{"analyze", "implement_a", "implement_b", "merge"} {
-		path := filepath.Join(cfg.StateDir, "phases", "issue-1", name+".output")
+		path := config.RuntimePath(cfg.StateDir, "phases", "issue-1", name+".output")
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			t.Errorf("expected output file for phase %q", name)
 		}
@@ -6432,7 +6432,7 @@ func TestVerifyProtectedSurfacesSkipsWhenWorktreeMissing(t *testing.T) {
 	cfg.StateDir = stateDir
 	auditPath := filepath.Join(stateDir, "audit.jsonl")
 	auditLog := intermediary.NewAuditLog(auditPath)
-	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r := New(cfg, queue.New(config.RuntimePath(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
 	r.AuditLog = auditLog
 
 	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
@@ -6502,7 +6502,7 @@ func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *t
 	cfg.StateDir = stateDir
 	auditPath := filepath.Join(stateDir, "audit.jsonl")
 	auditLog := intermediary.NewAuditLog(auditPath)
-	r := New(cfg, queue.New(filepath.Join(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r := New(cfg, queue.New(config.RuntimePath(stateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
 	r.AuditLog = auditLog
 
 	before, ok, err := r.takeProtectedSurfaceSnapshot(context.Background(), worktreeDir)
@@ -6659,7 +6659,7 @@ func TestVerifyProtectedSurfacesSelfHealsDeletedFileFromDefaultBranch(t *testing
 		},
 	}
 	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
-	r := New(cfg, queue.New(filepath.Join(cfg.StateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
+	r := New(cfg, queue.New(config.RuntimePath(cfg.StateDir, "queue.jsonl")), &mockWorktree{path: worktreeDir}, cmdRunner)
 	r.AuditLog = auditLog
 
 	err = r.verifyProtectedSurfaces(
@@ -7500,7 +7500,7 @@ func TestSmoke_S22_WaveResultsAreMergedIntoVesselRunStateAfterWgWait(t *testing.
 		{name: "b", promptContent: "Branch B {{.PreviousOutputs.root}}", maxTurns: 5, dependsOn: []string{"root"}},
 	})
 
-	preseedDir := filepath.Join(cfg.StateDir, "phases", "issue-1")
+	preseedDir := config.RuntimePath(cfg.StateDir, "phases", "issue-1")
 	if err := os.MkdirAll(preseedDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(preseedDir) error = %v", err)
 	}
@@ -7553,7 +7553,7 @@ func TestSmoke_S23_CostTrackerConcurrentAccessFromMultipleGoroutinesIsSafe(t *te
 		{name: "b", promptContent: "Cost B {{.PreviousOutputs.root}}", maxTurns: 5, dependsOn: []string{"root"}},
 	})
 
-	preseedDir := filepath.Join(cfg.StateDir, "phases", "issue-1")
+	preseedDir := config.RuntimePath(cfg.StateDir, "phases", "issue-1")
 	if err := os.MkdirAll(preseedDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(preseedDir) error = %v", err)
 	}
@@ -7651,7 +7651,7 @@ func TestSmoke_S25_ConcurrentPhasesMayCauseSlightOverspendWithoutRetroactiveFail
 		{name: "b", promptContent: "Concurrent B {{.PreviousOutputs.root}}", maxTurns: 5, dependsOn: []string{"root"}},
 	})
 
-	preseedDir := filepath.Join(cfg.StateDir, "phases", "issue-1")
+	preseedDir := config.RuntimePath(cfg.StateDir, "phases", "issue-1")
 	if err := os.MkdirAll(preseedDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(preseedDir) error = %v", err)
 	}
@@ -8228,7 +8228,7 @@ func TestSmoke_S1_UntrackedPhaseStalledVesselTimesOut(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	require.NotNil(t, vessel)
 
-	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "analyze.output")
+	outputPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "analyze.output")
 	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
 	require.NoError(t, os.WriteFile(outputPath, []byte(""), 0o644))
 	old := now.Add(-11 * time.Minute)
@@ -8265,7 +8265,7 @@ func TestCheckStalledVesselsDoesNotTimeoutLiveTrackedSubprocessWithOldOutput(t *
 	vessel, _ := q.Dequeue()
 	require.NotNil(t, vessel)
 
-	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "implement.output")
+	outputPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "implement.output")
 	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
 	require.NoError(t, os.WriteFile(outputPath, []byte(""), 0o644))
 	old := now.Add(-11 * time.Minute)
@@ -8323,7 +8323,7 @@ func TestCheckStalledVesselsDoesNotTimeoutObservedLivePhaseWithOldOutput(t *test
 
 	<-cmdRunner.started
 
-	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "implement.output")
+	outputPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "implement.output")
 	old := now.Add(-11 * time.Minute)
 	require.NoError(t, os.Chtimes(outputPath, old, old))
 
@@ -8653,7 +8653,7 @@ func TestCheckStalledVesselsDoesNotTimeoutUntrackedRecentPhase(t *testing.T) {
 	vessel, _ := q.Dequeue()
 	require.NotNil(t, vessel)
 
-	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "analyze.output")
+	outputPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "analyze.output")
 	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
 	require.NoError(t, os.WriteFile(outputPath, []byte("still running"), 0o644))
 	require.NoError(t, os.Chtimes(outputPath, now, now))
@@ -8686,7 +8686,7 @@ func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {
 	require.NoError(t, findErr)
 	assert.Equal(t, queue.StateCompleted, vessel.State)
 
-	outputPath := filepath.Join(r.Config.StateDir, "phases", "issue-1", "analyze.output")
+	outputPath := config.RuntimePath(r.Config.StateDir, "phases", "issue-1", "analyze.output")
 	output, readErr := os.ReadFile(outputPath)
 	require.NoError(t, readErr)
 	assert.Equal(t, "analysis complete", string(output))

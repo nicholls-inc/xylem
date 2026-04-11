@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os/exec"
-	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -75,7 +74,7 @@ func newRootCmd() *cobra.Command {
 				}
 			}
 
-			queueFile := filepath.Join(cfg.StateDir, "queue.jsonl")
+			queueFile := config.RuntimePath(cfg.StateDir, "queue.jsonl")
 			wt := worktree.New(".", &realCmdRunner{})
 			wt.DefaultBranch = cfg.DefaultBranch
 			deps = &appDeps{

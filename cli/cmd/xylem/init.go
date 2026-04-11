@@ -115,6 +115,9 @@ func cmdInitWithProfileAndOptions(configPath string, force bool, profileValue st
 		return fmt.Errorf("create state directory: %w", err)
 	}
 	fmt.Printf("Ensured %s/ directory exists\n", defaultStateDir)
+	if err := os.MkdirAll(filepath.Join(defaultStateDir, "state"), 0o755); err != nil {
+		return fmt.Errorf("create runtime state directory: %w", err)
+	}
 
 	gitignorePath := filepath.Join(defaultStateDir, ".gitignore")
 	if err := os.WriteFile(gitignorePath, []byte(scaffoldGitignore), 0o644); err != nil {

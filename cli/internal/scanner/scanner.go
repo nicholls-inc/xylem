@@ -4,7 +4,6 @@ import (
 	"context"
 	"log"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -52,7 +51,7 @@ func New(cfg *config.Config, q *queue.Queue, runner CommandRunner) *Scanner {
 
 // Scan queries configured sources, filters candidates, and enqueues new vessels.
 func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
-	pauseMarker := filepath.Join(s.Config.StateDir, "paused")
+	pauseMarker := config.RuntimePath(s.Config.StateDir, "paused")
 	if _, err := os.Stat(pauseMarker); err == nil {
 		return ScanResult{Paused: true}, nil
 	}
