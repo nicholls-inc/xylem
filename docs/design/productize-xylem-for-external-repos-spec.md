@@ -570,7 +570,7 @@ Activation of the overlay MUST be through the `profiles` field in `.xylem.yml`:
 profiles: [core, self-hosting-xylem]
 
 validation:
-  format: "goimports -l ./cli/..."
+  format: "goimports -l ."
   lint:   "go vet ./cli/..."
   build:  "go build ./cli/cmd/xylem"
   test:   "go test ./cli/..."

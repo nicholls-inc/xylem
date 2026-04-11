@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -350,6 +351,18 @@ func validConfig() *Config {
 	}
 	cfg.normalize()
 	return cfg
+}
+
+func validationRequiredSourceConfig(workflow string) map[string]SourceConfig {
+	return map[string]SourceConfig{
+		"github": {
+			Type: "github",
+			Repo: "owner/name",
+			Tasks: map[string]Task{
+				"validation": {Labels: []string{"ci"}, Workflow: workflow},
+			},
+		},
+	}
 }
 
 func TestValidateMissingRepoInGitHubSource(t *testing.T) {
@@ -2671,6 +2684,99 @@ claude:
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Equal(t, "go test ./...", cfg.Validation.Test)
+}
+
+func TestSmoke_S4_RejectsGoimportsPackagePatternForValidationRequiredWorkflows(t *testing.T) {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+		t.Run(workflow, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, fmt.Sprintf(`sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      validation:
+        labels: [ci]
+        workflow: %s
+validation:
+  format: "goimports -l ./cli/..."
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`, workflow))
+
+			_, err := Load(path)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), `validation.format uses goimports package pattern "./cli/..."`)
+			assert.Contains(t, err.Error(), workflow)
+		})
+	}
+}
+
+func TestSmoke_S5_AllowsGoimportsDirectoryTargetsForValidationRequiredWorkflows(t *testing.T) {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+		t.Run(workflow, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, fmt.Sprintf(`sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      validation:
+        labels: [ci]
+        workflow: %s
+validation:
+  format: "goimports -l ."
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`, workflow))
+
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			assert.Equal(t, "goimports -l .", cfg.Validation.Format)
+		})
+	}
+}
+
+func TestSmoke_S6_AllowsGoimportsLocalPrefixContainingEllipsisForValidationRequiredWorkflows(t *testing.T) {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+		t.Run(workflow, func(t *testing.T) {
+			t.Parallel()
+
+			path := writeConfigFile(t, fmt.Sprintf(`sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      validation:
+        labels: [ci]
+        workflow: %s
+validation:
+  format: "goimports -local example.com/... -l ."
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`, workflow))
+
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			require.NotNil(t, cfg)
+			assert.Equal(t, "goimports -local example.com/... -l .", cfg.Validation.Format)
+		})
+	}
 }
 
 func TestValidateRejectsInvalidAutoMergeBranchPattern(t *testing.T) {

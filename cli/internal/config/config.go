@@ -1034,9 +1034,20 @@ func (c *Config) validateTelemetry() error {
 }
 
 func (c *Config) validateWorkflowRequirements() error {
-	if c.ValidationConfigured() {
+	active := c.validationRequiredWorkflows()
+	if len(active) == 0 {
 		return nil
 	}
+	if !c.ValidationConfigured() {
+		return fmt.Errorf("validation: at least one of format, lint, build, or test must be set when workflows are active: %s", strings.Join(active, ", "))
+	}
+	if err := c.validateValidationCommands(); err != nil {
+		return fmt.Errorf("%w (active workflows: %s)", err, strings.Join(active, ", "))
+	}
+	return nil
+}
+
+func (c *Config) validationRequiredWorkflows() []string {
 	required := []string{"fix-pr-checks", "resolve-conflicts"}
 	active := make([]string, 0, len(required))
 	for _, workflowName := range required {
@@ -1044,11 +1055,84 @@ func (c *Config) validateWorkflowRequirements() error {
 			active = append(active, workflowName)
 		}
 	}
-	if len(active) == 0 {
-		return nil
+	if len(active) > 0 {
+		sort.Strings(active)
 	}
-	sort.Strings(active)
-	return fmt.Errorf("validation: at least one of format, lint, build, or test must be set when workflows are active: %s", strings.Join(active, ", "))
+	return active
+}
+
+func (c *Config) validateValidationCommands() error {
+	if target, ok := invalidGoimportsPackagePatternTarget(c.Validation.Format); ok {
+		return fmt.Errorf(`validation.format uses goimports package pattern %q; goimports expects directories or files, use "goimports -l ." or "cd cli && goimports -l ."`, target)
+	}
+	return nil
+}
+
+func invalidGoimportsPackagePatternTarget(command string) (string, bool) {
+	fields := validationCommandFields(command)
+	for i := 0; i < len(fields); i++ {
+		token := trimValidationCommandField(fields[i])
+		if filepath.Base(token) != "goimports" {
+			continue
+		}
+		for j := i + 1; j < len(fields); j++ {
+			rawArg := fields[j]
+			arg := trimValidationCommandField(rawArg)
+			if isValidationCommandSeparator(arg) {
+				break
+			}
+			if arg == "" {
+				continue
+			}
+			if strings.HasPrefix(arg, "-") {
+				if goimportsFlagConsumesValue(arg) {
+					j++
+				}
+				continue
+			}
+			if strings.Contains(arg, "...") {
+				return arg, true
+			}
+		}
+	}
+	return "", false
+}
+
+func goimportsFlagConsumesValue(arg string) bool {
+	flag, _, hasInlineValue := strings.Cut(arg, "=")
+	if hasInlineValue {
+		return false
+	}
+	switch flag {
+	case "-cpuprofile", "-local", "-memprofile", "-memrate", "-srcdir", "-trace":
+		return true
+	default:
+		return false
+	}
+}
+
+func validationCommandFields(command string) []string {
+	replacer := strings.NewReplacer(
+		"&&", " && ",
+		"||", " || ",
+		";", " ; ",
+		"\n", " ; ",
+		"\t", " ",
+	)
+	return strings.Fields(replacer.Replace(command))
+}
+
+func trimValidationCommandField(field string) string {
+	return strings.Trim(field, `"'`)
+}
+
+func isValidationCommandSeparator(field string) bool {
+	switch field {
+	case "", "&&", "||", ";", "|":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Config) workflowActive(name string) bool {
