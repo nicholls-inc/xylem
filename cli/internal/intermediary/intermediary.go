@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gofrs/flock"
+
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 )
 
 // Effect represents the outcome of a policy evaluation.
@@ -25,6 +27,13 @@ const (
 	Deny Effect = "deny"
 	// RequireApproval pauses execution pending human review.
 	RequireApproval Effect = "require_approval"
+)
+
+type PolicyMode string
+
+const (
+	PolicyModeWarn    PolicyMode = "warn"
+	PolicyModeEnforce PolicyMode = "enforce"
 )
 
 // Intent represents a structured action request from an agent crossing the
@@ -52,20 +61,36 @@ type Policy struct {
 	Rules []Rule `json:"rules"`
 }
 
+type EvaluationContext struct {
+	WorkflowClass policy.Class
+	FilePath      string
+	VesselID      string
+}
+
 // PolicyResult captures the outcome of evaluating an intent against policies.
 type PolicyResult struct {
-	Effect      Effect `json:"effect"`
-	MatchedRule *Rule  `json:"matched_rule,omitempty"`
-	Reason      string `json:"reason"`
+	Effect        Effect       `json:"effect"`
+	MatchedRule   *Rule        `json:"matched_rule,omitempty"`
+	Reason        string       `json:"reason"`
+	WorkflowClass policy.Class `json:"-"`
+	Operation     string       `json:"-"`
+	RuleMatched   string       `json:"-"`
+	FilePath      string       `json:"-"`
+	VesselID      string       `json:"-"`
 }
 
 // AuditEntry records a single intermediary decision for the tamper-proof log.
 type AuditEntry struct {
-	Intent     Intent    `json:"intent"`
-	Decision   Effect    `json:"decision"`
-	Timestamp  time.Time `json:"timestamp"`
-	ApprovedBy string    `json:"approved_by,omitempty"`
-	Error      string    `json:"error,omitempty"`
+	Intent        Intent    `json:"intent"`
+	Decision      Effect    `json:"decision"`
+	Timestamp     time.Time `json:"timestamp"`
+	ApprovedBy    string    `json:"approved_by,omitempty"`
+	Error         string    `json:"error,omitempty"`
+	WorkflowClass string    `json:"workflow_class,omitempty"`
+	Operation     string    `json:"operation,omitempty"`
+	RuleMatched   string    `json:"rule_matched,omitempty"`
+	FilePath      string    `json:"file_path,omitempty"`
+	VesselID      string    `json:"vessel_id,omitempty"`
 }
 
 // AuditLog provides an append-only JSONL-backed audit log with file locking.
@@ -166,6 +191,7 @@ type Intermediary struct {
 	policies []Policy
 	auditLog *AuditLog
 	executor Executor
+	mode     PolicyMode
 }
 
 // NewIntermediary creates an intermediary with the given policies, audit log,
@@ -175,22 +201,48 @@ func NewIntermediary(policies []Policy, auditLog *AuditLog, executor Executor) *
 		policies: policies,
 		auditLog: auditLog,
 		executor: executor,
+		mode:     PolicyModeEnforce,
 	}
+}
+
+func ParsePolicyMode(s string) (PolicyMode, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", string(PolicyModeEnforce):
+		return PolicyModeEnforce, nil
+	case string(PolicyModeWarn):
+		return PolicyModeWarn, nil
+	default:
+		return "", fmt.Errorf("invalid policy mode %q (must be %q or %q)", s, PolicyModeWarn, PolicyModeEnforce)
+	}
+}
+
+func (i *Intermediary) SetMode(mode PolicyMode) {
+	i.mode = normalizePolicyMode(mode)
+}
+
+func (i *Intermediary) Mode() PolicyMode {
+	return normalizePolicyMode(i.mode)
+}
+
+func (i *Intermediary) ShouldBlock(effect Effect) bool {
+	return i.Mode() == PolicyModeEnforce && effect != Allow
 }
 
 // Submit validates an intent, evaluates it against policies, executes it if
 // allowed, and records an audit entry.
 //
-// INV: Denied intents never reach the executor.
+// INV: Denied intents never reach the executor in enforce mode.
 // INV: Every Submit call produces exactly one audit entry.
-// INV: RequireApproval intents are logged but not executed.
+// INV: RequireApproval intents are logged but not executed in enforce mode.
 func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error) {
 	if err := ValidateIntent(intent); err != nil {
 		entry := AuditEntry{
-			Intent:    intent,
-			Decision:  Deny,
-			Timestamp: time.Now().UTC(),
-			Error:     err.Error(),
+			Intent:        intent,
+			Decision:      Deny,
+			Timestamp:     time.Now().UTC(),
+			Error:         err.Error(),
+			WorkflowClass: string(policy.Delivery),
+			VesselID:      intent.AgentID,
 		}
 		if appendErr := i.auditLog.Append(entry); appendErr != nil {
 			return Deny, fmt.Errorf("audit validation failure: %w", appendErr)
@@ -199,16 +251,9 @@ func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error
 	}
 
 	result := i.Evaluate(intent)
+	entry := auditEntryForResult(intent, result)
 
-	entry := AuditEntry{
-		Intent:    intent,
-		Decision:  result.Effect,
-		Timestamp: time.Now().UTC(),
-	}
-
-	switch result.Effect {
-	case Allow:
-		// INV: Only allowed intents reach the executor.
+	if !i.ShouldBlock(result.Effect) && i.executor != nil {
 		if err := i.executor.Execute(ctx, intent); err != nil {
 			entry.Error = err.Error()
 			if appendErr := i.auditLog.Append(entry); appendErr != nil {
@@ -216,10 +261,6 @@ func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error
 			}
 			return Allow, fmt.Errorf("execute intent: %w", err)
 		}
-	case RequireApproval:
-		// INV: RequireApproval intents are logged but not executed.
-	case Deny:
-		// INV: Denied intents never reach the executor.
 	}
 
 	if err := i.auditLog.Append(entry); err != nil {
@@ -228,27 +269,165 @@ func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error
 	return result.Effect, nil
 }
 
+func auditEntryForResult(intent Intent, result PolicyResult) AuditEntry {
+	entry := AuditEntry{
+		Intent:        intent,
+		Decision:      result.Effect,
+		Timestamp:     time.Now().UTC(),
+		WorkflowClass: string(result.WorkflowClass),
+		Operation:     result.Operation,
+		RuleMatched:   result.RuleMatched,
+		FilePath:      result.FilePath,
+		VesselID:      result.VesselID,
+	}
+	if result.Effect != Allow && result.Reason != "" {
+		entry.Error = result.Reason
+	}
+	return entry
+}
+
+func normalizePolicyMode(mode PolicyMode) PolicyMode {
+	switch mode {
+	case PolicyModeWarn:
+		return PolicyModeWarn
+	default:
+		return PolicyModeEnforce
+	}
+}
+
+func defaultWorkflowClass(class policy.Class) policy.Class {
+	if class == "" {
+		return policy.Delivery
+	}
+	return class
+}
+
+func policyEffect(decision policy.Decision) Effect {
+	if decision.Allowed {
+		return Allow
+	}
+	return Deny
+}
+
+var controlPlanePatterns = []string{
+	".xylem/HARNESS.md",
+	".xylem.yml",
+	".xylem/workflows/*.yaml",
+	".xylem/prompts/*/*.md",
+}
+
+func IsControlPlaneResource(resource string) bool {
+	for _, pattern := range controlPlanePatterns {
+		if MatchGlob(pattern, resource) {
+			return true
+		}
+	}
+	return false
+}
+
+func classifyOperation(intent Intent) (policy.Operation, bool) {
+	switch intent.Action {
+	case "file_write", "write":
+		if IsControlPlaneResource(intent.Resource) {
+			return policy.OpWriteControlPlane, true
+		}
+	case "git_push":
+		return policy.OpPushBranch, true
+	case "pr_create":
+		return policy.OpCreatePR, true
+	case "merge_pr":
+		return policy.OpMergePR, true
+	case "reload", "reload_daemon":
+		return policy.OpReloadDaemon, true
+	case "read_secret", "read_secrets":
+		return policy.OpReadSecrets, true
+	case "commit_default_branch":
+		return policy.OpCommitDefaultBranch, true
+	}
+	return "", false
+}
+
+func policyRuleLabel(name string, index int) string {
+	return fmt.Sprintf("policy.%s[%d]", strings.ReplaceAll(strings.TrimSpace(name), " ", "_"), index)
+}
+
+func (i *Intermediary) evaluatePolicies(intent Intent) PolicyResult {
+	for _, policyDef := range i.policies {
+		for ruleIndex, rule := range policyDef.Rules {
+			if MatchGlob(rule.Action, intent.Action) && MatchGlob(rule.Resource, intent.Resource) {
+				matchedRule := rule
+				return PolicyResult{
+					Effect:      rule.Effect,
+					MatchedRule: &matchedRule,
+					Reason:      fmt.Sprintf("matched rule in policy %q", policyDef.Name),
+					RuleMatched: policyRuleLabel(policyDef.Name, ruleIndex),
+				}
+			}
+		}
+	}
+	return PolicyResult{
+		Effect: Deny,
+		Reason: "no matching rule; default deny",
+	}
+}
+
+// EvaluateWithContext checks an intent against the workflow-class matrix first,
+// then applies any configured glob rules as an additional tightening layer.
+func (i *Intermediary) EvaluateWithContext(intent Intent, evalCtx EvaluationContext) PolicyResult {
+	result := PolicyResult{
+		WorkflowClass: defaultWorkflowClass(evalCtx.WorkflowClass),
+		VesselID:      strings.TrimSpace(evalCtx.VesselID),
+	}
+	if result.VesselID == "" {
+		result.VesselID = intent.AgentID
+	}
+
+	if op, ok := classifyOperation(intent); ok {
+		result.Operation = string(op)
+		result.FilePath = strings.TrimSpace(evalCtx.FilePath)
+		if result.FilePath == "" && op == policy.OpWriteControlPlane {
+			result.FilePath = intent.Resource
+		}
+
+		classDecision := policy.Evaluate(result.WorkflowClass, op)
+		result.Effect = policyEffect(classDecision)
+		result.Reason = classDecision.Rule
+		result.RuleMatched = classDecision.Rule
+		if !classDecision.Allowed {
+			return result
+		}
+		if len(i.policies) == 0 {
+			return result
+		}
+	}
+
+	globResult := i.evaluatePolicies(intent)
+	globResult.WorkflowClass = result.WorkflowClass
+	globResult.VesselID = result.VesselID
+	if globResult.Operation == "" {
+		globResult.Operation = result.Operation
+	}
+	if globResult.FilePath == "" {
+		globResult.FilePath = result.FilePath
+	}
+
+	if result.Operation != "" {
+		if len(i.policies) == 0 {
+			return result
+		}
+		if globResult.Effect == Allow {
+			return result
+		}
+	}
+	return globResult
+}
+
 // Evaluate checks an intent against all policies using first-match semantics.
 //
 // INV: Policy evaluation is deterministic for the same input.
 // INV: Default effect is Deny if no rule matches.
 func (i *Intermediary) Evaluate(intent Intent) PolicyResult {
-	for _, policy := range i.policies {
-		for _, rule := range policy.Rules {
-			if MatchGlob(rule.Action, intent.Action) && MatchGlob(rule.Resource, intent.Resource) {
-				return PolicyResult{
-					Effect:      rule.Effect,
-					MatchedRule: &rule,
-					Reason:      fmt.Sprintf("matched rule in policy %q", policy.Name),
-				}
-			}
-		}
-	}
-	// INV: Default effect is Deny if no rule matches.
-	return PolicyResult{
-		Effect: Deny,
-		Reason: "no matching rule; default deny",
-	}
+	return i.EvaluateWithContext(intent, EvaluationContext{})
 }
 
 // ErrEmptyAction is returned when an intent has an empty Action field.

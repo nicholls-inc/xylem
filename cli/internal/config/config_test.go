@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -1904,7 +1905,9 @@ func newSmokeIntermediary(t *testing.T, cfg *Config) *intermediary.Intermediary 
 	t.Helper()
 
 	auditLog := intermediary.NewAuditLog(filepath.Join(t.TempDir(), "audit.jsonl"))
-	return intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+	inter := intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+	inter.SetMode(cfg.HarnessPolicyMode())
+	return inter
 }
 
 func TestSmoke_S1_FullConfigLoadsWithHarnessSection(t *testing.T) {
@@ -1918,6 +1921,7 @@ harness:
       - ".xylem/workflows/*.yaml"
       - ".xylem/prompts/*/*.md"
   policy:
+    mode: "warn"
     rules:
       - action: "file_write"
         resource: ".xylem/*"
@@ -1946,6 +1950,7 @@ cost:
 	assert.Equal(t, "audit.jsonl", cfg.Harness.AuditLog)
 	require.Len(t, cfg.Harness.ProtectedSurfaces.Paths, 4)
 	require.Len(t, cfg.Harness.Policy.Rules, 4)
+	assert.Equal(t, intermediary.PolicyModeWarn, cfg.HarnessPolicyMode())
 	require.NotNil(t, cfg.Observability.Enabled)
 	assert.True(t, *cfg.Observability.Enabled)
 	assert.Equal(t, 1.0, cfg.Observability.SampleRate)
@@ -2020,40 +2025,53 @@ func TestSmoke_S5_InvalidPolicyEffectRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "approve_maybe")
 }
 
+func TestSmoke_S5b_InvalidPolicyModeRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  policy:
+    mode: "observe"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.policy.mode")
+	assert.Contains(t, err.Error(), "invalid policy mode")
+}
+
 func TestSmoke_S6_DefaultPolicyDeniesHarnessWrite(t *testing.T) {
-	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+	result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 		Action:   "file_write",
 		Resource: ".xylem/HARNESS.md",
 		AgentID:  "vessel-001",
-	})
+	}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-001"})
 
 	assert.Equal(t, intermediary.Deny, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, "file_write", result.MatchedRule.Action)
-	assert.Equal(t, ".xylem/HARNESS.md", result.MatchedRule.Resource)
+	assert.Equal(t, "write_control_plane", result.Operation)
+	assert.Equal(t, "delivery.no_control_plane_writes", result.RuleMatched)
+	assert.Equal(t, policy.Delivery, result.WorkflowClass)
 }
 
 func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
 	// Autonomous self-healing requires git_push to succeed without manual
 	// approval. Operators who want approval gates can override via
 	// harness.policy in .xylem.yml.
-	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+	result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 		Action:   "git_push",
 		Resource: "main",
 		AgentID:  "vessel-002",
-	})
+	}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-002"})
 
 	assert.Equal(t, intermediary.Allow, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, "*", result.MatchedRule.Action)
-	assert.Equal(t, "*", result.MatchedRule.Resource)
+	assert.Equal(t, "push_branch", result.Operation)
+	assert.Equal(t, "delivery.feature_branch_push_allowed", result.RuleMatched)
 }
 
 func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
 	tests := []struct {
-		name     string
-		action   string
-		resource string
+		name            string
+		action          string
+		resource        string
+		wantOperation   string
+		wantRuleMatched string
 	}{
 		{
 			name:     "git commit",
@@ -2061,43 +2079,54 @@ func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
 			resource: "*",
 		},
 		{
-			name:     "git push",
-			action:   "git_push",
-			resource: "main",
+			name:            "git push",
+			action:          "git_push",
+			resource:        "main",
+			wantOperation:   "push_branch",
+			wantRuleMatched: "delivery.feature_branch_push_allowed",
 		},
 		{
-			name:     "pull request create",
-			action:   "pr_create",
-			resource: "owner/name",
+			name:            "pull request create",
+			action:          "pr_create",
+			resource:        "owner/name",
+			wantOperation:   "create_pr",
+			wantRuleMatched: "delivery.pr_creation_allowed",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+			result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 				Action:   tt.action,
 				Resource: tt.resource,
 				AgentID:  "vessel-009",
-			})
+			}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-009"})
 
 			assert.Equal(t, intermediary.Allow, result.Effect)
-			require.NotNil(t, result.MatchedRule)
-			assert.Equal(t, "*", result.MatchedRule.Action)
-			assert.Equal(t, "*", result.MatchedRule.Resource)
+			assert.Equal(t, policy.Delivery, result.WorkflowClass)
+			if tt.action == "git_commit" {
+				assert.Empty(t, result.Operation)
+				assert.NotNil(t, result.MatchedRule)
+				assert.Equal(t, "*", result.MatchedRule.Action)
+				assert.Equal(t, "*", result.MatchedRule.Resource)
+				return
+			}
+			assert.Equal(t, tt.wantOperation, result.Operation)
+			assert.Equal(t, tt.wantRuleMatched, result.RuleMatched)
 		})
 	}
 }
 
 func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {
-	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+	result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 		Action:   "file_write",
 		Resource: ".xylem/prompts/fix-bug/analyze.md",
 		AgentID:  "vessel-004",
-	})
+	}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-004"})
 
 	assert.Equal(t, intermediary.Deny, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, ".xylem/prompts/*/*.md", result.MatchedRule.Resource)
+	assert.Equal(t, "write_control_plane", result.Operation)
+	assert.Equal(t, "delivery.no_control_plane_writes", result.RuleMatched)
 }
 
 func TestSmoke_S8_DefaultPolicyAllowsPhaseExecute(t *testing.T) {
