@@ -15,6 +15,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/daemonhealth"
@@ -37,7 +38,7 @@ func newDaemonCmd() *cobra.Command {
 			return cmdDaemon(deps.cfg, deps.q, deps.wt)
 		},
 	}
-	cmd.AddCommand(newDaemonStopCmd())
+	cmd.AddCommand(newDaemonStopCmd(), newDaemonReloadCmd())
 	return cmd
 }
 
@@ -89,6 +90,19 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	reloadSignals := make(chan os.Signal, 1)
+	signal.Notify(reloadSignals, syscall.SIGHUP)
+	defer signal.Stop(reloadSignals)
+
+	rootDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	runtime, err := newDaemonRuntime(rootDir, viper.GetString("config"), q, wt, cfg)
+	if err != nil {
+		return fmt.Errorf("create daemon runtime: %w", err)
+	}
+	defer runtime.cleanupRetired()
 
 	startedAt := daemonNow()
 	lastActivityAt := startedAt
@@ -101,10 +115,8 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	}
 	var backlogCount int
 	var stallChecks []daemonhealth.Check
-	scanRunner := newCmdRunner(cfg)
 	scan := func(ctx context.Context) (scanner.ScanResult, error) {
-		s := scanner.New(cfg, q, scanRunner)
-		result, err := s.Scan(ctx)
+		result, err := runtime.scan(ctx)
 		if err != nil {
 			return result, err
 		}
@@ -117,7 +129,7 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 			backlogCount = 0
 			return result, nil
 		}
-		count, err := s.BacklogCount(ctx)
+		count, err := runtime.backlogCount(ctx)
 		if err != nil {
 			slog.Warn("daemon backlog check failed", "error", err)
 			backlogCount = 0
@@ -132,39 +144,20 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		}
 		return result, nil
 	}
-	cmdRunner := newCmdRunner(cfg)
-	drainRunner, cleanupDrainRunner := buildDrainRunner(cfg, q, wt, cmdRunner)
-	defer cleanupDrainRunner()
-	drainRunner.Reporter = buildReporter(cfg, cmdRunner)
-	drainRunner.DrainBudget = drainInterval
-	commandSpan := startCommandSpan(drainRunner.Tracer, ctx, "daemon", false, cfg.StateDir)
+	commandSpan := startCommandSpan(runtime.currentHandle().drain.Tracer, ctx, "daemon", false, cfg.StateDir)
 	var commandErr error
 	defer func() {
-		finishCommandSpan(drainRunner.Tracer, commandSpan, commandErr)
+		finishCommandSpan(runtime.currentHandle().drain.Tracer, commandSpan, commandErr)
 	}()
 	if spanCtx := commandSpan.Context(); spanCtx != nil {
 		ctx = spanCtx
 	}
 	drain := func(ctx context.Context) (runner.DrainResult, error) {
-		return drainRunner.Drain(ctx)
+		return runtime.drainOnce(ctx)
 	}
 	check := func(ctx context.Context) {
-		findings := drainRunner.CheckStalledVessels(ctx)
+		findings := runtime.runChecks(ctx, runtime.currentConfig().Daemon.AutoMerge)
 		stallChecks = daemonChecksFromFindings(findings, daemonNow())
-		drainRunner.CheckWaitingVessels(ctx)
-		drainRunner.CheckHungVessels(ctx)
-		if removed := drainRunner.PruneStaleWorktrees(ctx); removed > 0 {
-			slog.Info("daemon pruned stale worktrees", "removed", removed)
-		}
-		// Cancel pending vessels whose PRs are already merged/closed,
-		// freeing concurrency slots for real work.
-		drainRunner.CancelStalePRVessels(ctx)
-		// Auto-merge: best-effort request copilot review on merge-ready
-		// vessel PRs, then admin-merge once deterministic safety checks
-		// are green.
-		if cfg.Daemon.AutoMerge {
-			autoMergeXylemPRs(ctx, cfg.Daemon)
-		}
 	}
 
 	tickHook := func(now time.Time, state daemonTickState) {
@@ -192,7 +185,20 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		}
 	}
 
-	commandErr = daemonLoop(ctx, q, drainRunner, scan, drain, check, upgrade, tickHook, scanInterval, drainInterval, upgradeInterval)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-reloadSignals:
+				if err := runtime.triggerSignalReload(); err != nil {
+					slog.Warn("daemon signal reload request failed", "error", err)
+				}
+			}
+		}
+	}()
+
+	commandErr = daemonLoop(ctx, q, runtime, scan, drain, check, upgrade, tickHook, runtime.intervals, scanInterval, drainInterval, upgradeInterval)
 	return commandErr
 }
 
@@ -303,12 +309,7 @@ const upgradeOverdueMultiplier = 3
 //     Once in_flight reaches zero, the normal path fires.
 //
 // Pass nil/zero upgrade/upgradeInterval to disable.
-func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, tick tickFunc, scanInterval, drainInterval, upgradeInterval time.Duration) error {
-	tickInterval := scanInterval
-	if drainInterval < tickInterval {
-		tickInterval = drainInterval
-	}
-
+func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, scan scanFunc, drain drainFunc, check checkFunc, upgrade upgradeFunc, tick tickFunc, intervals daemonIntervalSource, scanInterval, drainInterval, upgradeInterval time.Duration) error {
 	var lastScan, lastDrain, lastUpgrade time.Time
 	var draining int32 // 0=idle, 1=running
 	var drainWg sync.WaitGroup
@@ -346,8 +347,18 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 		}
 
 		now := daemonNow()
+		currentScanInterval, currentDrainInterval := scanInterval, drainInterval
+		if intervals != nil {
+			if updatedScan, updatedDrain := intervals(); updatedScan > 0 && updatedDrain > 0 {
+				currentScanInterval, currentDrainInterval = updatedScan, updatedDrain
+			}
+		}
+		tickInterval := currentScanInterval
+		if currentDrainInterval < tickInterval {
+			tickInterval = currentDrainInterval
+		}
 
-		if now.Sub(lastScan) >= scanInterval {
+		if now.Sub(lastScan) >= currentScanInterval {
 			scanResult, err := scan(ctx)
 			if err != nil {
 				slog.Error("daemon scan failed", "error", err)
@@ -407,7 +418,7 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 		// upgrade above handles recovery via exec().
 		phantomInFlight := upgradeElapsed >= 30*time.Minute && inFlight > 0 && daemonQueueCounts(q).running == 0
 		drainPaused := upgradeOverdue && inFlight > 0 && !phantomInFlight
-		if !drainPaused && now.Sub(lastDrain) >= drainInterval {
+		if !drainPaused && now.Sub(lastDrain) >= currentDrainInterval {
 			if atomic.CompareAndSwapInt32(&draining, 0, 1) {
 				lastDrain = now
 				drainWg.Add(1)
