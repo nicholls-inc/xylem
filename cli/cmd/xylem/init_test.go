@@ -49,6 +49,7 @@ var expectedSelfHostingWorkflows = []string{
 	"initiative-tracker",
 	"metrics-collector",
 	"portfolio-analyst",
+	"release-cadence",
 	"sota-gap-analysis",
 	"unblock-wave",
 }
@@ -682,6 +683,7 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	assert.Equal(t, expectedWorkflows, scaffoldedWorkflowNames(t, dir))
 	assert.Contains(t, output, "Created .xylem/workflows/continuous-simplicity.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/implement-harness.yaml")
+	assert.Contains(t, output, "Created .xylem/workflows/release-cadence.yaml")
 	assert.Contains(t, output, "Created .xylem/workflows/unblock-wave.yaml")
 
 	lockData, err := os.ReadFile(filepath.Join(dir, ".xylem", "profile.lock"))
@@ -694,6 +696,10 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
 	assert.Contains(t, cfg.Sources, "harness-impl")
 	assert.Contains(t, cfg.Sources, "harness-pr-lifecycle")
+	assert.Contains(t, cfg.Sources, "release-cadence")
+	assert.Equal(t, []string{"ready-to-merge"}, cfg.Daemon.EffectiveAutoMergeLabels())
+	assert.Equal(t, "^((feat|fix|chore)/issue-[0-9]+|release-please--.+)", cfg.Daemon.EffectiveAutoMergeBranchPattern())
+	assert.Equal(t, "copilot-pull-request-reviewer", cfg.Daemon.EffectiveAutoMergeReviewer())
 	require.NoError(t, cfg.Validate())
 }
 

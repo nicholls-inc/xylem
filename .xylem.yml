@@ -151,6 +151,16 @@ sources:
         workflow: continuous-improvement
         ref: continuous-improvement
 
+  release-cadence:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "4h"
+    timeout: "15m"
+    tasks:
+      label-mature-release-pr:
+        workflow: release-cadence
+        ref: release-cadence
+
   backlog-refinement:
     type: scheduled
     repo: nicholls-inc/xylem
@@ -198,7 +208,7 @@ daemon:
   auto_merge: true
   auto_merge_repo: nicholls-inc/xylem
   auto_merge_labels: [ready-to-merge]
-  auto_merge_branch_pattern: "^(feat|fix|chore)/issue-\\d+"
+  auto_merge_branch_pattern: "^((feat|fix|chore)/issue-[0-9]+|release-please--.+)"
   auto_merge_reviewer: "copilot-pull-request-reviewer"
 
 concurrency:

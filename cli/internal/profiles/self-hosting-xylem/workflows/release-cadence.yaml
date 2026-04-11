@@ -1,0 +1,9 @@
+name: release-cadence
+class: harness-maintenance
+description: "Periodically promote mature release-please PRs into the daemon auto-merge path"
+phases:
+  - name: label_ready
+    type: command
+    run: xylem release-cadence label-ready --repo {{ .Repo }}
+    noop:
+      match: XYLEM_NOOP

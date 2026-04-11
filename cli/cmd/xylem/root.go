@@ -97,6 +97,7 @@ func newRootCmd() *cobra.Command {
 		newBootstrapCmd(),
 		newContinuousImprovementCmd(),
 		newContinuousSimplicityCmd(),
+		newReleaseCadenceCmd(),
 		newHardenCmd(),
 		newDtuCmd(),
 		newShimDispatchCmd(),

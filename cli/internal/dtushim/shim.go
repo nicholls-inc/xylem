@@ -1599,10 +1599,18 @@ func encodePR(state *dtu.State, repo *dtu.Repository, pr dtu.PullRequest, fields
 			out[field] = encodeLabels(pr.Labels)
 		case "state":
 			out[field] = prState(pr)
+		case "createdAt":
+			if !pr.CreatedAt.IsZero() {
+				out[field] = pr.CreatedAt.UTC().Format(time.RFC3339)
+			} else {
+				out[field] = time.Time{}.Format(time.RFC3339)
+			}
 		case "headRefName":
 			out[field] = pr.HeadBranch
 		case "headRefOid":
 			out[field] = pr.HeadSHA
+		case "commits":
+			out[field] = encodePRCommits(pr)
 		case "mergeable":
 			out[field] = prMergeable(pr)
 		case "reviewDecision":
@@ -1624,6 +1632,24 @@ func encodePR(state *dtu.State, repo *dtu.Repository, pr dtu.PullRequest, fields
 		case "mergeCommit":
 			out[field] = map[string]any{"oid": pr.HeadSHA}
 		}
+	}
+	return out
+}
+
+func encodePRCommits(pr dtu.PullRequest) []map[string]any {
+	if len(pr.Commits) == 0 {
+		if strings.TrimSpace(pr.HeadSHA) == "" {
+			return []map[string]any{}
+		}
+		return []map[string]any{{"oid": pr.HeadSHA}}
+	}
+	out := make([]map[string]any, 0, len(pr.Commits))
+	for _, commit := range pr.Commits {
+		oid := strings.TrimSpace(commit.OID)
+		if oid == "" {
+			continue
+		}
+		out = append(out, map[string]any{"oid": oid})
 	}
 	return out
 }

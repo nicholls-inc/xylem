@@ -3,6 +3,7 @@ package dtu
 import (
 	"fmt"
 	"strings"
+	"time"
 )
 
 const (
@@ -529,25 +530,32 @@ type Issue struct {
 
 // PullRequest describes a GitHub pull request.
 type PullRequest struct {
-	Number                int              `yaml:"number" json:"number"`
-	Title                 string           `yaml:"title" json:"title"`
-	Body                  string           `yaml:"body,omitempty" json:"body,omitempty"`
-	URL                   string           `yaml:"url,omitempty" json:"url,omitempty"`
-	State                 PullRequestState `yaml:"state,omitempty" json:"state,omitempty"`
-	Merged                bool             `yaml:"merged,omitempty" json:"merged,omitempty"`
-	AutoMergeEnabled      bool             `yaml:"auto_merge_enabled,omitempty" json:"auto_merge_enabled,omitempty"`
-	AutoMergeDeleteBranch bool             `yaml:"auto_merge_delete_branch,omitempty" json:"auto_merge_delete_branch,omitempty"`
-	Mergeable             string           `yaml:"mergeable,omitempty" json:"mergeable,omitempty"`
-	ReviewDecision        string           `yaml:"review_decision,omitempty" json:"review_decision,omitempty"`
-	Labels                []string         `yaml:"labels,omitempty" json:"labels,omitempty"`
-	BaseBranch            string           `yaml:"base_branch" json:"base_branch"`
-	HeadBranch            string           `yaml:"head_branch" json:"head_branch"`
-	HeadSHA               string           `yaml:"head_sha" json:"head_sha"`
-	Comments              []Comment        `yaml:"comments,omitempty" json:"comments,omitempty"`
-	Reviews               []Review         `yaml:"reviews,omitempty" json:"reviews,omitempty"`
-	ReviewRequests        []string         `yaml:"review_requests,omitempty" json:"review_requests,omitempty"`
-	ReviewThreads         []ReviewThread   `yaml:"review_threads,omitempty" json:"review_threads,omitempty"`
-	Checks                []Check          `yaml:"checks,omitempty" json:"checks,omitempty"`
+	Number                int                 `yaml:"number" json:"number"`
+	Title                 string              `yaml:"title" json:"title"`
+	Body                  string              `yaml:"body,omitempty" json:"body,omitempty"`
+	URL                   string              `yaml:"url,omitempty" json:"url,omitempty"`
+	CreatedAt             time.Time           `yaml:"created_at,omitempty" json:"created_at,omitempty"`
+	State                 PullRequestState    `yaml:"state,omitempty" json:"state,omitempty"`
+	Merged                bool                `yaml:"merged,omitempty" json:"merged,omitempty"`
+	AutoMergeEnabled      bool                `yaml:"auto_merge_enabled,omitempty" json:"auto_merge_enabled,omitempty"`
+	AutoMergeDeleteBranch bool                `yaml:"auto_merge_delete_branch,omitempty" json:"auto_merge_delete_branch,omitempty"`
+	Mergeable             string              `yaml:"mergeable,omitempty" json:"mergeable,omitempty"`
+	ReviewDecision        string              `yaml:"review_decision,omitempty" json:"review_decision,omitempty"`
+	Labels                []string            `yaml:"labels,omitempty" json:"labels,omitempty"`
+	BaseBranch            string              `yaml:"base_branch" json:"base_branch"`
+	HeadBranch            string              `yaml:"head_branch" json:"head_branch"`
+	HeadSHA               string              `yaml:"head_sha" json:"head_sha"`
+	Comments              []Comment           `yaml:"comments,omitempty" json:"comments,omitempty"`
+	Reviews               []Review            `yaml:"reviews,omitempty" json:"reviews,omitempty"`
+	ReviewRequests        []string            `yaml:"review_requests,omitempty" json:"review_requests,omitempty"`
+	ReviewThreads         []ReviewThread      `yaml:"review_threads,omitempty" json:"review_threads,omitempty"`
+	Checks                []Check             `yaml:"checks,omitempty" json:"checks,omitempty"`
+	Commits               []PullRequestCommit `yaml:"commits,omitempty" json:"commits,omitempty"`
+}
+
+// PullRequestCommit describes a commit visible through `gh pr view --json commits`.
+type PullRequestCommit struct {
+	OID string `yaml:"oid" json:"oid"`
 }
 
 // HasBlockingMergeChecks reports whether any check still prevents a queued

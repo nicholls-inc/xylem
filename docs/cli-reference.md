@@ -357,6 +357,62 @@ xylem review
 
 ---
 
+## xylem release-cadence
+
+Deterministic helpers for release-please merge cadence.
+
+### Usage
+
+```
+xylem release-cadence <subcommand> [flags]
+```
+
+### Subcommands
+
+#### `xylem release-cadence label-ready`
+
+Finds the open `release-please` pull request, checks whether it is mature enough to cut, and applies the ready label that feeds the daemon auto-merge loop.
+
+##### Usage
+
+```bash
+xylem release-cadence label-ready [flags]
+```
+
+##### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--repo` | `string` | config repo | GitHub repository slug (`owner/name`). If omitted, xylem falls back to the repo configured in `.xylem.yml`. |
+| `--ready-label` | `string` | `ready-to-merge` | Label added once the release PR is mature. |
+| `--opt-out-label` | `string` | `no-auto-admin-merge` | Label that blocks automatic promotion for the current release PR. |
+| `--min-age` | `duration` | `168h` | Minimum PR age before xylem marks the release PR ready. |
+| `--min-commits` | `int` | `5` | Minimum queued commit count before xylem marks the release PR ready. |
+| `--now` | `string` | current time | Optional RFC3339 timestamp override for deterministic tests and replay. |
+
+##### Behavior
+
+1. Lists open pull requests in the target repo and selects the `release-please` PR by branch/title shape.
+2. Returns a no-op if there is no release PR, if it already has the ready label, or if the opt-out label is present.
+3. Checks PR age and queued commit count against the configured thresholds.
+4. Applies the ready label with `gh pr edit --add-label` once the PR is mature.
+5. Prints `XYLEM_NOOP: ...` for no-op cases so scheduled workflows can short-circuit cleanly.
+
+##### Examples
+
+```bash
+# Use the repo from .xylem.yml
+xylem release-cadence label-ready
+
+# Check a different repository with stricter release thresholds
+xylem release-cadence label-ready \
+  --repo owner/repo \
+  --min-age 72h \
+  --min-commits 8
+```
+
+---
+
 ## xylem lessons
 
 Synthesize recurring failed-run patterns into institutional-memory proposals for `.xylem/HARNESS.md`.

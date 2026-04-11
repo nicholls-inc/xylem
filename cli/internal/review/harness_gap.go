@@ -16,6 +16,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
+	"github.com/nicholls-inc/xylem/cli/internal/releasecadence"
 )
 
 const (
@@ -29,8 +30,6 @@ const (
 	harnessGapStaleConflictThreshold = 1
 	harnessGapRestartThreshold       = 1
 	harnessGapIdleBacklogThreshold   = 15 * time.Minute
-	harnessGapReleasePRAgeThreshold  = 7 * 24 * time.Hour
-	harnessGapReleasePRCommitMinimum = 5
 	harnessGapFailedBacklogThreshold = 3
 	harnessGapLocalSignalsLookback   = 24 * time.Hour
 	harnessGapDaemonLogFileName      = "daemon.log"
@@ -496,7 +495,7 @@ func detectReleaseCadenceGap(ctx context.Context, repo string, runner issueRunne
 	for i := range prs {
 		head := strings.ToLower(strings.TrimSpace(prs[i].HeadRefName))
 		title := strings.ToLower(strings.TrimSpace(prs[i].Title))
-		if strings.HasPrefix(head, "release-please") || strings.Contains(title, "release please") {
+		if releasecadence.MatchesReleasePR(head, title) {
 			releasePR = &prs[i]
 			break
 		}
@@ -505,7 +504,7 @@ func detectReleaseCadenceGap(ctx context.Context, repo string, runner issueRunne
 		return nil, nil
 	}
 	age := now.Sub(releasePR.CreatedAt)
-	if age < harnessGapReleasePRAgeThreshold {
+	if age < releasecadence.DefaultMinAge {
 		return nil, nil
 	}
 
@@ -520,7 +519,7 @@ func detectReleaseCadenceGap(ctx context.Context, repo string, runner issueRunne
 	if err := json.Unmarshal(commitOut, &details); err != nil {
 		return nil, fmt.Errorf("detect release cadence gap: parse gh pr view output: %w", err)
 	}
-	if len(details.Commits) < harnessGapReleasePRCommitMinimum {
+	if len(details.Commits) < releasecadence.DefaultMinCommits {
 		return nil, nil
 	}
 
@@ -529,7 +528,7 @@ func detectReleaseCadenceGap(ctx context.Context, repo string, runner issueRunne
 		"harness-gap-analysis: release-please cadence is drifting",
 		fmt.Sprintf("release PR #%d has been open for %s with %d queued commit(s)", releasePR.Number, age.Round(24*time.Hour), len(details.Commits)),
 		len(details.Commits),
-		harnessGapReleasePRCommitMinimum,
+		releasecadence.DefaultMinCommits,
 		[]string{
 			fmt.Sprintf("#%d opened at %s and still accumulating commits on `%s`", releasePR.Number, releasePR.CreatedAt.Format(time.RFC3339), releasePR.HeadRefName),
 		},
