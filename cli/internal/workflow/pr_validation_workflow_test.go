@@ -55,13 +55,20 @@ func TestSmoke_S6_ResolveConflictsWorkflowUsesRepoAndValidationTemplates(t *test
 	assert.Equal(t, "command", mergeMainPhase.Type)
 	require.NotNil(t, mergeMainPhase.NoOp, "workflow %q missing merge_main noop", wf.Name)
 	assert.Equal(t, "XYLEM_NOOP", mergeMainPhase.NoOp.Match)
+	assert.Contains(t, mergeMainPhase.Run, "head_branch=\"$(gh pr view {{ .Issue.Number }} --repo {{ .Repo.Slug }} --json headRefName --jq '.headRefName')\"")
+	assert.Contains(t, mergeMainPhase.Run, "git fetch origin \"$head_branch\" \"{{ .Repo.DefaultBranch }}\"")
+	assert.Contains(t, mergeMainPhase.Run, "git branch -D \"$head_branch\" >/dev/null 2>&1 || true")
 	assert.Contains(t, mergeMainPhase.Run, "gh pr checkout {{ .Issue.Number }} --repo {{ .Repo.Slug }}")
+	assert.Contains(t, mergeMainPhase.Run, "git reset --hard \"origin/$head_branch\"")
 	assert.Contains(t, mergeMainPhase.Run, "git merge origin/{{ .Repo.DefaultBranch }} --no-commit --no-ff")
 	assert.Contains(t, mergeMainPhase.Run, "git diff --name-only --diff-filter=U")
 	assert.True(t, commandContainsInOrder(
 		mergeMainPhase.Run,
+		"head_branch=\"$(gh pr view {{ .Issue.Number }} --repo {{ .Repo.Slug }} --json headRefName --jq '.headRefName')\"",
+		"git fetch origin \"$head_branch\" \"{{ .Repo.DefaultBranch }}\"",
+		"git branch -D \"$head_branch\" >/dev/null 2>&1 || true",
 		"gh pr checkout {{ .Issue.Number }} --repo {{ .Repo.Slug }}",
-		"git fetch origin {{ .Repo.DefaultBranch }}",
+		"git reset --hard \"origin/$head_branch\"",
 		"git merge origin/{{ .Repo.DefaultBranch }} --no-commit --no-ff",
 	))
 

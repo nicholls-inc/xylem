@@ -555,7 +555,47 @@ func TestSmoke_S5_SecurityComplianceWorkflowParsesAsFourPhaseAudit(t *testing.T)
 	assert.Nil(t, wf.Phases[3].Gate)
 }
 
-func TestSmoke_S6_SecurityComplianceScheduledSourceUsesDailyCadence(t *testing.T) {
+func TestSmoke_S6_ResolveConflictsWorkflowResyncsHeadBeforeMerge(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	workflowData, ok := composed.Workflows["resolve-conflicts"]
+	require.True(t, ok)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(workflowData, &wf))
+	require.Len(t, wf.Phases, 4)
+
+	mergeMainPhase := wf.Phases[0]
+	assert.Equal(t, "merge_main", mergeMainPhase.Name)
+	assert.Equal(t, "command", mergeMainPhase.Type)
+	assert.Contains(t, mergeMainPhase.Run, "head_branch=\"$(gh pr view {{ .Issue.Number }} --json headRefName --jq '.headRefName')\"")
+	assert.Contains(t, mergeMainPhase.Run, "git fetch origin \"$head_branch\" main")
+	assert.Contains(t, mergeMainPhase.Run, "git branch -D \"$head_branch\" >/dev/null 2>&1 || true")
+	assert.Contains(t, mergeMainPhase.Run, "git reset --hard \"origin/$head_branch\"")
+	assert.Contains(t, mergeMainPhase.Run, "git merge origin/main --no-commit --no-ff")
+	require.NotNil(t, mergeMainPhase.NoOp)
+	assert.Equal(t, "XYLEM_NOOP", mergeMainPhase.NoOp.Match)
+
+	analyzePrompt, ok := composed.Prompts["resolve-conflicts/analyze"]
+	require.True(t, ok)
+	assert.Contains(t, string(analyzePrompt), "{{.PreviousOutputs.merge_main}}")
+	assert.Contains(t, string(analyzePrompt), "Do not rerun the merge.")
+
+	resolvePrompt, ok := composed.Prompts["resolve-conflicts/resolve"]
+	require.True(t, ok)
+	assert.Contains(t, string(resolvePrompt), "{{.PreviousOutputs.merge_main}}")
+	assert.Contains(t, string(resolvePrompt), "complete the in-progress merge before validation")
+
+	pushPrompt, ok := composed.Prompts["resolve-conflicts/push"]
+	require.True(t, ok)
+	assert.Contains(t, string(pushPrompt), "Push the already-completed merge resolution")
+	assert.NotContains(t, string(pushPrompt), "git add -A && git commit")
+}
+
+func TestSmoke_S7_SecurityComplianceScheduledSourceUsesDailyCadence(t *testing.T) {
 	t.Parallel()
 
 	profile, err := Load("core")
@@ -567,7 +607,7 @@ func TestSmoke_S6_SecurityComplianceScheduledSourceUsesDailyCadence(t *testing.T
 	assert.Contains(t, string(configTemplate), "security-compliance:\n    type: schedule\n    cadence: \"@daily\"\n    workflow: security-compliance")
 }
 
-func TestSmoke_S7_SecurityCompliancePromptsDocumentReportingContract(t *testing.T) {
+func TestSmoke_S8_SecurityCompliancePromptsDocumentReportingContract(t *testing.T) {
 	t.Parallel()
 
 	profile, err := Load("core")

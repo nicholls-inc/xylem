@@ -366,9 +366,11 @@ func (m *Manager) Remove(ctx context.Context, worktreePath string) error {
 		span.RecordError(err)
 		return fmt.Errorf("git worktree remove: %w", err)
 	}
-	// Best-effort branch deletion using the real branch name
 	if branchName != "" {
-		m.Runner.Run(ctx, "git", "branch", "-d", branchName) //nolint:errcheck
+		if _, err := m.Runner.Run(ctx, "git", "branch", "-D", branchName); err != nil {
+			span.RecordError(err)
+			return fmt.Errorf("git branch -D %s: %w", branchName, err)
+		}
 	}
 	span.AddAttributes(observability.WorktreeSpanAttributes(observability.WorktreeSpanData{
 		Action: "remove",

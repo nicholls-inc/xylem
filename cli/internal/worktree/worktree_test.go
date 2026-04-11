@@ -79,6 +79,26 @@ func (m *mockRunner) called(name string, args ...string) bool {
 	return false
 }
 
+func (m *mockRunner) callIndex(name string, args ...string) int {
+	target := append([]string{name}, args...)
+	for idx, call := range m.calls {
+		if len(call) != len(target) {
+			continue
+		}
+		match := true
+		for i := range call {
+			if call[i] != target[i] {
+				match = false
+				break
+			}
+		}
+		if match {
+			return idx
+		}
+	}
+	return -1
+}
+
 func TestDefaultBranchFromGH(t *testing.T) {
 	r := newMock()
 	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
@@ -198,11 +218,11 @@ func TestRemoveDeletesCorrectBranchWithSlash(t *testing.T) {
 
 	// The fix: must delete the FULL branch name "fix/issue-42-slug",
 	// NOT the truncated "issue-42-slug" that filepath.Base() would return.
-	if !r.called("git", "branch", "-d", "fix/issue-42-slug") {
-		t.Errorf("expected 'git branch -d fix/issue-42-slug', got calls: %v", r.calls)
+	if !r.called("git", "branch", "-D", "fix/issue-42-slug") {
+		t.Errorf("expected 'git branch -D fix/issue-42-slug', got calls: %v", r.calls)
 	}
-	if r.called("git", "branch", "-d", "issue-42-slug") {
-		t.Error("should NOT call 'git branch -d issue-42-slug' (truncated by filepath.Base)")
+	if r.called("git", "branch", "-D", "issue-42-slug") {
+		t.Error("should NOT call 'git branch -D issue-42-slug' (truncated by filepath.Base)")
 	}
 }
 
@@ -218,8 +238,8 @@ func TestRemoveWithAbsoluteWorktreePath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !r.called("git", "branch", "-d", "feat/add-logging") {
-		t.Errorf("expected 'git branch -d feat/add-logging', got calls: %v", r.calls)
+	if !r.called("git", "branch", "-D", "feat/add-logging") {
+		t.Errorf("expected 'git branch -D feat/add-logging', got calls: %v", r.calls)
 	}
 }
 
@@ -241,6 +261,26 @@ func TestRemoveSkipsBranchDeleteWhenNotFound(t *testing.T) {
 			t.Errorf("should not call git branch when branch name is unknown, got: %v", call)
 		}
 	}
+}
+
+func TestSmoke_S1_RemoveDeletesPersistedBranchRefAfterWorktreeCleanup(t *testing.T) {
+	t.Parallel()
+
+	r := newMock()
+	porcelain := "worktree /repo/.claude/worktrees/feat/issue-235-235\nHEAD abc123\nbranch refs/heads/feat/issue-235-235\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+
+	m := New("/repo", r)
+	err := m.Remove(context.Background(), ".claude/worktrees/feat/issue-235-235")
+	require.NoError(t, err)
+
+	removeIdx := r.callIndex("git", "worktree", "remove", ".claude/worktrees/feat/issue-235-235", "--force")
+	deleteIdx := r.callIndex("git", "branch", "-D", "feat/issue-235-235")
+	require.NotEqual(t, -1, removeIdx, "expected worktree removal command")
+	require.NotEqual(t, -1, deleteIdx, "expected stale branch ref deletion command")
+
+	assert.Less(t, removeIdx, deleteIdx, "expected stale branch ref deletion after worktree removal")
+	assert.Equal(t, []string{"git", "branch", "-D", "feat/issue-235-235"}, r.calls[deleteIdx])
 }
 
 func TestListParsesPorcelain(t *testing.T) {
@@ -697,8 +737,24 @@ func TestRemoveWorktreeRemoveFails(t *testing.T) {
 		t.Errorf("expected worktree-remove error, got: %v", err)
 	}
 	// Should NOT attempt branch delete if remove failed
-	if r.called("git", "branch", "-d", "fix/issue-1") {
+	if r.called("git", "branch", "-D", "fix/issue-1") {
 		t.Error("should not delete branch when worktree remove fails")
+	}
+}
+
+func TestRemoveBranchDeleteFails(t *testing.T) {
+	r := newMock()
+	porcelain := "worktree /repo/.claude/worktrees/fix/issue-2\nHEAD abc\nbranch refs/heads/fix/issue-2\n\n"
+	r.setOutput("git worktree list --porcelain", []byte(porcelain))
+	r.setErr("git branch -D fix/issue-2", errors.New("branch is checked out elsewhere"))
+
+	m := New("/repo", r)
+	err := m.Remove(context.Background(), ".claude/worktrees/fix/issue-2")
+	if err == nil {
+		t.Fatal("expected error when branch delete fails")
+	}
+	if !strings.Contains(err.Error(), "git branch -D fix/issue-2") {
+		t.Errorf("expected branch-delete error, got: %v", err)
 	}
 }
 
@@ -983,7 +1039,7 @@ func TestRemoveResolvesRelativeRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !r.called("git", "branch", "-d", "fix/issue-42-test") {
+	if !r.called("git", "branch", "-D", "fix/issue-42-test") {
 		t.Errorf("expected branch deletion with relative root, got calls: %v", r.calls)
 	}
 }
