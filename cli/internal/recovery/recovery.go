@@ -164,6 +164,11 @@ type DiagnosisInput struct {
 	Artifact *Artifact
 }
 
+type RefreshOptions struct {
+	ReviewedAt time.Time
+	Rationale  string
+}
+
 type RemediationState struct {
 	SourceInputFP    string
 	HarnessDigest    string
@@ -536,6 +541,82 @@ func LoadForVessel(stateDir, vesselID string) (*Artifact, error) {
 		return nil, fmt.Errorf("load recovery artifact: invalid vessel ID: %w", err)
 	}
 	return Load(Path(stateDir, vesselID))
+}
+
+func RefreshRetryDecision(artifact *Artifact, opts RefreshOptions) (*Artifact, error) {
+	if artifact == nil {
+		return nil, fmt.Errorf("refresh retry decision: artifact must not be nil")
+	}
+
+	updated := cloneArtifact(artifact)
+	reviewedAt := opts.ReviewedAt.UTC()
+	if reviewedAt.IsZero() {
+		reviewedAt = time.Now().UTC()
+	}
+
+	updated.SchemaVersion = schemaVersion
+	updated.DecisionSource = DecisionSourceDiagnosis
+	updated.RecoveryAction = ActionRetry
+	updated.Confidence = max(updated.Confidence, 0.8)
+	updated.Rationale = strings.TrimSpace(opts.Rationale)
+	if updated.Rationale == "" {
+		updated.Rationale = fmt.Sprintf(
+			"A human refreshed the failure-review decision at %s after reviewing the cited artifacts and verifying that the relevant fix landed.",
+			reviewedAt.Format(time.RFC3339),
+		)
+	}
+	if len(updated.EvidencePaths) == 0 {
+		updated.EvidencePaths = []string{filepath.ToSlash(filepath.Join("phases", updated.VesselID, "summary.json"))}
+	}
+	updated.RetryPreconditions = []string{
+		"Review the cited artifacts and confirm the relevant fix landed before retrying.",
+	}
+	updated.FollowUpRoute = ""
+	updated.RetrySuppressed = false
+	updated.RetryOutcome = "not_attempted"
+	updated.UnlockDimension = "decision"
+	updated.RequiresDecisionRefresh = false
+	updated.RetryAfter = nil
+	switch {
+	case updated.RetryCap <= 0:
+		updated.RetryCap = max(DefaultRetryCap, updated.RetryCount+1)
+	case updated.RetryCap <= updated.RetryCount:
+		updated.RetryCap = updated.RetryCount + 1
+	}
+
+	updated.DecisionDigest = DecisionDigest(updated)
+	if updated.RemediationEpoch == "" {
+		updated.RemediationEpoch = strconv.Itoa(max(updated.RetryCount, 0))
+	}
+	updated.RemediationFP = ComputeRemediationFingerprint(RemediationState{
+		SourceInputFP:    updated.SourceInputFP,
+		HarnessDigest:    updated.HarnessDigest,
+		WorkflowDigest:   updated.WorkflowDigest,
+		DecisionDigest:   updated.DecisionDigest,
+		RemediationEpoch: updated.RemediationEpoch,
+	})
+	if err := Validate(updated); err != nil {
+		return nil, fmt.Errorf("refresh retry decision: %w", err)
+	}
+	return updated, nil
+}
+
+func RefreshRetryDecisionForVessel(stateDir, vesselID string, opts RefreshOptions) (*Artifact, error) {
+	if err := validatePathComponent(vesselID); err != nil {
+		return nil, fmt.Errorf("refresh retry decision: invalid vessel ID: %w", err)
+	}
+	artifact, err := LoadForVessel(stateDir, vesselID)
+	if err != nil {
+		return nil, fmt.Errorf("refresh retry decision: %w", err)
+	}
+	updated, err := RefreshRetryDecision(artifact, opts)
+	if err != nil {
+		return nil, err
+	}
+	if err := Save(stateDir, updated); err != nil {
+		return nil, fmt.Errorf("refresh retry decision: %w", err)
+	}
+	return updated, nil
 }
 
 func NextRetryVessel(base, parent queue.Vessel, artifact *Artifact, q *queue.Queue, createdAt time.Time, unlockDimension string) queue.Vessel {

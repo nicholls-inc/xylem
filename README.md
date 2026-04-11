@@ -172,6 +172,7 @@ See the [Workflows Guide](docs/workflows.md) for template variables, custom work
 | `xylem daemon stop` | Stop the daemon and suppress supervisor restarts |
 | `xylem enqueue` | Manually enqueue a task |
 | `xylem retry` | Retry a failed vessel with failure context, or restart from scratch |
+| `xylem recovery refresh` | Refresh a suppressed failure-review decision so retries are allowed again |
 | `xylem status` | Show queue state and vessel summary |
 | `xylem pause` / `resume` | Pause and resume scanning |
 | `xylem cancel` | Cancel a pending vessel |
@@ -186,6 +187,7 @@ xylem daemon-supervisor             # Auto-restart wrapper around xylem daemon
 xylem daemon stop                   # Stop the daemon without triggering a restart
 xylem enqueue --workflow fix-bug \
   --ref "https://github.com/owner/repo/issues/99"  # Ad-hoc task
+xylem recovery refresh issue-158-fresh-retry-1     # Re-enable retry after reviewing a suppressed failure-review
 xylem status --json | jq '.[] | select(.state == "failed")'  # Query failures
 xylem dtu load --manifest cli/internal/dtu/testdata/issue-label-gate.yaml        # Seed DTU state from the repo's example fixture
 xylem dtu materialize --manifest cli/internal/dtu/testdata/issue-label-gate.yaml # Prepare DTU runtime and shims

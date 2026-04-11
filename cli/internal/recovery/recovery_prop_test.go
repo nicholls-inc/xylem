@@ -120,3 +120,56 @@ func TestPropFailureFingerprintNormalizesWhitespaceAndCase(t *testing.T) {
 		}
 	})
 }
+
+func TestPropRefreshRetryDecisionAlwaysAuthorizesRetry(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		vesselID := rapid.StringMatching(`[a-z0-9-]{1,24}`).Draw(t, "vesselID")
+		retryCount := rapid.IntRange(0, 4).Draw(t, "retryCount")
+		retryCap := rapid.IntRange(0, retryCount).Draw(t, "retryCap")
+		artifact := &Artifact{
+			SchemaVersion:           schemaVersion,
+			VesselID:                vesselID,
+			State:                   string(queue.StateFailed),
+			FailureFingerprint:      "fail-" + vesselID,
+			RecoveryClass:           ClassUnknown,
+			Confidence:              0.79,
+			RecoveryAction:          ActionHumanEscalation,
+			DecisionSource:          DecisionSourceDiagnosis,
+			Rationale:               "needs human review",
+			EvidencePaths:           []string{"phases/" + vesselID + "/summary.json"},
+			RetryPreconditions:      []string{"Refresh the recovery decision after a human reviews the cited artifacts."},
+			RetrySuppressed:         true,
+			RetryOutcome:            "suppressed",
+			RetryCount:              retryCount,
+			RetryCap:                retryCap,
+			RequiresDecisionRefresh: true,
+			CreatedAt:               time.Unix(0, 0).UTC(),
+		}
+		before := DecisionDigest(artifact)
+
+		updated, err := RefreshRetryDecision(artifact, RefreshOptions{
+			ReviewedAt: time.Unix(int64(rapid.Int64().Draw(t, "reviewedAtUnix")), 0).UTC(),
+		})
+		if err != nil {
+			t.Fatalf("RefreshRetryDecision() error = %v", err)
+		}
+		if updated.RecoveryAction != ActionRetry {
+			t.Fatalf("RecoveryAction = %q, want %q", updated.RecoveryAction, ActionRetry)
+		}
+		if updated.RetrySuppressed {
+			t.Fatalf("RetrySuppressed = true, want false")
+		}
+		if updated.RequiresDecisionRefresh {
+			t.Fatalf("RequiresDecisionRefresh = true, want false")
+		}
+		if updated.RetryCap < updated.RetryCount+1 {
+			t.Fatalf("RetryCap = %d, want >= %d", updated.RetryCap, updated.RetryCount+1)
+		}
+		if updated.DecisionDigest == before {
+			t.Fatalf("DecisionDigest did not change")
+		}
+		if err := ValidateRetryAuthorization(updated); err != nil {
+			t.Fatalf("ValidateRetryAuthorization() error = %v", err)
+		}
+	})
+}

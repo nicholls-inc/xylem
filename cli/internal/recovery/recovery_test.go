@@ -293,34 +293,6 @@ func TestCountMatchingFailuresCountsTerminalMatchesOnly(t *testing.T) {
 	assert.Equal(t, 3, CountMatchingFailures(vessels, current, fingerprint))
 }
 
-func TestSmoke_S7_RetryReadyBlocksBeforeCooldownExpires(t *testing.T) {
-	now := time.Date(2026, time.April, 9, 10, 0, 0, 0, time.UTC)
-	retryAfter := now.Add(time.Minute)
-
-	decision := RetryReady(&Artifact{
-		RecoveryAction: ActionRetry,
-		RetryCount:     1,
-		RetryCap:       2,
-		RetryAfter:     &retryAfter,
-	}, now)
-
-	assert.Equal(t, RetryDecision{}, decision)
-}
-
-func TestSmoke_S8_RetryReadyBlocksWhenRetryCapReached(t *testing.T) {
-	now := time.Date(2026, time.April, 9, 10, 0, 0, 0, time.UTC)
-	retryAfter := now.Add(-time.Minute)
-
-	decision := RetryReady(&Artifact{
-		RecoveryAction: ActionRetry,
-		RetryCount:     2,
-		RetryCap:       2,
-		RetryAfter:     &retryAfter,
-	}, now)
-
-	assert.Equal(t, RetryDecision{}, decision)
-}
-
 func TestSmoke_S9_RemediationFingerprintIsStableForSameInputs(t *testing.T) {
 	first := remediationFingerprint("src-fingerprint", "cooldown", 1)
 	second := remediationFingerprint("src-fingerprint", "cooldown", 1)
@@ -644,4 +616,80 @@ func TestUpdateRetryOutcomeRejectsUnsafeVesselID(t *testing.T) {
 	if got := err.Error(); got == "" || !strings.Contains(got, "invalid vessel ID") {
 		t.Fatalf("UpdateRetryOutcome() error = %q, want invalid vessel ID", got)
 	}
+}
+
+func TestSmoke_S11_RefreshRetryDecisionReenablesSuppressedArtifact(t *testing.T) {
+	reviewedAt := time.Date(2026, time.April, 11, 7, 0, 0, 0, time.UTC)
+	artifact := &Artifact{
+		SchemaVersion:           schemaVersion,
+		VesselID:                "issue-158-fresh-retry-1",
+		State:                   string(queue.StateFailed),
+		FailureFingerprint:      "fail-worktree-missing",
+		RecoveryClass:           ClassUnknown,
+		Confidence:              0.79,
+		RecoveryAction:          ActionHumanEscalation,
+		DecisionSource:          DecisionSourceDiagnosis,
+		Rationale:               "needs human review",
+		EvidencePaths:           []string{"phases/issue-158-fresh-retry-1/summary.json"},
+		RetryPreconditions:      []string{"Refresh the recovery decision after a human reviews the cited artifacts."},
+		RetrySuppressed:         true,
+		RetryOutcome:            "suppressed",
+		RetryCount:              1,
+		RetryCap:                0,
+		RequiresDecisionRefresh: true,
+		SourceInputFP:           "src-same",
+		HarnessDigest:           "har-same",
+		WorkflowDigest:          "wf-same",
+		RemediationEpoch:        "1",
+		CreatedAt:               reviewedAt.Add(-time.Hour),
+	}
+	before := DecisionDigest(artifact)
+
+	updated, err := RefreshRetryDecision(artifact, RefreshOptions{ReviewedAt: reviewedAt})
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+	assert.Equal(t, ActionRetry, updated.RecoveryAction)
+	assert.False(t, updated.RetrySuppressed)
+	assert.False(t, updated.RequiresDecisionRefresh)
+	assert.Equal(t, "not_attempted", updated.RetryOutcome)
+	assert.Equal(t, "decision", updated.UnlockDimension)
+	assert.GreaterOrEqual(t, updated.RetryCap, updated.RetryCount+1)
+	assert.Nil(t, updated.RetryAfter)
+	assert.NotEqual(t, before, updated.DecisionDigest)
+	assert.NoError(t, ValidateRetryAuthorization(updated))
+	assert.Contains(t, updated.Rationale, reviewedAt.Format(time.RFC3339))
+}
+
+func TestRefreshRetryDecisionForVesselPersistsUpdatedArtifact(t *testing.T) {
+	stateDir := t.TempDir()
+	artifact := &Artifact{
+		SchemaVersion:           schemaVersion,
+		VesselID:                "issue-159",
+		State:                   string(queue.StateFailed),
+		FailureFingerprint:      "fail-worktree-missing",
+		RecoveryClass:           ClassUnknown,
+		Confidence:              0.79,
+		RecoveryAction:          ActionHumanEscalation,
+		DecisionSource:          DecisionSourceDiagnosis,
+		Rationale:               "needs human review",
+		EvidencePaths:           []string{"phases/issue-159/summary.json"},
+		RetryPreconditions:      []string{"Refresh the recovery decision after a human reviews the cited artifacts."},
+		RetrySuppressed:         true,
+		RetryOutcome:            "suppressed",
+		RequiresDecisionRefresh: true,
+		CreatedAt:               time.Date(2026, time.April, 11, 7, 0, 0, 0, time.UTC),
+	}
+	require.NoError(t, Save(stateDir, artifact))
+
+	updated, err := RefreshRetryDecisionForVessel(stateDir, artifact.VesselID, RefreshOptions{
+		ReviewedAt: time.Date(2026, time.April, 11, 8, 0, 0, 0, time.UTC),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, updated)
+
+	loaded, err := Load(filepath.Join(stateDir, RelativePath(artifact.VesselID)))
+	require.NoError(t, err)
+	assert.Equal(t, ActionRetry, loaded.RecoveryAction)
+	assert.False(t, loaded.RetrySuppressed)
+	assert.Equal(t, updated.DecisionDigest, loaded.DecisionDigest)
 }

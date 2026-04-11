@@ -149,6 +149,58 @@ func TestSmoke_S1c_RetryCommandAllowsUpdatedDiagnosisDecision(t *testing.T) {
 	assert.Equal(t, "enqueued", loaded.RetryOutcome)
 }
 
+func TestSmoke_S1d_RecoveryRefreshThenRetryCreatesNewVessel(t *testing.T) {
+	q := newRetryTestQueue(t)
+	cfg := newRetryTestConfig(t)
+	now := time.Now().UTC()
+	v := queue.Vessel{
+		ID:        "issue-158-fresh-retry-1",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	}
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+	require.NoError(t, q.Update(v.ID, queue.StateRunning, ""))
+	require.NoError(t, q.Update(v.ID, queue.StateFailed, "panic: chdir missing worktree"))
+
+	artifact := &recovery.Artifact{
+		SchemaVersion:           "v1",
+		VesselID:                v.ID,
+		State:                   string(queue.StateFailed),
+		FailureFingerprint:      "fail-worktree-missing",
+		RecoveryClass:           recovery.ClassUnknown,
+		Confidence:              0.79,
+		RecoveryAction:          recovery.ActionHumanEscalation,
+		DecisionSource:          recovery.DecisionSourceDiagnosis,
+		Rationale:               "needs human review",
+		EvidencePaths:           []string{"phases/issue-158-fresh-retry-1/summary.json"},
+		RetryPreconditions:      []string{"Refresh the recovery decision after a human reviews the cited artifacts."},
+		RetrySuppressed:         true,
+		RetryOutcome:            "suppressed",
+		RequiresDecisionRefresh: true,
+		CreatedAt:               now.Add(time.Minute),
+	}
+	require.NoError(t, recovery.Save(cfg.StateDir, artifact))
+
+	require.NoError(t, cmdRecoveryRefresh(cfg, v.ID))
+	require.NoError(t, cmdRetry(q, cfg, v.ID, true))
+
+	retry, err := q.FindByID("issue-158-fresh-retry-1-retry-1")
+	require.NoError(t, err)
+	require.NotNil(t, retry)
+	assert.Equal(t, queue.StatePending, retry.State)
+	assert.Equal(t, v.ID, retry.RetryOf)
+	assert.Equal(t, "decision", retry.Meta[recovery.MetaUnlockedBy])
+
+	loaded, err := recovery.Load(filepath.Join(cfg.StateDir, recovery.RelativePath(v.ID)))
+	require.NoError(t, err)
+	assert.Equal(t, recovery.ActionRetry, loaded.RecoveryAction)
+	assert.False(t, loaded.RetrySuppressed)
+	assert.Equal(t, "enqueued", loaded.RetryOutcome)
+}
+
 func TestRetryCreatesNewVessel(t *testing.T) {
 	q := newRetryTestQueue(t)
 	cfg := newRetryTestConfig(t)

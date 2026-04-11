@@ -263,6 +263,112 @@ func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailure(t *testing.T) {
 	assert.Equal(t, "1", vessels[0].Meta[recovery.MetaRetryCount])
 }
 
+func TestSmoke_S2b_GitHubScanRetriesAfterRecoveryRefreshChangesDecisionDigest(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 158,
+		Title:  "missing worktree panic",
+		Body:   "same body",
+		URL:    "https://github.com/owner/repo/issues/158",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "search", "issues",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	fingerprint := githubSourceFingerprint("missing worktree panic", "same body", []string{"bug"})
+	_, err := q.Enqueue(queue.Vessel{
+		ID:       "issue-158-fresh-retry-1",
+		Source:   "github-issue",
+		Ref:      issues[0].URL,
+		Workflow: "fix-bug",
+		Meta: map[string]string{
+			"issue_num":                "158",
+			"source_input_fingerprint": fingerprint,
+		},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+	_, err = q.Dequeue()
+	require.NoError(t, err)
+	require.NoError(t, q.Update("issue-158-fresh-retry-1", queue.StateFailed, "panic: chdir missing worktree"))
+
+	blocked := &recovery.Artifact{
+		SchemaVersion:           "v1",
+		VesselID:                "issue-158-fresh-retry-1",
+		State:                   string(queue.StateFailed),
+		FailureFingerprint:      "fail-worktree-missing",
+		RecoveryClass:           recovery.ClassUnknown,
+		Confidence:              0.79,
+		RecoveryAction:          recovery.ActionHumanEscalation,
+		DecisionSource:          recovery.DecisionSourceDiagnosis,
+		Rationale:               "needs human review",
+		EvidencePaths:           []string{"phases/issue-158-fresh-retry-1/summary.json"},
+		RetryPreconditions:      []string{"Refresh the recovery decision after a human reviews the cited artifacts."},
+		RetrySuppressed:         true,
+		RetryOutcome:            "suppressed",
+		RequiresDecisionRefresh: true,
+		SourceInputFP:           fingerprint,
+		HarnessDigest:           "har-same",
+		WorkflowDigest:          "wf-same",
+		RemediationEpoch:        "1",
+		CreatedAt:               time.Now().UTC().Add(-time.Hour),
+	}
+	blocked.DecisionDigest = recovery.DecisionDigest(blocked)
+	blocked.RemediationFP = recovery.ComputeRemediationFingerprint(recovery.RemediationState{
+		SourceInputFP:    blocked.SourceInputFP,
+		HarnessDigest:    blocked.HarnessDigest,
+		WorkflowDigest:   blocked.WorkflowDigest,
+		DecisionDigest:   blocked.DecisionDigest,
+		RemediationEpoch: blocked.RemediationEpoch,
+	})
+	require.NoError(t, recovery.Save(dir, blocked))
+
+	failed, err := q.FindByID(blocked.VesselID)
+	require.NoError(t, err)
+	require.NotNil(t, failed)
+	failed.Meta = recovery.ApplyToMeta(failed.Meta, blocked)
+	require.NoError(t, q.UpdateVessel(*failed))
+
+	_, err = recovery.RefreshRetryDecisionForVessel(dir, blocked.VesselID, recovery.RefreshOptions{
+		ReviewedAt: time.Now().UTC(),
+	})
+	require.NoError(t, err)
+
+	g := &GitHub{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{"fix": {
+			Labels:   []string{"bug"},
+			Workflow: "fix-bug",
+		}},
+		StateDir:              dir,
+		Queue:                 q,
+		CmdRunner:             r,
+		HarnessDigestResolver: func() string { return "har-same" },
+		WorkflowDigestResolver: func(string) string {
+			return "wf-same"
+		},
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "issue-158-fresh-retry-1-retry-1", vessels[0].ID)
+	assert.Equal(t, blocked.VesselID, vessels[0].RetryOf)
+	assert.Equal(t, "decision", vessels[0].Meta[recovery.MetaUnlockedBy])
+	assert.Equal(t, string(recovery.ActionRetry), vessels[0].Meta[recovery.MetaAction])
+}
+
 func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailureIgnoresStaleBranchWithoutPR(t *testing.T) {
 	t.Parallel()
 
