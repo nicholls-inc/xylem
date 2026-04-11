@@ -134,10 +134,13 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Workflows), "unblock-wave")
 	assert.Contains(t, sortedKeys(composed.Workflows), "diagnose-failures")
 	assert.Contains(t, sortedKeys(composed.Workflows), "initiative-tracker")
+	assert.Contains(t, sortedKeys(composed.Workflows), "backlog-refinement")
 	assert.Contains(t, sortedKeys(composed.Workflows), "ingest-field-reports")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
 	assert.Contains(t, sortedKeys(composed.Prompts), "hardening-audit/rank")
+	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/analyze")
+	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/report")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
@@ -145,10 +148,12 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Sources), "hardening-audit")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
 	assert.Contains(t, sortedKeys(composed.Sources), "initiative-tracker")
+	assert.Contains(t, sortedKeys(composed.Sources), "backlog-refinement")
 	assert.Contains(t, sortedKeys(composed.Sources), "ingest-field-reports")
 	require.Len(t, composed.ConfigOverlays, 2)
 
 	assert.Contains(t, sortedKeys(composed.Scripts), "post-discussion.sh")
+	assert.Contains(t, joinOverlays(composed.ConfigOverlays), "concurrency:\n  global: 3\n  per_class:\n    backlog-refinement: 1")
 
 	implementHarnessWorkflow := string(composed.Workflows["implement-harness"])
 	assert.Contains(t, implementHarnessWorkflow, `--repo nicholls-inc/xylem`)
@@ -227,6 +232,47 @@ func TestSmoke_S4_SelfHostingProfileScaffoldsMonthlyHardeningAuditWorkflow(t *te
 	assert.Contains(t, wf.Phases[4].Run, "docs/hardening-ledger.md")
 
 	assert.Contains(t, sortedKeys(composed.Prompts), "hardening-audit/rank")
+}
+
+func TestSmoke_S5_SelfHostingProfileScaffoldsDailyBacklogRefinementWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	var source config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["backlog-refinement"], &source))
+	assert.Equal(t, "scheduled", source.Type)
+	assert.Equal(t, "{{ .Repo }}", source.Repo)
+	assert.Equal(t, "@daily", source.Schedule)
+	require.Contains(t, source.Tasks, "daily-backlog-refinement")
+	assert.Equal(t, "backlog-refinement", source.Tasks["daily-backlog-refinement"].Workflow)
+	assert.Equal(t, "backlog-refinement", source.Tasks["daily-backlog-refinement"].Ref)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["backlog-refinement"], &wf))
+	assert.Equal(t, "backlog-refinement", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 5)
+	assert.Equal(t, "collect", wf.Phases[0].Name)
+	assert.Equal(t, "command", wf.Phases[0].Type)
+	assert.Contains(t, wf.Phases[0].Run, "gh issue list --repo nicholls-inc/xylem")
+	assert.Contains(t, wf.Phases[0].Run, "gh pr list --repo nicholls-inc/xylem")
+	assert.Contains(t, wf.Phases[0].Run, "labels?per_page=100")
+	assert.NotNil(t, wf.Phases[0].NoOp)
+	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
+	assert.Equal(t, ".xylem/prompts/backlog-refinement/analyze.md", wf.Phases[1].PromptFile)
+	assert.Equal(t, ".xylem/prompts/backlog-refinement/report.md", wf.Phases[2].PromptFile)
+	assert.Equal(t, "apply_actions", wf.Phases[3].Name)
+	assert.Equal(t, "command", wf.Phases[3].Type)
+	assert.Contains(t, wf.Phases[3].Run, "gh issue edit")
+	assert.Contains(t, wf.Phases[3].Run, "gh issue comment")
+	assert.Equal(t, "persist_summary", wf.Phases[4].Name)
+	assert.Equal(t, "command", wf.Phases[4].Type)
+	assert.Contains(t, wf.Phases[4].Run, "summary.md")
+
+	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/analyze")
+	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/report")
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

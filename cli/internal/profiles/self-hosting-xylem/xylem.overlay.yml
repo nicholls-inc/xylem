@@ -126,6 +126,16 @@ sources:
         workflow: initiative-tracker
         ref: initiative-tracker
 
+  backlog-refinement:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@daily"
+    timeout: "60m"
+    tasks:
+      daily-backlog-refinement:
+        workflow: backlog-refinement
+        ref: backlog-refinement
+
   ingest-field-reports:
     type: scheduled
     repo: "{{ .Repo }}"
@@ -147,3 +157,8 @@ daemon:
   auto_upgrade: true
   auto_merge: true
   auto_merge_repo: "{{ .Repo }}"
+
+concurrency:
+  global: 3
+  per_class:
+    backlog-refinement: 1
