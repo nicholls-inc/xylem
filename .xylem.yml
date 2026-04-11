@@ -151,6 +151,16 @@ sources:
         workflow: continuous-improvement
         ref: continuous-improvement
 
+  backlog-refinement:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@daily"
+    timeout: "60m"
+    tasks:
+      daily-backlog-refinement:
+        workflow: backlog-refinement
+        ref: backlog-refinement
+
   harness-gap-analysis:
     type: scheduled
     repo: nicholls-inc/xylem
@@ -191,7 +201,10 @@ daemon:
   auto_merge_branch_pattern: "^(feat|fix|chore)/issue-\\d+"
   auto_merge_reviewer: "copilot-pull-request-reviewer"
 
-concurrency: 3
+concurrency:
+  global: 3
+  per_class:
+    backlog-refinement: 1
 max_turns: 80
 timeout: "45m"
 state_dir: ".xylem"
