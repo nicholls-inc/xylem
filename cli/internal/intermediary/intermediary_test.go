@@ -399,6 +399,40 @@ func TestSubmit_ExecutorErrorCaptured(t *testing.T) {
 	}
 }
 
+func TestSubmit_WarnModeExecutorErrorReturnsEvaluatedEffect(t *testing.T) {
+	execErr := errors.New("disk full")
+	exec := &mockExecutor{err: execErr}
+	al := newTestAuditLog(t)
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, al, exec)
+	inter.SetMode(PolicyModeWarn)
+
+	intent := Intent{Action: "file_write", Resource: ".xylem/HARNESS.md", AgentID: "agent-1", Justification: "test"}
+	effect, err := inter.Submit(context.Background(), intent)
+	if effect != Deny {
+		t.Fatalf("warn-mode effect = %q, want %q", effect, Deny)
+	}
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("expected executor error, got %v", err)
+	}
+
+	entries, err := al.Entries()
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("audit entries: got %d, want 1", len(entries))
+	}
+	if entries[0].Decision != Deny {
+		t.Fatalf("audit decision: got %q, want %q", entries[0].Decision, Deny)
+	}
+	if entries[0].Error != "disk full" {
+		t.Fatalf("audit error: got %q, want %q", entries[0].Error, "disk full")
+	}
+}
+
 func TestSubmit_RequireApprovalNotExecuted(t *testing.T) {
 	exec := &mockExecutor{}
 	al := newTestAuditLog(t)

@@ -3202,7 +3202,6 @@ func indicatesControlPlaneWrite(rendered string) bool {
 		"touch ",
 		"echo ",
 		"printf ",
-		"cat ",
 		"tee ",
 		"sed ",
 		"cp ",
@@ -3889,9 +3888,12 @@ func (r *Runner) detectDefaultBranchAtPath(ctx context.Context, worktreePath str
 }
 
 func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, worktreePath, errMsg string, violations []surface.Violation) error {
-	workflowClass, _ := r.workflowClassForAudit(vessel)
+	workflowClass, workflowClassErr := r.workflowClassForAudit(vessel)
 	ruleMatched := ""
-	if classDecision := policy.Evaluate(workflowClass, policy.OpWriteControlPlane); !classDecision.Allowed {
+	if workflowClassErr != nil {
+		log.Printf("runner: determine workflow class for audit for vessel %s workflow %q: %v", vessel.ID, vessel.Workflow, workflowClassErr)
+		workflowClass = ""
+	} else if classDecision := policy.Evaluate(workflowClass, policy.OpWriteControlPlane); !classDecision.Allowed {
 		ruleMatched = classDecision.Rule
 	}
 	for _, violation := range violations {

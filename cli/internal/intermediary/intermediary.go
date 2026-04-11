@@ -257,9 +257,9 @@ func (i *Intermediary) Submit(ctx context.Context, intent Intent) (Effect, error
 		if err := i.executor.Execute(ctx, intent); err != nil {
 			entry.Error = err.Error()
 			if appendErr := i.auditLog.Append(entry); appendErr != nil {
-				return Allow, fmt.Errorf("audit execution failure: %w", appendErr)
+				return result.Effect, fmt.Errorf("audit execution failure: %w", appendErr)
 			}
-			return Allow, fmt.Errorf("execute intent: %w", err)
+			return result.Effect, fmt.Errorf("execute intent: %w", err)
 		}
 	}
 

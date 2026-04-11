@@ -1106,6 +1106,24 @@ func TestPhasePolicyIntents_ClassifiesHighRiskPromptActions(t *testing.T) {
 	assert.Equal(t, "prompt", intents[1].Metadata["classified_from"])
 }
 
+func TestPhasePolicyIntents_DoesNotTreatCatReadAsControlPlaneWrite(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := New(cfg, nil, nil, nil)
+	vessel := queue.Vessel{
+		ID:       "issue-1",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		Meta:     map[string]string{"config_source": "github"},
+	}
+	phaseDef := workflow.Phase{Name: "inspect", Type: "command"}
+
+	intents := r.phasePolicyIntents(vessel, phaseDef, "cat .xylem.yml", "")
+	require.Len(t, intents, 1)
+	assert.Equal(t, "external_command", intents[0].Action)
+	assert.Equal(t, "inspect", intents[0].Resource)
+}
+
 func TestSmoke_S5_DiscussionOutputCreatesDiscussion(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
@@ -7328,6 +7346,37 @@ phases:
 	assert.Equal(t, "file_write", entries[0].Intent.Action)
 	assert.Equal(t, ".xylem/workflows/doctor.yaml", entries[0].Intent.Resource)
 	assert.Equal(t, intermediary.Deny, entries[0].Decision)
+}
+
+func TestRecordProtectedSurfaceViolations_OmitsWorkflowClassWhenAuditLookupFails(t *testing.T) {
+	repoRoot := t.TempDir()
+	withTestWorkingDir(t, repoRoot)
+
+	cfg := makeTestConfig(repoRoot, 1)
+	cfg.StateDir = filepath.Join(repoRoot, ".xylem-state")
+	require.NoError(t, os.MkdirAll(cfg.StateDir, 0o755))
+
+	worktreeDir := filepath.Join(repoRoot, "worktree")
+	require.NoError(t, os.MkdirAll(worktreeDir, 0o755))
+
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, "audit.jsonl"))
+	r := New(cfg, queue.New(filepath.Join(repoRoot, "queue.jsonl")), &mockWorktree{path: worktreeDir}, &mockCmdRunner{})
+	r.AuditLog = auditLog
+
+	err := r.recordProtectedSurfaceViolations(
+		queue.Vessel{ID: "issue-missing-workflow", Source: "manual", Workflow: "missing-workflow"},
+		workflow.Phase{Name: "tamper"},
+		worktreeDir,
+		"violated protected surfaces",
+		[]surface.Violation{{Path: ".xylem.yml", Before: "abc", After: "xyz"}},
+	)
+	require.NoError(t, err)
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "", entries[0].WorkflowClass)
+	assert.Equal(t, "", entries[0].RuleMatched)
 }
 
 // TestCopyProtectedSurfaceFileAddsWorktreeExcludeEntry verifies that the
