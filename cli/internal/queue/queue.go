@@ -137,8 +137,8 @@ func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 			for _, v := range vessels {
 				if v.Ref == vessel.Ref {
 					switch v.State {
-					case StatePending, StateRunning, StateWaiting, StateCompleted:
-						return nil // already active or completed, skip silently
+					case StatePending, StateRunning, StateWaiting:
+						return nil // already active, skip silently
 					}
 				}
 			}
@@ -287,6 +287,18 @@ func (q *Queue) List() ([]Vessel, error) {
 		return readErr
 	})
 	return vessels, err
+}
+
+// ReplaceAll rewrites the queue contents with vessels in their current order.
+func (q *Queue) ReplaceAll(vessels []Vessel) error {
+	return q.withLock(func() error {
+		copied := make([]Vessel, len(vessels))
+		copy(copied, vessels)
+		for i := range copied {
+			copied[i].NormalizeWorkflowClass()
+		}
+		return q.writeAllVessels(copied)
+	})
 }
 
 func (q *Queue) FindByID(id string) (*Vessel, error) {

@@ -52,7 +52,15 @@ func dryRunScan(cfg *config.Config, q *queue.Queue, runner scanner.CommandRunner
 	tmpFile.Close()
 	defer os.Remove(tmpFile.Name())
 
+	seed, err := q.List()
+	if err != nil {
+		return fmt.Errorf("load queue for dry-run: %w", err)
+	}
+
 	dryQ := queue.New(tmpFile.Name())
+	if err := dryQ.ReplaceAll(seed); err != nil {
+		return fmt.Errorf("seed dry-run queue: %w", err)
+	}
 	s := scanner.New(cfg, dryQ, runner)
 	s.RunHooks = false
 	result, err := s.Scan(context.Background())
@@ -63,7 +71,11 @@ func dryRunScan(cfg *config.Config, q *queue.Queue, runner scanner.CommandRunner
 		fmt.Println("Scanning is paused.")
 		return nil
 	}
-	vessels, _ := dryQ.List()
+	vessels, err := dryQ.List()
+	if err != nil {
+		return fmt.Errorf("list dry-run candidates: %w", err)
+	}
+	vessels = vessels[len(seed):]
 	if len(vessels) == 0 {
 		fmt.Println("No new issues found.")
 		return nil
