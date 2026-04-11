@@ -59,6 +59,15 @@ sources:
       weekly-self-gap-analysis:
         workflow: sota-gap-analysis
         ref: sota-gap-analysis
+  hardening-audit:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@monthly"
+    timeout: "90m"
+    tasks:
+      monthly-hardening-audit:
+        workflow: hardening-audit
+        ref: hardening-audit
   continuous-simplicity:
     type: scheduled
     repo: "{{ .Repo }}"

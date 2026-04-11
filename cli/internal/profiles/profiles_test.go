@@ -127,6 +127,7 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Contains(t, sortedKeys(composed.Workflows), "implement-harness")
+	assert.Contains(t, sortedKeys(composed.Workflows), "hardening-audit")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Workflows), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Workflows), "sota-gap-analysis")
@@ -136,10 +137,12 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Workflows), "ingest-field-reports")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
+	assert.Contains(t, sortedKeys(composed.Prompts), "hardening-audit/rank")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")
+	assert.Contains(t, sortedKeys(composed.Sources), "hardening-audit")
 	assert.Contains(t, sortedKeys(composed.Sources), "sota-gap")
 	assert.Contains(t, sortedKeys(composed.Sources), "initiative-tracker")
 	assert.Contains(t, sortedKeys(composed.Sources), "ingest-field-reports")
@@ -188,6 +191,42 @@ func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkf
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/implement")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
+}
+
+func TestSmoke_S4_SelfHostingProfileScaffoldsMonthlyHardeningAuditWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	var source config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["hardening-audit"], &source))
+	assert.Equal(t, "scheduled", source.Type)
+	assert.Equal(t, "{{ .Repo }}", source.Repo)
+	assert.Equal(t, "@monthly", source.Schedule)
+	require.Contains(t, source.Tasks, "monthly-hardening-audit")
+	assert.Equal(t, "hardening-audit", source.Tasks["monthly-hardening-audit"].Workflow)
+	assert.Equal(t, "hardening-audit", source.Tasks["monthly-hardening-audit"].Ref)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["hardening-audit"], &wf))
+	assert.Equal(t, "hardening-audit", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 5)
+	assert.Equal(t, "inventory", wf.Phases[0].Name)
+	assert.Equal(t, "command", wf.Phases[0].Type)
+	assert.Contains(t, wf.Phases[0].Run, "harden inventory")
+	assert.Equal(t, "evaluate", wf.Phases[1].Name)
+	assert.Equal(t, "command", wf.Phases[1].Type)
+	assert.Contains(t, wf.Phases[1].Run, "harden score")
+	assert.Equal(t, ".xylem/prompts/hardening-audit/rank.md", wf.Phases[2].PromptFile)
+	assert.Equal(t, "file_issues", wf.Phases[3].Name)
+	assert.Equal(t, "command", wf.Phases[3].Type)
+	assert.Contains(t, wf.Phases[3].Run, "harden file-issues")
+	assert.Equal(t, "track", wf.Phases[4].Name)
+	assert.Contains(t, wf.Phases[4].Run, "docs/hardening-ledger.md")
+
+	assert.Contains(t, sortedKeys(composed.Prompts), "hardening-audit/rank")
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

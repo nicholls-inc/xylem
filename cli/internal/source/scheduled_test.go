@@ -60,6 +60,14 @@ func TestParseSchedule(t *testing.T) {
 	if got != 7*24*time.Hour {
 		t.Fatalf("parseSchedule(@weekly) = %s, want 168h", got)
 	}
+
+	got, err = parseSchedule("@monthly")
+	if err != nil {
+		t.Fatalf("parseSchedule(@monthly) error = %v", err)
+	}
+	if got != 30*24*time.Hour {
+		t.Fatalf("parseSchedule(@monthly) = %s, want 720h", got)
+	}
 }
 
 func TestScheduleWindow(t *testing.T) {

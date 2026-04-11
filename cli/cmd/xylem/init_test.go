@@ -42,6 +42,7 @@ var expectedSelfHostingWorkflows = []string{
 	"continuous-improvement",
 	"continuous-simplicity",
 	"diagnose-failures",
+	"hardening-audit",
 	"implement-harness",
 	"ingest-field-reports",
 	"initiative-tracker",

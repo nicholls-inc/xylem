@@ -1,0 +1,44 @@
+name: hardening-audit
+class: harness-maintenance
+description: "Monthly audit that identifies fuzzy workflow phases ready to harden into deterministic CLI tools"
+phases:
+  - name: inventory
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem --config ../.xylem.yml harden inventory \
+        --repo-root .. \
+        --workflow-dir ../.xylem/workflows \
+        --output ../.xylem/state/hardening-audit/inventory.json
+  - name: evaluate
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem --config ../.xylem.yml harden score \
+        --repo-root .. \
+        --inventory ../.xylem/state/hardening-audit/inventory.json \
+        --state-dir ../.xylem \
+        --output ../.xylem/state/hardening-audit/scores.json
+  - name: rank
+    prompt_file: .xylem/prompts/hardening-audit/rank.md
+    max_turns: 40
+  - name: file_issues
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem --config ../.xylem.yml harden file-issues \
+        --proposals ../.xylem/state/hardening-audit/proposals.json \
+        --output ../.xylem/state/hardening-audit/filed-issues.json
+  - name: track
+    type: command
+    run: |
+      set -euo pipefail
+      cd cli
+      go run ./cmd/xylem --config ../.xylem.yml harden track \
+        --repo-root .. \
+        --proposals ../.xylem/state/hardening-audit/proposals.json \
+        --filed ../.xylem/state/hardening-audit/filed-issues.json \
+        --ledger docs/hardening-ledger.md
