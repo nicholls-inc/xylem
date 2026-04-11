@@ -1065,6 +1065,19 @@ func (c *Config) validateValidationCommands() error {
 	if target, ok := invalidGoimportsPackagePatternTarget(c.Validation.Format); ok {
 		return fmt.Errorf(`validation.format uses goimports package pattern %q; goimports expects directories or files, use "goimports -l ." or "cd cli && goimports -l ."`, target)
 	}
+	for _, check := range []struct {
+		name    string
+		command string
+		example string
+	}{
+		{name: "lint", command: c.Validation.Lint, example: `cd cli && go vet ./...`},
+		{name: "build", command: c.Validation.Build, example: `cd cli && go build ./cmd/xylem`},
+		{name: "test", command: c.Validation.Test, example: `cd cli && go test ./...`},
+	} {
+		if target, ok := invalidRepoRootGoCLITarget(check.command); ok {
+			return fmt.Errorf(`validation.%s runs go from repo root against %q; xylem executes validation from the worktree root, use %q`, check.name, target, check.example)
+		}
+	}
 	return nil
 }
 
@@ -1091,6 +1104,26 @@ func invalidGoimportsPackagePatternTarget(command string) (string, bool) {
 				continue
 			}
 			if strings.Contains(arg, "...") {
+				return arg, true
+			}
+		}
+	}
+	return "", false
+}
+
+func invalidRepoRootGoCLITarget(command string) (string, bool) {
+	fields := validationCommandFields(command)
+	for i := 0; i < len(fields); i++ {
+		token := trimValidationCommandField(fields[i])
+		if filepath.Base(token) != "go" {
+			continue
+		}
+		for j := i + 1; j < len(fields); j++ {
+			arg := trimValidationCommandField(fields[j])
+			if isValidationCommandSeparator(arg) {
+				break
+			}
+			if strings.HasPrefix(arg, "./cli/") || strings.HasPrefix(arg, "cli/") {
 				return arg, true
 			}
 		}
