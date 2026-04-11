@@ -40,8 +40,7 @@ func (m *mockCleanupRunner) Run(_ context.Context, name string, args ...string) 
 		m.removeCalls = append(m.removeCalls, key)
 		return []byte{}, m.removeErr
 	}
-	// branch -d is best-effort
-	if strings.Contains(key, "branch -d") {
+	if strings.Contains(key, "branch -D") {
 		return []byte{}, nil
 	}
 	return []byte{}, nil
@@ -297,7 +296,7 @@ func (m *partialFailRunner) Run(_ context.Context, name string, args ...string) 
 		}
 		return []byte{}, nil
 	}
-	if strings.Contains(key, "branch -d") {
+	if strings.Contains(key, "branch -D") {
 		return []byte{}, nil
 	}
 	return []byte{}, nil

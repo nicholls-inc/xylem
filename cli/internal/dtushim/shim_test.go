@@ -534,6 +534,70 @@ func TestExecuteGitWorktreeCommandsMaterializeDirectories(t *testing.T) {
 	}
 }
 
+func TestExecuteGitBranchForceDeleteRemovesBranch(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Repositories[0].Branches = []dtu.Branch{{Name: "fix/issue-1-bug-one", SHA: "abc123"}}
+	store, stateDir := testStore(t, state)
+	env := envForStore(store, stateDir, state.UniverseID)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), "git", []string{"branch", "-D", "fix/issue-1-bug-one"}, nil, &stdout, &stderr, env)
+	if code != 0 {
+		t.Fatalf("git branch -D code = %d, stderr = %q", code, stderr.String())
+	}
+
+	got, err := store.Load()
+	require.NoError(t, err)
+	require.Empty(t, got.Repositories[0].Branches)
+}
+
+func TestExecuteGitFetchSupportsMultipleBranches(t *testing.T) {
+	t.Parallel()
+
+	state := sampleState()
+	state.Repositories[0].Branches = []dtu.Branch{
+		{Name: "main", SHA: "1111111"},
+		{Name: "fix/issue-1-bug-one", SHA: "abc1234"},
+	}
+	store, stateDir := testStore(t, state)
+	env := envForStore(store, stateDir, state.UniverseID)
+
+	var stdout, stderr bytes.Buffer
+	code := Execute(context.Background(), "git", []string{"fetch", "origin", "fix/issue-1-bug-one", "main"}, nil, &stdout, &stderr, env)
+	require.Zero(t, code, "stderr = %q", stderr.String())
+	assert.Empty(t, stdout.String())
+
+	loaded, err := store.Load()
+	require.NoError(t, err)
+	repo := loaded.RepositoryBySlug("owner/repo")
+	require.NotNil(t, repo)
+	require.NotNil(t, repo.BranchByName("fix/issue-1-bug-one"))
+	require.NotNil(t, repo.BranchByName("main"))
+
+	events, err := store.ReadEvents()
+	require.NoError(t, err)
+	var invocation, result *dtu.Event
+	for i := range events {
+		if events[i].Shim == nil || events[i].Shim.Command != "git" || len(events[i].Shim.Args) == 0 || events[i].Shim.Args[0] != "fetch" {
+			continue
+		}
+		switch events[i].Kind {
+		case dtu.EventKindShimInvocation:
+			invocation = &events[i]
+		case dtu.EventKindShimResult:
+			result = &events[i]
+		}
+	}
+	require.NotNil(t, invocation)
+	require.NotNil(t, result)
+	assert.Equal(t, []string{"fetch", "origin", "fix/issue-1-bug-one", "main"}, invocation.Shim.Args)
+	assert.Equal(t, []string{"fetch", "origin", "fix/issue-1-bug-one", "main"}, result.Shim.Args)
+	require.NotNil(t, result.Shim.ExitCode)
+	assert.Equal(t, 0, *result.Shim.ExitCode)
+}
+
 func TestExecuteGHIssueViewAppliesScheduledMutationAfterObservationThreshold(t *testing.T) {
 	t.Parallel()
 

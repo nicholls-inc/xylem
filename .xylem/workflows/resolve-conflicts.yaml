@@ -5,9 +5,12 @@ phases:
     type: command
     run: |
       set -eu
+      head_branch="$(gh pr view {{ .Issue.Number }} --repo {{ .Repo.Slug }} --json headRefName --jq '.headRefName')"
+      git fetch origin "$head_branch" "{{ .Repo.DefaultBranch }}"
+      git branch -D "$head_branch" >/dev/null 2>&1 || true
       gh pr checkout {{ .Issue.Number }} --repo {{ .Repo.Slug }}
-      test "$(git branch --show-current)" = "$(gh pr view {{ .Issue.Number }} --repo {{ .Repo.Slug }} --json headRefName --jq '.headRefName')"
-      git fetch origin {{ .Repo.DefaultBranch }}
+      test "$(git branch --show-current)" = "$head_branch"
+      git reset --hard "origin/$head_branch"
       merge_log=$(mktemp)
       set +e
       git merge origin/{{ .Repo.DefaultBranch }} --no-commit --no-ff >"$merge_log" 2>&1

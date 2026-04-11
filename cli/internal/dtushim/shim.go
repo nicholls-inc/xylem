@@ -692,7 +692,7 @@ func runGit(_ context.Context, store *dtu.Store, state *dtu.State, args []string
 			return runGitWorktreeRemove(store, args[2:], stderr)
 		}
 	case "branch":
-		if len(args) >= 2 && args[1] == "-d" {
+		if len(args) >= 2 && (args[1] == "-d" || args[1] == "-D") {
 			return runGitBranchDelete(store, args[2:], stderr)
 		}
 	case "ls-remote":
@@ -746,15 +746,17 @@ func runGitRemoteShow(store *dtu.Store, state *dtu.State, args []string, stdout,
 }
 
 func runGitFetch(store *dtu.Store, state *dtu.State, args []string, stderr io.Writer) int {
-	if len(args) != 2 || args[0] != "origin" {
-		return writeError(stderr, 2, fmt.Errorf("git fetch requires origin and a branch name"))
+	if len(args) < 2 || args[0] != "origin" {
+		return writeError(stderr, 2, fmt.Errorf("git fetch requires origin and at least one branch name"))
 	}
 	repo, _, code := loadRepo(store, state, "", stderr)
 	if code != 0 {
 		return code
 	}
-	if !repoHasBranch(repo, args[1]) {
-		return writeError(stderr, 1, fmt.Errorf("branch %q not found", args[1]))
+	for _, branch := range args[1:] {
+		if !repoHasBranch(repo, branch) {
+			return writeError(stderr, 1, fmt.Errorf("branch %q not found", branch))
+		}
 	}
 	return 0
 }
@@ -853,7 +855,7 @@ func runGitWorktreeRemove(store *dtu.Store, args []string, stderr io.Writer) int
 
 func runGitBranchDelete(store *dtu.Store, args []string, stderr io.Writer) int {
 	if len(args) != 1 {
-		return writeError(stderr, 2, fmt.Errorf("git branch -d requires exactly one branch"))
+		return writeError(stderr, 2, fmt.Errorf("git branch -d/-D requires exactly one branch"))
 	}
 	branchName := strings.TrimSpace(args[0])
 	err := store.Update(func(state *dtu.State) error {
