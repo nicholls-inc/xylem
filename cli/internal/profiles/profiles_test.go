@@ -136,6 +136,7 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Workflows), "initiative-tracker")
 	assert.Contains(t, sortedKeys(composed.Workflows), "backlog-refinement")
 	assert.Contains(t, sortedKeys(composed.Workflows), "ingest-field-reports")
+	assert.Contains(t, sortedKeys(composed.Workflows), "release-cadence")
 	assert.Contains(t, sortedKeys(composed.Prompts), "implement-harness/pr_draft")
 	assert.Contains(t, sortedKeys(composed.Prompts), "continuous-improvement/verify")
 	assert.Contains(t, sortedKeys(composed.Prompts), "hardening-audit/rank")
@@ -150,10 +151,15 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Sources), "initiative-tracker")
 	assert.Contains(t, sortedKeys(composed.Sources), "backlog-refinement")
 	assert.Contains(t, sortedKeys(composed.Sources), "ingest-field-reports")
+	assert.Contains(t, sortedKeys(composed.Sources), "release-cadence")
 	require.Len(t, composed.ConfigOverlays, 2)
 
 	assert.Contains(t, sortedKeys(composed.Scripts), "post-discussion.sh")
-	assert.Contains(t, joinOverlays(composed.ConfigOverlays), "concurrency:\n  global: 3\n  per_class:\n    backlog-refinement: 1")
+	overlays := joinOverlays(composed.ConfigOverlays)
+	assert.Contains(t, overlays, "concurrency:\n  global: 3\n  per_class:\n    backlog-refinement: 1")
+	assert.Contains(t, overlays, `auto_merge_labels: [ready-to-merge]`)
+	assert.Contains(t, overlays, `auto_merge_branch_pattern: "^((feat|fix|chore)/issue-[0-9]+|release-please--.+)"`)
+	assert.Contains(t, overlays, `auto_merge_reviewer: "copilot-pull-request-reviewer"`)
 
 	implementHarnessWorkflow := string(composed.Workflows["implement-harness"])
 	assert.Contains(t, implementHarnessWorkflow, `--repo nicholls-inc/xylem`)
@@ -273,6 +279,33 @@ func TestSmoke_S5_SelfHostingProfileScaffoldsDailyBacklogRefinementWorkflow(t *t
 
 	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/analyze")
 	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/report")
+}
+
+func TestSmoke_S6_SelfHostingProfileScaffoldsReleaseCadenceWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	var source config.SourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["release-cadence"], &source))
+	assert.Equal(t, "scheduled", source.Type)
+	assert.Equal(t, "{{ .Repo }}", source.Repo)
+	assert.Equal(t, "4h", source.Schedule)
+	require.Contains(t, source.Tasks, "label-mature-release-pr")
+	assert.Equal(t, "release-cadence", source.Tasks["label-mature-release-pr"].Workflow)
+	assert.Equal(t, "release-cadence", source.Tasks["label-mature-release-pr"].Ref)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["release-cadence"], &wf))
+	assert.Equal(t, "release-cadence", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 1)
+	assert.Equal(t, "label_ready", wf.Phases[0].Name)
+	assert.Equal(t, "command", wf.Phases[0].Type)
+	assert.Contains(t, wf.Phases[0].Run, "xylem release-cadence label-ready --repo {{ .Repo }}")
+	require.NotNil(t, wf.Phases[0].NoOp)
+	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
 }
 
 func TestAdaptRepoWorkflowAssetParsesCleanly(t *testing.T) {

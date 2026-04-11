@@ -86,6 +86,15 @@ sources:
       daily-rotation:
         workflow: continuous-improvement
         ref: continuous-improvement
+  release-cadence:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "4h"
+    timeout: "15m"
+    tasks:
+      label-mature-release-pr:
+        workflow: release-cadence
+        ref: release-cadence
   metrics-collector:
     type: scheduled
     repo: "{{ .Repo }}"
@@ -157,6 +166,9 @@ daemon:
   auto_upgrade: true
   auto_merge: true
   auto_merge_repo: "{{ .Repo }}"
+  auto_merge_labels: [ready-to-merge]
+  auto_merge_branch_pattern: "^((feat|fix|chore)/issue-[0-9]+|release-please--.+)"
+  auto_merge_reviewer: "copilot-pull-request-reviewer"
 
 concurrency:
   global: 3

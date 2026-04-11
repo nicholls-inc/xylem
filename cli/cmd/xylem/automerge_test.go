@@ -16,7 +16,7 @@ func xylemAutoMergeSettings(t *testing.T) autoMergeSettings {
 	settings, err := newAutoMergeSettings(config.DaemonConfig{
 		AutoMergeRepo:          "nicholls-inc/xylem",
 		AutoMergeLabels:        []string{"ready-to-merge"},
-		AutoMergeBranchPattern: `^(feat|fix|chore)/issue-\d+`,
+		AutoMergeBranchPattern: `^((feat|fix|chore)/issue-[0-9]+|release-please--.+)`,
 		AutoMergeReviewer:      "copilot-pull-request-reviewer",
 	})
 	require.NoError(t, err)
@@ -122,7 +122,7 @@ func TestXylemBranchPattern(t *testing.T) {
 		{"fix/issue-99-99", true},
 		{"chore/issue-1-1", true},
 		{"main", false},
-		{"release-please--branches--main--components--xylem", false},
+		{"release-please--branches--main--components--xylem", true},
 		{"worktree-agent-abc", false},
 		{"docs/smoke-scenarios-unit-1", false},
 		{"feat/self-healing-daemon", false},
@@ -336,6 +336,19 @@ func TestDecideAutoMergeAction(t *testing.T) {
 				HeadRefName: "feat/issue-1-1", State: "OPEN", Mergeable: "MERGEABLE",
 				Labels: mergeReadyLabels, StatusCheckRollup: greenChecks, ReviewDecision: "APPROVED",
 				LatestReviews: copilotReviewed,
+			},
+			want: actionAdminMerge,
+		},
+		{
+			name: "release-please PR with merge-ready label admin-merges",
+			pr: prSummary{
+				HeadRefName:       "release-please--branches--main--components--xylem",
+				State:             "OPEN",
+				Mergeable:         "MERGEABLE",
+				Labels:            mergeReadyLabels,
+				StatusCheckRollup: greenChecks,
+				ReviewDecision:    "APPROVED",
+				LatestReviews:     copilotReviewed,
 			},
 			want: actionAdminMerge,
 		},

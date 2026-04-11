@@ -146,6 +146,9 @@ daemon:
 | `upgrade_interval` | string | `"5m"` | No | How often the daemon re-runs auto-upgrade checks while the loop is running. Must be a valid Go duration string. |
 | `auto_merge` | boolean | `false` | No | Enables the merge-ready Copilot review + auto-merge cycle for xylem-authored PRs. |
 | `auto_merge_repo` | string | current repo remote | No | Optional `owner/name` override for auto-merge GitHub operations. |
+| `auto_merge_labels` | list of strings | `["ready-to-merge"]` | No | Labels a PR must carry before the daemon considers it eligible for auto-merge. Blank entries are ignored. |
+| `auto_merge_branch_pattern` | string | `".*"` | No | Regular expression applied to the PR head branch. Only matching branches participate in daemon auto-merge. |
+| `auto_merge_reviewer` | string | `""` | No | Optional GitHub reviewer login requested before the daemon performs the admin merge. Empty disables reviewer requests. |
 
 ### `daemon.stall_monitor`
 
@@ -260,6 +263,15 @@ sources:
       analyze-gaps:
         workflow: harness-gap-analysis
         ref: harness-gap-analysis
+
+  release-cadence:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "4h"
+    tasks:
+      label-mature-release-pr:
+        workflow: release-cadence
+        ref: release-cadence
 ```
 
 `continuous-improvement` is another scheduled self-hosting workflow. It runs a deterministic rotation helper before the prompt phases, persists its focus history under `<state_dir>/state/continuous-improvement/state.json`, writes the current focus brief to `<state_dir>/state/continuous-improvement/current-selection.json`, and then drives a small improvement PR through the normal workflow pipeline.
@@ -277,6 +289,35 @@ sources:
 ```
 
 To opt out, omit or delete the scheduled `continuous-improvement` source from your config; likewise, omit `harness-gap-analysis` if you do not want the sibling scheduled review. No separate feature flag is required.
+
+`release-cadence` is the self-hosting sibling that periodically promotes a mature `release-please` PR into the daemon auto-merge path. It is intentionally a two-step policy:
+
+1. the scheduled helper checks the release PR age and queued commit count, then adds `ready-to-merge`;
+2. the daemon auto-merge loop performs the usual mergeability, green-CI, and review checks before merging.
+
+The bundled `self-hosting-xylem` profile scaffolds that full contract for you: it installs the `release-cadence` scheduled source and narrows `daemon.auto_merge_branch_pattern` to xylem issue branches plus `release-please`, so unrelated human-authored PRs stay outside the auto-admin-merge path.
+
+```yaml
+sources:
+  release-cadence:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "4h"
+    timeout: "15m"
+    tasks:
+      label-mature-release-pr:
+        workflow: release-cadence
+        ref: release-cadence
+
+daemon:
+  auto_merge: true
+  auto_merge_repo: nicholls-inc/xylem
+  auto_merge_labels: [ready-to-merge]
+  auto_merge_branch_pattern: "^((feat|fix|chore)/issue-[0-9]+|release-please--.+)"
+  auto_merge_reviewer: "copilot-pull-request-reviewer"
+```
+
+Use the `no-auto-admin-merge` label on the release PR when you want to pause automatic cutting for a cycle without disabling the scheduled source.
 
 ### `status_labels`
 

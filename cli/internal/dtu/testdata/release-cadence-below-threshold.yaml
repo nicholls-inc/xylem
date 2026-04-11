@@ -1,0 +1,23 @@
+metadata:
+  name: release-cadence-below-threshold
+  scenario: release-please PR below commit threshold no-ops
+repositories:
+  - owner: owner
+    name: repo
+    default_branch: main
+    labels:
+      - name: ready-to-merge
+      - name: no-auto-admin-merge
+    pull_requests:
+      - number: 3
+        title: Release Please
+        body: accumulated changelog
+        state: open
+        created_at: 2026-04-01T12:00:00Z
+        base_branch: main
+        head_branch: release-please--branches--main
+        head_sha: aaa111
+        commits:
+          - oid: aaa111
+          - oid: bbb222
+          - oid: ccc333
