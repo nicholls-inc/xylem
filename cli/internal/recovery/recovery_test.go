@@ -554,10 +554,15 @@ func TestSmoke_S10_NextRetryVesselPreservesRecoveryLineageMetadata(t *testing.T)
 		Ref:            "https://github.com/owner/repo/issues/42",
 		Workflow:       "fix-bug",
 		WorkflowDigest: "wf-launch-snapshot",
-		State:          queue.StateFailed,
-		Error:          "temporary failure from upstream 503",
-		FailedPhase:    "verify",
-		GateOutput:     "503 Service Unavailable",
+		CurrentPhase:   2,
+		WorktreePath:   "/tmp/worktrees/issue-42",
+		PhaseOutputs: map[string]string{
+			"plan": "/tmp/.xylem/phases/issue-42/plan.output",
+		},
+		State:       queue.StateFailed,
+		Error:       "temporary failure from upstream 503",
+		FailedPhase: "verify",
+		GateOutput:  "503 Service Unavailable",
 		Meta: map[string]string{
 			"issue_num":                "42",
 			"source_input_fingerprint": "src-fingerprint",
@@ -607,6 +612,9 @@ func TestSmoke_S10_NextRetryVesselPreservesRecoveryLineageMetadata(t *testing.T)
 	assert.NotEmpty(t, retry.Meta[MetaRemediationFingerprint])
 	assert.Equal(t, "updated title", retry.Meta["issue_title"])
 	assert.Empty(t, retry.WorkflowDigest)
+	assert.Zero(t, retry.CurrentPhase)
+	assert.Empty(t, retry.WorktreePath)
+	assert.Nil(t, retry.PhaseOutputs)
 }
 
 func TestSaveRejectsUnsafeVesselID(t *testing.T) {

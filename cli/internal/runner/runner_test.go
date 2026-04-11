@@ -340,11 +340,17 @@ func (m *mockWorktree) Remove(_ context.Context, worktreePath string) error {
 }
 
 type trackingWorktree struct {
-	lastBranch string
+	lastBranch  string
+	path        string
+	createCalls int
 }
 
 func (tw *trackingWorktree) Create(_ context.Context, branchName string) (string, error) {
+	tw.createCalls++
 	tw.lastBranch = branchName
+	if tw.path != "" {
+		return tw.path, nil
+	}
 	return ".claude/worktrees/" + branchName, nil
 }
 
@@ -1703,6 +1709,42 @@ func TestDrainSingleVessel(t *testing.T) {
 	if vessels[0].State != queue.StateCompleted {
 		t.Errorf("expected vessel completed, got %s", vessels[0].State)
 	}
+}
+
+func TestEnsureWorktreeRecreatesMissingInheritedPath(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := queue.Vessel{
+		ID:           "issue-99-retry-1",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		Ref:          "retry-spec",
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+		CurrentPhase: 2,
+		WorktreePath: filepath.Join(dir, "missing-worktree"),
+		PhaseOutputs: map[string]string{"plan": filepath.Join(dir, ".xylem", "phases", "issue-99", "plan.output")},
+	}
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	recreatedPath := filepath.Join(dir, "recreated-worktree")
+	wt := &trackingWorktree{path: recreatedPath}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+
+	worktreePath, ok := r.ensureWorktree(context.Background(), &vessel, &source.Manual{})
+	require.True(t, ok)
+	require.Equal(t, recreatedPath, worktreePath)
+	require.Equal(t, recreatedPath, vessel.WorktreePath)
+	require.Equal(t, 1, wt.createCalls)
+	require.Equal(t, "task/issue-99-retry-1-retry-spec", wt.lastBranch)
+
+	stored, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	require.Equal(t, recreatedPath, stored.WorktreePath)
+	require.Equal(t, 2, stored.CurrentPhase)
+	require.Equal(t, vessel.PhaseOutputs, stored.PhaseOutputs)
 }
 
 // TestWS6S29NilHarnessFieldsRunsNormally verifies that a runner without
