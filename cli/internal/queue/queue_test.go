@@ -587,8 +587,7 @@ func TestEnqueueIdempotentDuplicateRef(t *testing.T) {
 }
 
 func TestEnqueueAfterTerminalState(t *testing.T) {
-	// Completed vessels block re-enqueue (prevents scanner re-scan loop).
-	t.Run("after completed blocks re-enqueue", func(t *testing.T) {
+	t.Run("after completed", func(t *testing.T) {
 		q, _ := newTestQueue(t)
 		vessel := testVessel(42)
 		if _, err := q.Enqueue(vessel); err != nil {
@@ -606,18 +605,17 @@ func TestEnqueueAfterTerminalState(t *testing.T) {
 		if err != nil {
 			t.Fatalf("re-enqueue: %v", err)
 		}
-		if enqueued {
-			t.Fatal("expected re-enqueue to be blocked after completed state")
+		if !enqueued {
+			t.Fatal("expected re-enqueue to succeed after completed state")
 		}
 	})
 
-	// Failed, cancelled, and timed_out vessels allow re-enqueue.
 	tests := []struct {
 		name        string
 		transitions []VesselState
 	}{
-		{"after failed", []VesselState{StateRunning, StateFailed}},
 		{"after cancelled", []VesselState{StateCancelled}},
+		{"after failed", []VesselState{StateRunning, StateFailed}},
 		{"after timed_out", []VesselState{StateRunning, StateWaiting, StateTimedOut}},
 	}
 

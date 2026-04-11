@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
@@ -164,6 +165,47 @@ func TestScanDryRun(t *testing.T) {
 	}
 }
 
+func TestScanDryRunUsesLiveQueueContext(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeScanConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newScanMock()
+
+	existing := queue.Vessel{
+		ID:        "issue-1",
+		Source:    "github-issue",
+		Ref:       "https://github.com/owner/repo/issues/1",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+		Meta:      map[string]string{"issue_num": "1"},
+	}
+	if _, err := q.Enqueue(existing); err != nil {
+		t.Fatalf("seed queue: %v", err)
+	}
+
+	issues := []ghIssueJSON{
+		{Number: 1, Title: "fix null", URL: existing.Ref,
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "bug"}}},
+	}
+	stubScanCommands(r, cfg, issues)
+
+	out := captureStdout(func() {
+		if err := dryRunScan(cfg, q, r); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "No new issues found.") {
+		t.Fatalf("expected dry-run to honor existing queue state, got: %s", out)
+	}
+	if strings.Contains(out, "issue-1") {
+		t.Fatalf("expected dry-run to suppress already-pending issue, got: %s", out)
+	}
+}
+
 func TestScanNormalMode(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeScanConfig(dir)
@@ -195,6 +237,64 @@ func TestScanNormalMode(t *testing.T) {
 	}
 	if vessels[0].ID != "issue-2" {
 		t.Errorf("expected vessel ID issue-2, got %s", vessels[0].ID)
+	}
+}
+
+func TestScanReenqueuesCompletedIssue(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeScanConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newScanMock()
+
+	completed := queue.Vessel{
+		ID:        "issue-3",
+		Source:    "github-issue",
+		Ref:       "https://github.com/owner/repo/issues/3",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+		Meta:      map[string]string{"issue_num": "3"},
+	}
+	if _, err := q.Enqueue(completed); err != nil {
+		t.Fatalf("enqueue seed vessel: %v", err)
+	}
+	if err := q.Update(completed.ID, queue.StateRunning, ""); err != nil {
+		t.Fatalf("mark running: %v", err)
+	}
+	if err := q.Update(completed.ID, queue.StateCompleted, ""); err != nil {
+		t.Fatalf("mark completed: %v", err)
+	}
+
+	issues := []ghIssueJSON{
+		{Number: 3, Title: "still open bug", URL: completed.Ref,
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "bug"}}},
+	}
+	stubScanCommands(r, cfg, issues)
+
+	out := captureStdout(func() {
+		if err := cmdScan(cfg, q, r, false); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Added 1") {
+		t.Fatalf("expected completed issue to be re-enqueued, got: %s", out)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list queue: %v", err)
+	}
+	if len(vessels) != 2 {
+		t.Fatalf("expected original and re-enqueued vessels, got %d", len(vessels))
+	}
+	if vessels[1].ID != "issue-3" {
+		t.Fatalf("expected re-enqueued vessel to reuse issue id, got %s", vessels[1].ID)
+	}
+	if vessels[1].State != queue.StatePending {
+		t.Fatalf("expected re-enqueued vessel to be pending, got %s", vessels[1].State)
 	}
 }
 
