@@ -811,7 +811,12 @@ func TestSmoke_S15_BuildGateClaimWithEvidenceMetadataProducesATypedClaim(t *test
 	assert.True(t, claim.Timestamp.Equal(recordedAt))
 }
 
-func TestSmoke_S16_BuildGateClaimWithoutEvidenceMetadataProducesAnUntypedClaim(t *testing.T) {
+func TestSmoke_S16_BuildGateClaimWithoutEvidenceMetadataProducesABehaviorallyCheckedClaim(t *testing.T) {
+	// Command gates run a shell command and assert on its exit status — that is
+	// a behavioral check, not an unclassified assertion. Per P0 #10 in
+	// docs/plans/sota-gap-implementation-2026-04-11.md, command gates default to
+	// evidence.BehaviorallyChecked so evidence manifests never ship with
+	// "untyped" claims into production.
 	recordedAt := time.Date(2026, time.April, 1, 8, 30, 0, 0, time.UTC)
 	artifactPath := phaseArtifactRelativePath("vessel-1", "implement")
 	claim := buildGateClaim(workflow.Phase{
@@ -819,8 +824,8 @@ func TestSmoke_S16_BuildGateClaimWithoutEvidenceMetadataProducesAnUntypedClaim(t
 		Gate: &workflow.Gate{Run: "cd cli && go test ./..."},
 	}, true, artifactPath, recordedAt)
 
-	assert.Equal(t, evidence.Untyped, claim.Level)
-	assert.Equal(t, "No trust boundary declared", claim.TrustBoundary)
+	assert.Equal(t, evidence.BehaviorallyChecked, claim.Level)
+	assert.Equal(t, "Command gate output", claim.TrustBoundary)
 	assert.Contains(t, claim.Claim, "implement")
 	assert.True(t, claim.Passed)
 	assert.Equal(t, artifactPath, claim.ArtifactPath)

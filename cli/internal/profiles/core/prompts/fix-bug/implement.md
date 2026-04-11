@@ -16,4 +16,11 @@ The following gate check failed after the previous attempt. Fix the issues and t
 {{.GateResult}}
 {{end}}
 
+{{if .Evaluation.Feedback}}
+## Evaluator Feedback
+Address the following evaluator feedback before finalizing the implementation:
+
+{{.Evaluation.Feedback}}
+{{end}}
+
 Implement the changes now. Follow the plan precisely.
