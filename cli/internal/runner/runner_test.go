@@ -310,6 +310,49 @@ func (b *blockingPhaseCmdRunner) RunPhase(ctx context.Context, _ string, stdin i
 	}
 }
 
+type observedBlockingPhaseCmdRunner struct {
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+}
+
+func newObservedBlockingPhaseCmdRunner() *observedBlockingPhaseCmdRunner {
+	return &observedBlockingPhaseCmdRunner{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+}
+
+func (b *observedBlockingPhaseCmdRunner) RunOutput(_ context.Context, _ string, _ ...string) ([]byte, error) {
+	return []byte{}, nil
+}
+
+func (b *observedBlockingPhaseCmdRunner) RunProcess(_ context.Context, _ string, _ string, _ ...string) error {
+	return nil
+}
+
+func (b *observedBlockingPhaseCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return b.RunPhaseObserved(ctx, dir, stdin, nil, name, args...)
+}
+
+func (b *observedBlockingPhaseCmdRunner) RunPhaseObserved(ctx context.Context, _ string, stdin io.Reader, observer PhaseProcessObserver, _ string, _ ...string) ([]byte, error) {
+	if _, err := io.ReadAll(stdin); err != nil {
+		return nil, err
+	}
+	if observer != nil {
+		pid := os.Getpid()
+		observer.ProcessStarted(pid)
+		defer observer.ProcessExited(pid)
+	}
+	b.startOnce.Do(func() { close(b.started) })
+	select {
+	case <-b.release:
+		return []byte("observed output"), nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 type mockWorktree struct {
 	mu           sync.Mutex
 	createErr    error
@@ -8167,7 +8210,7 @@ func TestCheckHungVesselsWritesTraceableSummary(t *testing.T) {
 	assert.Equal(t, timeoutSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
 }
 
-func TestSmoke_S1_PhaseStalledVesselTimesOut(t *testing.T) {
+func TestSmoke_S1_UntrackedPhaseStalledVesselTimesOut(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -8202,6 +8245,98 @@ func TestSmoke_S1_PhaseStalledVesselTimesOut(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, queue.StateTimedOut, updated.State)
 	assert.Contains(t, updated.Error, "phase stalled: no output for")
+}
+
+func TestCheckStalledVesselsDoesNotTimeoutLiveTrackedSubprocessWithOldOutput(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "live-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "implement.output")
+	require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+	require.NoError(t, os.WriteFile(outputPath, []byte(""), 0o644))
+	old := now.Add(-11 * time.Minute)
+	require.NoError(t, os.Chtimes(outputPath, old, old))
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	r.markProcessStarted(vessel.ID, "implement", os.Getpid())
+
+	findings := r.CheckStalledVessels(context.Background())
+	require.Empty(t, findings)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateRunning, updated.State)
+	assert.Empty(t, updated.Error)
+}
+
+func TestCheckStalledVesselsDoesNotTimeoutObservedLivePhaseWithOldOutput(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{{
+		name:          "implement",
+		promptContent: "Implement the fix",
+		maxTurns:      5,
+	}})
+	withTestWorkingDir(t, dir)
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, err := q.Enqueue(queue.Vessel{
+		ID:        "observed-live-1",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	require.NoError(t, err)
+
+	vessel, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, vessel)
+
+	cmdRunner := newObservedBlockingPhaseCmdRunner()
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+
+	done := make(chan string, 1)
+	go func() {
+		done <- r.runVessel(context.Background(), *vessel)
+	}()
+
+	<-cmdRunner.started
+
+	outputPath := filepath.Join(cfg.StateDir, "phases", vessel.ID, "implement.output")
+	old := now.Add(-11 * time.Minute)
+	require.NoError(t, os.Chtimes(outputPath, old, old))
+
+	findings := r.CheckStalledVessels(context.Background())
+	require.Empty(t, findings)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateRunning, updated.State)
+	assert.Empty(t, updated.Error)
+
+	close(cmdRunner.release)
+	assert.Equal(t, "completed", <-done)
 }
 
 func TestSmoke_S3_OrphanedRunningVesselTimesOut(t *testing.T) {

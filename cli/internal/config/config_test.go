@@ -179,8 +179,8 @@ claude:
 	if cfg.Daemon.DrainInterval != "30s" {
 		t.Fatalf("Daemon.DrainInterval = %q, want 30s", cfg.Daemon.DrainInterval)
 	}
-	if cfg.Daemon.StallMonitor.PhaseStallThreshold != "10m" {
-		t.Fatalf("Daemon.StallMonitor.PhaseStallThreshold = %q, want 10m", cfg.Daemon.StallMonitor.PhaseStallThreshold)
+	if cfg.Daemon.StallMonitor.PhaseStallThreshold != "30m" {
+		t.Fatalf("Daemon.StallMonitor.PhaseStallThreshold = %q, want 30m", cfg.Daemon.StallMonitor.PhaseStallThreshold)
 	}
 	if cfg.Daemon.StallMonitor.ScannerIdleThreshold != "5m" {
 		t.Fatalf("Daemon.StallMonitor.ScannerIdleThreshold = %q, want 5m", cfg.Daemon.StallMonitor.ScannerIdleThreshold)
