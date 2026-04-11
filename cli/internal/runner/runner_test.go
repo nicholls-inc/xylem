@@ -3,6 +3,7 @@ package runner
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
@@ -653,7 +655,7 @@ func writeWorkflowFile(t *testing.T, dir, name string, phases []testPhase) {
 func writeWorkflowFileWithOptions(t *testing.T, dir, name string, opts testWorkflowOptions, phases []testPhase) {
 	t.Helper()
 	workflowDir := filepath.Join(dir, ".xylem", "workflows")
-	os.MkdirAll(workflowDir, 0o755)
+	require.NoError(t, os.MkdirAll(workflowDir, 0o755))
 
 	var phaseYAML strings.Builder
 	for _, p := range phases {
@@ -664,11 +666,37 @@ func writeWorkflowFileWithOptions(t *testing.T, dir, name string, opts testWorkf
 			fmt.Fprintf(&phaseYAML, "    run: %q\n", p.run)
 		} else {
 			promptPath := filepath.Join(dir, ".xylem", "prompts", name, p.name+".md")
-			os.MkdirAll(filepath.Dir(promptPath), 0o755)
-			os.WriteFile(promptPath, []byte(p.promptContent), 0o644)
+			require.NoError(t, os.MkdirAll(filepath.Dir(promptPath), 0o755))
+			require.NoError(t, os.WriteFile(promptPath, []byte(p.promptContent), 0o644))
 
 			fmt.Fprintf(&phaseYAML, "    prompt_file: %s\n", promptPath)
 			fmt.Fprintf(&phaseYAML, "    max_turns: %d\n", p.maxTurns)
+			if p.evaluatorPromptContent != "" {
+				evaluatorPromptPath := filepath.Join(dir, ".xylem", "prompts", name, p.name+".evaluator.md")
+				require.NoError(t, os.MkdirAll(filepath.Dir(evaluatorPromptPath), 0o755))
+				require.NoError(t, os.WriteFile(evaluatorPromptPath, []byte(p.evaluatorPromptContent), 0o644))
+
+				phaseYAML.WriteString("    evaluator:\n")
+				fmt.Fprintf(&phaseYAML, "      prompt_file: %s\n", evaluatorPromptPath)
+				fmt.Fprintf(&phaseYAML, "      max_turns: %d\n", p.evaluatorMaxTurns)
+				if p.evaluatorMaxIterations > 0 {
+					fmt.Fprintf(&phaseYAML, "      max_iterations: %d\n", p.evaluatorMaxIterations)
+				}
+				if p.evaluatorPassThreshold > 0 {
+					fmt.Fprintf(&phaseYAML, "      pass_threshold: %.2f\n", p.evaluatorPassThreshold)
+				}
+				if len(p.evaluatorCriteria) > 0 {
+					phaseYAML.WriteString("      criteria:\n")
+					for _, criterion := range p.evaluatorCriteria {
+						fmt.Fprintf(&phaseYAML, "        - name: %q\n", criterion.Name)
+						if criterion.Description != "" {
+							fmt.Fprintf(&phaseYAML, "          description: %q\n", criterion.Description)
+						}
+						fmt.Fprintf(&phaseYAML, "          weight: %.2f\n", criterion.Weight)
+						fmt.Fprintf(&phaseYAML, "          threshold: %.2f\n", criterion.Threshold)
+					}
+				}
+			}
 		}
 		if p.noopMatch != "" {
 			phaseYAML.WriteString("    noop:\n")
@@ -714,7 +742,7 @@ func writeWorkflowFileWithOptions(t *testing.T, dir, name string, opts testWorkf
 		workflowContent += "allow_canonical_protected_writes: true\n"
 	}
 	workflowContent += fmt.Sprintf("phases:\n%s", phaseYAML.String())
-	os.WriteFile(filepath.Join(workflowDir, name+".yaml"), []byte(workflowContent), 0o644)
+	require.NoError(t, os.WriteFile(filepath.Join(workflowDir, name+".yaml"), []byte(workflowContent), 0o644))
 }
 
 func withTestWorkingDir(t *testing.T, dir string) {
@@ -955,6 +983,156 @@ func TestDrainTracingSurfacesVesselHealthAndPatterns(t *testing.T) {
 	}
 }
 
+func TestDrainEvaluatorLoopRetriesGeneratorAndPersistsQualityReport(t *testing.T) {
+	tracer, rec := newTestTracer(t)
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(_ string, prompt, _ string, _ ...string) ([]byte, error, bool) {
+			switch {
+			case strings.Contains(prompt, "Evaluate output") && strings.Contains(prompt, "Output: draft 1"):
+				return []byte(`{"pass":false,"score":{"overall":0.40,"criteria":{"correctness":0.40},"issues":[{"severity":1,"description":"missing tests","suggestion":"add tests"}]},"feedback":[{"severity":1,"description":"missing tests","suggestion":"add tests"}]}`), nil, true
+			case strings.Contains(prompt, "Evaluate output") && strings.Contains(prompt, "Output: draft 2"):
+				return []byte(`{"pass":true,"score":{"overall":0.95,"criteria":{"correctness":0.95}},"feedback":[]}`), nil, true
+			case strings.Contains(prompt, "Implement fix") && strings.Contains(prompt, "Suggestion: add tests"):
+				return []byte("draft 2"), nil, true
+			case strings.Contains(prompt, "Implement fix"):
+				return []byte("draft 1"), nil, true
+			default:
+				return nil, nil, false
+			}
+		},
+	}
+
+	r := newWorkflowRunner(t, "eval-loop", []testPhase{
+		{
+			name:                   "implement",
+			promptContent:          "Implement fix\nFeedback: {{.Evaluation.Feedback}}",
+			maxTurns:               6,
+			evaluatorPromptContent: "Evaluate output\nCriteria: {{.Evaluation.Criteria}}\nOutput: {{.Evaluation.Output}}",
+			evaluatorMaxTurns:      4,
+			evaluatorMaxIterations: 2,
+			evaluatorPassThreshold: 0.70,
+			evaluatorCriteria: []evaluator.Criterion{
+				{Name: "correctness", Description: "Fix is correct", Weight: 1.0, Threshold: 0.70},
+			},
+		},
+	}, cmdRunner, tracer)
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+
+	summary := loadSummary(t, r.Config.StateDir, "issue-1")
+	require.Len(t, summary.Phases, 1)
+	assert.Equal(t, evalReportRelativePath("issue-1"), summary.EvalReportPath)
+	assert.Equal(t, evidenceManifestRelativePath("issue-1"), summary.EvidenceManifestPath)
+	assert.Equal(t, 2, summary.Phases[0].EvalIterations)
+	assert.True(t, summary.Phases[0].EvalConverged)
+	assert.NotEmpty(t, summary.Phases[0].EvalIntensity)
+
+	manifest, err := evidence.LoadManifest(r.Config.StateDir, "issue-1")
+	require.NoError(t, err)
+	require.Len(t, manifest.Claims, 1)
+	assert.Equal(t, evidence.BehaviorallyChecked, manifest.Claims[0].Level)
+	assert.Equal(t, evalReportRelativePath("issue-1"), manifest.Claims[0].ArtifactPath)
+	assert.True(t, manifest.Claims[0].Passed)
+
+	outputPath := config.RuntimePath(r.Config.StateDir, "phases", "issue-1", "implement.output")
+	outputData, err := os.ReadFile(outputPath)
+	require.NoError(t, err)
+	assert.Equal(t, "draft 2", string(outputData))
+
+	reportPath := config.RuntimePath(r.Config.StateDir, "phases", "issue-1", evalReportFileName)
+	reportData, err := os.ReadFile(reportPath)
+	require.NoError(t, err)
+
+	var artifact EvaluationArtifact
+	require.NoError(t, json.Unmarshal(reportData, &artifact))
+	require.Len(t, artifact.Phases, 1)
+	assert.Equal(t, "implement", artifact.Phases[0].Phase)
+	assert.Equal(t, 2, artifact.Phases[0].Iterations)
+	assert.True(t, artifact.Phases[0].Converged)
+	if assert.NotNil(t, artifact.Phases[0].FinalResult) {
+		assert.True(t, artifact.Phases[0].FinalResult.Pass)
+	}
+
+	cmdRunner.mu.Lock()
+	require.Len(t, cmdRunner.phaseCalls, 4)
+	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Output: draft 1")
+	assert.Contains(t, cmdRunner.phaseCalls[2].prompt, "Suggestion: add tests")
+	assert.Contains(t, cmdRunner.phaseCalls[3].prompt, "Output: draft 2")
+	cmdRunner.mu.Unlock()
+
+	phaseSpan := endedSpanByName(t, rec, "phase:implement")
+	phaseAttrs := spanAttrMap(phaseSpan)
+	assert.Equal(t, "true", phaseAttrs["xylem.eval.enabled"])
+	assert.Equal(t, "2", phaseAttrs["xylem.eval.iterations"])
+	assert.Equal(t, "true", phaseAttrs["xylem.eval.converged"])
+	assert.Equal(t, "true", phaseAttrs["xylem.eval.pass"])
+	assert.NotEmpty(t, phaseAttrs["signals.health"])
+}
+
+func TestDrainEvaluatorLoopAndGatePersistBothEvidenceClaims(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(2, "eval-and-gate")
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "eval-and-gate", []testPhase{
+		{
+			name:                   "implement",
+			promptContent:          "Implement fix",
+			maxTurns:               6,
+			evaluatorPromptContent: "Evaluate output\nCriteria: {{.Evaluation.Criteria}}\nOutput: {{.Evaluation.Output}}",
+			evaluatorMaxTurns:      4,
+			evaluatorMaxIterations: 1,
+			evaluatorPassThreshold: 0.70,
+			evaluatorCriteria: []evaluator.Criterion{
+				{Name: "correctness", Description: "Fix is correct", Weight: 1.0, Threshold: 0.70},
+			},
+			gate: `      type: command
+      run: "make test"
+      retries: 0
+      evidence:
+        claim: "Implementation gate passed"
+        level: behaviorally_checked
+        checker: "make test"`,
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Implement fix": []byte("draft 1"),
+		},
+		runPhaseHook: func(_ string, prompt, _ string, _ ...string) ([]byte, error, bool) {
+			if strings.Contains(prompt, "Evaluate output") {
+				return []byte(`{"pass":true,"score":{"overall":0.95,"criteria":{"correctness":0.95}},"feedback":[]}`), nil, true
+			}
+			return nil, nil, false
+		},
+		gateOutput: []byte("ok"),
+	}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, vessel.ID)
+	require.NoError(t, err)
+	require.Len(t, manifest.Claims, 2)
+	assert.Equal(t, evidence.BehaviorallyChecked, manifest.Claims[0].Level)
+	assert.Equal(t, evalReportRelativePath(vessel.ID), manifest.Claims[0].ArtifactPath)
+	assert.Equal(t, "implement", manifest.Claims[0].Phase)
+	assert.Equal(t, "Implementation gate passed", manifest.Claims[1].Claim)
+	assert.Equal(t, phaseArtifactRelativePath(vessel.ID, "implement"), manifest.Claims[1].ArtifactPath)
+}
+
 func TestInspectVesselStatusMissingSummaryDoesNotWarn(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
@@ -1015,6 +1193,11 @@ type testPhase struct {
 	name                          string
 	promptContent                 string
 	maxTurns                      int
+	evaluatorPromptContent        string
+	evaluatorMaxTurns             int
+	evaluatorMaxIterations        int
+	evaluatorPassThreshold        float64
+	evaluatorCriteria             []evaluator.Criterion
 	noopMatch                     string
 	gate                          string
 	allowedTools                  string
@@ -5971,7 +6154,7 @@ func TestSmoke_S4_BuildTemplateDataExposesRepoAndValidation(t *testing.T) {
 			"schedule.source_name": "security-compliance",
 		},
 	}
-	td := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "")
+	td := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "", phase.EvaluationData{})
 
 	rendered, err := renderCommandTemplate("merge", "command", "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} && echo {{.Source.Name}} {{.Source.Repo}} {{.Repo.DefaultBranch}} {{.Validation.Format}} {{.Validation.Lint}} {{.Validation.Build}} {{.Validation.Test}} {{.Vessel.Ref}} {{index .Vessel.Meta \"schedule.source_name\"}}", td)
 	require.NoError(t, err)
@@ -7781,7 +7964,7 @@ func TestSmoke_S20_SinglePhaseResultIncludesAPhaseSummaryField(t *testing.T) {
 	assert.Greater(t, result.phaseSummary.DurationMS, int64(0))
 }
 
-func TestSmoke_S21_SinglePhaseResultEvidenceClaimIsNilWhenNoGateIsPresent(t *testing.T) {
+func TestSmoke_S21_SinglePhaseResultEvidenceClaimsAreEmptyWhenNoGateIsPresent(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -7806,7 +7989,7 @@ func TestSmoke_S21_SinglePhaseResultEvidenceClaimIsNilWhenNoGateIsPresent(t *tes
 	r := New(cfg, queue.New(filepath.Join(dir, "queue.jsonl")), &mockWorktree{path: dir}, cmdRunner)
 
 	result := r.runSinglePhase(context.Background(), vessel, wf, 0, map[string]string{}, phase.IssueData{}, "", dir, &source.Manual{}, vrs, true)
-	assert.Nil(t, result.evidenceClaim)
+	assert.Empty(t, result.evidenceClaims)
 }
 
 func TestSmoke_S22_WaveResultsAreMergedIntoVesselRunStateAfterWgWait(t *testing.T) {

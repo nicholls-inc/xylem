@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"gopkg.in/yaml.v3"
@@ -71,8 +72,23 @@ type Phase struct {
 	Discussion   *DiscussionOutput `yaml:"discussion,omitempty"`
 	NoOp         *NoOp             `yaml:"noop,omitempty"`
 	Gate         *Gate             `yaml:"gate,omitempty"`
+	Evaluator    *PhaseEvaluator   `yaml:"evaluator,omitempty"`
 	AllowedTools *string           `yaml:"allowed_tools,omitempty"`
 	DependsOn    []string          `yaml:"depends_on,omitempty"`
+}
+
+// PhaseEvaluator defines an optional evaluator pass that critiques and can
+// trigger regeneration of a prompt phase before gate execution.
+type PhaseEvaluator struct {
+	PromptFile    string                `yaml:"prompt_file"`
+	MaxTurns      int                   `yaml:"max_turns"`
+	LLM           *string               `yaml:"llm,omitempty"`
+	Model         *string               `yaml:"model,omitempty"`
+	Tier          *string               `yaml:"tier,omitempty"`
+	AllowedTools  *string               `yaml:"allowed_tools,omitempty"`
+	MaxIterations int                   `yaml:"max_iterations,omitempty"`
+	PassThreshold float64               `yaml:"pass_threshold,omitempty"`
+	Criteria      []evaluator.Criterion `yaml:"criteria,omitempty"`
 }
 
 // NoOp defines an early-success completion rule for a phase.
@@ -303,6 +319,12 @@ func (s *Workflow) Validate(workflowFilePath string) error {
 			}
 		}
 
+		if p.Evaluator != nil {
+			if err := validatePhaseEvaluator(p); err != nil {
+				return err
+			}
+		}
+
 		if p.NoOp != nil {
 			if err := validateNoOp(p.Name, p.NoOp); err != nil {
 				return err
@@ -523,6 +545,38 @@ func validateDependencyCycles(phases []Phase) error {
 func validateNoOp(phaseName string, n *NoOp) error {
 	if strings.TrimSpace(n.Match) == "" {
 		return fmt.Errorf("phase %q: noop: match is required", phaseName)
+	}
+	return nil
+}
+
+func validatePhaseEvaluator(p Phase) error {
+	if p.Type == "command" {
+		return fmt.Errorf("phase %q: evaluator is only supported for prompt phases", p.Name)
+	}
+	if p.Evaluator == nil {
+		return nil
+	}
+	if strings.TrimSpace(p.Evaluator.PromptFile) == "" {
+		return fmt.Errorf("phase %q: evaluator.prompt_file is required", p.Name)
+	}
+	if _, err := os.Stat(p.Evaluator.PromptFile); err != nil {
+		return fmt.Errorf("phase %q: evaluator.prompt_file not found: %s", p.Name, p.Evaluator.PromptFile)
+	}
+	if p.Evaluator.MaxTurns <= 0 {
+		return fmt.Errorf("phase %q: evaluator.max_turns must be greater than 0", p.Name)
+	}
+	if p.Evaluator.AllowedTools != nil && *p.Evaluator.AllowedTools == "" {
+		return fmt.Errorf("phase %q: evaluator.allowed_tools must not be empty when specified", p.Name)
+	}
+	if err := validateLLM(p.Evaluator.LLM, fmt.Sprintf("phase %q evaluator", p.Name)); err != nil {
+		return err
+	}
+	if err := evaluator.ValidateConfig(evaluator.EvalConfig{
+		Criteria:      p.Evaluator.Criteria,
+		MaxIterations: p.Evaluator.MaxIterations,
+		PassThreshold: p.Evaluator.PassThreshold,
+	}); err != nil {
+		return fmt.Errorf("phase %q: evaluator: %w", p.Name, err)
 	}
 	return nil
 }

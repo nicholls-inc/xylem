@@ -124,6 +124,19 @@ func TestRenderPrompt(t *testing.T) {
 			want: "Gate: all checks passed",
 		},
 		{
+			name:     "renders evaluation context",
+			template: "Iteration: {{.Evaluation.Iteration}}\nFeedback: {{.Evaluation.Feedback}}\nOutput: {{.Evaluation.Output}}\nCriteria: {{.Evaluation.Criteria}}",
+			data: TemplateData{
+				Evaluation: EvaluationData{
+					Iteration: 2,
+					Feedback:  "Add tests",
+					Output:    "draft 1",
+					Criteria:  "correctness",
+				},
+			},
+			want: "Iteration: 2\nFeedback: Add tests\nOutput: draft 1\nCriteria: correctness",
+		},
+		{
 			name:     "renders vessel ID and source",
 			template: "Vessel: {{.Vessel.ID}} from {{.Vessel.Source}}",
 			data: TemplateData{
@@ -285,6 +298,29 @@ func TestRenderPromptTruncation(t *testing.T) {
 		suffix := fmt.Sprintf(TruncationSuffix, MaxPreviousOutputLen)
 		if !strings.HasSuffix(got, suffix) {
 			t.Fatalf("expected truncation suffix for large value")
+		}
+	})
+
+	t.Run("Evaluation fields exceeding limits are truncated", func(t *testing.T) {
+		data := TemplateData{
+			Evaluation: EvaluationData{
+				Feedback: longString(MaxEvalFeedbackLen + 100),
+				Output:   longString(MaxEvalOutputLen + 100),
+				Criteria: longString(MaxEvalCriteriaLen + 100),
+			},
+		}
+		got, err := RenderPrompt("{{.Evaluation.Feedback}}\n{{.Evaluation.Output}}\n{{.Evaluation.Criteria}}", data)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !strings.Contains(got, fmt.Sprintf(TruncationSuffix, MaxEvalFeedbackLen)) {
+			t.Fatalf("expected feedback truncation suffix")
+		}
+		if !strings.Contains(got, fmt.Sprintf(TruncationSuffix, MaxEvalOutputLen)) {
+			t.Fatalf("expected output truncation suffix")
+		}
+		if !strings.Contains(got, fmt.Sprintf(TruncationSuffix, MaxEvalCriteriaLen)) {
+			t.Fatalf("expected criteria truncation suffix")
 		}
 	})
 }

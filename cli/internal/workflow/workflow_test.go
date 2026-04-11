@@ -1283,6 +1283,69 @@ func TestLoadMalformedYAML(t *testing.T) {
 	requireErrorContains(t, err, "did not find expected")
 }
 
+func TestLoadWorkflowParsesPhaseEvaluator(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/implement.md")
+	createPromptFile(t, dir, "prompts/implement-eval.md")
+
+	path := writeWorkflowFile(t, dir, "eval-workflow", `name: eval-workflow
+phases:
+  - name: implement
+    prompt_file: prompts/implement.md
+    max_turns: 10
+    evaluator:
+      prompt_file: prompts/implement-eval.md
+      max_turns: 4
+      max_iterations: 2
+      pass_threshold: 0.75
+      criteria:
+        - name: correctness
+          description: "Fix solves the issue"
+          weight: 1.0
+          threshold: 0.75
+`)
+
+	got, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, got.Phases[0].Evaluator)
+	assert.Equal(t, "prompts/implement-eval.md", got.Phases[0].Evaluator.PromptFile)
+	assert.Equal(t, 4, got.Phases[0].Evaluator.MaxTurns)
+	assert.Equal(t, 2, got.Phases[0].Evaluator.MaxIterations)
+	assert.Equal(t, 0.75, got.Phases[0].Evaluator.PassThreshold)
+	require.Len(t, got.Phases[0].Evaluator.Criteria, 1)
+	assert.Equal(t, "correctness", got.Phases[0].Evaluator.Criteria[0].Name)
+}
+
+func TestLoadWorkflowRejectsInvalidPhaseEvaluator(t *testing.T) {
+	dir := t.TempDir()
+	chdirTemp(t, dir)
+	createPromptFile(t, dir, "prompts/implement.md")
+	createPromptFile(t, dir, "prompts/implement-eval.md")
+
+	path := writeWorkflowFile(t, dir, "eval-workflow", `name: eval-workflow
+phases:
+  - name: implement
+    prompt_file: prompts/implement.md
+    max_turns: 10
+    evaluator:
+      prompt_file: prompts/implement-eval.md
+      max_turns: 4
+      criteria:
+        - name: correctness
+          weight: 0.6
+          threshold: 0.75
+        - name: completeness
+          weight: 0.6
+          threshold: 0.75
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `phase "implement": evaluator:`)
+	assert.Contains(t, err.Error(), "criteria weights must sum to ~1.0")
+}
+
 func TestLoadWorkflowWithNoOp(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)

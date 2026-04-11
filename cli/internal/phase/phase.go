@@ -12,6 +12,9 @@ const (
 	MaxGateResultLen     = 8000
 	MaxIssueBodyLen      = 32000
 	MaxReporterOutputLen = 64000
+	MaxEvalFeedbackLen   = 8000
+	MaxEvalOutputLen     = 16000
+	MaxEvalCriteriaLen   = 8000
 	TruncationSuffix     = "\n\n[... output truncated at %d characters]"
 )
 
@@ -22,6 +25,7 @@ type TemplateData struct {
 	Phase           PhaseData
 	PreviousOutputs map[string]string // phase name → output text
 	GateResult      string            // most recent gate command output
+	Evaluation      EvaluationData
 	Vessel          VesselData
 	Repo            RepoData
 	Source          SourceData
@@ -71,6 +75,14 @@ type ValidationData struct {
 	Test   string
 }
 
+// EvaluationData describes evaluator loop context for the current phase.
+type EvaluationData struct {
+	Iteration int
+	Feedback  string
+	Output    string
+	Criteria  string
+}
+
 // TruncateOutput truncates s to maxLen characters, appending a suffix if truncated.
 func TruncateOutput(s string, maxLen int) string {
 	if len(s) <= maxLen {
@@ -101,6 +113,9 @@ func prepareData(data TemplateData) TemplateData {
 
 	out.GateResult = TruncateOutput(data.GateResult, MaxGateResultLen)
 	out.Issue.Body = TruncateOutput(data.Issue.Body, MaxIssueBodyLen)
+	out.Evaluation.Feedback = TruncateOutput(data.Evaluation.Feedback, MaxEvalFeedbackLen)
+	out.Evaluation.Output = TruncateOutput(data.Evaluation.Output, MaxEvalOutputLen)
+	out.Evaluation.Criteria = TruncateOutput(data.Evaluation.Criteria, MaxEvalCriteriaLen)
 
 	return out
 }
