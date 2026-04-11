@@ -403,6 +403,10 @@ func (m *smokeReloadCmdRunner) RunPhase(_ context.Context, _ string, stdin io.Re
 	return []byte("ok"), nil
 }
 
+func (m *smokeReloadCmdRunner) RunPhaseWithEnv(_ context.Context, _ string, _ []string, stdin io.Reader, _ string, _ ...string) ([]byte, error) {
+	return m.RunPhase(context.Background(), "", stdin, "")
+}
+
 func (m *smokeReloadCmdRunner) phasePrompts() []string {
 	m.mu.Lock()
 	defer m.mu.Unlock()
