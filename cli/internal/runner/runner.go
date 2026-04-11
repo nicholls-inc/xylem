@@ -1786,7 +1786,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		if r.vesselCancelled(ctx, vessel.ID) {
 			return singlePhaseResult{status: "cancelled"}
 		}
-		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
+		log.Printf("%sphase %q starting", vesselLabel(vessel), p.Name)
 		phaseStart := r.runtimeNow()
 
 		td := r.buildTemplateData(vessel, issueData, p.Name, phaseIdx, previousOutputs, gateResult, phase.EvaluationData{})
@@ -2581,8 +2581,12 @@ func buildGateClaim(p workflow.Phase, passed bool, artifactPath string, recorded
 
 func buildEvaluationClaim(vesselID string, p workflow.Phase, report PhaseEvaluationReport, recordedAt time.Time) evidence.Claim {
 	passed := report.Converged && report.FinalResult != nil && report.FinalResult.Pass
+	claimText := fmt.Sprintf("Evaluator review for phase %q did not meet configured quality thresholds", p.Name)
+	if passed {
+		claimText = fmt.Sprintf("Evaluator review for phase %q met configured quality thresholds", p.Name)
+	}
 	return evidence.Claim{
-		Claim:         fmt.Sprintf("Evaluator review for phase %q met configured quality thresholds", p.Name),
+		Claim:         claimText,
 		Level:         evidence.BehaviorallyChecked,
 		Checker:       "generator-evaluator loop",
 		TrustBoundary: "LLM evaluator review of generated output",

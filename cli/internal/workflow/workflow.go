@@ -560,7 +560,10 @@ func validatePhaseEvaluator(p Phase) error {
 		return fmt.Errorf("phase %q: evaluator.prompt_file is required", p.Name)
 	}
 	if _, err := os.Stat(p.Evaluator.PromptFile); err != nil {
-		return fmt.Errorf("phase %q: evaluator.prompt_file not found: %s", p.Name, p.Evaluator.PromptFile)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("phase %q: evaluator.prompt_file not found: %s", p.Name, p.Evaluator.PromptFile)
+		}
+		return fmt.Errorf("phase %q: cannot access evaluator.prompt_file %q: %w", p.Name, p.Evaluator.PromptFile, err)
 	}
 	if p.Evaluator.MaxTurns <= 0 {
 		return fmt.Errorf("phase %q: evaluator.max_turns must be greater than 0", p.Name)

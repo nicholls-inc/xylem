@@ -984,6 +984,8 @@ func TestDrainTracingSurfacesVesselHealthAndPatterns(t *testing.T) {
 }
 
 func TestDrainEvaluatorLoopRetriesGeneratorAndPersistsQualityReport(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", "/tmp/dtu/state.json")
+
 	tracer, rec := newTestTracer(t)
 	cmdRunner := &mockCmdRunner{
 		runPhaseHook: func(_ string, prompt, _ string, _ ...string) ([]byte, error, bool) {
@@ -1032,6 +1034,7 @@ func TestDrainEvaluatorLoopRetriesGeneratorAndPersistsQualityReport(t *testing.T
 	manifest, err := evidence.LoadManifest(r.Config.StateDir, "issue-1")
 	require.NoError(t, err)
 	require.Len(t, manifest.Claims, 1)
+	assert.Equal(t, `Evaluator review for phase "implement" met configured quality thresholds`, manifest.Claims[0].Claim)
 	assert.Equal(t, evidence.BehaviorallyChecked, manifest.Claims[0].Level)
 	assert.Equal(t, evalReportRelativePath("issue-1"), manifest.Claims[0].ArtifactPath)
 	assert.True(t, manifest.Claims[0].Passed)
@@ -1060,6 +1063,10 @@ func TestDrainEvaluatorLoopRetriesGeneratorAndPersistsQualityReport(t *testing.T
 	assert.Contains(t, cmdRunner.phaseCalls[1].prompt, "Output: draft 1")
 	assert.Contains(t, cmdRunner.phaseCalls[2].prompt, "Suggestion: add tests")
 	assert.Contains(t, cmdRunner.phaseCalls[3].prompt, "Output: draft 2")
+	assert.True(t, containsArgSequence(cmdRunner.phaseCalls[0].args, "--dtu-attempt", "1001"))
+	assert.True(t, containsArgSequence(cmdRunner.phaseCalls[1].args, "--dtu-attempt", "1001"))
+	assert.True(t, containsArgSequence(cmdRunner.phaseCalls[2].args, "--dtu-attempt", "1002"))
+	assert.True(t, containsArgSequence(cmdRunner.phaseCalls[3].args, "--dtu-attempt", "1002"))
 	cmdRunner.mu.Unlock()
 
 	phaseSpan := endedSpanByName(t, rec, "phase:implement")
@@ -1127,10 +1134,21 @@ func TestDrainEvaluatorLoopAndGatePersistBothEvidenceClaims(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, manifest.Claims, 2)
 	assert.Equal(t, evidence.BehaviorallyChecked, manifest.Claims[0].Level)
+	assert.Equal(t, `Evaluator review for phase "implement" met configured quality thresholds`, manifest.Claims[0].Claim)
 	assert.Equal(t, evalReportRelativePath(vessel.ID), manifest.Claims[0].ArtifactPath)
 	assert.Equal(t, "implement", manifest.Claims[0].Phase)
 	assert.Equal(t, "Implementation gate passed", manifest.Claims[1].Claim)
 	assert.Equal(t, phaseArtifactRelativePath(vessel.ID, "implement"), manifest.Claims[1].ArtifactPath)
+}
+
+func TestBuildEvaluationClaimReflectsFailure(t *testing.T) {
+	claim := buildEvaluationClaim("issue-1", workflow.Phase{Name: "implement"}, PhaseEvaluationReport{
+		Converged:   false,
+		FinalResult: &evaluator.EvalResult{Pass: false},
+	}, time.Unix(123, 0))
+
+	assert.Equal(t, `Evaluator review for phase "implement" did not meet configured quality thresholds`, claim.Claim)
+	assert.False(t, claim.Passed)
 }
 
 func TestInspectVesselStatusMissingSummaryDoesNotWarn(t *testing.T) {

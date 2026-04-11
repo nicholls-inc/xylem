@@ -79,7 +79,7 @@ func (g *phaseLoopGenerator) Generate(ctx context.Context, _ string, feedback []
 	if wErr := os.WriteFile(filepath.Join(g.phasesDir, g.phaseDef.Name+".prompt"), []byte(rendered), 0o644); wErr != nil {
 		log.Printf("warn: write prompt artifact for phase %s: %v", g.phaseDef.Name, wErr)
 	}
-	output, promptForCost, provider, model, err := g.r.runPromptInvocation(ctx, g.vessel, g.worktreePath, g.srcCfg, g.wf, &g.phaseDef, g.harnessContent, rendered, g.retryAttempt)
+	output, promptForCost, provider, model, err := g.r.runPromptInvocation(ctx, g.vessel, g.worktreePath, g.srcCfg, g.wf, &g.phaseDef, g.harnessContent, rendered, evaluatorLoopAttempt(g.retryAttempt, g.iteration))
 	if err != nil {
 		g.appendTrace("generation", false, "")
 		return "", err
@@ -98,7 +98,7 @@ func (g *phaseLoopGenerator) appendTrace(eventType string, success bool, content
 	}
 	*g.traceEvents = append(*g.traceEvents, signal.TraceEvent{
 		Type:       eventType,
-		Timestamp:  time.Now().UTC(),
+		Timestamp:  g.r.runtimeNow().UTC(),
 		Success:    success,
 		TokensUsed: cost.EstimateTokens(content),
 		Content:    content,
@@ -122,6 +122,7 @@ type phaseLoopEvaluator struct {
 	srcCfg          *config.SourceConfig
 	vrs             *vesselRunState
 	traceEvents     *[]signal.TraceEvent
+	retryAttempt    int
 	iteration       int
 }
 
@@ -152,7 +153,7 @@ func (e *phaseLoopEvaluator) Evaluate(ctx context.Context, output string, criter
 	if wErr := os.WriteFile(filepath.Join(e.phasesDir, e.phaseDef.Name+".evaluator.prompt"), []byte(rendered), 0o644); wErr != nil {
 		log.Printf("warn: write evaluator prompt artifact for phase %s: %v", e.phaseDef.Name, wErr)
 	}
-	rawOutput, promptForCost, _, model, err := e.r.runPromptInvocation(ctx, e.vessel, e.worktreePath, e.srcCfg, e.wf, &e.evaluatorDef, e.harnessContent, rendered, e.iteration)
+	rawOutput, promptForCost, _, model, err := e.r.runPromptInvocation(ctx, e.vessel, e.worktreePath, e.srcCfg, e.wf, &e.evaluatorDef, e.harnessContent, rendered, evaluatorLoopAttempt(e.retryAttempt, e.iteration))
 	if err != nil {
 		e.appendTrace(false, "")
 		return nil, err
@@ -161,7 +162,7 @@ func (e *phaseLoopEvaluator) Evaluate(ctx context.Context, output string, criter
 		log.Printf("warn: write evaluator output artifact for phase %s: %v", e.phaseDef.Name, wErr)
 	}
 	if e.vrs != nil {
-		e.vrs.recordEvaluationUsage(model, promptForCost, string(rawOutput), time.Now().UTC())
+		e.vrs.recordEvaluationUsage(model, promptForCost, string(rawOutput), e.r.runtimeNow().UTC())
 	}
 	result, err := parseEvalResultOutput(rawOutput)
 	if err != nil {
@@ -181,7 +182,7 @@ func (e *phaseLoopEvaluator) appendTrace(success bool, content string) {
 	}
 	*e.traceEvents = append(*e.traceEvents, signal.TraceEvent{
 		Type:       "evaluation",
-		Timestamp:  time.Now().UTC(),
+		Timestamp:  e.r.runtimeNow().UTC(),
 		Success:    success,
 		TokensUsed: cost.EstimateTokens(content),
 		Content:    content,
@@ -223,7 +224,7 @@ func (r *Runner) runPhaseEvaluationLoop(ctx context.Context, vessel queue.Vessel
 		return nil, fmt.Errorf("phase %s has no evaluator configuration", p.Name)
 	}
 
-	traceEvents := evaluationSeedEvents(previousOutputs, gateResult)
+	traceEvents := evaluationSeedEvents(previousOutputs, gateResult, r.runtimeNow())
 	seedSignals := signal.Compute(traceEvents, signal.DefaultConfig())
 	intensity := evaluator.SelectIntensity(resolveEvaluationComplexity(p, p.Evaluator), seedSignals.HealthString())
 	srcCfg := r.sourceConfigFromMeta(vessel)
@@ -267,6 +268,7 @@ func (r *Runner) runPhaseEvaluationLoop(ctx context.Context, vessel queue.Vessel
 		srcCfg:          srcCfg,
 		vrs:             vrs,
 		traceEvents:     &traceEvents,
+		retryAttempt:    retryAttempt,
 	}
 	loop, err := evaluator.NewLoop(gen, ev, evaluator.EvalConfig{
 		Criteria:      append([]evaluator.Criterion(nil), p.Evaluator.Criteria...),
@@ -375,13 +377,13 @@ func formatEvaluatorCriteria(criteria []evaluator.Criterion) string {
 	return b.String()
 }
 
-func evaluationSeedEvents(previousOutputs map[string]string, gateResult string) []signal.TraceEvent {
+func evaluationSeedEvents(previousOutputs map[string]string, gateResult string, now time.Time) []signal.TraceEvent {
 	keys := make([]string, 0, len(previousOutputs))
 	for key := range previousOutputs {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	now := time.Now().UTC()
+	now = now.UTC()
 	events := make([]signal.TraceEvent, 0, len(keys)+1)
 	for i, key := range keys {
 		events = append(events, signal.TraceEvent{
@@ -402,6 +404,16 @@ func evaluationSeedEvents(previousOutputs map[string]string, gateResult string) 
 		})
 	}
 	return events
+}
+
+func evaluatorLoopAttempt(retryAttempt, iteration int) int {
+	if retryAttempt < 1 {
+		retryAttempt = 1
+	}
+	if iteration < 1 {
+		iteration = 1
+	}
+	return retryAttempt*1000 + iteration
 }
 
 func resolveEvaluationComplexity(p workflow.Phase, cfg *workflow.PhaseEvaluator) string {

@@ -1346,6 +1346,19 @@ phases:
 	assert.Contains(t, err.Error(), "criteria weights must sum to ~1.0")
 }
 
+func TestValidatePhaseEvaluatorWrapsAccessErrors(t *testing.T) {
+	err := validatePhaseEvaluator(Phase{
+		Name: "implement",
+		Evaluator: &PhaseEvaluator{
+			PromptFile: "bad\x00path",
+			MaxTurns:   4,
+		},
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `phase "implement": cannot access evaluator.prompt_file "bad`)
+}
+
 func TestLoadWorkflowWithNoOp(t *testing.T) {
 	dir := t.TempDir()
 	chdirTemp(t, dir)
