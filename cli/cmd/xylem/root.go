@@ -50,7 +50,8 @@ func newRootCmd() *cobra.Command {
 				commandPath == "xylem harden score" ||
 				commandPath == "xylem harden track" ||
 				commandPath == "xylem field-report generate" ||
-				commandPath == "xylem daemon stop"
+				commandPath == "xylem daemon stop" ||
+				commandPath == "xylem daemon reload"
 
 			if !skipTooling {
 				if _, err := exec.LookPath("git"); err != nil {

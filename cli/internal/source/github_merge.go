@@ -18,11 +18,12 @@ type MergeTask struct {
 
 // GitHubMerge scans for merged PRs and produces vessels.
 type GitHubMerge struct {
-	Repo        string
-	Tasks       map[string]MergeTask
-	DefaultTier string
-	Queue       *queue.Queue
-	CmdRunner   CommandRunner
+	Repo                string
+	Tasks               map[string]MergeTask
+	DefaultTier         string
+	Queue               *queue.Queue
+	CmdRunner           CommandRunner
+	OnControlPlaneMerge func(ControlPlaneMergeEvent)
 }
 
 type ghMergeCommit struct {
@@ -35,6 +36,12 @@ type ghMergedPR struct {
 	URL         string        `json:"url"`
 	MergeCommit ghMergeCommit `json:"mergeCommit"`
 	HeadRefName string        `json:"headRefName"`
+}
+
+type ControlPlaneMergeEvent struct {
+	PRNumber       int
+	MergeCommitSHA string
+	Files          []string
 }
 
 func (g *GitHubMerge) Name() string { return "github-merge" }
@@ -64,9 +71,22 @@ func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
 		if oid == "" {
 			continue
 		}
+		ref := fmt.Sprintf("%s#merge-%s", pr.URL, oid)
+		if g.OnControlPlaneMerge != nil && !g.Queue.HasRefAny(ref) {
+			files, err := g.listFiles(ctx, pr.Number)
+			if err != nil {
+				return nil, fmt.Errorf("gh pr view files #%d: %w", pr.Number, err)
+			}
+			if controlPlanePathsTouched(files) {
+				g.OnControlPlaneMerge(ControlPlaneMergeEvent{
+					PRNumber:       pr.Number,
+					MergeCommitSHA: oid,
+					Files:          files,
+				})
+			}
+		}
 
 		for _, task := range g.Tasks {
-			ref := fmt.Sprintf("%s#merge-%s", pr.URL, oid)
 			if g.Queue.HasRefAny(ref) {
 				continue
 			}
@@ -88,6 +108,34 @@ func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	}
 
 	return vessels, nil
+}
+
+func (g *GitHubMerge) listFiles(ctx context.Context, number int) ([]string, error) {
+	args := []string{
+		"pr", "view", strconv.Itoa(number),
+		"--repo", g.Repo,
+		"--json", "files",
+	}
+	out, err := g.CmdRunner.Run(ctx, "gh", args...)
+	if err != nil {
+		return nil, err
+	}
+	var resp struct {
+		Files []struct {
+			Path string `json:"path"`
+		} `json:"files"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return nil, fmt.Errorf("parse gh pr view output: %w", err)
+	}
+	files := make([]string, 0, len(resp.Files))
+	for _, file := range resp.Files {
+		if strings.TrimSpace(file.Path) == "" {
+			continue
+		}
+		files = append(files, file.Path)
+	}
+	return files, nil
 }
 
 func (g *GitHubMerge) OnEnqueue(_ context.Context, _ queue.Vessel) error          { return nil }

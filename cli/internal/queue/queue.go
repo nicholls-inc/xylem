@@ -514,6 +514,11 @@ func (q *Queue) HasRefAny(ref string) bool {
 	return false
 }
 
+// WithWriteLock executes fn while holding the queue's write lock.
+func (q *Queue) WithWriteLock(fn func() error) error {
+	return q.withLock(fn)
+}
+
 func (q *Queue) withLock(fn func() error) error {
 	lock := flock.New(q.lockPath)
 	if err := lock.Lock(); err != nil {

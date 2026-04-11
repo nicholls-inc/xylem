@@ -20,11 +20,12 @@ type CommandRunner interface {
 
 // Scanner scans configured sources for actionable tasks and enqueues vessels.
 type Scanner struct {
-	Config     *config.Config
-	Queue      *queue.Queue
-	CmdRunner  CommandRunner
-	RunHooks   bool
-	BudgetGate budgetGate
+	Config              *config.Config
+	Queue               *queue.Queue
+	CmdRunner           CommandRunner
+	RunHooks            bool
+	BudgetGate          budgetGate
+	OnControlPlaneMerge func(source.ControlPlaneMergeEvent)
 }
 
 type budgetGate interface {
@@ -186,11 +187,12 @@ func (s *Scanner) buildSources() []sourceEntry {
 			mergeTasks := convertMergeTasks(srcCfg.Tasks)
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubMerge{
-					Repo:        srcCfg.Repo,
-					Tasks:       mergeTasks,
-					DefaultTier: s.Config.LLMRouting.DefaultTier,
-					Queue:       s.Queue,
-					CmdRunner:   s.CmdRunner,
+					Repo:                srcCfg.Repo,
+					Tasks:               mergeTasks,
+					DefaultTier:         s.Config.LLMRouting.DefaultTier,
+					Queue:               s.Queue,
+					CmdRunner:           s.CmdRunner,
+					OnControlPlaneMerge: s.OnControlPlaneMerge,
 				},
 				configName: name,
 			})

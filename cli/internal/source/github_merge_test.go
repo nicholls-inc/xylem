@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -69,6 +70,139 @@ func TestMergeScan(t *testing.T) {
 	}
 	if v.Workflow != "post-merge" {
 		t.Errorf("Workflow = %q, want post-merge", v.Workflow)
+	}
+}
+
+func TestMergeScanControlPlaneCallback(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghMergedPR{
+		{
+			Number:      20,
+			Title:       "merged PR",
+			URL:         "https://github.com/owner/repo/pull/20",
+			MergeCommit: ghMergeCommit{OID: "abcdef1234567890"},
+			HeadRefName: "feature-x",
+		},
+	}
+	prBytes, _ := json.Marshal(prs)
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set([]byte(`{"files":[{"path":".xylem/workflows/fix-bug.yaml"},{"path":"README.md"}]}`),
+		"gh", "pr", "view", "20", "--repo", "owner/repo", "--json", "files")
+
+	var got ControlPlaneMergeEvent
+	g := &GitHubMerge{
+		Repo:  "owner/repo",
+		Tasks: map[string]MergeTask{"deploy": {Workflow: "post-merge"}},
+		Queue: q, CmdRunner: r,
+		OnControlPlaneMerge: func(event ControlPlaneMergeEvent) {
+			got = event
+		},
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	want := ControlPlaneMergeEvent{
+		PRNumber:       20,
+		MergeCommitSHA: "abcdef1234567890",
+		Files:          []string{".xylem/workflows/fix-bug.yaml", "README.md"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("callback event = %#v, want %#v", got, want)
+	}
+}
+
+func TestMergeScanControlPlaneCallbackIgnoresNonControlPlaneChanges(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghMergedPR{
+		{
+			Number:      20,
+			Title:       "merged PR",
+			URL:         "https://github.com/owner/repo/pull/20",
+			MergeCommit: ghMergeCommit{OID: "abcdef1234567890"},
+			HeadRefName: "feature-x",
+		},
+	}
+	prBytes, _ := json.Marshal(prs)
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set([]byte(`{"files":[{"path":"README.md"},{"path":"docs/guide.md"}]}`),
+		"gh", "pr", "view", "20", "--repo", "owner/repo", "--json", "files")
+
+	called := false
+	g := &GitHubMerge{
+		Repo:  "owner/repo",
+		Tasks: map[string]MergeTask{"deploy": {Workflow: "post-merge"}},
+		Queue: q, CmdRunner: r,
+		OnControlPlaneMerge: func(ControlPlaneMergeEvent) {
+			called = true
+		},
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+	if called {
+		t.Fatal("expected non-control-plane merge to skip control-plane callback")
+	}
+}
+
+func TestMergeScanControlPlaneCallbackSkipsDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghMergedPR{
+		{
+			Number:      20,
+			Title:       "merged PR",
+			URL:         "https://github.com/owner/repo/pull/20",
+			MergeCommit: ghMergeCommit{OID: "abcdef1234567890"},
+			HeadRefName: "feature-x",
+		},
+	}
+	prBytes, _ := json.Marshal(prs)
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:     "merge-pr-20-abcdef12",
+		Source: "github-merge",
+		Ref:    "https://github.com/owner/repo/pull/20#merge-abcdef1234567890",
+		State:  queue.StatePending,
+	})
+
+	called := false
+	g := &GitHubMerge{
+		Repo:  "owner/repo",
+		Tasks: map[string]MergeTask{"deploy": {Workflow: "post-merge"}},
+		Queue: q, CmdRunner: r,
+		OnControlPlaneMerge: func(ControlPlaneMergeEvent) {
+			called = true
+		},
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels, got %d", len(vessels))
+	}
+	if called {
+		t.Fatal("expected duplicate merge ref to skip control-plane callback")
 	}
 }
 
@@ -158,36 +292,33 @@ func TestMergeBranchName(t *testing.T) {
 
 func TestMergeOnStartNoOp(t *testing.T) {
 	g := &GitHubMerge{}
-	if err := g.OnStart(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnStart should be no-op, got: %v", err)
+	vessel := queue.Vessel{
+		ID:     "merge-pr-20-abcdef12",
+		Source: "github-merge",
+		Ref:    "https://github.com/owner/repo/pull/20#merge-abcdef1234567890",
+		Meta:   map[string]string{"pr_num": "20"},
 	}
-}
 
-func TestMergeOnEnqueueNoOp(t *testing.T) {
-	g := &GitHubMerge{}
-	if err := g.OnEnqueue(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnEnqueue should be no-op, got: %v", err)
+	tests := []struct {
+		name string
+		call func(context.Context, queue.Vessel) error
+	}{
+		{name: "enqueue", call: g.OnEnqueue},
+		{name: "start", call: g.OnStart},
+		{name: "wait", call: g.OnWait},
+		{name: "resume", call: g.OnResume},
+		{name: "complete", call: g.OnComplete},
+		{name: "fail", call: g.OnFail},
+		{name: "timed_out", call: g.OnTimedOut},
+		{name: "remove_running_label", call: g.RemoveRunningLabel},
 	}
-}
 
-func TestMergeOnCompleteNoOp(t *testing.T) {
-	g := &GitHubMerge{}
-	if err := g.OnComplete(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnComplete should be no-op, got: %v", err)
-	}
-}
-
-func TestMergeOnFailNoOp(t *testing.T) {
-	g := &GitHubMerge{}
-	if err := g.OnFail(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnFail should be no-op, got: %v", err)
-	}
-}
-
-func TestMergeOnTimedOutNoOp(t *testing.T) {
-	g := &GitHubMerge{}
-	if err := g.OnTimedOut(context.Background(), queue.Vessel{}); err != nil {
-		t.Fatalf("OnTimedOut should be no-op, got: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := tt.call(context.Background(), vessel); err != nil {
+				t.Fatalf("%s should be a no-op, got: %v", tt.name, err)
+			}
+		})
 	}
 }
 
@@ -208,6 +339,9 @@ func TestMergeScanGHError(t *testing.T) {
 	_, err := g.Scan(context.Background())
 	if err == nil {
 		t.Fatal("expected error from gh failure, got nil")
+	}
+	if !strings.Contains(err.Error(), "gh pr list (merged): network error") {
+		t.Fatalf("Scan() error = %q, want wrapped gh list failure", err)
 	}
 }
 
