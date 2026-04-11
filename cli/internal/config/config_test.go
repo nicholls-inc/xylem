@@ -2779,6 +2779,125 @@ claude:
 	}
 }
 
+func TestSmoke_S7_RejectsRepoRootGoCLIPathsForValidationRequiredWorkflows(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name       string
+		field      string
+		command    string
+		errMessage string
+	}{
+		{
+			name:       "lint",
+			field:      "lint",
+			command:    "go vet ./cli/...",
+			errMessage: `validation.lint runs go from repo root against "./cli/..."`,
+		},
+		{
+			name:       "build",
+			field:      "build",
+			command:    "go build ./cli/cmd/xylem",
+			errMessage: `validation.build runs go from repo root against "./cli/cmd/xylem"`,
+		},
+		{
+			name:       "test",
+			field:      "test",
+			command:    "go test ./cli/...",
+			errMessage: `validation.test runs go from repo root against "./cli/..."`,
+		},
+	}
+
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+		workflow := workflow
+		for _, tc := range testCases {
+			tc := tc
+			t.Run(workflow+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				path := writeConfigFile(t, fmt.Sprintf(`sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      validation:
+        labels: [ci]
+        workflow: %s
+validation:
+  %s: %q
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`, workflow, tc.field, tc.command))
+
+				_, err := Load(path)
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tc.errMessage)
+				assert.Contains(t, err.Error(), workflow)
+			})
+		}
+	}
+}
+
+func TestSmoke_S8_AllowsCLIWorkingDirGoCommandsForValidationRequiredWorkflows(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name    string
+		field   string
+		command string
+	}{
+		{name: "lint", field: "lint", command: "cd cli && go vet ./..."},
+		{name: "build", field: "build", command: "cd cli && go build ./cmd/xylem"},
+		{name: "test", field: "test", command: "cd cli && go test ./..."},
+	}
+
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+		workflow := workflow
+		for _, tc := range testCases {
+			tc := tc
+			t.Run(workflow+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
+
+				path := writeConfigFile(t, fmt.Sprintf(`sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      validation:
+        labels: [ci]
+        workflow: %s
+validation:
+  %s: %q
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`, workflow, tc.field, tc.command))
+
+				cfg, err := Load(path)
+				require.NoError(t, err)
+				require.NotNil(t, cfg)
+				switch tc.field {
+				case "lint":
+					assert.Equal(t, tc.command, cfg.Validation.Lint)
+				case "build":
+					assert.Equal(t, tc.command, cfg.Validation.Build)
+				case "test":
+					assert.Equal(t, tc.command, cfg.Validation.Test)
+				default:
+					t.Fatalf("unexpected field %q", tc.field)
+				}
+			})
+		}
+	}
+}
+
 func TestValidateRejectsInvalidAutoMergeBranchPattern(t *testing.T) {
 	cfg := validConfig()
 	cfg.Daemon.AutoMergeBranchPattern = "("

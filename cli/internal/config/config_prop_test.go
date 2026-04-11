@@ -311,6 +311,62 @@ func TestPropValidationRequirementAcceptsGoimportsDirectoryTargets(t *testing.T)
 	})
 }
 
+func TestPropValidationRequirementRejectsRepoRootGoCLITargets(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := validConfig()
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		cfg.Sources = validationRequiredSourceConfig(workflow)
+		target := rapid.SampledFrom([]string{"./cli/...", "./cli/cmd/xylem", "cli/...", "cli/internal/config"}).Draw(t, "target")
+		field := rapid.SampledFrom([]string{"lint", "build", "test"}).Draw(t, "field")
+
+		switch field {
+		case "lint":
+			cfg.Validation.Lint = "go vet " + target
+		case "build":
+			cfg.Validation.Build = "go build " + target
+		case "test":
+			cfg.Validation.Test = "go test " + target
+		default:
+			t.Fatalf("unexpected field %q", field)
+		}
+
+		err := cfg.validateWorkflowRequirements()
+		if err == nil {
+			t.Fatalf("validateWorkflowRequirements() unexpectedly accepted %s target %q", field, target)
+		}
+		if !strings.Contains(err.Error(), "validation."+field) {
+			t.Fatalf("validateWorkflowRequirements() error = %v, want validation.%s", err, field)
+		}
+		if !strings.Contains(err.Error(), target) {
+			t.Fatalf("validateWorkflowRequirements() error = %v, want target %q in error", err, target)
+		}
+	})
+}
+
+func TestPropValidationRequirementAcceptsCLIWorkingDirGoCommands(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		cfg := validConfig()
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		cfg.Sources = validationRequiredSourceConfig(workflow)
+		field := rapid.SampledFrom([]string{"lint", "build", "test"}).Draw(t, "field")
+
+		switch field {
+		case "lint":
+			cfg.Validation.Lint = "cd cli && go vet ./..."
+		case "build":
+			cfg.Validation.Build = "cd cli && go build ./cmd/xylem"
+		case "test":
+			cfg.Validation.Test = "cd cli && go test ./..."
+		default:
+			t.Fatalf("unexpected field %q", field)
+		}
+
+		if err := cfg.validateWorkflowRequirements(); err != nil {
+			t.Fatalf("validateWorkflowRequirements() error = %v", err)
+		}
+	})
+}
+
 func TestPropEffectiveAutoMergeLabelsNeverReturnsBlank(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		size := rapid.IntRange(0, 6).Draw(t, "size")

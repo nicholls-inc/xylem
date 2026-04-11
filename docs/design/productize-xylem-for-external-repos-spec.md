@@ -504,7 +504,7 @@ type Config struct {
 Semantics:
 
 - Every field is optional; empty means "skip this step".
-- Commands MUST run from the worktree root.
+- Commands are invoked from the worktree root shell and MAY `cd` into a module or subdirectory when the repo layout requires it.
 - `fix-pr-checks`, `resolve-conflicts`, and `adapt-repo verify` MUST template these commands into their gate definitions; they MUST NOT hard-code Go-specific invocations in workflow YAML or prompt Markdown.
 - `adapt-repo` MUST populate this block on first run based on `bootstrap.DetectLanguages` / `DetectBuildTools` output (§8).
 - `xylem config validate` MUST reject a configuration where `fix-pr-checks` / `resolve-conflicts` / `adapt-repo` are active but `validation:` is completely empty.
@@ -571,9 +571,9 @@ profiles: [core, self-hosting-xylem]
 
 validation:
   format: "goimports -l ."
-  lint:   "go vet ./cli/..."
-  build:  "go build ./cli/cmd/xylem"
-  test:   "go test ./cli/..."
+  lint:   "cd cli && go vet ./..."
+  build:  "cd cli && go build ./cmd/xylem"
+  test:   "cd cli && go test ./..."
 
 observability:
   enabled: true
