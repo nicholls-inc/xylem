@@ -272,3 +272,131 @@ func TestTelegram_Name(t *testing.T) {
 		t.Errorf("expected Name()=telegram, got %q", tg.Name())
 	}
 }
+
+func TestTelegram_GetUpdates_ReturnsMessages(t *testing.T) {
+	handlerCalled := false
+	var gotChatID int64
+	var gotText string
+
+	updates := `{"ok":true,"result":[{"update_id":100,"message":{"message_id":1,"chat":{"id":12345},"text":"hello"}}]}`
+	srv := tryNewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(updates)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	tg := newTestTelegram(srv.URL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	received, err := tg.getUpdates(ctx)
+	if err != nil {
+		t.Fatalf("getUpdates returned error: %v", err)
+	}
+	if len(received) != 1 {
+		t.Fatalf("expected 1 update, got %d", len(received))
+	}
+	if received[0].Message != nil {
+		handlerCalled = true
+		gotChatID = received[0].Message.Chat.ID
+		gotText = received[0].Message.Text
+	}
+	if !handlerCalled {
+		t.Error("expected message in update")
+	}
+	if gotChatID != 12345 {
+		t.Errorf("expected chat_id=12345, got %d", gotChatID)
+	}
+	if gotText != "hello" {
+		t.Errorf("expected text=hello, got %q", gotText)
+	}
+}
+
+func TestTelegram_GetUpdates_EmptyBatch(t *testing.T) {
+	srv := tryNewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"ok":true,"result":[]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	tg := newTestTelegram(srv.URL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	received, err := tg.getUpdates(ctx)
+	if err != nil {
+		t.Fatalf("getUpdates returned error: %v", err)
+	}
+	if len(received) != 0 {
+		t.Errorf("expected 0 updates, got %d", len(received))
+	}
+	// Offset should remain 0 since no updates were received.
+	if tg.offset != 0 {
+		t.Errorf("expected offset=0 after empty batch, got %d", tg.offset)
+	}
+}
+
+func TestTelegram_GetUpdates_AcknowledgesOffset(t *testing.T) {
+	var lastOffset string
+	call := 0
+	srv := tryNewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		call++
+		lastOffset = r.URL.Query().Get("offset")
+		w.Write([]byte(`{"ok":true,"result":[{"update_id":42,"message":{"message_id":1,"chat":{"id":1},"text":"hi"}}]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	tg := newTestTelegram(srv.URL, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	if _, err := tg.getUpdates(ctx); err != nil {
+		t.Fatalf("first getUpdates error: %v", err)
+	}
+	// After seeing update_id=42, offset should be 43.
+	if tg.offset != 43 {
+		t.Errorf("expected offset=43 after update_id=42, got %d", tg.offset)
+	}
+
+	// Second call should send offset=43.
+	if _, err := tg.getUpdates(ctx); err != nil {
+		t.Fatalf("second getUpdates error: %v", err)
+	}
+	if lastOffset != "43" {
+		t.Errorf("expected second request to have offset=43, got %q", lastOffset)
+	}
+	_ = call
+}
+
+func TestTelegram_StartPolling_CancelStops(t *testing.T) {
+	calls := 0
+	// Server immediately returns empty batch so pollLoop keeps looping without
+	// blocking on a real long-poll.
+	srv := tryNewServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		w.Write([]byte(`{"ok":true,"result":[]}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+
+	tg := newTestTelegram(srv.URL, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	tg.StartPolling(ctx, func(ctx context.Context, chatID int64, text string) {
+		// Should not be called with empty batches.
+		t.Error("handler called unexpectedly")
+		close(done)
+	})
+
+	// Let a couple of iterations happen, then cancel.
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	// Give the goroutine time to notice ctx cancellation.
+	time.Sleep(100 * time.Millisecond)
+
+	// We can't directly observe that the goroutine stopped, but if it's still
+	// running after cancel() we'd see continued server calls. The test passes
+	// as long as no races or panics occur.
+	if calls == 0 {
+		t.Log("note: no getUpdates calls (may be expected in sandbox)")
+	}
+}

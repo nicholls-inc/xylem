@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -26,9 +27,19 @@ type daemonNotifier struct {
 	lastReportAt time.Time
 }
 
+// defaultBotAllowedCommands is the safe read-only set used when bot_enabled is
+// true but allowed_commands is not configured.
+var defaultBotAllowedCommands = []string{
+	"xylem status",
+	"xylem queue list",
+	"xylem doctor",
+}
+
 // newDaemonNotifier constructs the notifier from config. Returns nil if no
-// notifications are configured.
-func newDaemonNotifier(cfg *config.Config, q *queue.Queue) *daemonNotifier {
+// notifications are configured. ctx is required to start the Telegram bot
+// polling goroutine when bot_enabled is true; cmdRunner executes bot-dispatched
+// commands.
+func newDaemonNotifier(ctx context.Context, cfg *config.Config, q *queue.Queue, cmdRunner notify.CommandRunner) *daemonNotifier {
 	ncfg := cfg.Notifications
 	if !ncfg.GitHubDiscussion.Enabled && !ncfg.Telegram.Enabled {
 		return nil
@@ -42,8 +53,8 @@ func newDaemonNotifier(cfg *config.Config, q *queue.Queue) *daemonNotifier {
 			repoSlug = resolveDefaultRepo(cfg)
 		}
 		if repoSlug != "" {
-			cmdRunner := newCmdRunner(cfg)
-			pub := &discussion.Publisher{Runner: cmdRunner}
+			discCmdRunner := newCmdRunner(cfg)
+			pub := &discussion.Publisher{Runner: discCmdRunner}
 			disc, err := notify.NewDiscussion(pub, repoSlug,
 				ncfg.GitHubDiscussion.Category,
 				ncfg.GitHubDiscussion.Title)
@@ -59,10 +70,28 @@ func newDaemonNotifier(cfg *config.Config, q *queue.Queue) *daemonNotifier {
 
 	if ncfg.Telegram.Enabled {
 		token := os.Getenv(ncfg.Telegram.TokenEnv)
-		chatID := os.Getenv(ncfg.Telegram.ChatIDEnv)
-		if token != "" && chatID != "" {
-			tg := notify.NewTelegram(token, chatID, ncfg.Telegram.Levels)
+		chatIDStr := os.Getenv(ncfg.Telegram.ChatIDEnv)
+		if token != "" && chatIDStr != "" {
+			tg := notify.NewTelegram(token, chatIDStr, ncfg.Telegram.Levels)
 			notifiers = append(notifiers, tg)
+
+			if ncfg.Telegram.BotEnabled {
+				chatID, err := strconv.ParseInt(chatIDStr, 10, 64)
+				if err != nil {
+					slog.Warn("daemon: telegram bot_enabled but chat_id is not a valid int64; bot disabled",
+						"chat_id_env", ncfg.Telegram.ChatIDEnv,
+						"error", err)
+				} else {
+					allowed := ncfg.Telegram.AllowedCommands
+					if len(allowed) == 0 {
+						allowed = defaultBotAllowedCommands
+					}
+					dispatcher := notify.NewBotDispatcher(tg, chatID, allowed, cmdRunner)
+					tg.StartPolling(ctx, dispatcher.Dispatch)
+					slog.Info("daemon: telegram bot polling started",
+						"allowed_commands", len(allowed))
+				}
+			}
 		} else {
 			slog.Warn("daemon: telegram notifications enabled but token/chat_id env vars empty",
 				"token_env", ncfg.Telegram.TokenEnv,

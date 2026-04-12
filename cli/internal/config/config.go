@@ -333,10 +333,12 @@ type DiscussionNotifyConfig struct {
 }
 
 type TelegramNotifyConfig struct {
-	Enabled   bool     `yaml:"enabled,omitempty"`
-	TokenEnv  string   `yaml:"token_env,omitempty"`
-	ChatIDEnv string   `yaml:"chat_id_env,omitempty"`
-	Levels    []string `yaml:"levels,omitempty"`
+	Enabled         bool     `yaml:"enabled,omitempty"`
+	TokenEnv        string   `yaml:"token_env,omitempty"`
+	ChatIDEnv       string   `yaml:"chat_id_env,omitempty"`
+	Levels          []string `yaml:"levels,omitempty"`
+	BotEnabled      bool     `yaml:"bot_enabled,omitempty"`      // gates inbound long-poll listener
+	AllowedCommands []string `yaml:"allowed_commands,omitempty"` // explicit command allowlist for bot
 }
 
 type parsedConcurrency struct {
