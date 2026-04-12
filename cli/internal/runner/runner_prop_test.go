@@ -62,6 +62,21 @@ func TestProp_ClassifyProviderError_AuthSentinelsAreFallbackOnly(t *testing.T) {
 	})
 }
 
+func TestProp_ClassifyProviderError_QuotaSentinelsAreFallback(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		prefix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "prefix")
+		suffix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "suffix")
+		sentinel := rapid.SampledFrom([]string{
+			"no quota",
+		}).Draw(t, "sentinel")
+
+		got := classifyProviderError(errors.New(prefix + sentinel + suffix))
+		if got != providerErrorFallbackNextProvider {
+			t.Fatalf("classifyProviderError() = %v, want %v", got, providerErrorFallbackNextProvider)
+		}
+	})
+}
+
 func TestProp_FilterAdditiveProtectedSurfaceViolationsDropsOnlyAdditions(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		allowAdditive := rapid.Bool().Draw(t, "allowAdditive")

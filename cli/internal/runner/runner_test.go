@@ -9816,6 +9816,8 @@ func TestClassifyProviderError(t *testing.T) {
 		{name: "model access failure falls back", err: errors.New("provider: not authorized to access this model"), want: providerErrorFallbackNextProvider},
 		{name: "service unavailable falls back", err: errors.New("provider returned service unavailable"), want: providerErrorFallbackNextProvider},
 		{name: "missing command falls back", err: errors.New("claude: executable file not found in $PATH"), want: providerErrorFallbackNextProvider},
+		{name: "quota exhaustion falls back to next provider", err: errors.New("402 You have no quota (Request ID: EBB5:1DBFAF)"), want: providerErrorFallbackNextProvider},
+		{name: "quota exceeded without sentinel does not fall back", err: errors.New("quota exceeded"), want: providerErrorFail},
 		{name: "plain unauthorized does not fall back", err: errors.New("unauthorized"), want: providerErrorFail},
 		{name: "plain forbidden does not fall back", err: errors.New("forbidden"), want: providerErrorFail},
 	}
