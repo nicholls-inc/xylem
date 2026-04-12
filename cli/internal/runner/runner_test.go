@@ -10584,3 +10584,25 @@ func TestEpisodicContextPhaseZeroSkipped(t *testing.T) {
 		t.Errorf("EpisodicContext at phase 0 should be nil, got %v", td.EpisodicContext)
 	}
 }
+
+func TestBuildTemplateData_DaemonBinaryRendersInCommand(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	r := &Runner{Config: cfg}
+
+	vessel := queue.Vessel{ID: "v-1", Source: "manual"}
+	td := r.buildTemplateData(vessel, nil, phase.IssueData{}, "label_ready", 0, nil, "", phase.EvaluationData{})
+
+	// DaemonBinary must be a non-empty absolute path (os.Executable succeeds in tests).
+	assert.NotEmpty(t, td.DaemonBinary)
+	assert.True(t, filepath.IsAbs(td.DaemonBinary), "DaemonBinary should be an absolute path, got %q", td.DaemonBinary)
+
+	rendered, err := renderCommandTemplate("label_ready", "command",
+		"{{.DaemonBinary}} release-cadence label-ready --repo nicholls-inc/xylem", td)
+	require.NoError(t, err)
+	assert.NotContains(t, rendered, "{{")
+	// Verify the substitution: rendered command must begin with the actual binary path.
+	assert.True(t, strings.HasPrefix(rendered, td.DaemonBinary), "rendered command %q should start with DaemonBinary %q", rendered, td.DaemonBinary)
+}

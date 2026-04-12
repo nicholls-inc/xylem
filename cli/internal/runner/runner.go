@@ -4143,6 +4143,11 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, wf *workflow.Workflow, i
 			episodicCtx = entries
 		}
 	}
+	daemonBinary, err := os.Executable()
+	if err != nil {
+		log.Printf("warn: os.Executable: %v", err)
+		daemonBinary = ""
+	}
 	return phase.TemplateData{
 		Date:  r.runtimeNow().UTC().Format("2006-01-02"),
 		Issue: issueData,
@@ -4170,6 +4175,7 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, wf *workflow.Workflow, i
 		},
 		Validation:      validation,
 		EpisodicContext: episodicCtx,
+		DaemonBinary:    daemonBinary,
 	}
 }
 
