@@ -118,6 +118,7 @@ func newRootCmd() *cobra.Command {
 		newCancelCmd(),
 		newCleanupCmd(),
 		newDoctorCmd(),
+		newReportCmd(),
 		newDaemonCmd(),
 		newDaemonSupervisorCmd(),
 		newRetryCmd(),

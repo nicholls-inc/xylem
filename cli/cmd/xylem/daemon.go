@@ -167,6 +167,9 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		stallChecks = daemonChecksFromFindings(findings, daemonNow())
 	}
 
+	// Notification system: periodic status reports + escalation alerts.
+	dn := newDaemonNotifier(cfg, q)
+
 	tickHook := func(now time.Time, state daemonTickState) {
 		if !state.LastUpgrade.IsZero() {
 			lastUpgradeAt = state.LastUpgrade
@@ -189,6 +192,14 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		}
 		if err := daemonhealth.Save(cfg.StateDir, snapshot); err != nil {
 			slog.Warn("daemon save health failed", "error", err)
+		}
+
+		// Dispatch notifications (status reports + escalation alerts).
+		if dn != nil {
+			upgradeOverdue := upgrade != nil && upgradeInterval > 0 &&
+				now.Sub(lastUpgradeAt) >= upgradeInterval*3
+			upgradeOverdueBy := now.Sub(lastUpgradeAt) - upgradeInterval
+			dn.tick(ctx, now, checks, upgradeOverdue, upgradeOverdueBy)
 		}
 	}
 
