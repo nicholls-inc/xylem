@@ -46,7 +46,16 @@ func New(cfg *config.Config, q *queue.Queue, runner CommandRunner) *Scanner {
 		Queue:      q,
 		CmdRunner:  runner,
 		RunHooks:   true,
-		BudgetGate: cost.NewBudgetGate(cfg.VesselBudget()),
+		BudgetGate: cost.NewBudgetGate(gateConfigFrom(cfg), cfg.StateDir),
+	}
+}
+
+// gateConfigFrom converts the cost section of a Config into a cost.GateConfig.
+func gateConfigFrom(cfg *config.Config) cost.GateConfig {
+	return cost.GateConfig{
+		DailyBudgetUSD: cfg.Cost.DailyBudgetUSD,
+		PerClassLimit:  cfg.Cost.PerClassLimit,
+		OnExceeded:     cfg.CostOnExceeded(),
 	}
 }
 
@@ -111,7 +120,7 @@ func (s *Scanner) budgetGate() budgetGate {
 	if s.BudgetGate != nil {
 		return s.BudgetGate
 	}
-	return cost.NewBudgetGate(s.Config.VesselBudget())
+	return cost.NewBudgetGate(gateConfigFrom(s.Config), s.Config.StateDir)
 }
 
 // BacklogCount reports how many items currently match backlog-aware sources.

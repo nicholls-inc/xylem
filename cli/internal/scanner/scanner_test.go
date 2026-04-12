@@ -1203,6 +1203,132 @@ func TestSmoke_S47_BudgetGateSkipLeavesSourceUnchanged(t *testing.T) {
 	assert.Equal(t, "fix-bug", vessels[0].Workflow)
 }
 
+// TestSmoke_S49_RealBudgetGateTrackerDeniesOnDailyBudgetExceeded exercises the
+// real (non-stub) BudgetGate in an end-to-end scanner integration test.
+//
+// Preconditions: a state dir containing a cost-report.json totalling $1.05 for
+// class "fix-bug", with daily_budget_usd: 1.00 and on_exceeded: pause.
+//
+// Action: scan with a real scanner (no BudgetGate override).
+//
+// Expected outcome: the candidate vessel is skipped (budget exceeded), the
+// queue remains empty, and no OnEnqueue hook fires.
+//
+// A second scan run with a fresh state dir ($0.00 spend) confirms the vessel
+// is enqueued when budget is available.
+func TestSmoke_S49_RealBudgetGateTrackerDeniesOnDailyBudgetExceeded(t *testing.T) {
+	dir := t.TempDir()
+
+	// Write cost-report.json fixtures into the state dir to simulate $1.05 of
+	// prior spend today — exceeding the $1.00 daily budget.
+	writeFixture := func(vesselID string, amount float64) {
+		t.Helper()
+		phasesDir := filepath.Join(dir, "phases", vesselID)
+		require.NoError(t, os.MkdirAll(phasesDir, 0o755))
+		report := &cost.CostReport{
+			MissionID:    vesselID,
+			Workflow:     "fix-bug",
+			TotalCostUSD: amount,
+			GeneratedAt:  time.Now().UTC(),
+		}
+		require.NoError(t, cost.SaveReport(filepath.Join(phasesDir, "cost-report.json"), report))
+	}
+	writeFixture("prior-001", 0.90)
+	writeFixture("prior-002", 0.15)
+
+	cfg := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Cost: config.CostConfig{
+			DailyBudgetUSD: 1.00,
+			OnExceeded:     "pause",
+		},
+		Sources: map[string]config.SourceConfig{
+			"github": {
+				Type: "github",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug"},
+				},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+	r.set(issueJSON([]ghIssue{{
+		Number: 7,
+		Title:  "real gate test issue",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/7",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+
+	// No BudgetGate override — scanner uses the real gate backed by the state dir.
+	s := New(cfg, q, r)
+
+	result, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 0, result.Added, "vessel must not be enqueued when daily budget exceeded")
+	assert.Equal(t, 1, result.Skipped, "vessel must be counted as skipped")
+
+	vessels, err := q.List()
+	require.NoError(t, err)
+	assert.Empty(t, vessels, "queue must remain empty when budget is exceeded")
+	for _, call := range r.calls {
+		assert.False(t, len(call) >= 3 && call[0] == "gh" && call[1] == "issue" && call[2] == "edit",
+			"OnEnqueue hook must not fire for a budget-skipped vessel: %v", call)
+	}
+
+	// Second scan: fresh state dir with zero spend — vessel must be enqueued.
+	dir2 := t.TempDir()
+	cfg2 := &config.Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		StateDir:    dir2,
+		Claude:      config.ClaudeConfig{Command: "claude"},
+		Cost: config.CostConfig{
+			DailyBudgetUSD: 1.00,
+			OnExceeded:     "pause",
+		},
+		Sources: map[string]config.SourceConfig{
+			"github": {
+				Type: "github",
+				Repo: "owner/repo",
+				Tasks: map[string]config.Task{
+					"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug"},
+				},
+			},
+		},
+	}
+	q2 := queue.New(filepath.Join(dir2, "queue.jsonl"))
+	r2 := newMock()
+	r2.set(issueJSON([]ghIssue{{
+		Number: 7,
+		Title:  "real gate test issue",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/7",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+
+	s2 := New(cfg2, q2, r2)
+	result2, err := s2.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result2.Added, "vessel must be enqueued when budget is available")
+
+	vessels2, err := q2.List()
+	require.NoError(t, err)
+	require.Len(t, vessels2, 1)
+	assert.Equal(t, "fix-bug", vessels2[0].Workflow)
+}
+
 type ghMergeCommitForScanner struct {
 	OID string `json:"oid"`
 }

@@ -32,14 +32,15 @@ var safeSummaryPathComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // VesselSummary is the JSON artifact written after vessel completion or failure.
 type VesselSummary struct {
-	VesselID   string    `json:"vessel_id"`
-	Source     string    `json:"source"`
-	Workflow   string    `json:"workflow"`
-	Ref        string    `json:"ref,omitempty"`
-	State      string    `json:"state"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at"`
-	DurationMS int64     `json:"duration_ms"`
+	VesselID      string    `json:"vessel_id"`
+	Source        string    `json:"source"`
+	Workflow      string    `json:"workflow"`
+	WorkflowClass string    `json:"workflow_class,omitempty"`
+	Ref           string    `json:"ref,omitempty"`
+	State         string    `json:"state"`
+	StartedAt     time.Time `json:"started_at"`
+	EndedAt       time.Time `json:"ended_at"`
+	DurationMS    int64     `json:"duration_ms"`
 
 	Phases []PhaseSummary `json:"phases"`
 
@@ -116,11 +117,12 @@ type vesselRunState struct {
 	phases      []PhaseSummary
 	evalReports map[string]PhaseEvaluationReport
 
-	costTracker *cost.Tracker
-	vesselID    string
-	source      string
-	workflow    string
-	ref         string
+	costTracker   *cost.Tracker
+	vesselID      string
+	source        string
+	workflow      string
+	workflowClass string
+	ref           string
 
 	budgetMaxCostUSD *float64
 	budgetMaxTokens  *int
@@ -148,13 +150,14 @@ type EvaluationArtifact struct {
 
 func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.Time) *vesselRunState {
 	s := &vesselRunState{
-		startedAt:   startedAt.UTC(),
-		phases:      make([]PhaseSummary, 0),
-		evalReports: make(map[string]PhaseEvaluationReport),
-		vesselID:    vessel.ID,
-		source:      vessel.Source,
-		workflow:    vessel.Workflow,
-		ref:         vessel.Ref,
+		startedAt:     startedAt.UTC(),
+		phases:        make([]PhaseSummary, 0),
+		evalReports:   make(map[string]PhaseEvaluationReport),
+		vesselID:      vessel.ID,
+		source:        vessel.Source,
+		workflow:      vessel.Workflow,
+		workflowClass: vessel.WorkflowClass,
+		ref:           vessel.Ref,
 	}
 
 	if cfg == nil {
@@ -214,6 +217,7 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		VesselID:         s.vesselID,
 		Source:           s.source,
 		Workflow:         s.workflow,
+		WorkflowClass:    s.workflowClass,
 		Ref:              s.ref,
 		State:            state,
 		StartedAt:        s.startedAt,
@@ -359,6 +363,7 @@ func (s *vesselRunState) buildCostReport(summary *VesselSummary) *cost.CostRepor
 	report := s.costTracker.Report(s.vesselID)
 	report.Source = summary.Source
 	report.Workflow = summary.Workflow
+	report.WorkflowClass = summary.WorkflowClass
 	report.Ref = summary.Ref
 	report.State = summary.State
 	report.TotalDurationMS = summary.DurationMS
