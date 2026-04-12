@@ -1016,13 +1016,11 @@ func TestLogTickSummary(t *testing.T) {
 	}
 }
 
-// TestWS1S28DaemonPathWiresScaffolding verifies that the daemon drain path
-// produces a Runner with Intermediary and AuditLog wired. runDrain delegates
-// directly to buildDrainRunner, so constructing the runner here exercises the
-// same daemon-side wiring.
-//
-// Covers: WS1 S28.
-func TestWS1S28DaemonPathWiresScaffolding(t *testing.T) {
+// TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig verifies that
+// the daemon drain path produces a Runner with Intermediary and AuditLog wired.
+// runDrain delegates directly to buildDrainRunner, so constructing the runner
+// here exercises the same daemon-side wiring.
+func TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
@@ -1031,21 +1029,29 @@ func TestWS1S28DaemonPathWiresScaffolding(t *testing.T) {
 	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
 	defer cleanup()
 
-	if r.Intermediary == nil {
-		t.Fatal("r.Intermediary = nil: daemon runDrain must wire Intermediary")
-	}
-	if r.AuditLog == nil {
-		t.Fatal("r.AuditLog = nil: daemon runDrain must wire AuditLog")
-	}
+	require.NotNil(t, r)
+	require.NotNil(t, r.Intermediary)
+	require.NotNil(t, r.AuditLog)
 
 	result := r.Intermediary.Evaluate(intermediary.Intent{
 		Action:   "file_write",
 		Resource: ".xylem/HARNESS.md",
 		AgentID:  "issue-1",
 	})
-	if result.Effect != intermediary.Deny {
-		t.Fatalf("default protected-surface effect = %q, want %q", result.Effect, intermediary.Deny)
+	assert.Equal(t, intermediary.Deny, result.Effect)
+
+	entry := intermediary.AuditEntry{
+		Intent: intermediary.Intent{
+			Action:   "phase_execute",
+			Resource: "fix",
+			AgentID:  "issue-1",
+		},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Now().UTC(),
 	}
+	require.NoError(t, r.AuditLog.Append(entry))
+	_, err := os.Stat(filepath.Join(dir, "audit.jsonl"))
+	require.NoError(t, err)
 }
 
 func TestReconcileStaleVessels(t *testing.T) {

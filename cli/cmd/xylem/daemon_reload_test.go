@@ -127,6 +127,47 @@ func TestDaemonRuntimeRetainsBusyRunnerAcrossReload(t *testing.T) {
 	assert.Empty(t, rt.retired)
 }
 
+func TestDaemonRuntimeReloadReappliesDaemonRootEnv(t *testing.T) {
+	rootDir, configPath, _ := writeDaemonReloadRepo(t, "# Harness A\n")
+	envPath := daemonSupervisorEnvFilePath(rootDir)
+	require.NoError(t, os.MkdirAll(filepath.Dir(envPath), 0o755))
+	require.NoError(t, os.WriteFile(envPath, []byte("XYLEM_TEST_DAEMON_TOKEN=first\n"), 0o644))
+
+	configYAML := strings.Join([]string{
+		"repo: owner/name",
+		"tasks:",
+		"  fix-bugs:",
+		"    labels: [bug]",
+		"    workflow: fix-bug",
+		"state_dir: " + filepath.Join(rootDir, ".xylem"),
+		"claude:",
+		"  command: claude",
+		"  default_model: claude-sonnet-4-6",
+		"  env:",
+		"    API_TOKEN: ${XYLEM_TEST_DAEMON_TOKEN}",
+		"daemon:",
+		"  scan_interval: 1s",
+		"  drain_interval: 1s",
+		"",
+	}, "\n")
+	require.NoError(t, os.WriteFile(configPath, []byte(configYAML), 0o644))
+
+	cfg, err := config.Load(configPath)
+	require.NoError(t, err)
+	require.NoError(t, loadDaemonStartupEnv(rootDir))
+
+	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
+	rt, err := newDaemonRuntime(rootDir, configPath, q, worktree.New(rootDir, newCmdRunner(cfg)), cfg)
+	require.NoError(t, err)
+	assert.Equal(t, "first", daemonEnvValue(rt.currentHandle().scanCmd.extraEnv, "API_TOKEN"))
+
+	require.NoError(t, os.WriteFile(envPath, []byte("XYLEM_TEST_DAEMON_TOKEN=second\n"), 0o644))
+
+	rt.request(daemonReloadRequest{Trigger: "signal", RequestedAt: daemonNow().Add(-time.Minute)})
+	require.NoError(t, rt.processPendingReload(context.Background()))
+	assert.Equal(t, "second", daemonEnvValue(rt.currentHandle().scanCmd.extraEnv, "API_TOKEN"))
+}
+
 func TestValidateDaemonReloadCandidateRejectsInvalidWorkflow(t *testing.T) {
 	rootDir, configPath, _ := writeDaemonReloadRepo(t, "# Harness A\n")
 	require.NoError(t, os.WriteFile(filepath.Join(rootDir, ".xylem", "workflows", "fix-bug.yaml"), []byte("name: fix-bug\nphases:\n  - name: Bad\n"), 0o644))

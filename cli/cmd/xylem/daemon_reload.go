@@ -324,6 +324,12 @@ func (r *daemonRuntime) applyReload(ctx context.Context, req daemonReloadRequest
 
 	handle := before
 	if reloadErr == nil {
+		if err := loadDaemonStartupEnv(r.rootDir); err != nil {
+			reloadErr = fmt.Errorf("reload daemon startup env: %w", err)
+			result = "rejected"
+		}
+	}
+	if reloadErr == nil {
 		handle, reloadErr = buildDaemonRunnerHandle(nextCfg, r.q, r.wt, nextSnapshot)
 		if reloadErr != nil {
 			result = "rejected"
