@@ -25,7 +25,7 @@ phases:
       retries: 2
   - name: test_critic
     prompt_file: .xylem/prompts/implement-harness/test_critic.md
-    max_turns: 30
+    max_turns: 50
     gate:
       type: command
       run: "cd cli && go test ./..."
@@ -39,7 +39,7 @@ phases:
       retries: 2
   - name: pr_draft
     prompt_file: .xylem/prompts/implement-harness/pr_draft.md
-    max_turns: 30
+    max_turns: 50
     gate:
       type: command
       run: |
