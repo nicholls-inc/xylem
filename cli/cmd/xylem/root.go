@@ -52,6 +52,8 @@ func newRootCmd() *cobra.Command {
 				commandPath == "xylem harden score" ||
 				commandPath == "xylem harden track" ||
 				commandPath == "xylem field-report generate" ||
+				commandPath == "xylem audit" ||
+				strings.HasPrefix(commandPath, "xylem audit ") ||
 				commandPath == "xylem daemon stop" ||
 				commandPath == "xylem daemon reload"
 
@@ -125,6 +127,7 @@ func newRootCmd() *cobra.Command {
 		newVisualizeCmd(),
 		newVersionCmd(),
 		newFieldReportCmd(),
+		newAuditCmd(),
 	)
 
 	return cmd
