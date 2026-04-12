@@ -4346,6 +4346,14 @@ type providerInvocation struct {
 	StdinContent string
 }
 
+type providerErrorDisposition uint8
+
+const (
+	providerErrorFail providerErrorDisposition = iota
+	providerErrorRetrySameProvider
+	providerErrorFallbackNextProvider
+)
+
 // isRateLimitError reports whether the error indicates a transient LLM
 // provider error that should be retried with backoff. This includes HTTP 429
 // rate limits (rate_limit_error), insufficient credit balance, and generic
@@ -4384,6 +4392,58 @@ func isRateLimitError(err error) bool {
 	return false
 }
 
+func classifyProviderError(err error) providerErrorDisposition {
+	if err == nil {
+		return providerErrorFail
+	}
+	if isRateLimitError(err) {
+		return providerErrorRetrySameProvider
+	}
+
+	msg := strings.ToLower(err.Error())
+	fallbackPatterns := []string{
+		"authentication failed",
+		"authentication required",
+		"authentication_error",
+		"invalid api key",
+		"api key is invalid",
+		"missing api key",
+		"invalid x-api-key",
+		"anthropic_api_key",
+		"github token",
+		"github_token",
+		"bad credentials",
+		"invalid token",
+		"token is invalid",
+		"oauth token",
+		"not authorized to access this model",
+		"permission denied for model",
+		"model access denied",
+		"service unavailable",
+		"temporarily unavailable",
+		"provider unavailable",
+		"overloaded_error",
+		"model is overloaded",
+		"currently overloaded",
+		"executable file not found",
+		"command not found",
+	}
+	for _, pattern := range fallbackPatterns {
+		if strings.Contains(msg, pattern) {
+			return providerErrorFallbackNextProvider
+		}
+	}
+	if strings.Contains(msg, "unauthorized") &&
+		(strings.Contains(msg, "api key") || strings.Contains(msg, "token") || strings.Contains(msg, "authentication")) {
+		return providerErrorFallbackNextProvider
+	}
+	if strings.Contains(msg, "forbidden") &&
+		(strings.Contains(msg, "api key") || strings.Contains(msg, "token") || strings.Contains(msg, "model")) {
+		return providerErrorFallbackNextProvider
+	}
+	return providerErrorFail
+}
+
 // runPhaseWithRateLimitRetry wraps RunPhase with retry logic for API rate limit
 // errors (HTTP 429). It retries up to rateLimitMaxRetries times with exponential
 // backoff (30s, 60s, 120s) before returning the final error.
@@ -4410,7 +4470,7 @@ func (r *Runner) runPhaseWithRateLimitRetry(
 		} else {
 			output, err = r.Runner.RunPhaseWithEnv(ctx, dir, extraEnv, stdin, cmd, args...)
 		}
-		if err == nil || !isRateLimitError(err) {
+		if err == nil || classifyProviderError(err) != providerErrorRetrySameProvider {
 			return output, err
 		}
 		if attempt == rateLimitMaxRetries {
@@ -4451,10 +4511,18 @@ func (r *Runner) runPhaseWithProviderFallback(
 		if err == nil {
 			return output, invocation.Provider, invocation.Model, nil
 		}
-		if !isRateLimitError(err) || idx == len(providers)-1 {
+
+		disposition := classifyProviderError(err)
+		if disposition == providerErrorFail || idx == len(providers)-1 {
 			return output, invocation.Provider, invocation.Model, err
 		}
-		log.Printf("provider %s rate-limited, falling back to %s", invocation.Provider, providers[idx+1])
+
+		switch disposition {
+		case providerErrorRetrySameProvider:
+			log.Printf("provider %s exhausted rate-limit retries, falling back to %s", invocation.Provider, providers[idx+1])
+		case providerErrorFallbackNextProvider:
+			log.Printf("provider %s unavailable for phase %s, falling back to %s: %v", invocation.Provider, phaseName, providers[idx+1], err)
+		}
 	}
 	return nil, "", "", nil
 }

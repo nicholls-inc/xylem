@@ -12,12 +12,12 @@ Today xylem invokes a single LLM per vessel (`claude` or `copilot`), picked via 
 The goal is two-fold:
 
 1. Let users classify vessels by **effort tier** (`high` / `med` / `low`) and map each tier to a specific model per provider.
-2. Let the runner **route** a vessel to the first healthy provider in a per-tier preference list, and **fall back** to the next provider when the current one hits a credit/rate-limit error.
+2. Let the runner **route** a vessel to the first healthy provider in a per-tier preference list, and **fall back** to the next provider when the current one hits a provider-level auth/config/access or availability failure after preserving same-provider retries for credit/rate-limit errors.
 
 Design decisions (per user, 2026-04-09):
 
 - Tier comes from the workflow YAML **and** from `tasks.<name>.tier` in `.xylem.yml` (not GitHub labels).
-- Fallback fires **only** on credit/rate-limit errors — regular failures still fail the phase.
+- Retry the **same provider** on credit/rate-limit errors; fall back to the **next provider** on provider-auth, provider-config/access, or provider-unavailable failures.
 - Provider preference is **per-tier** (`tiers.high.providers: [claude]`, `tiers.low.providers: [copilot, claude]`).
 - Config moves to a **generic `providers:` map** so gemini (and any future CLI) plugs in without new structs.
 
@@ -120,8 +120,9 @@ Replace the current provider/model resolution block (runner.go:3668-3709) with t
 - **New `runPhaseWithProviderFallback`** wraps `runPhaseWithRateLimitRetry` (runner.go:3488-3517):
   - Iterates `resolveProviderChain(cfg, tier)`.
   - For each provider: build args + env, invoke `runPhaseWithRateLimitRetry` as today.
-  - If the final error passes `isRateLimitError` (runner.go:3460) **and** there is a next provider, log the fallback (`log.Printf("provider %s rate-limited, falling back to %s", curr, next)`) and continue.
-  - Any non-rate-limit error returns immediately (preserves today's fail-fast semantics for real bugs).
+  - If the final error is still classified as a same-provider retryable rate-limit/quota error after retries are exhausted **and** there is a next provider, log the fallback and continue.
+  - If the final error is classified as a provider-auth/config/access or provider-unavailable failure **and** there is a next provider, fall through to the next provider immediately without same-provider backoff.
+  - Any other non-provider-routing error returns immediately (preserves today's fail-fast semantics for real bugs).
   - On the last provider, propagate whatever error comes back.
 - Callers of `runPhaseWithRateLimitRetry` inside the phase execution path (around runner.go:735) switch to the new wrapper and pass the resolved tier.
 
@@ -160,8 +161,8 @@ No user-visible doc file changes in this plan (CLAUDE.md already covers config s
 
 ## Reuse / do-not-duplicate
 
-- `isRateLimitError` (`runner.go:3456-3486`) already matches claude 429, copilot quota, and "Credit balance is too low". Reuse verbatim as the fallback trigger.
-- `runPhaseWithRateLimitRetry` (`runner.go:3488-3517`) keeps per-provider retries with its existing exponential backoff; the new fallback wrapper composes it, not replaces it.
+- `isRateLimitError` (`runner.go:3456-3486`) already matches claude 429, copilot quota, and "Credit balance is too low". Keep it as the **same-provider retry** trigger.
+- `runPhaseWithRateLimitRetry` (`runner.go:3488-3517`) keeps per-provider retries with its existing exponential backoff; the new fallback wrapper composes it, not replaces it, and a classifier decides when the next provider should be tried.
 - `resolveProvider` / `resolveModel` (`runner.go:3670-3709`) are deleted — their callers switch to `resolveTier` + `resolveProviderChain` + `modelForProvider`. The `Phase.LLM` / `Phase.Model` / `Workflow.LLM` / `Workflow.Model` fields remain for backward compat: if set and no `Tier` is set, normalize them into a one-off single-provider chain at runtime so we don't need a migration script.
 - `stripModelFlag`, `stripBoolFlag`, `stripPromptFlag` utilities stay as-is and are called from the refactored kind-dispatched arg builders.
 - `RunProcessWithEnv` (`exec.go:155`) is the model for the new `RunPhaseWithEnv` — same merge semantics.
@@ -173,8 +174,8 @@ No user-visible doc file changes in this plan (CLAUDE.md already covers config s
 3. **Format check**: `goimports -l .` clean (CI parity).
 4. **Backward-compat smoke**: take an unmodified `.xylem.yml` from a guest repo (only `claude:` block, no `providers:`) and run `xylem scan --dry-run` + unit tests for the config loader; assert the vessel uses claude with the old `default_model`, no behavior change.
 5. **End-to-end fallback smoke** (manual, against local stub providers):
-   - Write a `.xylem.yml` with two providers where `claude.command` is a shell stub that prints `Error: Credit balance is too low` to stderr and exits non-zero, and `copilot.command` is a stub that echoes a valid phase output to stdout.
+   - Write a `.xylem.yml` with two providers where `claude.command` is a shell stub that prints either `Error: Credit balance is too low` or an auth failure like `authentication failed: invalid x-api-key` to stderr and exits non-zero, and `copilot.command` is a stub that echoes a valid phase output to stdout.
    - Configure `llm_routing.tiers.med.providers: [claude, copilot]`.
    - Run `xylem drain` on a test vessel.
-   - Assert in logs: `rate limit error` retries on claude, then `provider claude rate-limited, falling back to copilot`, then phase success using copilot's env + model.
+   - Assert in logs: rate-limit input retries on claude before falling back, auth-failure input skips same-provider backoff and falls through directly to copilot, and the successful phase uses copilot's env + model.
 6. **Live observability**: with Jaeger running (`docker compose -f dev/docker-compose.yml up -d`), check that the phase span carries the final provider name (extend existing OTel span attributes in `cli/internal/observability` to include `llm.provider` and `llm.tier`).
