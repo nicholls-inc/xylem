@@ -127,6 +127,11 @@ type CompactionConfig struct {
 	PreserveDurable bool    `json:"preserve_durable"`
 }
 
+type indexedSegment struct {
+	Segment
+	index int
+}
+
 // NewPipeline creates a pipeline from the given processors, sorted by
 // priority (ascending).
 // INV: Pipeline output is deterministic for same input and same processors.
@@ -198,6 +203,64 @@ func Compact(window *Window, config CompactionConfig) *Window {
 		Segments:  kept,
 		MaxTokens: window.MaxTokens,
 	}
+}
+
+// CompactToFit removes the lowest-priority working segments until the window
+// fits within MaxTokens, preserving original order for the segments that
+// remain.
+func CompactToFit(window *Window, config CompactionConfig) *Window {
+	if window == nil {
+		return nil
+	}
+	if window.UsedTokens() <= window.MaxTokens && window.Utilization() <= config.Threshold {
+		copied := *window
+		copied.Segments = make([]Segment, len(window.Segments))
+		copy(copied.Segments, window.Segments)
+		return &copied
+	}
+
+	preserved := make(map[int]bool, len(window.Segments))
+	total := 0
+	working := make([]indexedSegment, 0, len(window.Segments))
+	for idx, seg := range window.Segments {
+		tokens := seg.Tokens
+		if tokens < 0 {
+			tokens = 0
+		}
+		if config.PreserveDurable && seg.Durable {
+			preserved[idx] = true
+			total += tokens
+			continue
+		}
+		working = append(working, indexedSegment{Segment: seg, index: idx})
+	}
+
+	sort.SliceStable(working, func(i, j int) bool {
+		if working[i].Priority == working[j].Priority {
+			return working[i].index < working[j].index
+		}
+		return working[i].Priority > working[j].Priority
+	})
+
+	for _, seg := range working {
+		tokens := seg.Tokens
+		if tokens < 0 {
+			tokens = 0
+		}
+		if total+tokens > window.MaxTokens {
+			continue
+		}
+		preserved[seg.index] = true
+		total += tokens
+	}
+
+	result := &Window{MaxTokens: window.MaxTokens}
+	for idx, seg := range window.Segments {
+		if preserved[idx] {
+			result.Segments = append(result.Segments, seg)
+		}
+	}
+	return result
 }
 
 // SelectStrategy picks a context management strategy based on current

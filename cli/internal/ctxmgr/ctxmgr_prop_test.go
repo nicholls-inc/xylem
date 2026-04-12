@@ -170,6 +170,39 @@ func TestProp_EstimateTokensNonNegative(t *testing.T) {
 	})
 }
 
+func TestProp_CompactToFitRespectsBudgetWhenDurableFits(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		w := genWindow().Draw(t, "window")
+		durableTokens := 0
+		for _, seg := range w.Segments {
+			if seg.Durable && seg.Tokens > 0 {
+				durableTokens += seg.Tokens
+			}
+		}
+
+		maxTokens := rapid.IntRange(1, 100000).Draw(t, "maxTokens")
+		if durableTokens > maxTokens {
+			maxTokens = durableTokens
+		}
+		w.MaxTokens = maxTokens
+
+		result := CompactToFit(&w, CompactionConfig{
+			Threshold:       rapid.Float64Range(0.0, 1.0).Draw(t, "threshold"),
+			PreserveDurable: true,
+		})
+		if result == nil {
+			t.Fatal("CompactToFit() = nil")
+			return
+		}
+		if result.UsedTokens() > result.MaxTokens {
+			t.Fatalf("CompactToFit() used=%d, max=%d", result.UsedTokens(), result.MaxTokens)
+		}
+		if result.UsedTokens() > w.UsedTokens() {
+			t.Fatalf("CompactToFit() increased tokens: %d > %d", result.UsedTokens(), w.UsedTokens())
+		}
+	})
+}
+
 func TestProp_AssembleDeterministic(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		n := rapid.IntRange(0, 5).Draw(t, "n")

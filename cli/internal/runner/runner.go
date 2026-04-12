@@ -1829,7 +1829,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		log.Printf("%sphase %q starting", vesselLabel(vessel), p.Name)
 		phaseStart := r.runtimeNow()
 
-		td := r.buildTemplateData(vessel, issueData, p.Name, phaseIdx, previousOutputs, gateResult, phase.EvaluationData{})
+		td := r.buildTemplateData(vessel, wf, issueData, p.Name, phaseIdx, previousOutputs, gateResult, phase.EvaluationData{})
 
 		var output []byte
 		var runErr error
@@ -1993,7 +1993,10 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					runErr = err
 				}
 			} else {
-				rendered, err := phase.RenderPrompt(promptTemplate, td)
+				rendered, err := phase.RenderPromptWithOptions(promptTemplate, td, phase.RenderOptions{
+					ContextBudget: phaseContextBudget(r.Config),
+					Preamble:      harnessContent,
+				})
 				if err != nil {
 					finishCurrentPhaseSpan(err)
 					r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
@@ -4077,7 +4080,7 @@ func (r *Runner) resolveDefaultBranch() string {
 	return "main"
 }
 
-func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string, evaluation phase.EvaluationData) phase.TemplateData {
+func (r *Runner) buildTemplateData(vessel queue.Vessel, wf *workflow.Workflow, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string, evaluation phase.EvaluationData) phase.TemplateData {
 	sourceName := vessel.Source
 	if configSource := r.sourceConfigNameFromMeta(vessel); configSource != "" {
 		sourceName = configSource
@@ -4099,9 +4102,10 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			Name:  phaseName,
 			Index: phaseIndex,
 		},
-		PreviousOutputs: previousOutputs,
-		GateResult:      gateResult,
-		Evaluation:      evaluation,
+		PreviousOutputs:     previousOutputs,
+		PreviousOutputOrder: orderedPreviousOutputNames(wf, phaseIndex, previousOutputs),
+		GateResult:          gateResult,
+		Evaluation:          evaluation,
 		Vessel: phase.VesselData{
 			ID:     vessel.ID,
 			Ref:    vessel.Ref,
@@ -4118,6 +4122,44 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 		},
 		Validation: validation,
 	}
+}
+
+func orderedPreviousOutputNames(wf *workflow.Workflow, phaseIndex int, previousOutputs map[string]string) []string {
+	if len(previousOutputs) == 0 {
+		return nil
+	}
+	ordered := make([]string, 0, len(previousOutputs))
+	seen := make(map[string]struct{}, len(previousOutputs))
+	if wf != nil {
+		limit := phaseIndex
+		if limit > len(wf.Phases) {
+			limit = len(wf.Phases)
+		}
+		for i := 0; i < limit; i++ {
+			name := wf.Phases[i].Name
+			if _, ok := previousOutputs[name]; !ok {
+				continue
+			}
+			ordered = append(ordered, name)
+			seen[name] = struct{}{}
+		}
+	}
+	extras := make([]string, 0, len(previousOutputs)-len(ordered))
+	for name := range previousOutputs {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		extras = append(extras, name)
+	}
+	sort.Strings(extras)
+	return append(ordered, extras...)
+}
+
+func phaseContextBudget(cfg *config.Config) int {
+	if cfg == nil || cfg.Phase.ContextBudget <= 0 {
+		return config.DefaultPhaseContextBudget
+	}
+	return cfg.Phase.ContextBudget
 }
 
 func vesselLabel(v queue.Vessel) string {
