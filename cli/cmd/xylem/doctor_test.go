@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -222,8 +223,12 @@ func TestDoctorQueueHealth(t *testing.T) {
 	if queueCheck.Status != "ok" {
 		t.Fatalf("queue status = %q, want ok", queueCheck.Status)
 	}
-	if queueCheck.Message != "1 vessel(s) in queue" {
-		t.Fatalf("queue message = %q, want %q", queueCheck.Message, "1 vessel(s) in queue")
+	// Message should show per-state breakdown: 0 pending, 0 running, 1 completed.
+	if !strings.Contains(queueCheck.Message, "0 pending") {
+		t.Fatalf("queue message = %q, want pending count", queueCheck.Message)
+	}
+	if !strings.Contains(queueCheck.Message, "1 completed") {
+		t.Fatalf("queue message = %q, want completed count", queueCheck.Message)
 	}
 
 	compactionCheck := requireDoctorCheck(t, report, "queue_compaction")
@@ -508,6 +513,65 @@ func TestSmoke_S2_DoctorDefaultBehaviorWithoutRootUnchanged(t *testing.T) {
 
 	assert.Contains(t, out, "pid=11111")
 	assert.NotContains(t, out, "pid=22222")
+}
+
+func TestCheckQueueHealthShowsStateCounts(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	// Set up a failed vessel first (pending → running → failed).
+	vf := queue.Vessel{
+		ID:        "failed-1",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: time.Now(),
+	}
+	if _, err := q.Enqueue(vf); err != nil {
+		t.Fatalf("enqueue failed-1: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil { // pending → running
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update("failed-1", queue.StateFailed, "boom"); err != nil {
+		t.Fatalf("update to failed: %v", err)
+	}
+
+	// Enqueue 2 pending vessels after so they are not dequeued.
+	for i := 1; i <= 2; i++ {
+		v := queue.Vessel{
+			ID:        fmt.Sprintf("pending-%d", i),
+			Source:    "github-issue",
+			Workflow:  "fix-bug",
+			State:     queue.StatePending,
+			CreatedAt: time.Now(),
+		}
+		if _, err := q.Enqueue(v); err != nil {
+			t.Fatalf("enqueue pending-%d: %v", i, err)
+		}
+	}
+
+	report := &doctorReport{}
+	checkQueueHealth(q, report)
+
+	queueCheck := requireDoctorCheck(t, report, "queue")
+	assert.Equal(t, "ok", queueCheck.Status)
+	assert.Contains(t, queueCheck.Message, "2 pending")
+	assert.Contains(t, queueCheck.Message, "0 running")
+	assert.Contains(t, queueCheck.Message, "1 failed")
+}
+
+func TestCheckQueueHealthAllZeros(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	report := &doctorReport{}
+	checkQueueHealth(q, report)
+
+	queueCheck := requireDoctorCheck(t, report, "queue")
+	assert.Equal(t, "ok", queueCheck.Status)
+	assert.Contains(t, queueCheck.Message, "0 pending")
+	assert.Contains(t, queueCheck.Message, "0 running")
 }
 
 func TestSmoke_S3_DoctorJSONModeHonorsRootFlag(t *testing.T) {

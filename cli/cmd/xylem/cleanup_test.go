@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -65,7 +66,7 @@ func TestCleanupNoWorktrees(t *testing.T) {
 	wt := worktree.New(dir, &emptyWorktreeRunner{})
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -96,7 +97,7 @@ func TestCleanupDryRunWithWorktrees(t *testing.T) {
 	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, true) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, true, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -131,7 +132,7 @@ func TestCleanupActualRemoval(t *testing.T) {
 	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -178,7 +179,7 @@ func TestCleanupSkipsActiveWorktreeWhenQueuePathIsRelative(t *testing.T) {
 	}
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, true) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, true, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -219,7 +220,7 @@ func TestCleanupRemovalError(t *testing.T) {
 	os.Stderr = errPw
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 
 	errPw.Close()
 	os.Stderr = oldErr
@@ -265,7 +266,7 @@ func TestCleanupPartialFailure(t *testing.T) {
 	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("expected nil error (best-effort), got: %v", err)
 	}
@@ -329,7 +330,7 @@ func TestCleanupPhaseDirs(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -367,7 +368,7 @@ func TestCleanupSkipsRecentPhaseDirs(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -402,7 +403,7 @@ func TestCleanupDryRunPhaseDirs(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, true) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, true, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -422,7 +423,7 @@ func TestCleanupNoPhasesDir(t *testing.T) {
 
 	// Do NOT create the phases directory -- it should not exist
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -454,7 +455,7 @@ func TestCleanupTimedOutPhaseDirs(t *testing.T) {
 	})
 
 	var err error
-	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false) })
+	out := captureStdout(func() { err = cmdCleanup(cfg, q, wt, false, 168*time.Hour) })
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -465,5 +466,152 @@ func TestCleanupTimedOutPhaseDirs(t *testing.T) {
 	}
 	if !strings.Contains(out, "Removed phase outputs") {
 		t.Errorf("expected 'Removed phase outputs' in output, got: %s", out)
+	}
+}
+
+// --- Queue compaction (--retain) tests ---
+
+func TestCleanupCompactsOldTerminalVessels(t *testing.T) {
+	cfg, q := testCleanupConfig(t)
+	wt := worktree.New(t.TempDir(), &emptyWorktreeRunner{})
+
+	now := time.Now().UTC()
+	started := now.Add(-9 * 24 * time.Hour)
+	ended := now.Add(-8 * 24 * time.Hour)
+
+	// Three failed vessels older than 7d.
+	for i := 1; i <= 3; i++ {
+		q.Enqueue(queue.Vessel{ //nolint:errcheck
+			ID:        fmt.Sprintf("issue-%d", i),
+			Source:    "github-issue",
+			Workflow:  "fix-bug",
+			State:     queue.StateFailed,
+			CreatedAt: started,
+			StartedAt: &started,
+			EndedAt:   &ended,
+		})
+	}
+	// One pending vessel that must survive.
+	q.Enqueue(queue.Vessel{ //nolint:errcheck
+		ID:        "issue-pending",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+
+	out := captureStdout(func() {
+		if err := cmdCleanup(cfg, q, wt, false, 7*24*time.Hour); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "removed 3 stale record(s)") {
+		t.Errorf("expected 3 records removed, got: %s", out)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Errorf("expected 1 vessel remaining (pending), got %d", len(vessels))
+	}
+	if len(vessels) > 0 && vessels[0].ID != "issue-pending" {
+		t.Errorf("expected pending vessel to survive, got %s", vessels[0].ID)
+	}
+}
+
+func TestCleanupRetainFlag_NilEndedAtKept(t *testing.T) {
+	cfg, q := testCleanupConfig(t)
+	wt := worktree.New(t.TempDir(), &emptyWorktreeRunner{})
+
+	// A failed vessel with no EndedAt (legacy) — must not be evicted.
+	q.Enqueue(queue.Vessel{ //nolint:errcheck
+		ID:       "issue-legacy",
+		Source:   "github-issue",
+		Workflow: "fix-bug",
+		State:    queue.StateFailed,
+	})
+
+	out := captureStdout(func() {
+		if err := cmdCleanup(cfg, q, wt, false, 0); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	// No compaction message expected.
+	if strings.Contains(out, "stale record") {
+		t.Errorf("expected no stale records removed for nil-EndedAt vessel, got: %s", out)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Errorf("expected legacy vessel to be kept, got %d vessels", len(vessels))
+	}
+}
+
+func TestCleanupRetainFlag_InvalidDuration(t *testing.T) {
+	// Exercise the cobra RunE path: --retain with an unparseable value must return
+	// a formatted error without touching the queue or worktrees.
+	dir := t.TempDir()
+	prev := deps
+	deps = &appDeps{
+		cfg: &config.Config{StateDir: dir},
+		q:   queue.New(filepath.Join(dir, "queue.jsonl")),
+		wt:  worktree.New(dir, &emptyWorktreeRunner{}),
+	}
+	t.Cleanup(func() { deps = prev })
+
+	cmd := newCleanupCmd()
+	cmd.SilenceUsage = true
+	cmd.SilenceErrors = true
+	cmd.SetArgs([]string{"--retain", "notaduration"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("expected error for invalid --retain value, got nil")
+	}
+	if !strings.Contains(err.Error(), `invalid --retain value "notaduration"`) {
+		t.Errorf("error = %q, want to contain expected message", err.Error())
+	}
+}
+
+func TestCleanupDryRunWithRetain(t *testing.T) {
+	cfg, q := testCleanupConfig(t)
+	wt := worktree.New(t.TempDir(), &emptyWorktreeRunner{})
+
+	now := time.Now().UTC()
+	started := now.Add(-9 * 24 * time.Hour)
+	ended := now.Add(-8 * 24 * time.Hour)
+	q.Enqueue(queue.Vessel{ //nolint:errcheck
+		ID:        "issue-dryrun",
+		Source:    "github-issue",
+		Workflow:  "fix-bug",
+		State:     queue.StateFailed,
+		CreatedAt: started,
+		StartedAt: &started,
+		EndedAt:   &ended,
+	})
+
+	out := captureStdout(func() {
+		if err := cmdCleanup(cfg, q, wt, true, 7*24*time.Hour); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	if !strings.Contains(out, "Would remove 1 stale queue record(s)") {
+		t.Errorf("expected dry-run message, got: %s", out)
+	}
+
+	// Queue must be unchanged.
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Errorf("expected queue unchanged after dry-run, got %d vessels", len(vessels))
 	}
 }

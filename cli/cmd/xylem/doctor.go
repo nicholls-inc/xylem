@@ -322,7 +322,27 @@ func checkQueueHealth(q *queue.Queue, report *doctorReport) {
 		report.add("queue_compaction", "ok", "Queue is compact")
 	}
 
-	report.add("queue", "ok", fmt.Sprintf("%d vessel(s) in queue", len(vessels)))
+	var pending, running, completed, failed, cancelled, timedOut int
+	for _, v := range vessels {
+		switch v.State {
+		case queue.StatePending:
+			pending++
+		case queue.StateRunning:
+			running++
+		case queue.StateCompleted:
+			completed++
+		case queue.StateFailed:
+			failed++
+		case queue.StateCancelled:
+			cancelled++
+		case queue.StateTimedOut:
+			timedOut++
+		}
+	}
+	report.add("queue", "ok", fmt.Sprintf(
+		"%d pending, %d running (%d completed, %d failed, %d cancelled, %d timed_out)",
+		pending, running, completed, failed, cancelled, timedOut,
+	))
 }
 
 func checkFleetHealth(cfg *config.Config, q *queue.Queue, report *doctorReport) {
