@@ -7,7 +7,10 @@ import (
 	"pgregory.net/rapid"
 )
 
-func TestPropEvaluateStableUnderRuleReordering(t *testing.T) {
+// TestProp_PolicyStableUnderReorder is the canonical spec name (§15.4):
+// policy matrix decisions are invariant under rule reordering for any
+// (class, operation) pair — there is no rule ordering ambiguity.
+func TestProp_PolicyStableUnderReorder(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		rules := append([]rule(nil), defaultRules...)
 		seed := rapid.Int64().Draw(t, "seed")

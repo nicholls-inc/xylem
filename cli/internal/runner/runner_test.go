@@ -2292,6 +2292,71 @@ func TestSmoke_S4_WorkflowClassEnforcement(t *testing.T) {
 	t.Run("harness-maintenance allows control-plane write", TestRunnerPolicyMatrixAllowsHarnessMaintenanceControlPlaneWrite)
 	t.Run("warn mode logs but allows control-plane write", TestRunnerPolicyWarnModeLogsButAllowsControlPlaneWrite)
 	t.Run("harness-maintenance default-branch push denied", TestRunnerHarnessMaintenanceDefaultBranchPushDeniedAtGitLayer)
+	t.Run("delivery default-branch push denied (class-matrix)", TestIntegration_RunnerRejectsClassMatrixDenial)
+}
+
+// TestIntegration_RunnerRejectsClassMatrixDenial is the load-bearing test for
+// spec §15.3 test case 4: a delivery-class workflow that tries to git-push to
+// the default branch is denied by the policy class matrix and produces the
+// correct audit entry. Mirrors TestRunnerHarnessMaintenanceDefaultBranchPushDeniedAtGitLayer
+// but exercises the Delivery class path added to enforceDefaultBranchPushPolicy.
+func TestIntegration_RunnerRejectsClassMatrixDenial(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	// Delivery class default-branch push must be blocked in enforce mode.
+	cfg.Harness.Policy.Mode = "enforce"
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, _ = q.Enqueue(makeVessel(1, "push-main-delivery"))
+
+	writeWorkflowFileWithOptions(t, dir, "push-main-delivery", testWorkflowOptions{
+		class: string(policy.Delivery),
+	}, []testPhase{{
+		name:      "publish",
+		phaseType: "command",
+		run:       "git push origin main",
+	}})
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "git" && len(args) >= 4 && args[2] == "symbolic-ref" {
+				return []byte("refs/remotes/origin/main\n"), nil, true
+			}
+			return nil, nil, false
+		},
+	}
+	auditLog := intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.AuditLog = auditLog
+	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Failed)
+	assert.Equal(t, 0, countRunOutputCalls(cmdRunner, "sh"))
+
+	vessel := loadSingleVessel(t, q)
+	assert.Equal(t, queue.StateFailed, vessel.State)
+	assert.Contains(t, vessel.Error, "denied by policy")
+	assert.Contains(t, vessel.Error, "git_push")
+
+	entries, err := auditLog.Entries()
+	require.NoError(t, err)
+	var guardEntry *intermediary.AuditEntry
+	for i := range entries {
+		if entries[i].Operation == "commit_default_branch" {
+			guardEntry = &entries[i]
+			break
+		}
+	}
+	require.NotNil(t, guardEntry)
+	assert.Equal(t, intermediary.Deny, guardEntry.Decision)
+	assert.Equal(t, "delivery", guardEntry.WorkflowClass)
+	assert.Equal(t, deliveryDefaultBranchRule, guardEntry.RuleMatched)
+	assert.Equal(t, vessel.ID, guardEntry.VesselID)
 }
 
 func TestEnsureWorktreeRecreatesMissingInheritedPath(t *testing.T) {
