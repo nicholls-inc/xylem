@@ -3592,3 +3592,127 @@ func TestTelemetryInvalidTargetRepoRejected(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "telemetry.target_repo")
 }
+
+func baseActionsConfig() *Config {
+	return &Config{
+		Concurrency: 2,
+		MaxTurns:    50,
+		Timeout:     "30m",
+		Claude:      ClaudeConfig{Command: "claude", DefaultModel: "claude-sonnet-4-6"},
+	}
+}
+
+func TestValidateGitHubActionsValid(t *testing.T) {
+	cfg := baseActionsConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"ci-failures": {
+			Type: "github-actions",
+			Repo: "owner/name",
+			Tasks: map[string]Task{
+				"analyze-failure": {Workflow: "report-ci-failure"},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid github-actions config, got: %v", err)
+	}
+}
+
+func TestValidateGitHubActionsWithFilter(t *testing.T) {
+	cfg := baseActionsConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"ci-failures": {
+			Type: "github-actions",
+			Repo: "owner/name",
+			Tasks: map[string]Task{
+				"analyze-failure": {
+					Workflow: "report-ci-failure",
+					Actions: &ActionsConfig{
+						Workflow:    "CI",
+						Branches:    []string{"main"},
+						Conclusions: []string{"failure", "timed_out"},
+					},
+				},
+			},
+		},
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected valid github-actions config with filter, got: %v", err)
+	}
+}
+
+func TestValidateGitHubActionsMissingRepo(t *testing.T) {
+	cfg := baseActionsConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"ci-failures": {
+			Type: "github-actions",
+			Repo: "",
+			Tasks: map[string]Task{
+				"analyze-failure": {Workflow: "report-ci-failure"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "repo is required")
+}
+
+func TestValidateGitHubActionsInvalidRepo(t *testing.T) {
+	cfg := baseActionsConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"ci-failures": {
+			Type: "github-actions",
+			Repo: "notavalidrepo",
+			Tasks: map[string]Task{
+				"analyze-failure": {Workflow: "report-ci-failure"},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "owner/name format")
+}
+
+func TestValidateGitHubActionsMissingTasks(t *testing.T) {
+	cfg := baseActionsConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"ci-failures": {
+			Type:  "github-actions",
+			Repo:  "owner/name",
+			Tasks: map[string]Task{},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "at least one task is required")
+}
+
+func TestValidateGitHubActionsMissingWorkflow(t *testing.T) {
+	cfg := baseActionsConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"ci-failures": {
+			Type: "github-actions",
+			Repo: "owner/name",
+			Tasks: map[string]Task{
+				"analyze-failure": {Workflow: ""},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "must include a workflow")
+}
+
+func TestValidateGitHubActionsEmptyConclusionRejected(t *testing.T) {
+	cfg := baseActionsConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"ci-failures": {
+			Type: "github-actions",
+			Repo: "owner/name",
+			Tasks: map[string]Task{
+				"analyze-failure": {
+					Workflow: "report-ci-failure",
+					Actions:  &ActionsConfig{Conclusions: []string{"failure", ""}},
+				},
+			},
+		},
+	}
+	err := cfg.Validate()
+	requireErrorContains(t, err, "conclusions must not contain empty strings")
+}

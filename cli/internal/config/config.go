@@ -166,6 +166,18 @@ type PREventsConfig struct {
 	Debounce   string   `yaml:"debounce,omitempty"`
 }
 
+// ActionsConfig filters which GitHub Actions workflow runs trigger a task.
+// Non-PR-triggered runs (scheduled, manual, push, etc.) are scanned; runs
+// with event == "pull_request" or "pull_request_target" are always skipped.
+type ActionsConfig struct {
+	// Workflow filters by workflow filename or display name. Empty = all workflows.
+	Workflow string `yaml:"workflow,omitempty"`
+	// Branches filters by head branch name. Empty = all branches.
+	Branches []string `yaml:"branches,omitempty"`
+	// Conclusions filters by run conclusion. Defaults to ["failure"] when empty.
+	Conclusions []string `yaml:"conclusions,omitempty"`
+}
+
 type Task struct {
 	Labels          []string         `yaml:"labels,omitempty"`
 	Workflow        string           `yaml:"workflow"`
@@ -174,6 +186,7 @@ type Task struct {
 	StatusLabels    *StatusLabels    `yaml:"status_labels,omitempty"`
 	LabelGateLabels *LabelGateLabels `yaml:"label_gate_labels,omitempty"`
 	On              *PREventsConfig  `yaml:"on,omitempty"`
+	Actions         *ActionsConfig   `yaml:"actions,omitempty"`
 }
 
 type ClaudeConfig struct {
@@ -687,6 +700,10 @@ func (c *Config) Validate() error {
 			}
 		case "schedule":
 			if err := validateScheduleSource(name, src); err != nil {
+				return err
+			}
+		case "github-actions":
+			if err := validateGitHubActionsSource(name, src); err != nil {
 				return err
 			}
 		case "":
@@ -1885,6 +1902,33 @@ func validateScheduledSource(name string, src SourceConfig) error {
 	for tname, task := range src.Tasks {
 		if strings.TrimSpace(task.Workflow) == "" {
 			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
+		}
+	}
+	return nil
+}
+
+func validateGitHubActionsSource(name string, src SourceConfig) error {
+	repo := strings.TrimSpace(src.Repo)
+	if repo == "" {
+		return fmt.Errorf("source %q (github-actions): repo is required", name)
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+		return fmt.Errorf("source %q (github-actions): repo must be in owner/name format", name)
+	}
+	if len(src.Tasks) == 0 {
+		return fmt.Errorf("source %q (github-actions): at least one task is required", name)
+	}
+	for tname, task := range src.Tasks {
+		if strings.TrimSpace(task.Workflow) == "" {
+			return fmt.Errorf("source %q task %q: must include a workflow", name, tname)
+		}
+		if task.Actions != nil {
+			for _, c := range task.Actions.Conclusions {
+				if strings.TrimSpace(c) == "" {
+					return fmt.Errorf("source %q task %q: conclusions must not contain empty strings", name, tname)
+				}
+			}
 		}
 	}
 	return nil
