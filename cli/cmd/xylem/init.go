@@ -141,6 +141,14 @@ func cmdInitWithProfileAndOptions(configPath string, force bool, profileValue st
 		return err
 	}
 
+	agentsContent, err := renderProfileTemplate(composed, "AGENTS.md.tmpl", data)
+	if err != nil {
+		return err
+	}
+	if err := writeAgentsMdIfNeeded("AGENTS.md", []byte(agentsContent), force); err != nil {
+		return err
+	}
+
 	if err := syncProfileAssets(defaultStateDir, composed, force); err != nil {
 		return err
 	}
@@ -203,6 +211,34 @@ func writeFileIfNeeded(path string, content []byte, force bool) error {
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create directory for %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	fmt.Printf("Created %s\n", path)
+	return nil
+}
+
+// writeAgentsMdIfNeeded writes content to path with AGENTS.md-specific overwrite semantics:
+//   - Without --force: skip if the file already exists.
+//   - With --force: overwrite only if the existing file's first line is "# Agents guide";
+//     otherwise print a warning and skip (the file is not xylem-managed).
+func writeAgentsMdIfNeeded(path string, content []byte, force bool) error {
+	if _, err := os.Stat(path); err == nil {
+		if !force {
+			fmt.Printf("skipped: %s (already exists)\n", path)
+			return nil
+		}
+		existing, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return fmt.Errorf("read existing %s: %w", path, readErr)
+		}
+		firstLine := strings.SplitN(string(existing), "\n", 2)[0]
+		firstLine = strings.TrimRight(firstLine, "\r")
+		if firstLine != "# Agents guide" {
+			fmt.Printf("skipped: %s (first line is not '# Agents guide'; edit manually)\n", path)
+			return nil
+		}
 	}
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
