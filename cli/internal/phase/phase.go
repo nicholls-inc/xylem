@@ -44,6 +44,10 @@ type TemplateData struct {
 	// recent first. Populated by the runner for phase index > 0. Template
 	// authors should guard with {{if .EpisodicContext}}.
 	EpisodicContext []memory.EpisodicEntry
+	// DaemonBinary is the absolute path to the running xylem daemon binary.
+	// Use this in command phases that need to call back into xylem without
+	// requiring a built binary in the worktree.
+	DaemonBinary string
 }
 
 type RenderOptions struct {

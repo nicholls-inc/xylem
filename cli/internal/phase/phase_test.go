@@ -596,3 +596,18 @@ func TestSummarizeText(t *testing.T) {
 		}
 	})
 }
+
+func TestRenderPrompt_DaemonBinary(t *testing.T) {
+	data := TemplateData{
+		DaemonBinary: "/usr/local/bin/xylem",
+	}
+	got, err := RenderPrompt("{{.DaemonBinary}} release-cadence label-ready", data)
+	require.NoError(t, err)
+	assert.Equal(t, "/usr/local/bin/xylem release-cadence label-ready", got)
+}
+
+func TestRenderPrompt_DaemonBinaryEmpty(t *testing.T) {
+	got, err := RenderPrompt("{{.DaemonBinary}} subcommand", TemplateData{})
+	require.NoError(t, err)
+	assert.Equal(t, " subcommand", got)
+}
