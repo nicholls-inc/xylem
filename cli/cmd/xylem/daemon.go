@@ -52,6 +52,14 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		return fmt.Errorf("daemon refused to start in main worktree; see log for instructions")
 	}
 
+	rootDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	if err := loadDaemonStartupEnv(rootDir); err != nil {
+		return err
+	}
+
 	scanInterval, drainInterval := parseDaemonIntervals(cfg.Daemon)
 
 	// P0-3: Acquire singleton lock to prevent multiple daemons.
@@ -93,11 +101,6 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	reloadSignals := make(chan os.Signal, 1)
 	signal.Notify(reloadSignals, syscall.SIGHUP)
 	defer signal.Stop(reloadSignals)
-
-	rootDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("resolve working directory: %w", err)
-	}
 	runtime, err := newDaemonRuntime(rootDir, viper.GetString("config"), q, wt, cfg)
 	if err != nil {
 		return fmt.Errorf("create daemon runtime: %w", err)
