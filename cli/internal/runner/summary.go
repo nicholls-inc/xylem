@@ -127,6 +127,8 @@ type vesselRunState struct {
 	budgetMaxCostUSD *float64
 	budgetMaxTokens  *int
 
+	pricingOverrides map[string]cost.ModelPricing
+
 	extraInputTokensEst  int
 	extraOutputTokensEst int
 	extraCostUSDEst      float64
@@ -174,6 +176,16 @@ func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.T
 			v := budget.TokenLimit
 			s.budgetMaxTokens = &v
 		}
+	}
+
+	overrides := make(map[string]cost.ModelPricing)
+	for _, p := range cfg.Providers {
+		for model, pricing := range p.Pricing {
+			overrides[model] = pricing
+		}
+	}
+	if len(overrides) > 0 {
+		s.pricingOverrides = overrides
 	}
 
 	return s
@@ -255,7 +267,7 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 func (s *vesselRunState) recordLLMUsage(model, inputText, outputText string, recordedAt time.Time) (int, int, float64) {
 	inputTokens := cost.EstimateTokens(inputText)
 	outputTokens := cost.EstimateTokens(outputText)
-	costUSDEst := cost.EstimateCost(inputTokens, outputTokens, cost.LookupPricing(model))
+	costUSDEst := cost.EstimateCost(inputTokens, outputTokens, cost.LookupPricingWithOverrides(model, s.pricingOverrides))
 
 	if s.costTracker != nil {
 		_ = s.costTracker.Record(cost.UsageRecord{
@@ -284,7 +296,7 @@ func (s *vesselRunState) recordPromptOnlyUsage(model, prompt, output string, rec
 func (s *vesselRunState) recordEvaluationUsage(model, prompt, output string, recordedAt time.Time) (int, int, float64) {
 	inputTokens := cost.EstimateTokens(prompt)
 	outputTokens := cost.EstimateTokens(output)
-	costUSDEst := cost.EstimateCost(inputTokens, outputTokens, cost.LookupPricing(model))
+	costUSDEst := cost.EstimateCost(inputTokens, outputTokens, cost.LookupPricingWithOverrides(model, s.pricingOverrides))
 
 	if s.costTracker != nil {
 		_ = s.costTracker.Record(cost.UsageRecord{
