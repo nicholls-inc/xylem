@@ -123,7 +123,7 @@ Protected-surface write allowances are intentionally narrow. `allow_additive_pro
 | `noop` | No | Early-success completion rule checked against the phase output before any gate runs. |
 | `output` | No | Optional post-phase output target. Supported values: `discussion`. |
 | `discussion` | No | GitHub Discussions publishing config. Requires `output: discussion`. |
-| `allowed_tools` | No | Tool restriction string for prompt phases. Passed through to the provider CLI. Use this instead of top-level `claude.allowed_tools`, which is rejected by config validation. |
+| `allowed_tools` | No | Tool restriction string for prompt phases. The runner resolves it through the harness tool catalog for the phase role, rejecting unauthorized tools and deriving the role default list when this field is omitted. That role comes from `harness.tool_permissions.phase_roles` when configured, otherwise from the workflow class (with a phase-name fallback only when no class is available). The resulting list is then passed to the provider CLI. |
 | `gate` | No | Quality gate that must pass after this phase completes. |
 | `depends_on` | No | List of phase names this phase depends on. Enables parallel execution -- phases without dependency relationships can execute concurrently. Validated for duplicate entries, self-references, references to unknown phase names, and dependency cycles. |
 
@@ -1154,7 +1154,7 @@ If a prompt phase should only read code (no edits), use the `allowed_tools` fiel
 
 This prevents an analysis phase from accidentally making code changes.
 
-The value is passed directly to the selected provider CLI (`--allowedTools` for Claude, `--allowed-tools` for Copilot), so use the syntax your provider expects.
+The runner first resolves the phase's effective tool list through the harness tool catalog and role permissions, then passes that list to the selected provider CLI (`--allowedTools` for Claude, `--available-tools` for Copilot).
 
 ### Test your prompts manually
 

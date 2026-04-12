@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/cadence"
+	"github.com/nicholls-inc/xylem/cli/internal/catalog"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
@@ -229,8 +230,19 @@ type StallMonitorConfig struct {
 type HarnessConfig struct {
 	ProtectedSurfaces ProtectedSurfacesConfig `yaml:"protected_surfaces,omitempty"`
 	Policy            PolicyConfig            `yaml:"policy,omitempty"`
+	ToolPermissions   ToolPermissionsConfig   `yaml:"tool_permissions,omitempty"`
 	AuditLog          string                  `yaml:"audit_log,omitempty"`
 	Review            HarnessReviewConfig     `yaml:"review,omitempty"`
+}
+
+type ToolPermissionsConfig struct {
+	PhaseRoles map[string]string         `yaml:"phase_roles,omitempty"`
+	Roles      map[string]ToolRoleConfig `yaml:"roles,omitempty"`
+}
+
+type ToolRoleConfig struct {
+	MaxScope     string   `yaml:"max_scope,omitempty"`
+	AllowedTools []string `yaml:"allowed_tools,omitempty"`
 }
 
 type HarnessReviewConfig struct {
@@ -988,6 +1000,67 @@ func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 	}}
 }
 
+func (c *Config) BuildPhaseToolCatalog() (*catalog.Catalog, error) {
+	toolCatalog, err := catalog.NewDefaultPhaseCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("build phase tool catalog: %w", err)
+	}
+	if c == nil {
+		return toolCatalog, nil
+	}
+
+	roleNames := make([]string, 0, len(c.Harness.ToolPermissions.Roles))
+	for role := range c.Harness.ToolPermissions.Roles {
+		roleNames = append(roleNames, role)
+	}
+	sort.Strings(roleNames)
+	for _, role := range roleNames {
+		override := c.Harness.ToolPermissions.Roles[role]
+		existing, existingErr := toolCatalog.GetRolePermissions(role)
+		maxScope := catalog.ScopeFullAutonomy
+		var allowedTools []string
+		if existingErr == nil {
+			maxScope = existing.MaxScope
+			allowedTools = append([]string(nil), existing.AllowedTools...)
+		}
+		if strings.TrimSpace(override.MaxScope) != "" {
+			parsedScope, err := parseToolPermissionScope(override.MaxScope)
+			if err != nil {
+				return nil, fmt.Errorf("build phase tool catalog: role %q: %w", role, err)
+			}
+			maxScope = parsedScope
+		} else if existingErr != nil {
+			return nil, fmt.Errorf("build phase tool catalog: role %q: max_scope is required for custom roles", role)
+		}
+
+		if len(override.AllowedTools) > 0 {
+			allowedTools = normalizeToolPermissionTools(override.AllowedTools)
+		}
+		for _, toolName := range allowedTools {
+			if _, err := toolCatalog.Get(toolName); err != nil {
+				return nil, fmt.Errorf("build phase tool catalog: role %q: %w", role, err)
+			}
+		}
+		if err := toolCatalog.SetRolePermissions(catalog.RolePermissions{
+			Role:         role,
+			MaxScope:     maxScope,
+			AllowedTools: allowedTools,
+		}); err != nil {
+			return nil, fmt.Errorf("build phase tool catalog: role %q: %w", role, err)
+		}
+	}
+	return toolCatalog, nil
+}
+
+func (c *Config) PhaseToolRole(class policy.Class, phaseName, phaseType string) string {
+	if c != nil {
+		if role := strings.TrimSpace(c.Harness.ToolPermissions.PhaseRoles[strings.TrimSpace(phaseName)]); role != "" {
+			return role
+		}
+	}
+	return defaultPhaseToolRole(class, phaseName, phaseType)
+}
+
 // DefaultPolicy returns the default user policy layer. Workflow-class matrix
 // decisions are enforced separately inside the intermediary; this default layer
 // simply keeps autonomous execution unblocked unless operators opt into tighter
@@ -1028,6 +1101,33 @@ func (c *Config) validateHarness() error {
 
 	if _, err := intermediary.ParsePolicyMode(c.Harness.Policy.Mode); err != nil {
 		return fmt.Errorf("harness.policy.mode: %w", err)
+	}
+
+	for phaseName, role := range c.Harness.ToolPermissions.PhaseRoles {
+		if strings.TrimSpace(phaseName) == "" {
+			return fmt.Errorf("harness.tool_permissions.phase_roles keys must be non-empty")
+		}
+		if strings.TrimSpace(role) == "" {
+			return fmt.Errorf("harness.tool_permissions.phase_roles[%q] must be non-empty", phaseName)
+		}
+	}
+	for role, cfg := range c.Harness.ToolPermissions.Roles {
+		if strings.TrimSpace(role) == "" {
+			return fmt.Errorf("harness.tool_permissions.roles keys must be non-empty")
+		}
+		if strings.TrimSpace(cfg.MaxScope) != "" {
+			if _, err := parseToolPermissionScope(cfg.MaxScope); err != nil {
+				return fmt.Errorf("harness.tool_permissions.roles[%q].max_scope: %w", role, err)
+			}
+		}
+		for i, tool := range cfg.AllowedTools {
+			if strings.TrimSpace(tool) == "" {
+				return fmt.Errorf("harness.tool_permissions.roles[%q].allowed_tools[%d] must be non-empty", role, i)
+			}
+		}
+	}
+	if _, err := c.BuildPhaseToolCatalog(); err != nil {
+		return err
 	}
 
 	if cadence := c.Harness.Review.Cadence; cadence != "" {
@@ -1110,6 +1210,83 @@ func (c *Config) validateTelemetry() error {
 		}
 	}
 	return nil
+}
+
+func defaultPhaseToolRole(class policy.Class, phaseName, phaseType string) string {
+	switch class {
+	case policy.Delivery:
+		return catalog.RoleDelivery
+	case policy.HarnessMaintenance, policy.Ops:
+		return catalog.RoleHousekeeping
+	}
+
+	if strings.EqualFold(strings.TrimSpace(phaseType), "command") {
+		return catalog.RoleHousekeeping
+	}
+
+	name := strings.ToLower(strings.TrimSpace(phaseName))
+	switch {
+	case strings.HasPrefix(name, "pr"),
+		strings.Contains(name, "review"),
+		strings.Contains(name, "release"),
+		strings.Contains(name, "merge"),
+		strings.Contains(name, "report"),
+		strings.Contains(name, "lessons"),
+		strings.Contains(name, "audit"),
+		strings.Contains(name, "backlog"):
+		return catalog.RoleHousekeeping
+	case strings.Contains(name, "implement"),
+		strings.Contains(name, "fix"),
+		strings.Contains(name, "resolve"),
+		strings.Contains(name, "refactor"),
+		strings.Contains(name, "patch"),
+		strings.Contains(name, "write"):
+		return catalog.RoleDelivery
+	default:
+		return catalog.RoleDiagnostic
+	}
+}
+
+func parseToolPermissionScope(raw string) (catalog.PermissionScope, error) {
+	switch normalizeToolPermissionToken(raw) {
+	case "readonly", "read_only", "read-only":
+		return catalog.ScopeReadOnly, nil
+	case "writewithapproval", "write_with_approval", "write-with-approval":
+		return catalog.ScopeWriteWithApproval, nil
+	case "fullautonomy", "full_autonomy", "full-autonomy":
+		return catalog.ScopeFullAutonomy, nil
+	default:
+		return 0, fmt.Errorf("invalid value %q (must be read_only, write_with_approval, or full_autonomy)", raw)
+	}
+}
+
+func normalizeToolPermissionTools(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeToolPermissionToken(value string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	trimmed = strings.ReplaceAll(trimmed, "-", "_")
+	return strings.ReplaceAll(trimmed, " ", "")
 }
 
 func (c *Config) validateWorkflowRequirements() error {

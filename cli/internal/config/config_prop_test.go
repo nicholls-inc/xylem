@@ -308,6 +308,26 @@ func TestPropHarnessReviewOutputDirRejectsTraversal(t *testing.T) {
 	})
 }
 
+func TestPropPhaseToolRoleOverrideWins(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		phaseName := rapid.StringMatching(`[a-z][a-z0-9_]{2,12}`).Draw(t, "phase-name")
+		role := rapid.SampledFrom([]string{"diagnostic", "delivery", "housekeeping"}).Draw(t, "role")
+		cfg := Config{
+			Harness: HarnessConfig{
+				ToolPermissions: ToolPermissionsConfig{
+					PhaseRoles: map[string]string{
+						phaseName: role,
+					},
+				},
+			},
+		}
+
+		if got := cfg.PhaseToolRole(policy.Delivery, phaseName, "prompt"); got != role {
+			t.Fatalf("PhaseToolRole(%q) = %q, want %q", phaseName, got, role)
+		}
+	})
+}
+
 func TestPropHarnessPolicyModeDefaultsToWarn(t *testing.T) {
 	// Contract:
 	//   - Empty / whitespace-only / invalid modes resolve to warn (the zero-

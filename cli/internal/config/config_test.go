@@ -845,6 +845,94 @@ claude:
 	requireErrorContains(t, err, "claude.allowed_tools is no longer supported")
 }
 
+func TestValidateHarnessToolPermissionsRejectsUnknownTool(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"diagnostic": {
+			AllowedTools: []string{"Read", "NotARealTool"},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `role "diagnostic"`)
+	requireErrorContains(t, err, `tool "NotARealTool" not found`)
+}
+
+func TestValidateHarnessToolPermissionsRejectsCustomRoleWithoutScope(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"custom": {
+			AllowedTools: []string{"Read"},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `role "custom": max_scope is required for custom roles`)
+}
+
+func TestBuildPhaseToolCatalogAppliesOverrides(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.PhaseRoles = map[string]string{
+		"implement": "diagnostic",
+	}
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"diagnostic": {
+			AllowedTools: []string{"Read", "Edit"},
+			MaxScope:     "full_autonomy",
+		},
+	}
+
+	role := cfg.PhaseToolRole(policy.Delivery, "implement", "prompt")
+	require.Equal(t, "diagnostic", role)
+
+	toolCatalog, err := cfg.BuildPhaseToolCatalog()
+	require.NoError(t, err)
+
+	allowed, err := toolCatalog.ResolveRoleTools(role, []string{"Read", "Edit"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"Read", "Edit"}, allowed)
+}
+
+func TestSmoke_S2_ConfigToolOverridesTakePrecedenceOverWorkflowClass(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.PhaseRoles = map[string]string{
+		"implement": "diagnostic",
+	}
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"diagnostic": {
+			AllowedTools: []string{"Read", "Edit"},
+			MaxScope:     "full_autonomy",
+		},
+	}
+
+	role := cfg.PhaseToolRole(policy.Ops, "implement", "prompt")
+	require.Equal(t, "diagnostic", role)
+
+	toolCatalog, err := cfg.BuildPhaseToolCatalog()
+	require.NoError(t, err)
+
+	allowed, err := toolCatalog.ResolveRoleTools(role, []string{"Read", "Edit"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Read", "Edit"}, allowed)
+
+	_, err = toolCatalog.ResolveRoleTools("housekeeping", []string{"Read", "Edit"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `role "housekeeping" is not allowed to use tool "Edit"`)
+}
+
+func TestPhaseToolRoleDefaults(t *testing.T) {
+	cfg := validConfig()
+
+	assert.Equal(t, "delivery", cfg.PhaseToolRole(policy.Delivery, "analyze", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole(policy.HarnessMaintenance, "analyze", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole(policy.Ops, "merge_pr", "prompt"))
+	assert.Equal(t, "diagnostic", cfg.PhaseToolRole("", "analyze", "prompt"))
+	assert.Equal(t, "delivery", cfg.PhaseToolRole("", "implement", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole("", "review", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole("", "pr_draft", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole("", "smoke", "command"))
+}
+
 func TestValidateCostBudgetNegativeMaxTokens(t *testing.T) {
 	cfg := validConfig()
 	cfg.Cost.Budget = &BudgetConfig{MaxTokens: -1}

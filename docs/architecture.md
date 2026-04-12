@@ -207,7 +207,7 @@ phases:
 
 The workflow name must match the YAML filename. Phase names must be unique within a workflow. Prompt files are Go templates rendered with issue data, previous phase outputs, and gate results.
 
-Prompt phases can also override the LLM provider and model at the workflow or phase level, and can set per-phase `allowed_tools` restrictions that the runner forwards to the selected provider CLI. Provider resolution is `phase.llm` -> `workflow.llm` -> `.xylem.yml llm`, with support for both `claude` and `copilot`. `xylem init` also scaffolds `.xylem/HARNESS.md`; the runner reads that file and passes it as a system prompt for prompt phases.
+Prompt phases can also override the LLM provider and model at the workflow or phase level, and can set per-phase `allowed_tools` restrictions. The runner resolves those tool requests through the harness catalog's role permissions first, then forwards the effective list to the selected provider CLI. Provider resolution is `phase.llm` -> `workflow.llm` -> `.xylem.yml llm`, with support for both `claude` and `copilot`. `xylem init` also scaffolds `.xylem/HARNESS.md`; the runner reads that file and passes it as a system prompt for prompt phases.
 
 **Built-in workflows:**
 

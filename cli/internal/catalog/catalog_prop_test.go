@@ -241,6 +241,42 @@ func TestPropAuthorizationHierarchy(t *testing.T) {
 	})
 }
 
+func TestPropResolveRoleToolsPreservesAuthorizedRequests(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		c, err := NewDefaultPhaseCatalog()
+		if err != nil {
+			t.Fatalf("NewDefaultPhaseCatalog(): %v", err)
+		}
+		role := rapid.SampledFrom([]string{RoleDiagnostic, RoleDelivery, RoleHousekeeping}).Draw(t, "role")
+		allowed, err := c.AllowedToolsForRole(role)
+		if err != nil {
+			t.Fatalf("AllowedToolsForRole(%q): %v", role, err)
+		}
+		subset := make([]string, 0, len(allowed))
+		for _, tool := range allowed {
+			if rapid.Bool().Draw(t, "keep-"+tool) {
+				subset = append(subset, tool)
+			}
+		}
+		if len(subset) == 0 {
+			subset = append(subset, allowed[0])
+		}
+
+		resolved, err := c.ResolveRoleTools(role, subset)
+		if err != nil {
+			t.Fatalf("ResolveRoleTools(%q): %v", role, err)
+		}
+		if len(resolved) != len(subset) {
+			t.Fatalf("ResolveRoleTools(%q) len = %d, want %d", role, len(resolved), len(subset))
+		}
+		for i := range subset {
+			if resolved[i] != subset[i] {
+				t.Fatalf("ResolveRoleTools(%q)[%d] = %q, want %q", role, i, resolved[i], subset[i])
+			}
+		}
+	})
+}
+
 // --- Property: unregistered tool operations return error ---
 
 func TestPropUnregisteredToolErrors(t *testing.T) {
