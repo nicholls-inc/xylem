@@ -489,6 +489,57 @@ func TestPREventsScanPROpenedDedupByPR(t *testing.T) {
 	}
 }
 
+func TestPROpenedDedupSurvivesRestart(t *testing.T) {
+	dir := t.TempDir()
+	queuePath := filepath.Join(dir, "queue.jsonl")
+
+	prs := []ghPR{
+		{Number: 11, Title: "PR 11", URL: "https://github.com/owner/repo/pull/11", HeadRefName: "branch-11"},
+	}
+	listCall := []string{"gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50"}
+
+	// --- First "daemon boot" ---
+	q1 := queue.New(queuePath)
+	r1 := newMock()
+	r1.set(prEventsListJSON(prs), listCall...)
+
+	g1 := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {Workflow: "review-pr", PROpened: true},
+		},
+		StateDir:  dir,
+		Queue:     q1,
+		CmdRunner: r1,
+	}
+
+	vessels, err := g1.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	_, err = q1.Enqueue(vessels[0])
+	require.NoError(t, err)
+	require.NoError(t, g1.OnEnqueue(context.Background(), vessels[0]))
+
+	// --- Simulate restart: new queue instance, same backing file ---
+	q2 := queue.New(queuePath)
+	r2 := newMock()
+	r2.set(prEventsListJSON(prs), listCall...)
+
+	g2 := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review": {Workflow: "review-pr", PROpened: true},
+		},
+		StateDir:  dir,
+		Queue:     q2,
+		CmdRunner: r2,
+	}
+
+	vessels2, err := g2.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels2, "queue-backed dedup must survive daemon restart")
+}
+
 func TestPREventsScanPRHeadUpdatedDedupsPerHead(t *testing.T) {
 	dir := t.TempDir()
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))

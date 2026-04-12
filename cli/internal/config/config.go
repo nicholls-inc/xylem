@@ -62,6 +62,10 @@ const runtimeStateDirName = "state"
 // suspenders in place.
 //
 // See issue #194 for the design discussion.
+//
+// Post-PR #366, the policy matrix in cli/internal/policy/ became the
+// authoritative enforcement layer for protected-surface class routing.
+// See issue #366 for the class matrix design and migration notes.
 var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
