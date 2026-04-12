@@ -98,7 +98,7 @@ func formatTelegramAlert(alert Alert) string {
 	var b strings.Builder
 	severity := strings.ToUpper(string(alert.Severity))
 	// Use HTML formatting (most reliable for Telegram).
-	b.WriteString(fmt.Sprintf("<b>%s</b>: %s\n\n", severity, html.EscapeString(alert.Title)))
+	fmt.Fprintf(&b, "<b>%s</b>: %s\n\n", severity, html.EscapeString(alert.Title))
 	b.WriteString(html.EscapeString(alert.Detail))
 	if len(alert.VesselIDs) > 0 {
 		b.WriteString("\n\n<b>Affected:</b> ")
@@ -115,7 +115,7 @@ func formatTelegramAlert(alert Alert) string {
 			b.WriteString("</code>")
 		}
 		if len(alert.VesselIDs) > 10 {
-			b.WriteString(fmt.Sprintf(" (+%d more)", len(alert.VesselIDs)-10))
+			fmt.Fprintf(&b, " (+%d more)", len(alert.VesselIDs)-10)
 		}
 	}
 	msg := b.String()
