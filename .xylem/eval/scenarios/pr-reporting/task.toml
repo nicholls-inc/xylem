@@ -1,0 +1,12 @@
+[task]
+id = "pr-reporting"
+version = "1"
+
+[task.environment]
+timeout_seconds = 600
+
+[task.metadata]
+category = "reporting"
+tags = ["pr", "report", "phase-output"]
+difficulty = "easy"
+canary = "CANARY-XYLEM-EVAL-f1c4"
