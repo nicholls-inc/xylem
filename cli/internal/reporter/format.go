@@ -11,31 +11,31 @@ import (
 func FormatMarkdown(r StatusReport) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("## Xylem Status -- %s\n\n", r.Timestamp.UTC().Format("2006-01-02 15:04 UTC")))
+	fmt.Fprintf(&b, "## Xylem Status -- %s\n\n", r.Timestamp.UTC().Format("2006-01-02 15:04 UTC"))
 
 	// Daemon section.
 	b.WriteString("### Daemon\n")
 	b.WriteString("| | |\n|---|---|\n")
-	b.WriteString(fmt.Sprintf("| PID | %d |\n", r.Daemon.PID))
-	b.WriteString(fmt.Sprintf("| Uptime | %s |\n", formatStatusDuration(r.Daemon.Uptime)))
+	fmt.Fprintf(&b, "| PID | %d |\n", r.Daemon.PID)
+	fmt.Fprintf(&b, "| Uptime | %s |\n", formatStatusDuration(r.Daemon.Uptime))
 	if r.Daemon.Binary != "" {
-		b.WriteString(fmt.Sprintf("| Binary | `%s` |\n", r.Daemon.Binary))
+		fmt.Fprintf(&b, "| Binary | `%s` |\n", r.Daemon.Binary)
 	}
 	if !r.Daemon.LastUpgradeAt.IsZero() {
-		b.WriteString(fmt.Sprintf("| Last upgrade | %s |\n", r.Daemon.LastUpgradeAt.UTC().Format("15:04 UTC")))
+		fmt.Fprintf(&b, "| Last upgrade | %s |\n", r.Daemon.LastUpgradeAt.UTC().Format("15:04 UTC"))
 	}
 	b.WriteString("\n")
 
 	// Vessel metrics.
 	b.WriteString("### Vessels\n")
 	b.WriteString("| State | Count |\n|-------|-------|\n")
-	b.WriteString(fmt.Sprintf("| Pending | %d |\n", r.Vessels.Pending))
-	b.WriteString(fmt.Sprintf("| Running | %d |\n", r.Vessels.Running))
-	b.WriteString(fmt.Sprintf("| Completed | %d |\n", r.Vessels.Completed))
-	b.WriteString(fmt.Sprintf("| Failed | %d |\n", r.Vessels.Failed))
-	b.WriteString(fmt.Sprintf("| Timed Out | %d |\n", r.Vessels.TimedOut))
-	b.WriteString(fmt.Sprintf("| Waiting | %d |\n", r.Vessels.Waiting))
-	b.WriteString(fmt.Sprintf("| Cancelled | %d |\n", r.Vessels.Cancelled))
+	fmt.Fprintf(&b, "| Pending | %d |\n", r.Vessels.Pending)
+	fmt.Fprintf(&b, "| Running | %d |\n", r.Vessels.Running)
+	fmt.Fprintf(&b, "| Completed | %d |\n", r.Vessels.Completed)
+	fmt.Fprintf(&b, "| Failed | %d |\n", r.Vessels.Failed)
+	fmt.Fprintf(&b, "| Timed Out | %d |\n", r.Vessels.TimedOut)
+	fmt.Fprintf(&b, "| Waiting | %d |\n", r.Vessels.Waiting)
+	fmt.Fprintf(&b, "| Cancelled | %d |\n", r.Vessels.Cancelled)
 	b.WriteString("\n")
 
 	// Active vessels.
@@ -48,8 +48,8 @@ func FormatMarkdown(r StatusReport) string {
 			if phase == "" {
 				phase = "-"
 			}
-			b.WriteString(fmt.Sprintf("| %s | %s | %s | %s |\n",
-				av.ID, phase, formatStatusDuration(av.Duration), av.Workflow))
+			fmt.Fprintf(&b, "| %s | %s | %s | %s |\n",
+				av.ID, phase, formatStatusDuration(av.Duration), av.Workflow)
 		}
 		b.WriteString("\n")
 	}
@@ -59,9 +59,9 @@ func FormatMarkdown(r StatusReport) string {
 	if total > 0 {
 		b.WriteString("### Fleet Health\n")
 		healthPct := float64(r.Fleet.Healthy) / float64(total) * 100
-		b.WriteString(fmt.Sprintf("- %.0f%% healthy (%d/%d vessels)\n", healthPct, r.Fleet.Healthy, total))
+		fmt.Fprintf(&b, "- %.0f%% healthy (%d/%d vessels)\n", healthPct, r.Fleet.Healthy, total)
 		if len(r.Fleet.Patterns) > 0 {
-			b.WriteString(fmt.Sprintf("- Patterns: %s\n", formatFleetPatterns(r.Fleet.Patterns)))
+			fmt.Fprintf(&b, "- Patterns: %s\n", formatFleetPatterns(r.Fleet.Patterns))
 		}
 		b.WriteString("\n")
 	}
@@ -83,10 +83,10 @@ func FormatMarkdown(r StatusReport) string {
 			if phase == "" {
 				phase = "-"
 			}
-			b.WriteString(fmt.Sprintf("| %s | %s | %s |\n", f.ID, phase, errMsg))
+			fmt.Fprintf(&b, "| %s | %s | %s |\n", f.ID, phase, errMsg)
 		}
 		if len(r.RecentFailures) > 10 {
-			b.WriteString(fmt.Sprintf("\n*+%d more failures not shown*\n", len(r.RecentFailures)-10))
+			fmt.Fprintf(&b, "\n*+%d more failures not shown*\n", len(r.RecentFailures)-10)
 		}
 		b.WriteString("\n")
 	}
@@ -95,7 +95,7 @@ func FormatMarkdown(r StatusReport) string {
 	if len(r.Warnings) > 0 {
 		b.WriteString("### Warnings\n")
 		for _, w := range r.Warnings {
-			b.WriteString(fmt.Sprintf("- %s\n", w))
+			fmt.Fprintf(&b, "- %s\n", w)
 		}
 	}
 
@@ -106,18 +106,18 @@ func FormatMarkdown(r StatusReport) string {
 func FormatPlainText(r StatusReport) string {
 	var b strings.Builder
 
-	b.WriteString(fmt.Sprintf("Xylem Status -- %s\n\n", r.Timestamp.UTC().Format("2006-01-02 15:04 UTC")))
+	fmt.Fprintf(&b, "Xylem Status -- %s\n\n", r.Timestamp.UTC().Format("2006-01-02 15:04 UTC"))
 
-	b.WriteString(fmt.Sprintf("Daemon: PID %d | Uptime %s | Binary %s\n",
-		r.Daemon.PID, formatStatusDuration(r.Daemon.Uptime), r.Daemon.Binary))
+	fmt.Fprintf(&b, "Daemon: PID %d | Uptime %s | Binary %s\n",
+		r.Daemon.PID, formatStatusDuration(r.Daemon.Uptime), r.Daemon.Binary)
 	if !r.Daemon.LastUpgradeAt.IsZero() {
-		b.WriteString(fmt.Sprintf("  Last upgrade: %s\n", r.Daemon.LastUpgradeAt.UTC().Format("15:04 UTC")))
+		fmt.Fprintf(&b, "  Last upgrade: %s\n", r.Daemon.LastUpgradeAt.UTC().Format("15:04 UTC"))
 	}
 	b.WriteString("\n")
 
-	b.WriteString(fmt.Sprintf("Vessels: %d pending, %d running, %d completed, %d failed, %d timed_out, %d waiting, %d cancelled\n",
+	fmt.Fprintf(&b, "Vessels: %d pending, %d running, %d completed, %d failed, %d timed_out, %d waiting, %d cancelled\n",
 		r.Vessels.Pending, r.Vessels.Running, r.Vessels.Completed,
-		r.Vessels.Failed, r.Vessels.TimedOut, r.Vessels.Waiting, r.Vessels.Cancelled))
+		r.Vessels.Failed, r.Vessels.TimedOut, r.Vessels.Waiting, r.Vessels.Cancelled)
 	b.WriteString("\n")
 
 	if len(r.ActiveVessels) > 0 {
@@ -127,18 +127,18 @@ func FormatPlainText(r StatusReport) string {
 			if phase == "" {
 				phase = "-"
 			}
-			b.WriteString(fmt.Sprintf("  %-20s %s (%s) [%s]\n",
-				av.ID, phase, formatStatusDuration(av.Duration), av.Workflow))
+			fmt.Fprintf(&b, "  %-20s %s (%s) [%s]\n",
+				av.ID, phase, formatStatusDuration(av.Duration), av.Workflow)
 		}
 		b.WriteString("\n")
 	}
 
 	total := r.Fleet.Healthy + r.Fleet.Degraded + r.Fleet.Unhealthy
 	if total > 0 {
-		b.WriteString(fmt.Sprintf("Fleet: %d healthy, %d degraded, %d unhealthy\n",
-			r.Fleet.Healthy, r.Fleet.Degraded, r.Fleet.Unhealthy))
+		fmt.Fprintf(&b, "Fleet: %d healthy, %d degraded, %d unhealthy\n",
+			r.Fleet.Healthy, r.Fleet.Degraded, r.Fleet.Unhealthy)
 		if len(r.Fleet.Patterns) > 0 {
-			b.WriteString(fmt.Sprintf("  Patterns: %s\n", formatFleetPatterns(r.Fleet.Patterns)))
+			fmt.Fprintf(&b, "  Patterns: %s\n", formatFleetPatterns(r.Fleet.Patterns))
 		}
 		b.WriteString("\n")
 	}
@@ -146,7 +146,7 @@ func FormatPlainText(r StatusReport) string {
 	if len(r.Warnings) > 0 {
 		b.WriteString("Warnings:\n")
 		for _, w := range r.Warnings {
-			b.WriteString(fmt.Sprintf("  - %s\n", w))
+			fmt.Fprintf(&b, "  - %s\n", w)
 		}
 	}
 
