@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/bootstrap"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -21,7 +22,7 @@ func writeConfigValidateFile(t *testing.T, dir, name, contents string) string {
 	return path
 }
 
-func writeConfigValidateAdaptPlanFile(t *testing.T, dir string, plan adaptRepoPlan) string {
+func writeConfigValidateAdaptPlanFile(t *testing.T, dir string, plan bootstrap.AdaptPlan) string {
 	t.Helper()
 
 	data, err := json.Marshal(plan)
@@ -96,16 +97,16 @@ claude:
   command: "claude"
   default_model: "claude-sonnet-4-6"
 `)
-	planPath := writeConfigValidateAdaptPlanFile(t, dir, adaptRepoPlan{
+	planPath := writeConfigValidateAdaptPlanFile(t, dir, bootstrap.AdaptPlan{
 		SchemaVersion: 1,
-		Detected:      adaptRepoPlanDetected{},
-		Planned: []adaptRepoPlannedAsset{{
+		Detected:      bootstrap.AdaptPlanDetected{},
+		PlannedChanges: []bootstrap.AdaptPlanChange{{
 			Path:        ".xylem.yml",
 			Op:          "patch",
 			Rationale:   "seed validation",
 			DiffSummary: "validation.test: cd cli && go test ./...",
 		}},
-		Skipped: []adaptRepoSkippedAsset{},
+		Skipped: []bootstrap.AdaptPlanSkipped{},
 	})
 
 	require.NoError(t, cmdConfigValidate(configPath, planPath, io.Discard))

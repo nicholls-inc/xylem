@@ -1,48 +1,19 @@
 package main
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/nicholls-inc/xylem/cli/internal/bootstrap"
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 )
-
-type adaptRepoPlan struct {
-	SchemaVersion int                     `json:"schema_version"`
-	Detected      adaptRepoPlanDetected   `json:"detected"`
-	Planned       []adaptRepoPlannedAsset `json:"planned_changes"`
-	Skipped       []adaptRepoSkippedAsset `json:"skipped"`
-}
-
-type adaptRepoPlanDetected struct {
-	Languages   []string `json:"languages"`
-	BuildTools  []string `json:"build_tools"`
-	TestRunners []string `json:"test_runners"`
-	Linters     []string `json:"linters"`
-	HasFrontend bool     `json:"has_frontend"`
-	HasDatabase bool     `json:"has_database"`
-	EntryPoints []string `json:"entry_points"`
-}
-
-type adaptRepoPlannedAsset struct {
-	Path        string `json:"path"`
-	Op          string `json:"op"`
-	Rationale   string `json:"rationale"`
-	DiffSummary string `json:"diff_summary,omitempty"`
-}
-
-type adaptRepoSkippedAsset struct {
-	Path   string `json:"path"`
-	Reason string `json:"reason"`
-}
 
 type profileLock struct {
 	ProfileVersion int                 `yaml:"profile_version"`
@@ -84,9 +55,9 @@ func cmdConfigValidate(configPath, proposedPath string, stdout io.Writer) error 
 		return fmt.Errorf("load config for validation: %w", err)
 	}
 
-	var plan *adaptRepoPlan
+	var plan *bootstrap.AdaptPlan
 	if strings.TrimSpace(proposedPath) != "" {
-		plan, err = loadAdaptRepoPlan(proposedPath)
+		plan, err = bootstrap.ReadAdaptPlan(proposedPath)
 		if err != nil {
 			return err
 		}
@@ -115,72 +86,11 @@ func cmdConfigValidate(configPath, proposedPath string, stdout io.Writer) error 
 	return nil
 }
 
-func loadAdaptRepoPlan(path string) (*adaptRepoPlan, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read proposed plan %q: %w", path, err)
-	}
-
-	var plan adaptRepoPlan
-	dec := json.NewDecoder(strings.NewReader(string(data)))
-	dec.DisallowUnknownFields()
-	if err := dec.Decode(&plan); err != nil {
-		return nil, fmt.Errorf("parse proposed plan %q: %w", path, err)
-	}
-	if err := dec.Decode(new(struct{})); err != io.EOF {
-		return nil, fmt.Errorf("parse proposed plan %q: trailing data", path)
-	}
-	if err := plan.Validate(); err != nil {
-		return nil, fmt.Errorf("validate proposed plan %q: %w", path, err)
-	}
-	return &plan, nil
-}
-
-func (p *adaptRepoPlan) Validate() error {
-	if p.SchemaVersion != 1 {
-		return fmt.Errorf("schema_version must equal 1")
-	}
-	if p.Skipped == nil {
-		return fmt.Errorf("skipped must be present")
-	}
-	for i, change := range p.Planned {
-		if strings.TrimSpace(change.Path) == "" {
-			return fmt.Errorf("planned_changes[%d].path must be non-empty", i)
-		}
-		if !isAllowedAdaptPlanPath(change.Path) {
-			return fmt.Errorf("planned_changes[%d].path %q is outside the allowed harness surfaces", i, change.Path)
-		}
-		switch change.Op {
-		case "patch", "replace", "create", "delete":
-		default:
-			return fmt.Errorf("planned_changes[%d].op %q is invalid", i, change.Op)
-		}
-		if change.Op == "delete" && !strings.HasPrefix(change.Path, ".xylem/workflows/") {
-			return fmt.Errorf("planned_changes[%d].op delete is only allowed under .xylem/workflows/", i)
-		}
-		if strings.TrimSpace(change.Rationale) == "" {
-			return fmt.Errorf("planned_changes[%d].rationale must be non-empty", i)
-		}
-	}
-	for i, skipped := range p.Skipped {
-		if strings.TrimSpace(skipped.Path) == "" {
-			return fmt.Errorf("skipped[%d].path must be non-empty", i)
-		}
-		if !isAllowedAdaptPlanPath(skipped.Path) {
-			return fmt.Errorf("skipped[%d].path %q is outside the allowed harness surfaces", i, skipped.Path)
-		}
-		if strings.TrimSpace(skipped.Reason) == "" {
-			return fmt.Errorf("skipped[%d].reason must be non-empty", i)
-		}
-	}
-	return nil
-}
-
-func applyAdaptRepoPlan(cfg *config.Config, plan *adaptRepoPlan) error {
+func applyAdaptRepoPlan(cfg *config.Config, plan *bootstrap.AdaptPlan) error {
 	if cfg == nil || plan == nil {
 		return nil
 	}
-	for _, change := range plan.Planned {
+	for _, change := range plan.PlannedChanges {
 		if change.Path != ".xylem.yml" {
 			continue
 		}
@@ -267,7 +177,7 @@ func validateConfiguredProfiles(cfg *config.Config) error {
 	return nil
 }
 
-func validateProfileLock(configPath string, cfg *config.Config, plan *adaptRepoPlan) error {
+func validateProfileLock(configPath string, cfg *config.Config, plan *bootstrap.AdaptPlan) error {
 	if cfg == nil || len(cfg.Profiles) == 0 || adaptPlanTouchesProfileLock(plan) {
 		return nil
 	}
@@ -310,11 +220,11 @@ func resolvedStateAssetPath(configPath, stateDir string, elems ...string) (strin
 	return filepath.Join(parts...), nil
 }
 
-func adaptPlanTouchesProfileLock(plan *adaptRepoPlan) bool {
+func adaptPlanTouchesProfileLock(plan *bootstrap.AdaptPlan) bool {
 	if plan == nil {
 		return false
 	}
-	for _, change := range plan.Planned {
+	for _, change := range plan.PlannedChanges {
 		if change.Path == ".xylem/profile.lock" {
 			return true
 		}
