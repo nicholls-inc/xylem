@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/memory"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
@@ -141,6 +144,13 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 	r.Intermediary.SetMode(cfg.HarnessPolicyMode())
 	r.AuditLog = auditLog
 	r.Tracer = tracer
+
+	episodicPath := config.RuntimePath(cfg.StateDir, "state", "memory", "episodic.jsonl")
+	if err := os.MkdirAll(filepath.Dir(episodicPath), 0o755); err != nil {
+		slog.Warn("create episodic memory dir", "error", err)
+	} else {
+		r.EpisodicStore = memory.NewEpisodicStore(episodicPath)
+	}
 }
 
 var newConfiguredTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {
