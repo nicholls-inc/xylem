@@ -107,7 +107,7 @@ func newDaemonDTUEnv(t *testing.T, fixtureName string) (string, *dtu.Store, *que
 			dtu.EnvUniverseID + "=" + manifest.Metadata.Name,
 		},
 	}
-	return repoDir, store, queue.New(filepath.Join(stateDir, "queue.jsonl")), cmdRunner
+	return repoDir, store, queue.New(config.RuntimePath(stateDir, "queue.jsonl")), cmdRunner
 }
 
 func loadDaemonDTUState(t *testing.T, store *dtu.Store) *dtu.State {
@@ -196,6 +196,108 @@ type daemonBacklogRunner struct {
 
 func (r daemonBacklogRunner) Run(_ context.Context, _ string, _ ...string) ([]byte, error) {
 	return r.output, nil
+}
+
+func TestSmoke_S1_LegacyFlatLayoutMigratesAndDrainKeepsWorking(t *testing.T) {
+	repoDir := t.TempDir()
+	stateDir := filepath.Join(repoDir, ".xylem")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+	cfg := makeDrainConfig(stateDir)
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
+	})
+
+	legacyQueue := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	enqueuePromptVessel(t, legacyQueue, "issue-388", filepath.Join(repoDir, "legacy-worktree"))
+
+	legacyAuditPath := filepath.Join(stateDir, config.DefaultAuditLogPath)
+	legacyAudit := intermediary.NewAuditLog(legacyAuditPath)
+	require.NoError(t, legacyAudit.Append(intermediary.AuditEntry{
+		Intent: intermediary.Intent{
+			Action:   "phase_execute",
+			Resource: "prompt",
+			AgentID:  "issue-388",
+		},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Now().UTC(),
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "daemon.pid"), []byte(fmt.Sprintf("%d", os.Getpid())), 0o644))
+
+	logBuf := withBufferedDefaultLogger(t)
+	require.NoError(t, config.MigrateFlatStateToRuntime(stateDir))
+
+	runtimeQueuePath := config.RuntimePath(stateDir, "queue.jsonl")
+	q := queue.New(runtimeQueuePath)
+	result, err := runDrain(context.Background(), cfg, q, worktree.New(repoDir, cmdRunner), 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Completed)
+	assert.FileExists(t, runtimeQueuePath)
+	assert.FileExists(t, config.RuntimePath(stateDir, config.DefaultAuditLogPath))
+	assert.FileExists(t, filepath.Join(stateDir, "queue.jsonl.migrated"))
+	assert.FileExists(t, filepath.Join(stateDir, config.DefaultAuditLogPath+".migrated"))
+	assert.FileExists(t, filepath.Join(stateDir, "daemon.pid.migrated"))
+	assert.Contains(t, logBuf.String(), "migrated legacy runtime file")
+	assert.Contains(t, logBuf.String(), "prepared daemon pid migration")
+
+	vessel, err := q.FindByID("issue-388")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+}
+
+func TestSmoke_S2_NewLayoutStartupDoesNotRenameAndDrainWorks(t *testing.T) {
+	repoDir := t.TempDir()
+	stateDir := filepath.Join(repoDir, ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+
+	cfg := makeDrainConfig(stateDir)
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
+	})
+
+	runtimeQueuePath := config.RuntimePath(stateDir, "queue.jsonl")
+	q := queue.New(runtimeQueuePath)
+	enqueuePromptVessel(t, q, "issue-389", filepath.Join(repoDir, "runtime-worktree"))
+
+	logBuf := withBufferedDefaultLogger(t)
+	require.NoError(t, config.MigrateFlatStateToRuntime(stateDir))
+
+	result, err := runDrain(context.Background(), cfg, q, worktree.New(repoDir, cmdRunner), 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Completed)
+	assert.FileExists(t, runtimeQueuePath)
+	assert.NoFileExists(t, filepath.Join(stateDir, "queue.jsonl"))
+	assert.NoFileExists(t, filepath.Join(stateDir, config.DefaultAuditLogPath+".migrated"))
+	assert.NoFileExists(t, filepath.Join(stateDir, "queue.jsonl.migrated"))
+	assert.NoFileExists(t, filepath.Join(stateDir, "daemon.pid.migrated"))
+	assert.NotContains(t, logBuf.String(), "migrated legacy runtime file")
+	assert.NotContains(t, logBuf.String(), "prepared daemon pid migration")
+
+	vessel, err := q.FindByID("issue-389")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+}
+
+func TestSmoke_S3_SplitBrainLayoutErrorsLoudly(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+
+	legacyQueue := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	enqueuePromptVessel(t, legacyQueue, "issue-390", filepath.Join(stateDir, "legacy-worktree"))
+
+	runtimeQueue := queue.New(filepath.Join(stateDir, "state", "queue.jsonl"))
+	enqueuePromptVessel(t, runtimeQueue, "issue-391", filepath.Join(stateDir, "runtime-worktree"))
+
+	logBuf := withBufferedDefaultLogger(t)
+	err := config.MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime queue.jsonl exist")
+	assert.NoFileExists(t, filepath.Join(stateDir, "queue.jsonl.migrated"))
+	assert.NotContains(t, logBuf.String(), "migrated legacy runtime file")
 }
 
 func TestSmoke_S7_DaemonStartupContinuesWhenAdaptRepoSearchFails(t *testing.T) {
@@ -445,7 +547,7 @@ func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", cfg.StateDir, err)
 	}
-	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
+	q := queue.New(config.RuntimePath(cfg.StateDir, "queue.jsonl"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -1066,8 +1168,13 @@ func TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig(t *testing.T
 		Timestamp: time.Now().UTC(),
 	}
 	require.NoError(t, r.AuditLog.Append(entry))
-	_, err := os.Stat(filepath.Join(dir, "audit.jsonl"))
+
+	auditLogPath := config.RuntimePath(cfg.StateDir, cfg.EffectiveAuditLogPath())
+	entries, err := intermediary.NewAuditLog(auditLogPath).Entries()
 	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, entry.Intent, entries[0].Intent)
+	assert.Equal(t, entry.Decision, entries[0].Decision)
 }
 
 func TestReconcileStaleVessels(t *testing.T) {

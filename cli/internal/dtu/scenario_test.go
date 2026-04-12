@@ -330,7 +330,7 @@ func newDrainRunner(t *testing.T, cfg *config.Config, q *queue.Queue, cmdRunner 
 	drainer.Sources = map[string]source.Source{
 		src.Name(): src,
 	}
-	drainer.AuditLog = intermediary.NewAuditLog(filepath.Join(cfg.StateDir, cfg.EffectiveAuditLogPath()))
+	drainer.AuditLog = intermediary.NewAuditLog(config.RuntimePath(cfg.StateDir, cfg.EffectiveAuditLogPath()))
 	drainer.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), drainer.AuditLog, nil)
 
 	if cfg.ObservabilityEnabled() && cfg.Observability.Endpoint != "" {

@@ -59,6 +59,10 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	if err := loadDaemonStartupEnv(rootDir); err != nil {
 		return err
 	}
+	if err := config.MigrateFlatStateToRuntime(cfg.StateDir); err != nil {
+		return err
+	}
+	q = queue.New(config.RuntimePath(cfg.StateDir, "queue.jsonl"))
 
 	scanInterval, drainInterval := parseDaemonIntervals(cfg.Daemon)
 

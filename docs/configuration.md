@@ -9,12 +9,14 @@ xylem looks for `.xylem.yml` in the root of your repository. Run `xylem init` to
 ```
 your-repo/
   .xylem.yml          <-- configuration file
-  .xylem/              <-- state directory (queue, workflows, prompts, phase outputs)
-    queue.jsonl
+  .xylem/              <-- xylem control plane + runtime root
     HARNESS.md
     workflows/
     prompts/
-    phases/
+    state/
+      queue.jsonl
+      audit.jsonl
+      phases/
 ```
 
 ## Minimal config
@@ -78,7 +80,7 @@ timeout: "30m"          # per-session timeout (Go duration string)
 # ---------------------------------------------------------------------------
 # State and branch management
 # ---------------------------------------------------------------------------
-state_dir: ".xylem"     # directory for queue, workflows, prompts, phase outputs
+state_dir: ".xylem"     # control-plane directory; runtime files live under state/
 default_branch: "main"  # branch to create worktrees from (auto-detected if omitted)
 cleanup_after: "168h"   # remove worktrees older than this (default: 7 days)
 
@@ -123,7 +125,7 @@ daemon:
 | `concurrency` | integer | `2` | No | Maximum number of simultaneous sessions. Must be greater than 0. |
 | `max_turns` | integer | `50` | No | Maximum turns per prompt phase or prompt-only run. Must be greater than 0. |
 | `timeout` | string | `"30m"` | No | Per-session timeout. Must be a valid Go duration string and at least `30s`. |
-| `state_dir` | string | `".xylem"` | No | Directory for queue file, workflows, prompts, and phase outputs. |
+| `state_dir` | string | `".xylem"` | No | Control-plane directory. In the standard repo layout, runtime files are resolved under `<state_dir>/state/`. |
 | `default_branch` | string | auto-detected | No | Git branch to create worktrees from. If omitted, xylem detects it from the repository. |
 | `cleanup_after` | string | `"168h"` | No | Age threshold for worktree cleanup. Must be a valid Go duration string. |
 | `llm` | string | `"claude"` | No | Default LLM provider. Valid values: `claude`, `copilot`. |
@@ -249,7 +251,7 @@ sources:
         ref: sota-gap-analysis
 ```
 
-The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
+The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/state/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
 
 `harness-gap-analysis` is a sibling built-in scheduled workflow for xylem self-hosting. It reads existing daemon telemetry (for example `<state_dir>/daemon.log`), current GitHub state, and git drift, then writes `harness-gap-analysis.{json,md}` plus a durable issue-dedup state file under `<state_dir>/<harness.review.output_dir>/`.
 
@@ -488,7 +490,7 @@ When `harness.policy.rules` is empty, xylem installs a default policy that denie
 |-------|------|---------|----------|-------------|
 | `harness.protected_surfaces.paths` | list of strings | `[".xylem/HARNESS.md", ".xylem.yml", ".xylem/workflows/*.yaml", ".xylem/prompts/*/*.md"]` | No | Glob patterns for files agents cannot modify. Set to `["none"]` to disable all surface protections. |
 | `harness.policy.rules` | list of objects | `[]` | No | Policy rules for action authorization. Each rule has `action`, `resource`, and `effect`. |
-| `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the state directory. |
+| `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the runtime state root (`<state_dir>/state/` in the standard layout). |
 | `harness.review.enabled` | bool | `false` | No | Enables recurring harness review generation after drain runs. Manual `xylem review` works regardless. |
 | `harness.review.cadence` | string | `"manual"` | No | Automatic review cadence. Valid values: `manual`, `every_drain`, `every_n_runs`. |
 | `harness.review.every_n_runs` | integer | `10` | No | When cadence is `every_n_runs`, regenerate after this many new reviewed runs. |
@@ -535,7 +537,7 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs. Built-in `harness-gap-analysis` runs do the same for `harness-gap-analysis.{json,md}` while surfacing recurring daemon-operation gaps such as drift, idle backlog episodes, stale conflict labels, and parked failed backlog. When failed or timed-out runs also have `<state_dir>/phases/<vessel-id>/failure-review.json`, the review loader reconstructs those recovery decisions alongside the existing evidence/cost/eval artifacts.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs. Built-in `harness-gap-analysis` runs do the same for `harness-gap-analysis.{json,md}` while surfacing recurring daemon-operation gaps such as drift, idle backlog episodes, stale conflict labels, and parked failed backlog. When failed or timed-out runs also have `<state_dir>/state/phases/<vessel-id>/failure-review.json`, the review loader reconstructs those recovery decisions alongside the existing evidence/cost/eval artifacts.
 
 ### Observability settings
 
