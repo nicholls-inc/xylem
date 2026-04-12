@@ -24,7 +24,6 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
-	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 	"github.com/spf13/cobra"
 )
@@ -455,28 +454,7 @@ func validateDaemonReloadCandidate(rootDir, configPath string) (*config.Config, 
 		return nil, fmt.Errorf("load config: %w", err)
 	}
 	workflowsDir := filepath.Join(rootDir, ".xylem", "workflows")
-	if _, err := os.Stat(workflowsDir); err != nil {
-		if errorsIsNotExist(err) {
-			return cfg, nil
-		}
-		return nil, fmt.Errorf("stat workflows dir: %w", err)
-	}
-	if err := filepath.WalkDir(workflowsDir, func(path string, d fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if d.IsDir() {
-			return nil
-		}
-		switch strings.ToLower(filepath.Ext(path)) {
-		case ".yaml", ".yml":
-			_, _, err := workflow.LoadWithDigest(path)
-			if err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
+	if _, err := validateWorkflowDir(workflowsDir, nil); err != nil {
 		return nil, fmt.Errorf("validate workflows: %w", err)
 	}
 	return cfg, nil
