@@ -99,12 +99,13 @@ type Config struct {
 }
 
 type ProviderConfig struct {
-	Kind         string            `yaml:"kind"`
-	Command      string            `yaml:"command"`
-	Flags        string            `yaml:"flags,omitempty"`
-	Tiers        map[string]string `yaml:"tiers,omitempty"`
-	Env          map[string]string `yaml:"env,omitempty"`
-	AllowedTools []string          `yaml:"allowed_tools,omitempty"`
+	Kind         string                       `yaml:"kind"`
+	Command      string                       `yaml:"command"`
+	Flags        string                       `yaml:"flags,omitempty"`
+	Tiers        map[string]string            `yaml:"tiers,omitempty"`
+	Env          map[string]string            `yaml:"env,omitempty"`
+	AllowedTools []string                     `yaml:"allowed_tools,omitempty"`
+	Pricing      map[string]cost.ModelPricing `yaml:"pricing,omitempty"`
 }
 
 type LLMRoutingConfig struct {
