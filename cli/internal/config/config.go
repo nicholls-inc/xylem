@@ -94,6 +94,7 @@ type Config struct {
 	Observability       ObservabilityConfig       `yaml:"observability,omitempty"`
 	Cost                CostConfig                `yaml:"cost,omitempty"`
 	Telemetry           TelemetryConfig           `yaml:"telemetry,omitempty"`
+	Notifications       NotificationsConfig       `yaml:"notifications,omitempty"`
 	configPath          string
 }
 
@@ -304,6 +305,26 @@ type BudgetConfig struct {
 	MaxTokens  int     `yaml:"max_tokens,omitempty"`
 }
 
+type NotificationsConfig struct {
+	GitHubDiscussion DiscussionNotifyConfig `yaml:"github_discussion,omitempty"`
+	Telegram         TelegramNotifyConfig   `yaml:"telegram,omitempty"`
+}
+
+type DiscussionNotifyConfig struct {
+	Enabled  bool   `yaml:"enabled,omitempty"`
+	Repo     string `yaml:"repo,omitempty"`
+	Category string `yaml:"category,omitempty"`
+	Interval string `yaml:"interval,omitempty"`
+	Title    string `yaml:"title,omitempty"`
+}
+
+type TelegramNotifyConfig struct {
+	Enabled   bool     `yaml:"enabled,omitempty"`
+	TokenEnv  string   `yaml:"token_env,omitempty"`
+	ChatIDEnv string   `yaml:"chat_id_env,omitempty"`
+	Levels    []string `yaml:"levels,omitempty"`
+}
+
 type parsedConcurrency struct {
 	Global   int
 	PerClass map[string]int
@@ -372,6 +393,18 @@ func load(path string, validate bool) (*Config, error) {
 		},
 		Cost: CostConfig{
 			OnExceeded: DefaultCostOnExceeded,
+		},
+		Notifications: NotificationsConfig{
+			GitHubDiscussion: DiscussionNotifyConfig{
+				Category: "Reports",
+				Interval: "1h",
+				Title:    "Xylem Daemon Status Log",
+			},
+			Telegram: TelegramNotifyConfig{
+				TokenEnv:  "XYLEM_TELEGRAM_TOKEN",
+				ChatIDEnv: "XYLEM_TELEGRAM_CHAT_ID",
+				Levels:    []string{"critical", "warning"},
+			},
 		},
 	}
 
