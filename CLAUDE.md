@@ -100,6 +100,20 @@ docker compose -f dev/docker-compose.yml down
   - `GET /api/traces?service=xylem&limit=10` — recent traces
   - `GET /api/traces/{traceID}` — full trace detail
 
+## Multi-repo operation
+
+Multiple xylem daemons can coexist across different repositories with no code changes. Each daemon is fully isolated.
+
+Key facts for agents operating in this context:
+
+- **CWD-scoped**: every daemon is bound to the directory it was started from. All state paths (`StateDir`, defaulting to `.xylem`) are relative to that repo's root. Never read or write another repo's `.xylem/` directory.
+- **No shared state**: separate flock on `state/daemon.pid` (which also stores the PID), separate queue (`state/queue.jsonl`), and separate phase outputs. There is no cross-repo IPC or global semaphore.
+- **Per-repo pause lever**: `state/paused` is the pause marker for a single daemon. Writing or removing it affects only the daemon whose state directory contains it.
+- **Concurrency and cost are per-daemon**: `concurrency` caps only the sessions spawned by one daemon; `cost.daily_budget_usd` tracks only the spend that daemon has incurred. Multiple running daemons multiply both without coordination.
+- **PID signaling caveat**: `xylem daemon stop` sends SIGTERM to the PID stored in `state/daemon.pid` without verifying the target is actually a xylem daemon. Do not signal PIDs from a different repo's PID file.
+
+See [docs/multi-repo.md](docs/multi-repo.md) for the full user-facing guide.
+
 ## Testing patterns
 
 - Tests use interfaces and stubs extensively (e.g., `CommandRunner`, `WorktreeManager`) — no real subprocesses or git operations in tests
