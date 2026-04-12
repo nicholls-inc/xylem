@@ -42,6 +42,8 @@ func newRootCmd() *cobra.Command {
 			// by a command phase. harden inventory/score/track are the same.
 			skipTooling := cmd.Name() == "visualize" ||
 				strings.HasPrefix(commandPath, "xylem visualize") ||
+				commandPath == "xylem workflow validate" ||
+				strings.HasPrefix(commandPath, "xylem workflow ") ||
 				cmd.Name() == "review" ||
 				cmd.Name() == "recovery" ||
 				strings.HasPrefix(commandPath, "xylem recovery") ||
@@ -95,6 +97,7 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(),
 		newBootstrapCmd(),
+		newWorkflowCmd(),
 		newContinuousImprovementCmd(),
 		newContinuousSimplicityCmd(),
 		newReleaseCadenceCmd(),

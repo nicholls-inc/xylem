@@ -73,6 +73,33 @@ xylem init --config my-config.yml
 
 ---
 
+## xylem workflow validate
+
+Validate the checked-in workflow YAML under `<state_dir>/workflows`.
+
+### Usage
+
+```bash
+xylem workflow validate [--proposed /path/to/adapt-plan.json]
+```
+
+### Flags
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--proposed` | `string` | `""` | Load an `adapt-plan.json` and validate the workflow set after applying any delete-only workflow removals in memory. |
+
+### Behavior
+
+1. Recursively loads every `.yaml` / `.yml` file under `<state_dir>/workflows`.
+2. Validates each workflow through the same `workflow.LoadWithDigest` path used by daemon reload validation.
+3. Prints a summary line with the number of validated workflows.
+4. In `--proposed` mode, rejects workflow `create`, `patch`, and `replace` changes because the current `adapt-plan.json` schema does not include the concrete workflow contents needed to validate those edits in memory.
+
+This command is local-only: it parses config and workflow files but does not require `git` or `gh` on `PATH`.
+
+---
+
 ## xylem dtu
 
 Manage Digital Twin Universe manifests, materialized state, and runtime wiring for offline scenario execution.
