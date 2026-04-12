@@ -18,7 +18,7 @@ repos:
 
       - id: golangci-lint
         name: golangci-lint
-        entry: bash -c 'cd cli && golangci-lint run --path-mode=abs'
+        entry: bash -c 'cd cli && GOCACHE=${TMPDIR:-/tmp}/golangci-lint-cache golangci-lint run ./...'
         language: system
         pass_filenames: false
         files: ^(cli/.*\.go|cli/go\.(mod|sum)|\.golangci\.yml)$

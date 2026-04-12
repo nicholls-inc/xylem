@@ -4509,6 +4509,7 @@ func classifyProviderError(err error) providerErrorDisposition {
 		"currently overloaded",
 		"executable file not found",
 		"command not found",
+		"no quota", // copilot: "402 You have no quota (Request ID: ...)"
 	}
 	for _, pattern := range fallbackPatterns {
 		if strings.Contains(msg, pattern) {

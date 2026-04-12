@@ -60,6 +60,8 @@ func (f *fallbackCmdRunner) RunPhaseWithEnv(_ context.Context, _ string, extraEn
 		return nil, errors.New("exit status 1")
 	case "copilot-auth-fail":
 		return nil, errors.New("copilot: authentication required: github token invalid")
+	case "copilot-quota-fail":
+		return nil, errors.New("402 You have no quota")
 	default:
 		return []byte("implemented"), nil
 	}
@@ -329,6 +331,102 @@ func TestRunPhaseWithProviderFallbackFallsBackAfterAuthFailure(t *testing.T) {
 	attrs := spanAttrMap(endedSpanByName(t, rec, "phase:implement"))
 	assert.Equal(t, "secondary", attrs["xylem.phase.provider"])
 	assert.Equal(t, "gpt-med", attrs["xylem.phase.model"])
+	assert.Equal(t, "secondary", attrs["llm.provider"])
+	assert.Equal(t, "med", attrs["llm.tier"])
+}
+
+func TestRunPhaseWithProviderFallbackFallsBackAfterQuotaExhaustion(t *testing.T) {
+	t.Setenv("XYLEM_DTU_STATE_PATH", setupDTUClock(t))
+	tracer, rec := newTestTracer(t)
+
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Concurrency: 1,
+		MaxTurns:    50,
+		Timeout:     "30s",
+		StateDir:    filepath.Join(dir, ".xylem"),
+		Providers: map[string]config.ProviderConfig{
+			"primary": {
+				Kind:    "copilot",
+				Command: "copilot-quota-fail",
+				Tiers:   map[string]string{"med": "gpt-med"},
+				Env: map[string]string{
+					"GITHUB_TOKEN": "copilot-secret",
+				},
+			},
+			"secondary": {
+				Kind:    "claude",
+				Command: "claude-success",
+				Tiers:   map[string]string{"med": "claude-med"},
+				Env: map[string]string{
+					"ANTHROPIC_API_KEY": "anthropic-secret",
+				},
+			},
+		},
+		LLMRouting: config.LLMRoutingConfig{
+			DefaultTier: "med",
+			Tiers: map[string]config.TierRouting{
+				"med": {Providers: []string{"primary", "secondary"}},
+			},
+		},
+		Harness: config.HarnessConfig{
+			ProtectedSurfaces: config.ProtectedSurfacesConfig{
+				Paths: []string{
+					".xylem/HARNESS.md",
+					".xylem.yml",
+					".xylem/workflows/*.yaml",
+					".xylem/prompts/*/*.md",
+				},
+			},
+		},
+		Sources: map[string]config.SourceConfig{
+			"github": {
+				Type:    "github",
+				Repo:    "owner/repo",
+				Exclude: []string{"wontfix"},
+				Tasks:   map[string]config.Task{"fix-bugs": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+			},
+		},
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	vessel := makeVessel(1, "fix-bug")
+	vessel.Tier = "med"
+	_, _ = q.Enqueue(vessel)
+
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{name: "implement", promptContent: "Fix the bug", maxTurns: 10},
+	})
+
+	oldWd, _ := os.Getwd()
+	require.NoError(t, os.Chdir(dir))
+	defer os.Chdir(oldWd)
+
+	cmdRunner := &fallbackCmdRunner{}
+	r := New(cfg, q, &mockWorktree{}, cmdRunner)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+	r.Tracer = tracer
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	require.Equal(t, 1, result.Completed)
+	require.Len(t, cmdRunner.calls, 2)
+
+	first := cmdRunner.calls[0]
+	assert.Equal(t, "copilot-quota-fail", first.Command)
+	assert.True(t, containsArgSequence(first.Args, "--model", "gpt-med"))
+	assert.Contains(t, first.Env, "GITHUB_TOKEN=copilot-secret")
+	assert.NotContains(t, first.Env, "ANTHROPIC_API_KEY=anthropic-secret")
+
+	second := cmdRunner.calls[1]
+	assert.Equal(t, "claude-success", second.Command)
+	assert.True(t, containsArgSequence(second.Args, "--model", "claude-med"))
+	assert.Contains(t, second.Env, "ANTHROPIC_API_KEY=anthropic-secret")
+	assert.NotContains(t, second.Env, "GITHUB_TOKEN=copilot-secret")
+	assert.Equal(t, "Fix the bug", second.Prompt)
+
+	attrs := spanAttrMap(endedSpanByName(t, rec, "phase:implement"))
+	assert.Equal(t, "secondary", attrs["xylem.phase.provider"])
+	assert.Equal(t, "claude-med", attrs["xylem.phase.model"])
 	assert.Equal(t, "secondary", attrs["llm.provider"])
 	assert.Equal(t, "med", attrs["llm.tier"])
 }
