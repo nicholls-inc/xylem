@@ -36,6 +36,24 @@ func outOfRangeSampleRateGen() *rapid.Generator[float64] {
 	})
 }
 
+func variedCaseAndSpacing(t *rapid.T, value string) string {
+	var b strings.Builder
+	b.WriteString(strings.Repeat(" ", rapid.IntRange(0, 3).Draw(t, "leading-spaces")))
+	for i, r := range value {
+		ch := string(r)
+		if ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') {
+			if rapid.Bool().Draw(t, fmt.Sprintf("upper-%d", i)) {
+				ch = strings.ToUpper(ch)
+			} else {
+				ch = strings.ToLower(ch)
+			}
+		}
+		b.WriteString(ch)
+	}
+	b.WriteString(strings.Repeat(" ", rapid.IntRange(0, 3).Draw(t, "trailing-spaces")))
+	return b.String()
+}
+
 func TestPropEffectiveProtectedSurfacesNeverAliasesInput(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		paths := protectedSurfacePathsGen().Draw(t, "paths")
@@ -127,6 +145,58 @@ func TestPropVesselBudgetNilWhenBothLimitsNonPositive(t *testing.T) {
 
 		if budget := cfg.VesselBudget(); budget != nil {
 			t.Fatalf("VesselBudget() = %#v, want nil", budget)
+		}
+	})
+}
+
+func TestPropValidateCostRejectsOversubscribedPerClassTotals(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		daily := rapid.IntRange(2, 1_000_000).Draw(t, "daily-budget-usd")
+		delivery := rapid.IntRange(1, daily).Draw(t, "delivery-budget-usd")
+		opsMin := daily - delivery + 1
+		ops := rapid.IntRange(opsMin, daily).Draw(t, "ops-budget-usd")
+		cfg := Config{
+			Cost: CostConfig{
+				DailyBudgetUSD: float64(daily),
+				PerClassLimit: map[string]float64{
+					"delivery": float64(delivery),
+					"ops":      float64(ops),
+				},
+			},
+		}
+
+		err := cfg.validateCost()
+		if err == nil {
+			t.Fatal("Validate() error = nil, want oversubscription rejection")
+		}
+		if !strings.Contains(err.Error(), "cost.per_class_limit total") {
+			t.Fatalf("Validate() error = %v, want cost.per_class_limit total", err)
+		}
+	})
+}
+
+func TestPropCostOnExceededDefaultsAndNormalizes(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		base := rapid.SampledFrom([]string{"", "drain_only", "pause", "alert", "stop"}).Draw(t, "mode-base")
+		mode := variedCaseAndSpacing(t, base)
+		cfg := Config{
+			Cost: CostConfig{
+				OnExceeded: mode,
+			},
+		}
+
+		got := cfg.CostOnExceeded()
+		switch base {
+		case "", "drain_only", "stop":
+			if got != DefaultCostOnExceeded {
+				t.Fatalf("CostOnExceeded() = %q, want %q", got, DefaultCostOnExceeded)
+			}
+		case "pause", "alert":
+			if got != base {
+				t.Fatalf("CostOnExceeded() = %q, want %q", got, base)
+			}
+		default:
+			t.Fatalf("unexpected sampled base %q", base)
 		}
 	})
 }

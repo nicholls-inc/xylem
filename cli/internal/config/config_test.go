@@ -195,6 +195,9 @@ claude:
 	if len(cfg.Sources) != 1 {
 		t.Fatalf("expected 1 source after normalization, got %d", len(cfg.Sources))
 	}
+	if got := cfg.CostOnExceeded(); got != DefaultCostOnExceeded {
+		t.Fatalf("CostOnExceeded() = %q, want %q", got, DefaultCostOnExceeded)
+	}
 }
 
 func TestLoadStructuredConcurrency(t *testing.T) {
@@ -740,6 +743,83 @@ func TestValidateCostBudgetNegativeMaxTokens(t *testing.T) {
 
 	err := cfg.Validate()
 	requireErrorContains(t, err, "cost.budget.max_tokens")
+}
+
+func TestValidateCostDailyBudgetNegative(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.DailyBudgetUSD = -1
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.daily_budget_usd")
+}
+
+func TestValidateCostPerClassLimitNegative(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.PerClassLimit = map[string]float64{"delivery": -1}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `cost.per_class_limit["delivery"]`)
+}
+
+func TestValidateCostPerClassLimitRejectsBlankClassName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.PerClassLimit = map[string]float64{"   ": 1}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.per_class_limit keys must be non-empty")
+}
+
+func TestValidateCostPerClassLimitOversubscribed(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.DailyBudgetUSD = 10
+	cfg.Cost.PerClassLimit = map[string]float64{
+		"delivery":            8,
+		"harness-maintenance": 3,
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.per_class_limit total")
+}
+
+func TestValidateCostPerClassLimitAllowsUnlimitedDailyBudget(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.DailyBudgetUSD = 0
+	cfg.Cost.PerClassLimit = map[string]float64{
+		"delivery":            40,
+		"harness-maintenance": 5,
+	}
+
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidateCostOnExceededRejectsUnknownValue(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.OnExceeded = "stop"
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.on_exceeded")
+}
+
+func TestCostOnExceededDefaultsAndNormalizes(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want string
+	}{
+		{name: "empty defaults", mode: "", want: DefaultCostOnExceeded},
+		{name: "whitespace defaults", mode: "   ", want: DefaultCostOnExceeded},
+		{name: "drain only trims", mode: " drain_only ", want: DefaultCostOnExceeded},
+		{name: "pause normalizes case", mode: " Pause ", want: "pause"},
+		{name: "alert normalizes case", mode: "ALERT", want: "alert"},
+		{name: "unknown falls back", mode: "stop", want: DefaultCostOnExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Cost: CostConfig{OnExceeded: tt.mode}}
+			assert.Equal(t, tt.want, cfg.CostOnExceeded())
+		})
+	}
 }
 
 func TestLoadDefaultModel(t *testing.T) {
@@ -1978,6 +2058,9 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 	assert.Equal(t, "reviews", cfg.HarnessReviewOutputDir())
 	assert.True(t, cfg.ObservabilityEnabled())
 	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
+	assert.Zero(t, cfg.Cost.DailyBudgetUSD)
+	assert.Nil(t, cfg.Cost.PerClassLimit)
+	assert.Equal(t, DefaultCostOnExceeded, cfg.CostOnExceeded())
 	assert.Nil(t, cfg.VesselBudget())
 
 	policies := cfg.BuildIntermediaryPolicies()
@@ -2149,11 +2232,17 @@ func TestSmoke_S29_ObservabilityDefaultsWhenAbsent(t *testing.T) {
 	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
 }
 
-func TestSmoke_S30_CostBudgetLoadsCorrectly(t *testing.T) {
+func TestSmoke_S30_CostConfigLoadsBudgetAndDailyBudgetPolicy(t *testing.T) {
 	path := writeSmokeConfigFile(t, `cost:
   budget:
     max_cost_usd: 5.0
     max_tokens: 500000
+  daily_budget_usd: 50
+  per_class_limit:
+    " delivery ": 40
+    " harness-maintenance ": 5
+    ops: 5
+  on_exceeded: " Pause "
 `)
 
 	cfg, err := Load(path)
@@ -2164,6 +2253,37 @@ func TestSmoke_S30_CostBudgetLoadsCorrectly(t *testing.T) {
 	require.NotNil(t, budget)
 	assert.Equal(t, 5.0, budget.CostLimitUSD)
 	assert.Equal(t, 500000, budget.TokenLimit)
+	assert.Equal(t, 50.0, cfg.Cost.DailyBudgetUSD)
+	assert.Equal(t, map[string]float64{
+		"delivery":            40,
+		"harness-maintenance": 5,
+		"ops":                 5,
+	}, cfg.Cost.PerClassLimit)
+	assert.Equal(t, "pause", cfg.CostOnExceeded())
+}
+
+func TestLoadDailyBudgetOversubscriptionRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  daily_budget_usd: 10
+  per_class_limit:
+    delivery: 8
+    ops: 4
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cost.per_class_limit total")
+}
+
+func TestLoadDailyBudgetUnknownOnExceededRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  daily_budget_usd: 50
+  on_exceeded: stop
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cost.on_exceeded")
 }
 
 func TestSmoke_S31_NegativeSampleRateRejected(t *testing.T) {

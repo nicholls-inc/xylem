@@ -20,6 +20,7 @@ const minTimeout = 30 * time.Second
 const DefaultAuditLogPath = "audit.jsonl"
 const DefaultLLMRoutingTier = "med"
 const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
+const DefaultCostOnExceeded = "drain_only"
 const runtimeStateDirName = "state"
 
 // DefaultProtectedSurfaces is the default list of paths that xylem's
@@ -267,7 +268,10 @@ type TelemetryConfig struct {
 }
 
 type CostConfig struct {
-	Budget *BudgetConfig `yaml:"budget,omitempty"`
+	Budget         *BudgetConfig      `yaml:"budget,omitempty"`
+	DailyBudgetUSD float64            `yaml:"daily_budget_usd,omitempty"`
+	PerClassLimit  map[string]float64 `yaml:"per_class_limit,omitempty"`
+	OnExceeded     string             `yaml:"on_exceeded,omitempty"`
 }
 
 type BudgetConfig struct {
@@ -328,6 +332,9 @@ func load(path string, validate bool) (*Config, error) {
 				ScannerIdleThreshold: "5m",
 				OrphanCheckEnabled:   true,
 			},
+		},
+		Cost: CostConfig{
+			OnExceeded: DefaultCostOnExceeded,
 		},
 	}
 
@@ -469,6 +476,7 @@ func (c *Config) normalize() {
 		}
 	}
 	c.ConcurrencyPerClass = normalizeConcurrencyPerClass(c.ConcurrencyPerClass)
+	c.Cost.PerClassLimit = normalizeCostPerClassLimit(c.Cost.PerClassLimit)
 	c.normalizeProviders()
 }
 
@@ -917,6 +925,17 @@ func normalizeConcurrencyPerClass(in map[string]int) map[string]int {
 	return out
 }
 
+func normalizeCostPerClassLimit(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for class, limit := range in {
+		out[strings.TrimSpace(class)] = limit
+	}
+	return out
+}
+
 func (c *Config) VesselBudget() *cost.Budget {
 	if c.Cost.Budget == nil {
 		return nil
@@ -929,6 +948,18 @@ func (c *Config) VesselBudget() *cost.Budget {
 	return &cost.Budget{
 		TokenLimit:   c.Cost.Budget.MaxTokens,
 		CostLimitUSD: c.Cost.Budget.MaxCostUSD,
+	}
+}
+
+func (c *Config) CostOnExceeded() string {
+	mode := strings.ToLower(strings.TrimSpace(c.Cost.OnExceeded))
+	switch mode {
+	case "", DefaultCostOnExceeded:
+		return DefaultCostOnExceeded
+	case "pause", "alert":
+		return mode
+	default:
+		return DefaultCostOnExceeded
 	}
 }
 
@@ -1034,16 +1065,36 @@ func (c *Config) validateObservability() error {
 }
 
 func (c *Config) validateCost() error {
-	if c.Cost.Budget == nil {
+	if c.Cost.Budget != nil {
+		if c.Cost.Budget.MaxCostUSD < 0 {
+			return fmt.Errorf("cost.budget.max_cost_usd must be non-negative")
+		}
+		if c.Cost.Budget.MaxTokens < 0 {
+			return fmt.Errorf("cost.budget.max_tokens must be non-negative")
+		}
+	}
+	if c.Cost.DailyBudgetUSD < 0 {
+		return fmt.Errorf("cost.daily_budget_usd must be non-negative")
+	}
+	totalPerClass := 0.0
+	for class, limit := range c.Cost.PerClassLimit {
+		if strings.TrimSpace(class) == "" {
+			return fmt.Errorf("cost.per_class_limit keys must be non-empty")
+		}
+		if limit < 0 {
+			return fmt.Errorf("cost.per_class_limit[%q] must be non-negative", class)
+		}
+		totalPerClass += limit
+	}
+	if c.Cost.DailyBudgetUSD > 0 && totalPerClass > c.Cost.DailyBudgetUSD {
+		return fmt.Errorf("cost.per_class_limit total must not exceed cost.daily_budget_usd")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Cost.OnExceeded)) {
+	case "", DefaultCostOnExceeded, "pause", "alert":
 		return nil
+	default:
+		return fmt.Errorf("cost.on_exceeded must be one of drain_only, pause, or alert")
 	}
-	if c.Cost.Budget.MaxCostUSD < 0 {
-		return fmt.Errorf("cost.budget.max_cost_usd must be non-negative")
-	}
-	if c.Cost.Budget.MaxTokens < 0 {
-		return fmt.Errorf("cost.budget.max_tokens must be non-negative")
-	}
-	return nil
 }
 
 func (c *Config) validateTelemetry() error {
