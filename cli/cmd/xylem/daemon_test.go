@@ -20,6 +20,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/dtushim"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
@@ -320,7 +321,7 @@ func TestSmoke_S7_DaemonStartupContinuesWhenAdaptRepoSearchFails(t *testing.T) {
 		},
 	}
 
-	err := daemonStartup(context.Background(), cfg, q, nil, runner)
+	err := daemonStartup(context.Background(), cfg, q, nil, runner, true)
 	require.NoError(t, err)
 	_, statErr := os.Stat(markerPath)
 	require.Error(t, statErr)
@@ -357,7 +358,7 @@ func TestSmoke_S8_DaemonStartupLeavesMarkerAbsentWhenAdaptRepoCreateFails(t *tes
 	require.Error(t, statErr)
 	require.True(t, os.IsNotExist(statErr))
 
-	err := daemonStartup(context.Background(), cfg, q, nil, runner)
+	err := daemonStartup(context.Background(), cfg, q, nil, runner, true)
 	require.NoError(t, err)
 	_, statErr = os.Stat(markerPath)
 	require.Error(t, statErr)
@@ -1175,6 +1176,132 @@ func TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig(t *testing.T
 	require.Len(t, entries, 1)
 	assert.Equal(t, entry.Intent, entries[0].Intent)
 	assert.Equal(t, entry.Decision, entries[0].Decision)
+}
+
+// TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts verifies
+// that daemonStartup overwrites stale workflow files when the embedded digest
+// differs from the runtime digest.
+func TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "workflows"), 0o755))
+	// Write stale content to one workflow file so the runtime digest differs.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, "workflows", "fix-bug.yaml"),
+		[]byte("stale: true"),
+		0o644,
+	))
+
+	cfg := &config.Config{
+		Profiles: []string{"core"},
+		StateDir: stateDir,
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err)
+
+	// Embedded content should have replaced the stale file — assert the exact
+	// embedded bytes, not just that the stale value is gone.
+	composed, composeErr := profiles.Compose("core")
+	require.NoError(t, composeErr)
+	embeddedContent, ok := composed.Workflows["fix-bug"]
+	require.True(t, ok, "core profile must contain fix-bug workflow")
+
+	data, readErr := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, readErr)
+	assert.Equal(t, embeddedContent, data, "stale workflow should be replaced with the exact embedded content")
+	assert.Contains(t, logs.String(), "daemon profile assets stale; re-syncing")
+}
+
+// TestSmoke_S50_DaemonStartupSkipsResyncWhenDigestsMatch verifies that
+// daemonStartup does not re-write files when the runtime digest already
+// matches the embedded digest.
+func TestSmoke_S50_DaemonStartupSkipsResyncWhenDigestsMatch(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+
+	// Run a full init-style sync first so the runtime dir is current.
+	cfg := &config.Config{
+		Profiles: []string{"core"},
+		StateDir: stateDir,
+	}
+	composed, err := profiles.Compose("core")
+	require.NoError(t, err)
+	require.NoError(t, syncProfileAssets(stateDir, composed, true))
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err = daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err)
+
+	assert.NotContains(t, logs.String(), "daemon profile assets stale; re-syncing",
+		"no re-sync expected when digests already match")
+}
+
+// TestSmoke_S51_DaemonStartupNoProfileSyncFlagSkipsResync verifies that
+// noProfileSync=true prevents re-sync even when the runtime dir is stale.
+func TestSmoke_S51_DaemonStartupNoProfileSyncFlagSkipsResync(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "workflows"), 0o755))
+	staleContent := []byte("stale: true")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, "workflows", "fix-bug.yaml"),
+		staleContent,
+		0o644,
+	))
+
+	cfg := &config.Config{
+		Profiles: []string{"core"},
+		StateDir: stateDir,
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, true)
+	require.NoError(t, err)
+
+	// File must NOT have been overwritten.
+	data, readErr := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, readErr)
+	assert.Equal(t, staleContent, data, "no-profile-sync should leave stale file untouched")
+	assert.NotContains(t, logs.String(), "daemon profile assets stale; re-syncing")
+}
+
+// TestSmoke_S52_DaemonStartupContinuesWhenProfileComposeFails verifies that
+// a profile compose error is logged as a warning and daemonStartup returns nil.
+func TestSmoke_S52_DaemonStartupContinuesWhenProfileComposeFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Profiles: []string{"nonexistent-profile"},
+		StateDir: filepath.Join(dir, ".xylem"),
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err, "daemonStartup must continue even when profile compose fails")
+	assert.Contains(t, logs.String(), "daemon profile re-sync failed, continuing")
+}
+
+// TestSmoke_S53_DaemonStartupSkipsResyncWhenProfilesEmpty verifies that
+// daemonStartup does not attempt any profile sync when cfg.Profiles is empty.
+func TestSmoke_S53_DaemonStartupSkipsResyncWhenProfilesEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Profiles: nil,
+		StateDir: filepath.Join(dir, ".xylem"),
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err)
+	assert.NotContains(t, logs.String(), "re-sync")
+	assert.NotContains(t, logs.String(), "compose profiles")
 }
 
 func TestReconcileStaleVessels(t *testing.T) {
