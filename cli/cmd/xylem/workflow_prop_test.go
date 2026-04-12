@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/bootstrap"
 	"pgregory.net/rapid"
 )
 
@@ -36,25 +37,25 @@ func TestPropApplyProposedWorkflowPlanDeleteOnlyRemovesNamedWorkflows(t *testing
 			keptCount++
 		}
 
-		changes := make([]adaptPlanChange, 0, len(deleted)+1)
+		changes := make([]bootstrap.AdaptPlanChange, 0, len(deleted)+1)
 		for path := range deleted {
-			changes = append(changes, adaptPlanChange{
+			changes = append(changes, bootstrap.AdaptPlanChange{
 				Path:      path,
 				Op:        "delete",
 				Rationale: "remove inapplicable workflow",
 			})
 		}
-		changes = append(changes, adaptPlanChange{
+		changes = append(changes, bootstrap.AdaptPlanChange{
 			Path:      "docs/README.md",
 			Op:        "patch",
 			Rationale: "unrelated doc update",
 		})
 
-		filtered, err := applyProposedWorkflowPlan(workflowsDir, workflowPaths, adaptPlan{
+		filtered, err := applyProposedWorkflowPlan(workflowsDir, workflowPaths, bootstrap.AdaptPlan{
 			SchemaVersion:  1,
-			Detected:       adaptPlanDetected{},
+			Detected:       bootstrap.AdaptPlanDetected{},
 			PlannedChanges: changes,
-			Skipped:        []adaptPlanSkipped{},
+			Skipped:        []bootstrap.AdaptPlanSkipped{},
 		})
 		if err != nil {
 			rt.Fatalf("applyProposedWorkflowPlan() error = %v", err)

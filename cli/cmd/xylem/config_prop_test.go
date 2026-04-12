@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/bootstrap"
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"pgregory.net/rapid"
 )
@@ -55,16 +56,16 @@ claude:
 			"cd cli && go test ./...",
 		}).Draw(t, "value")
 
-		plan := adaptRepoPlan{
+		plan := bootstrap.AdaptPlan{
 			SchemaVersion: 1,
-			Detected:      adaptRepoPlanDetected{},
-			Planned: []adaptRepoPlannedAsset{{
+			Detected:      bootstrap.AdaptPlanDetected{},
+			PlannedChanges: []bootstrap.AdaptPlanChange{{
 				Path:        ".xylem.yml",
 				Op:          "patch",
 				Rationale:   "apply validation override",
 				DiffSummary: key + ": " + value,
 			}},
-			Skipped: []adaptRepoSkippedAsset{},
+			Skipped: []bootstrap.AdaptPlanSkipped{},
 		}
 		data, err := json.Marshal(plan)
 		if err != nil {
