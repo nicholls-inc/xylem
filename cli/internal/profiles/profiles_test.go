@@ -363,7 +363,7 @@ func TestSmoke_S6_SelfHostingProfileScaffoldsReleaseCadenceWorkflow(t *testing.T
 	require.Len(t, wf.Phases, 1)
 	assert.Equal(t, "label_ready", wf.Phases[0].Name)
 	assert.Equal(t, "command", wf.Phases[0].Type)
-	assert.Contains(t, wf.Phases[0].Run, "xylem release-cadence label-ready --repo {{ .Repo }}")
+	assert.Contains(t, wf.Phases[0].Run, "./cli/xylem release-cadence label-ready --repo {{ .Repo }}")
 	require.NotNil(t, wf.Phases[0].NoOp)
 	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
 }
