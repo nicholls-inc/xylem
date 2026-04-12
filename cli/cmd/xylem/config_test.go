@@ -21,7 +21,7 @@ func writeConfigValidateFile(t *testing.T, dir, name, contents string) string {
 	return path
 }
 
-func writeAdaptPlanFile(t *testing.T, dir string, plan adaptRepoPlan) string {
+func writeConfigValidateAdaptPlanFile(t *testing.T, dir string, plan adaptRepoPlan) string {
 	t.Helper()
 
 	data, err := json.Marshal(plan)
@@ -96,7 +96,7 @@ claude:
   command: "claude"
   default_model: "claude-sonnet-4-6"
 `)
-	planPath := writeAdaptPlanFile(t, dir, adaptRepoPlan{
+	planPath := writeConfigValidateAdaptPlanFile(t, dir, adaptRepoPlan{
 		SchemaVersion: 1,
 		Detected:      adaptRepoPlanDetected{},
 		Planned: []adaptRepoPlannedAsset{{

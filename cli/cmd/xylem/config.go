@@ -322,17 +322,6 @@ func adaptPlanTouchesProfileLock(plan *adaptRepoPlan) bool {
 	return false
 }
 
-func isAllowedAdaptPlanPath(path string) bool {
-	switch {
-	case path == ".xylem.yml", path == "AGENTS.md":
-		return true
-	case strings.HasPrefix(path, ".xylem/"), strings.HasPrefix(path, "docs/"):
-		return true
-	default:
-		return false
-	}
-}
-
 func stringSlicesEqual(left, right []string) bool {
 	if len(left) != len(right) {
 		return false
