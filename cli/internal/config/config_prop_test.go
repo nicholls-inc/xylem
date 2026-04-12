@@ -296,7 +296,7 @@ func TestPropNormalizeLegacyProvidersPreservesDefaultTierModels(t *testing.T) {
 func TestPropValidationRequirementAcceptsAnyNonEmptyNonGoimportsValidationCommand(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		commands := []*string{
 			&cfg.Validation.Format,
@@ -316,7 +316,7 @@ func TestPropValidationRequirementAcceptsAnyNonEmptyNonGoimportsValidationComman
 func TestPropValidationRequirementRejectsGoimportsPackagePatternTargets(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		target := rapid.SampledFrom([]string{"./...", "./cli/...", "./internal/...", "cli/..."}).Draw(t, "target")
 		cfg.Validation.Format = "goimports -l " + target
@@ -334,7 +334,7 @@ func TestPropValidationRequirementRejectsGoimportsPackagePatternTargets(t *testi
 func TestPropValidationRequirementAcceptsGoimportsDirectoryTargets(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		target := rapid.StringMatching(`[./a-z0-9_-]{1,16}`).Draw(t, "target")
 		target = strings.TrimSpace(target)
@@ -352,7 +352,7 @@ func TestPropValidationRequirementAcceptsGoimportsDirectoryTargets(t *testing.T)
 func TestPropValidationRequirementRejectsRepoRootGoCLITargets(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		target := rapid.SampledFrom([]string{"./cli/...", "./cli/cmd/xylem", "cli/...", "cli/internal/config"}).Draw(t, "target")
 		field := rapid.SampledFrom([]string{"lint", "build", "test"}).Draw(t, "field")
@@ -384,7 +384,7 @@ func TestPropValidationRequirementRejectsRepoRootGoCLITargets(t *testing.T) {
 func TestPropValidationRequirementAcceptsCLIWorkingDirGoCommands(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		field := rapid.SampledFrom([]string{"lint", "build", "test"}).Draw(t, "field")
 
