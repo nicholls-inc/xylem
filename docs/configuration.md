@@ -137,6 +137,8 @@ daemon:
 | `observability` | object | see below | No | OpenTelemetry instrumentation settings. |
 | `cost` | object | see below | No | Token budget enforcement settings. |
 
+> **Multi-repo note:** `concurrency` limits are per-daemon. Running multiple daemons on the same machine multiplies the total concurrent sessions. See [Multi-repo daemon operation](multi-repo.md#resource-awareness).
+
 ### `daemon`
 
 | Field | Type | Default | Required | Description |
@@ -546,6 +548,8 @@ harness:
 
 The `observability` section controls OpenTelemetry instrumentation for tracing agent execution. Tracing requires an OTLP endpoint — when no endpoint is configured, tracing is silently disabled (no stdout fallback). This endpoint is used for traces only; xylem keeps daemon logs on stderr and `daemon.log`, and the bundled Jaeger dev stack does not ingest OTLP logs.
 
+> **Multi-repo note:** All daemons emit traces under the service name `"xylem"` with no per-repo identifier. Traces from multiple repos are indistinguishable in a shared collector. See [Multi-repo daemon operation](multi-repo.md#observability) for workarounds.
+
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|
 | `observability.enabled` | bool | `true` | No | Enable or disable OpenTelemetry tracing. |
@@ -579,6 +583,8 @@ The `cost` section configures token budget enforcement for agent sessions.
 |-------|------|---------|----------|-------------|
 | `cost.budget.max_cost_usd` | float | `0` | No | Maximum cost in USD. Must be >= 0. Set to 0 to disable cost-based limits. |
 | `cost.budget.max_tokens` | integer | `0` | No | Maximum total tokens. Must be >= 0. Set to 0 to disable token-based limits. |
+
+> **Multi-repo note:** `cost.daily_budget_usd` is enforced per-daemon. There is no cross-repo budget aggregation — each daemon tracks only the spend it incurs. See [Multi-repo daemon operation](multi-repo.md#cost-budgets) for how to divide a total budget across repos.
 
 ## Duration strings
 
