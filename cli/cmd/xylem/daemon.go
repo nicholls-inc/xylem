@@ -92,7 +92,7 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	// P0-2: Reconcile any vessels left in running state from a previous daemon.
 	// The singleton lock guarantees no other daemon is running, so all running
 	// vessels are definitionally orphaned.
-	if err := daemonStartup(context.Background(), cfg, q, wt, newCmdRunner(cfg)); err != nil {
+	if err := daemonStartup(context.Background(), cfg, q, wt, newCommandRunner(cfg)); err != nil {
 		return err
 	}
 
@@ -477,13 +477,13 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 }
 
 func runScan(ctx context.Context, cfg *config.Config, q *queue.Queue) (scanner.ScanResult, error) {
-	cmdRunner := newCmdRunner(cfg)
+	cmdRunner := newCommandRunner(cfg)
 	s := scanner.New(cfg, q, cmdRunner)
 	return s.Scan(ctx)
 }
 
 func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, budget time.Duration) (runner.DrainResult, error) {
-	cmdRunner := newCmdRunner(cfg)
+	cmdRunner := newCommandRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.DrainBudget = budget

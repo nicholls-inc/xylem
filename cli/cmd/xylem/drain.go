@@ -19,7 +19,15 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
 
+type drainCommandRunner interface {
+	runner.CommandRunner
+	source.CommandRunner
+}
+
 var newTracer = observability.NewTracer
+var newCommandRunner = func(cfg *config.Config) drainCommandRunner {
+	return newCmdRunner(cfg)
+}
 
 func newDrainCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -52,7 +60,7 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 		return commandErr
 	}
 
-	cmdRunner := newCmdRunner(cfg)
+	cmdRunner := newCommandRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.Reporter = buildReporter(cfg, cmdRunner)
@@ -109,7 +117,7 @@ func finishCommandSpan(tracer *observability.Tracer, span observability.SpanCont
 	span.End()
 }
 
-func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeManager, cmdRunner *realCmdRunner) (*runner.Runner, func()) {
+func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeManager, cmdRunner drainCommandRunner) (*runner.Runner, func()) {
 	tracer := buildConfiguredTracer(cfg)
 	if configurable, ok := wt.(interface{ SetProtectedSurfaces([]string) }); ok {
 		configurable.SetProtectedSurfaces(cfg.EffectiveProtectedSurfaces())

@@ -537,7 +537,7 @@ harness:
 
 ### Observability settings
 
-The `observability` section controls OpenTelemetry instrumentation for tracing agent execution. Tracing requires an OTLP endpoint — when no endpoint is configured, tracing is silently disabled (no stdout fallback).
+The `observability` section controls OpenTelemetry instrumentation for tracing agent execution. Tracing requires an OTLP endpoint — when no endpoint is configured, tracing is silently disabled (no stdout fallback). This endpoint is used for traces only; xylem keeps daemon logs on stderr and `daemon.log`, and the bundled Jaeger dev stack does not ingest OTLP logs.
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|

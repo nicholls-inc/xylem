@@ -13,7 +13,6 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
 func TestPropWireRunnerScaffoldingNeverNil(t *testing.T) {
@@ -102,17 +101,17 @@ func TestPropWireRunnerScaffoldingAuditLogUnderStateDir(t *testing.T) {
 	})
 }
 
-func TestPropBuildConfiguredTracerCreatesStdoutTracerWithoutEndpoint(t *testing.T) {
+func TestPropBuildConfiguredTracerUsesStdoutTracerWithoutEndpoint(t *testing.T) {
 	rapid.Check(t, func(rt *rapid.T) {
 		sampleRate := rapid.Float64Range(0.0001, 1.0).Draw(rt, "sampleRate")
 		cfg := &config.Config{}
 		cfg.Observability.SampleRate = sampleRate
 
-		oldNewTracer := newTracer
-		defer func() { newTracer = oldNewTracer }()
+		oldNewConfiguredTracer := newConfiguredTracer
+		defer func() { newConfiguredTracer = oldNewConfiguredTracer }()
 
 		var calls int
-		newTracer = func(tc observability.TracerConfig) (*observability.Tracer, error) {
+		newConfiguredTracer = func(tc observability.TracerConfig) (*observability.Tracer, error) {
 			calls++
 			if tc.Endpoint != "" {
 				rt.Fatalf("TracerConfig.Endpoint = %q, want empty endpoint", tc.Endpoint)
@@ -120,7 +119,8 @@ func TestPropBuildConfiguredTracerCreatesStdoutTracerWithoutEndpoint(t *testing.
 			if tc.SampleRate != sampleRate {
 				rt.Fatalf("TracerConfig.SampleRate = %v, want %v", tc.SampleRate, sampleRate)
 			}
-			return observability.NewTracerFromProvider(sdktrace.NewTracerProvider()), nil
+			tracer, _ := newRecordingTracer()
+			return tracer, nil
 		}
 
 		tracer := buildConfiguredTracer(cfg)
@@ -128,9 +128,7 @@ func TestPropBuildConfiguredTracerCreatesStdoutTracerWithoutEndpoint(t *testing.
 			rt.Fatal("buildConfiguredTracer() = nil, want tracer")
 		}
 		if calls != 1 {
-			rt.Fatalf("newTracer call count = %d, want 1", calls)
+			rt.Fatalf("newConfiguredTracer call count = %d, want 1", calls)
 		}
-
-		shutdownConfiguredTracer(tracer)
 	})
 }

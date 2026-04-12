@@ -484,35 +484,51 @@ func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
 func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
-	cfg.Observability.Endpoint = "localhost:4317"
-	cfg.Observability.Insecure = true
+	cfg.Observability.Endpoint = ""
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-
-	var exporters []*recordingSpanExporter
-	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
-		tracer, exporter := newRecordingTracer()
-		exporters = append(exporters, exporter)
-		return tracer, nil
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
 	})
 
-	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
-	require.NoError(t, err)
-	assert.Equal(t, runner.DrainResult{}, result)
+	var tracers []*observability.Tracer
+	stubConfiguredTracerFactory(t, func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, err := observability.NewTracer(cfg)
+		if err == nil {
+			tracers = append(tracers, tracer)
+		}
+		return tracer, err
+	})
 
-	secondResult, secondErr := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
-	require.NoError(t, secondErr)
-	assert.Equal(t, runner.DrainResult{}, secondResult)
+	enqueuePromptVessel(t, q, "daemon-1", filepath.Join(dir, "daemon-one"))
+	firstOut := captureStdout(func() {
+		result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, cmdRunner), 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.Completed)
+	})
 
-	require.Len(t, exporters, 2)
-	for _, exporter := range exporters {
-		requireSpanNamed(t, exporter.snapshots(), "drain_run")
-		assert.Equal(t, 1, exporter.shutdownCount())
-	}
+	enqueuePromptVessel(t, q, "daemon-2", filepath.Join(dir, "daemon-two"))
+	secondOut := captureStdout(func() {
+		result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, cmdRunner), 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.Completed)
+	})
+
+	require.Len(t, tracers, 2)
+	assert.NotSame(t, tracers[0], tracers[1])
+	assert.Contains(t, firstOut, `"Name":"drain_run"`)
+	assert.Contains(t, firstOut, `"Name":"vessel:daemon-1"`)
+	assert.NotContains(t, firstOut, `"Name":"vessel:daemon-2"`)
+	assert.Contains(t, secondOut, `"Name":"drain_run"`)
+	assert.Contains(t, secondOut, `"Name":"vessel:daemon-2"`)
+	assert.NotContains(t, secondOut, `"Name":"vessel:daemon-1"`)
 }
 
 func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
 	var exporter *recordingSpanExporter
