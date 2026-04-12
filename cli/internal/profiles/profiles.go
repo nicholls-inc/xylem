@@ -1,10 +1,13 @@
 package profiles
 
 import (
+	"crypto/sha256"
 	"embed"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -179,6 +182,110 @@ func mergeSources(profileName, filePath string, data []byte, dest map[string][]b
 	}
 
 	return nil
+}
+
+// ComputeEmbeddedDigest returns a deterministic SHA-256 hex digest over all
+// workflow, prompt, and script content in composed. Keys are sorted before
+// hashing so the result is independent of map iteration order.
+// Returns "" if composed is nil.
+func ComputeEmbeddedDigest(composed *ComposedProfile) string {
+	if composed == nil {
+		return ""
+	}
+	var entries []string
+	for _, name := range sortedByteMapKeys(composed.Workflows) {
+		entries = append(entries, "workflows/"+name+":"+hexHash(composed.Workflows[name]))
+	}
+	for _, name := range sortedByteMapKeys(composed.Prompts) {
+		entries = append(entries, "prompts/"+name+":"+hexHash(composed.Prompts[name]))
+	}
+	for _, name := range sortedByteMapKeys(composed.Scripts) {
+		entries = append(entries, "scripts/"+name+":"+hexHash(composed.Scripts[name]))
+	}
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return fmt.Sprintf("%x", sum)
+}
+
+// ComputeRuntimeDigest returns a deterministic SHA-256 hex digest over the
+// workflow YAML files, prompt MD files, and script files currently on disk
+// under stateDir. Returns "" if stateDir does not exist or is unreadable.
+func ComputeRuntimeDigest(stateDir string) string {
+	var entries []string
+
+	// workflows/<name>.yaml → key "workflows/<name>"
+	workflowsDir := filepath.Join(stateDir, "workflows")
+	if infos, err := os.ReadDir(workflowsDir); err == nil {
+		for _, info := range infos {
+			if info.IsDir() || !strings.HasSuffix(info.Name(), ".yaml") {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(workflowsDir, info.Name()))
+			if err != nil {
+				continue
+			}
+			name := strings.TrimSuffix(info.Name(), ".yaml")
+			entries = append(entries, "workflows/"+name+":"+hexHash(data))
+		}
+	}
+
+	// prompts/**/*.md → key "prompts/<rel-without-ext>" (forward slashes)
+	promptsDir := filepath.Join(stateDir, "prompts")
+	//nolint:errcheck // non-existent promptsDir and internal walk errors are intentionally ignored
+	_ = filepath.WalkDir(promptsDir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() || !strings.HasSuffix(d.Name(), ".md") {
+			return nil
+		}
+		rel, err := filepath.Rel(promptsDir, p)
+		if err != nil {
+			return nil
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil
+		}
+		key := strings.TrimSuffix(filepath.ToSlash(rel), ".md")
+		entries = append(entries, "prompts/"+key+":"+hexHash(data))
+		return nil
+	})
+
+	// scripts/<rel> → key "scripts/<rel>" (forward slashes)
+	scriptsDir := filepath.Join(stateDir, "scripts")
+	//nolint:errcheck // non-existent scriptsDir and internal walk errors are intentionally ignored
+	_ = filepath.WalkDir(scriptsDir, func(p string, d fs.DirEntry, walkErr error) error {
+		if walkErr != nil || d.IsDir() {
+			return nil
+		}
+		rel, err := filepath.Rel(scriptsDir, p)
+		if err != nil {
+			return nil
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return nil
+		}
+		key := filepath.ToSlash(rel)
+		entries = append(entries, "scripts/"+key+":"+hexHash(data))
+		return nil
+	})
+
+	sort.Strings(entries)
+	sum := sha256.Sum256([]byte(strings.Join(entries, "\n")))
+	return fmt.Sprintf("%x", sum)
+}
+
+func hexHash(data []byte) string {
+	sum := sha256.Sum256(data)
+	return fmt.Sprintf("%x", sum)
+}
+
+func sortedByteMapKeys(m map[string][]byte) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func cloneBytes(data []byte) []byte {
