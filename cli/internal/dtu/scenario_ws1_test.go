@@ -248,8 +248,8 @@ func TestWS1PolicyDenyBlocksPhase(t *testing.T) {
 	if len(summary.Phases) != 0 {
 		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
 	}
-	if summary.EvidenceManifestPath != "" {
-		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	if summary.EvidenceManifestPath == "" {
+		t.Fatal("summary.EvidenceManifestPath is empty, want non-empty path")
 	}
 
 	// Verify the provider was never invoked.
@@ -391,8 +391,8 @@ phases:
 	if len(summary.Phases) != 0 {
 		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
 	}
-	if summary.EvidenceManifestPath != "" {
-		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	if summary.EvidenceManifestPath == "" {
+		t.Fatal("summary.EvidenceManifestPath is empty, want non-empty path")
 	}
 
 	// Verify the implement phase was never invoked (violation stops after tamper).

@@ -3576,7 +3576,7 @@ func TestSmoke_WS6_S15_PromptOnlyVesselNoPolicy(t *testing.T) {
 	}
 }
 
-func TestSmoke_WS6_S16_PromptOnlyVesselNoEvidence(t *testing.T) {
+func TestSmoke_WS6_S16_PromptOnlyVesselWritesEmptyEvidenceManifest(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem")
@@ -3590,7 +3590,11 @@ func TestSmoke_WS6_S16_PromptOnlyVesselNoEvidence(t *testing.T) {
 	assert.Equal(t, 1, result.Completed)
 
 	manifestPath := config.RuntimePath(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
-	assert.NoFileExists(t, manifestPath)
+	assert.FileExists(t, manifestPath)
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, "prompt-1")
+	require.NoError(t, err)
+	assert.Empty(t, manifest.Claims)
 }
 
 func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
@@ -3631,6 +3635,80 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	assert.Equal(t, cost.UsageSourceEstimated, report.Phases[0].UsageSource)
 	assert.Equal(t, summary.TotalTokensEst, report.Phases[0].TotalTokens)
 	assert.Equal(t, summary.TotalCostUSDEst, report.Phases[0].CostUSD)
+}
+
+func TestSmoke_WS3_S18_AllThreeArtifactsWrittenForEveryVesselRun(t *testing.T) {
+	tests := []struct {
+		name       string
+		enqueue    func(dir string, q *queue.Queue)
+		vesselID   string
+		wantClaims int
+	}{
+		{
+			name: "gated phase produces one claim",
+			enqueue: func(dir string, q *queue.Queue) {
+				_, _ = q.Enqueue(makeVessel(1, "gated-workflow"))
+				writeWorkflowFile(t, dir, "gated-workflow", []testPhase{
+					{
+						name:          "implement",
+						promptContent: "Implement the fix",
+						maxTurns:      5,
+						gate:          "      type: command\n      run: \"go test ./...\"\n      evidence:\n        claim: \"Tests pass\"\n        level: behaviorally_checked\n        checker: \"go test\"\n        trust_boundary: \"Package-level only\"",
+					},
+				})
+			},
+			vesselID:   "issue-1",
+			wantClaims: 1,
+		},
+		{
+			name: "prompt-only vessel has no claims",
+			enqueue: func(_ string, q *queue.Queue) {
+				_, _ = q.Enqueue(makePromptVessel(2, "prompt only all artifacts"))
+			},
+			vesselID:   "prompt-2",
+			wantClaims: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := makeTestConfig(dir, 1)
+			cfg.StateDir = filepath.Join(dir, ".xylem")
+			setPricedModel(cfg)
+
+			oldWd, _ := os.Getwd()
+			if err := os.Chdir(dir); err != nil {
+				t.Fatalf("chdir: %v", err)
+			}
+			defer os.Chdir(oldWd)
+
+			q := queue.New(filepath.Join(dir, "queue.jsonl"))
+			tt.enqueue(dir, q)
+
+			r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{
+				gateCallResults: []gateCallResult{{output: []byte("ok"), err: nil}},
+			})
+
+			result, err := r.DrainAndWait(context.Background())
+			require.NoError(t, err)
+			require.Equal(t, 1, result.Completed)
+
+			summary := loadSummary(t, cfg.StateDir, tt.vesselID)
+			assert.Equal(t, "completed", summary.State)
+
+			// All three artifacts must always be written.
+			assert.FileExists(t, config.RuntimePath(cfg.StateDir, "phases", tt.vesselID, summaryFileName))
+			assert.NotEmpty(t, summary.CostReportPath)
+			assert.FileExists(t, config.RuntimePath(cfg.StateDir, "phases", tt.vesselID, costReportFileName))
+			assert.NotEmpty(t, summary.EvidenceManifestPath)
+			assert.FileExists(t, config.RuntimePath(cfg.StateDir, "phases", tt.vesselID, "evidence-manifest.json"))
+
+			manifest, err := evidence.LoadManifest(cfg.StateDir, tt.vesselID)
+			require.NoError(t, err)
+			assert.Len(t, manifest.Claims, tt.wantClaims)
+		})
+	}
 }
 
 func TestSmoke_S4_CompactedPromptArtifactWrittenWithinContextBudget(t *testing.T) {
@@ -6781,8 +6859,8 @@ func TestDrainPolicyBlocksPhaseBeforeExecution(t *testing.T) {
 			if len(summary.Phases) != 0 {
 				t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
 			}
-			if summary.EvidenceManifestPath != "" {
-				t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+			if summary.EvidenceManifestPath == "" {
+				t.Fatal("summary.EvidenceManifestPath is empty, want non-empty path")
 			}
 
 			tt.assertBlocked(t, cmdRunner)
@@ -6959,8 +7037,8 @@ func TestDrainOrchestratedPolicyBlocksSinglePhaseWave(t *testing.T) {
 	if len(summary.Phases) != 0 {
 		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
 	}
-	if summary.EvidenceManifestPath != "" {
-		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	if summary.EvidenceManifestPath == "" {
+		t.Fatal("summary.EvidenceManifestPath is empty, want non-empty path")
 	}
 
 	entries, err := auditLog.Entries()
@@ -7050,8 +7128,8 @@ func TestDrainOrchestratedProtectedSurfaceViolationFails(t *testing.T) {
 	if len(summary.Phases) != 0 {
 		t.Fatalf("len(summary.Phases) = %d, want 0", len(summary.Phases))
 	}
-	if summary.EvidenceManifestPath != "" {
-		t.Fatalf("summary.EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	if summary.EvidenceManifestPath == "" {
+		t.Fatal("summary.EvidenceManifestPath is empty, want non-empty path")
 	}
 
 	entries, err := auditLog.Entries()

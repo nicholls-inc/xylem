@@ -278,7 +278,7 @@ func TestSmoke_S14_SaveVesselSummaryFailureIsNonFatalCallerContinues(t *testing.
 	assert.Equal(t, queue.StateFailed, queueVesselByID(t, q, vessel.ID).State)
 }
 
-func TestSmoke_S17_CompleteVesselSavesEvidenceManifestWhenClaimsArePresent(t *testing.T) {
+func TestSmoke_WS3_S17_CompleteVesselSavesEvidenceManifestWhenClaimsArePresent(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem-state")
@@ -318,7 +318,7 @@ func TestSmoke_S17_CompleteVesselSavesEvidenceManifestWhenClaimsArePresent(t *te
 	assert.Equal(t, evidenceManifestRelativePath(vessel.ID), summary.EvidenceManifestPath)
 }
 
-func TestSmoke_S18_EvidenceManifestPathIsEmptyInSummaryWhenNoClaimsProvided(t *testing.T) {
+func TestSmoke_WS3_S18_EvidenceManifestWrittenEvenWhenNoClaimsProvided(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 1)
 	cfg.StateDir = filepath.Join(dir, ".xylem-state")
@@ -338,16 +338,18 @@ func TestSmoke_S18_EvidenceManifestPathIsEmptyInSummaryWhenNoClaimsProvided(t *t
 	assert.Equal(t, "completed", outcome)
 
 	manifestPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "evidence-manifest.json")
-	_, err = os.Stat(manifestPath)
-	require.Error(t, err)
-	require.True(t, os.IsNotExist(err))
+	assert.FileExists(t, manifestPath)
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, vessel.ID)
+	require.NoError(t, err)
+	assert.Empty(t, manifest.Claims)
 
 	summary := loadSummary(t, cfg.StateDir, vessel.ID)
-	assert.Empty(t, summary.EvidenceManifestPath)
+	assert.Equal(t, evidenceManifestRelativePath(vessel.ID), summary.EvidenceManifestPath)
 
 	raw := loadSummaryJSON(t, cfg.StateDir, vessel.ID)
 	_, ok := raw["evidence_manifest_path"]
-	assert.False(t, ok)
+	assert.True(t, ok)
 }
 
 func TestSmoke_S18a_PersistRunArtifactsWritesCostAndBudgetReviewInputs(t *testing.T) {
@@ -785,7 +787,7 @@ func TestVesselRunStateBuildSummaryAggregatesTotalsAndStatus(t *testing.T) {
 	}
 }
 
-func TestSmoke_S15_BuildGateClaimWithEvidenceMetadataProducesATypedClaim(t *testing.T) {
+func TestSmoke_WS4_S15_BuildGateClaimWithEvidenceMetadataProducesATypedClaim(t *testing.T) {
 	recordedAt := time.Date(2026, time.March, 31, 12, 0, 0, 0, time.UTC)
 	artifactPath := phaseArtifactRelativePath("vessel-1", "implement")
 	claim := buildGateClaim(workflow.Phase{
@@ -811,7 +813,7 @@ func TestSmoke_S15_BuildGateClaimWithEvidenceMetadataProducesATypedClaim(t *test
 	assert.True(t, claim.Timestamp.Equal(recordedAt))
 }
 
-func TestSmoke_S16_BuildGateClaimWithoutEvidenceMetadataProducesABehaviorallyCheckedClaim(t *testing.T) {
+func TestSmoke_WS4_S16_CommandGateTrustBoundaryIsCommandGateOutput(t *testing.T) {
 	// Command gates run a shell command and assert on its exit status — that is
 	// a behavioral check, not an unclassified assertion. Per P0 #10 in
 	// docs/plans/sota-gap-implementation-2026-04-11.md, command gates default to
@@ -858,7 +860,7 @@ func TestBuildGateClaimDefaultsLiveGatesToObservedInSitu(t *testing.T) {
 	}
 }
 
-func TestSmoke_S17_BuildGateClaimSetsCheckerFromGateRunCommandWhenNoEvidence(t *testing.T) {
+func TestSmoke_WS4_S17_BuildGateClaimSetsCheckerFromGateRunCommandWhenNoEvidence(t *testing.T) {
 	claim := buildGateClaim(workflow.Phase{
 		Name: "implement",
 		Gate: &workflow.Gate{Run: "cd cli && go test ./..."},
@@ -975,13 +977,21 @@ func TestDrainPromptOnlyWritesSummaryArtifact(t *testing.T) {
 	if summary.TotalTokensEst <= 0 {
 		t.Fatalf("TotalTokensEst = %d, want > 0", summary.TotalTokensEst)
 	}
-	if summary.EvidenceManifestPath != "" {
-		t.Fatalf("EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	if summary.EvidenceManifestPath == "" {
+		t.Fatal("EvidenceManifestPath is empty, want non-empty path")
 	}
 
 	manifestPath := config.RuntimePath(cfg.StateDir, "phases", "prompt-1", "evidence-manifest.json")
-	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
-		t.Fatalf("expected no evidence manifest, got err=%v", err)
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("expected evidence manifest to exist, got err=%v", err)
+	}
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, "prompt-1")
+	if err != nil {
+		t.Fatalf("LoadManifest() error = %v", err)
+	}
+	if len(manifest.Claims) != 0 {
+		t.Fatalf("manifest.Claims = %v, want empty (prompt-only vessel has no gates)", manifest.Claims)
 	}
 }
 
@@ -1448,13 +1458,21 @@ func TestDrainWorkflowWithoutGateOmitsEvidenceFromCompletionComment(t *testing.T
 	if len(summary.Phases) != 2 {
 		t.Fatalf("len(Phases) = %d, want 2", len(summary.Phases))
 	}
-	if summary.EvidenceManifestPath != "" {
-		t.Fatalf("EvidenceManifestPath = %q, want empty string", summary.EvidenceManifestPath)
+	if summary.EvidenceManifestPath == "" {
+		t.Fatal("EvidenceManifestPath is empty, want non-empty path")
 	}
 
 	manifestPath := config.RuntimePath(cfg.StateDir, "phases", "issue-7", "evidence-manifest.json")
-	if _, err := os.Stat(manifestPath); !os.IsNotExist(err) {
-		t.Fatalf("expected no evidence manifest, got err=%v", err)
+	if _, err := os.Stat(manifestPath); err != nil {
+		t.Fatalf("expected evidence manifest to exist, got err=%v", err)
+	}
+
+	manifest, err := evidence.LoadManifest(cfg.StateDir, "issue-7")
+	if err != nil {
+		t.Fatalf("LoadManifest() error = %v", err)
+	}
+	if len(manifest.Claims) != 0 {
+		t.Fatalf("manifest.Claims = %v, want empty (no gates in workflow)", manifest.Claims)
 	}
 
 	if !strings.Contains(cmdRunner.lastBody, "**xylem — all phases completed**") {

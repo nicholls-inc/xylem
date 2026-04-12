@@ -1377,20 +1377,18 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	if latest, err := r.Queue.FindByID(vessel.ID); err == nil && latest != nil {
 		artifactVessel = *latest
 	}
-	var manifest *evidence.Manifest
-	if len(claims) > 0 {
-		manifest = &evidence.Manifest{
-			VesselID:  vessel.ID,
-			Workflow:  vessel.Workflow,
-			Claims:    append([]evidence.Claim(nil), claims...),
-			CreatedAt: now.UTC(),
-		}
-		if err := evidence.SaveManifest(r.Config.StateDir, vessel.ID, manifest); err != nil {
-			log.Printf("warn: save evidence manifest: %v", err)
-		} else {
-			summary.EvidenceManifestPath = evidenceManifestRelativePath(vessel.ID)
-			reviewArtifacts.EvidenceManifest = summary.EvidenceManifestPath
-		}
+	manifest := &evidence.Manifest{
+		VesselID:  vessel.ID,
+		Workflow:  vessel.Workflow,
+		Claims:    append([]evidence.Claim(nil), claims...),
+		CreatedAt: now.UTC(),
+	}
+	if err := evidence.SaveManifest(r.Config.StateDir, vessel.ID, manifest); err != nil {
+		log.Printf("warn: save evidence manifest: %v", err)
+		manifest = nil
+	} else {
+		summary.EvidenceManifestPath = evidenceManifestRelativePath(vessel.ID)
+		reviewArtifacts.EvidenceManifest = summary.EvidenceManifestPath
 	}
 
 	if vrs.costTracker != nil {
