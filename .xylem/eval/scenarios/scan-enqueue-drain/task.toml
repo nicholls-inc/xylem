@@ -1,0 +1,12 @@
+[task]
+id = "scan-enqueue-drain"
+version = "1"
+
+[task.environment]
+timeout_seconds = 600
+
+[task.metadata]
+category = "scan-drain"
+tags = ["scanner", "drain", "enqueue"]
+difficulty = "easy"
+canary = "CANARY-XYLEM-EVAL-c5f2"

@@ -55,7 +55,9 @@ func newRootCmd() *cobra.Command {
 				commandPath == "xylem audit" ||
 				strings.HasPrefix(commandPath, "xylem audit ") ||
 				commandPath == "xylem daemon stop" ||
-				commandPath == "xylem daemon reload"
+				commandPath == "xylem daemon reload" ||
+				commandPath == "xylem eval" ||
+				strings.HasPrefix(commandPath, "xylem eval ")
 
 			if !skipTooling {
 				if _, err := exec.LookPath("git"); err != nil {
@@ -128,6 +130,7 @@ func newRootCmd() *cobra.Command {
 		newVersionCmd(),
 		newFieldReportCmd(),
 		newAuditCmd(),
+		newEvalCmd(),
 	)
 
 	return cmd
