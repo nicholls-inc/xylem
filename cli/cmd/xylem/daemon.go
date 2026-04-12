@@ -171,7 +171,7 @@ func cmdDaemon(cmd *cobra.Command, cfg *config.Config, q *queue.Queue, wt *workt
 	}
 
 	// Notification system: periodic status reports + escalation alerts.
-	dn := newDaemonNotifier(cfg, q)
+	dn := newDaemonNotifier(ctx, cfg, q, newCmdRunner(cfg))
 
 	tickHook := func(now time.Time, state daemonTickState) {
 		if !state.LastUpgrade.IsZero() {
