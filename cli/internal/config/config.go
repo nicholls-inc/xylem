@@ -282,6 +282,14 @@ type parsedConcurrency struct {
 }
 
 func Load(path string) (*Config, error) {
+	return load(path, true)
+}
+
+func LoadUnvalidated(path string) (*Config, error) {
+	return load(path, false)
+}
+
+func load(path string, validate bool) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", path, err)
@@ -333,8 +341,10 @@ func Load(path string) (*Config, error) {
 
 	cfg.normalize()
 
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	if validate {
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
 	}
 
 	return cfg, nil
@@ -1061,7 +1071,7 @@ func (c *Config) validateWorkflowRequirements() error {
 }
 
 func (c *Config) validationRequiredWorkflows() []string {
-	required := []string{"fix-pr-checks", "resolve-conflicts"}
+	required := []string{"adapt-repo", "fix-pr-checks", "resolve-conflicts"}
 	active := make([]string, 0, len(required))
 	for _, workflowName := range required {
 		if c.workflowActive(workflowName) {

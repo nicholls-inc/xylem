@@ -2673,6 +2673,9 @@ func TestSmoke_S2_RejectsEmptyValidationForActivePRValidationWorkflows(t *testin
       resolve-conflicts:
         labels: [merge]
         workflow: resolve-conflicts
+      adapt-repo:
+        labels: [bootstrap]
+        workflow: adapt-repo
 concurrency: 2
 max_turns: 50
 timeout: "30m"
@@ -2684,6 +2687,7 @@ claude:
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validation: at least one of format, lint, build, or test must be set")
+	assert.Contains(t, err.Error(), "adapt-repo")
 	assert.Contains(t, err.Error(), "fix-pr-checks")
 	assert.Contains(t, err.Error(), "resolve-conflicts")
 }
@@ -2698,7 +2702,7 @@ func TestSmoke_S3_AllowsPartialValidationForActivePRValidationWorkflow(t *testin
     tasks:
       fix-checks:
         labels: [ci]
-        workflow: fix-pr-checks
+        workflow: adapt-repo
 validation:
   test: "go test ./..."
 concurrency: 2
@@ -2716,7 +2720,7 @@ claude:
 }
 
 func TestSmoke_S4_RejectsGoimportsPackagePatternForValidationRequiredWorkflows(t *testing.T) {
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 
@@ -2747,7 +2751,7 @@ claude:
 }
 
 func TestSmoke_S5_AllowsGoimportsDirectoryTargetsForValidationRequiredWorkflows(t *testing.T) {
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 
@@ -2778,7 +2782,7 @@ claude:
 }
 
 func TestSmoke_S6_AllowsGoimportsLocalPrefixContainingEllipsisForValidationRequiredWorkflows(t *testing.T) {
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 
@@ -2837,7 +2841,7 @@ func TestSmoke_S7_RejectsRepoRootGoCLIPathsForValidationRequiredWorkflows(t *tes
 		},
 	}
 
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		workflow := workflow
 		for _, tc := range testCases {
 			tc := tc
@@ -2884,7 +2888,7 @@ func TestSmoke_S8_AllowsCLIWorkingDirGoCommandsForValidationRequiredWorkflows(t 
 		{name: "test", field: "test", command: "cd cli && go test ./..."},
 	}
 
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		workflow := workflow
 		for _, tc := range testCases {
 			tc := tc
