@@ -22,44 +22,55 @@ func newCleanupCmd() *cobra.Command {
 		Short: "Remove stale worktrees and old phase outputs",
 		RunE: func(cmd *cobra.Command, args []string) error {
 			dryRun, _ := cmd.Flags().GetBool("dry-run")
-			return cmdCleanup(deps.cfg, deps.q, deps.wt, dryRun)
+			retainStr, _ := cmd.Flags().GetString("retain")
+			retain := deps.cfg.CleanupAfterDuration()
+			if retainStr != "" {
+				d, err := time.ParseDuration(retainStr)
+				if err != nil {
+					return fmt.Errorf("invalid --retain value %q: %w", retainStr, err)
+				}
+				retain = d
+			}
+			return cmdCleanup(deps.cfg, deps.q, deps.wt, dryRun, retain)
 		},
 	}
 	cmd.Flags().Bool("dry-run", false, "Preview what would be removed")
+	cmd.Flags().String("retain", "", "remove terminal vessels older than this duration (default: cleanup_after from .xylem.yml, typically 168h)")
 	return cmd
 }
 
-func cmdCleanup(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun bool) error {
+func cmdCleanup(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun bool, retain time.Duration) error {
 	if err := cleanupWorktrees(wt, q, dryRun); err != nil {
 		return err
 	}
 
 	cleanupPhaseOutputs(cfg, q, dryRun)
-	compactQueue(q, dryRun)
+	compactQueue(q, retain, dryRun)
 
 	return nil
 }
 
-func compactQueue(q *queue.Queue, dryRun bool) {
+func compactQueue(q *queue.Queue, retain time.Duration, dryRun bool) {
+	cutoff := time.Now().Add(-retain)
 	if dryRun {
-		removed, err := q.CompactDryRun()
+		removed, err := q.CompactOlderThanDryRun(cutoff)
 		if err != nil {
 			slog.Warn("queue compaction dry-run check failed", "error", err)
 			return
 		}
 		if removed > 0 {
-			fmt.Printf("Would remove %d stale queue record(s) (dry-run — no changes made)\n", removed)
+			fmt.Printf("Would remove %d stale queue record(s) older than %s (dry-run — no changes made)\n", removed, retain)
 		}
 		return
 	}
 
-	removed, err := q.Compact()
+	removed, err := q.CompactOlderThan(cutoff)
 	if err != nil {
 		slog.Warn("queue compaction failed", "error", err)
 		return
 	}
 	if removed > 0 {
-		fmt.Printf("Compacted queue: removed %d stale record(s)\n", removed)
+		fmt.Printf("Compacted queue: removed %d stale record(s) older than %s\n", removed, retain)
 	}
 }
 

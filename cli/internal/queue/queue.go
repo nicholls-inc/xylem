@@ -483,6 +483,57 @@ func compactVessels(vessels []Vessel) ([]Vessel, int) {
 	return compacted, removed
 }
 
+// compactVesselsOlderThan removes terminal vessels whose EndedAt is before
+// cutoff, in addition to deduplication. Vessels with a nil EndedAt are always
+// kept regardless of state.
+func compactVesselsOlderThan(vessels []Vessel, cutoff time.Time) ([]Vessel, int) {
+	deduped, dedupRemoved := compactVessels(vessels)
+	var (
+		kept       []Vessel
+		ageRemoved int
+	)
+	for _, v := range deduped {
+		if v.State.IsTerminal() && v.EndedAt != nil && v.EndedAt.Before(cutoff) {
+			ageRemoved++
+		} else {
+			kept = append(kept, v)
+		}
+	}
+	return kept, dedupRemoved + ageRemoved
+}
+
+// CompactOlderThan removes terminal vessel records whose EndedAt is before
+// cutoff, in addition to deduplication. Vessels with a nil EndedAt are always
+// kept. Returns the count of records removed.
+func (q *Queue) CompactOlderThan(cutoff time.Time) (int, error) {
+	var removed int
+	err := q.withLock(func() error {
+		vessels, err := q.readAllVessels()
+		if err != nil {
+			return err
+		}
+		compacted, n := compactVesselsOlderThan(vessels, cutoff)
+		removed = n
+		return q.writeAllVessels(compacted)
+	})
+	return removed, err
+}
+
+// CompactOlderThanDryRun reports how many records CompactOlderThan would remove
+// without modifying the queue file.
+func (q *Queue) CompactOlderThanDryRun(cutoff time.Time) (int, error) {
+	var removable int
+	err := q.withRLock(func() error {
+		vessels, err := q.readAllVessels()
+		if err != nil {
+			return err
+		}
+		_, removable = compactVesselsOlderThan(vessels, cutoff)
+		return nil
+	})
+	return removable, err
+}
+
 func (q *Queue) HasRef(ref string) bool {
 	vessels, err := q.List()
 	if err != nil {

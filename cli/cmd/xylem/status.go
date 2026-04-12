@@ -96,9 +96,9 @@ func cmdStatus(cfg *config.Config, q *queue.Queue, jsonMode bool, stateFilter st
 		counts[j.State]++
 	}
 
-	fmt.Printf("Queue: %d running, %d pending, %d completed, %d failed, %d cancelled, %d waiting, %d timed_out\n",
-		counts[queue.StateRunning], counts[queue.StatePending], counts[queue.StateCompleted],
-		counts[queue.StateFailed], counts[queue.StateCancelled], counts[queue.StateWaiting],
+	fmt.Printf("Queue: %d pending, %d running, %d waiting | %d completed, %d failed, %d cancelled, %d timed_out\n",
+		counts[queue.StatePending], counts[queue.StateRunning], counts[queue.StateWaiting],
+		counts[queue.StateCompleted], counts[queue.StateFailed], counts[queue.StateCancelled],
 		counts[queue.StateTimedOut])
 	renderDaemonHealth(daemonSnapshot)
 	if len(vessels) == 0 {
