@@ -68,6 +68,8 @@ claude:
   flags: "--bare"
   env:
     ANTHROPIC_API_KEY: "test-key"
+phase:
+  context_budget: 120000
 `)
 
 	cfg, err := Load(path)
@@ -122,6 +124,9 @@ claude:
 
 	if cfg.Claude.Env["ANTHROPIC_API_KEY"] != "test-key" {
 		t.Fatalf("Claude.Env[ANTHROPIC_API_KEY] = %q, want test-key", cfg.Claude.Env["ANTHROPIC_API_KEY"])
+	}
+	if cfg.Phase.ContextBudget != 120000 {
+		t.Fatalf("Phase.ContextBudget = %d, want 120000", cfg.Phase.ContextBudget)
 	}
 
 	// Legacy config should be normalized into Sources
@@ -203,6 +208,9 @@ claude:
 	if !cfg.Daemon.StallMonitor.OrphanCheckEnabled {
 		t.Fatal("Daemon.StallMonitor.OrphanCheckEnabled = false, want true")
 	}
+	if cfg.Phase.ContextBudget != DefaultPhaseContextBudget {
+		t.Fatalf("Phase.ContextBudget = %d, want %d", cfg.Phase.ContextBudget, DefaultPhaseContextBudget)
+	}
 
 	// Legacy config should be normalized into Sources
 	if len(cfg.Sources) != 1 {
@@ -259,6 +267,29 @@ claude:
 
 	_, err := Load(path)
 	requireErrorContains(t, err, "concurrency.global is required when concurrency is a map")
+}
+
+func TestLoadRejectsNonPositivePhaseContextBudget(t *testing.T) {
+	path := writeConfigFile(t, `repo: owner/name
+tasks:
+  fix-bugs:
+    labels: [bug]
+    workflow: fix-bug
+claude:
+  default_model: "claude-sonnet-4-6"
+phase:
+  context_budget: 0
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, "phase.context_budget must be greater than 0")
+}
+
+func TestValidateRejectsNegativePhaseContextBudget(t *testing.T) {
+	cfg := validConfig()
+	cfg.Phase.ContextBudget = -1
+
+	requireErrorContains(t, cfg.Validate(), "phase.context_budget must be greater than 0")
 }
 
 func TestResolveStateDir(t *testing.T) {

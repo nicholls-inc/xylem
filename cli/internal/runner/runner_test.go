@@ -21,6 +21,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/ctxmgr"
 	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
@@ -3632,6 +3633,55 @@ func TestSmoke_WS6_S17_PromptOnlyVesselSummaryArtifact(t *testing.T) {
 	assert.Equal(t, summary.TotalCostUSDEst, report.Phases[0].CostUSD)
 }
 
+func TestSmoke_S4_CompactedPromptArtifactWrittenWithinContextBudget(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Phase.ContextBudget = config.DefaultPhaseContextBudget
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	_, err := q.Enqueue(makeVessel(1, "context-compaction"))
+	require.NoError(t, err)
+
+	writeWorkflowFile(t, dir, "context-compaction", []testPhase{
+		{
+			name:          "analyze",
+			promptContent: "Analyze the oversized prompt inputs",
+			maxTurns:      5,
+		},
+		{
+			name:          "implement",
+			promptContent: strings.Repeat("{{.PreviousOutputs.analyze}}\n", 40),
+			maxTurns:      5,
+		},
+	})
+
+	withTestWorkingDir(t, dir)
+
+	cmdRunner := &mockCmdRunner{
+		phaseOutputs: map[string][]byte{
+			"Analyze the oversized prompt inputs": []byte(strings.Repeat("analysis context block ", 1200)),
+			"[context compacted":                  []byte("implementation completed"),
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cmdRunner)
+	r.Sources = map[string]source.Source{
+		"github-issue": makeGitHubSource(),
+	}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Completed)
+
+	promptPath := config.RuntimePath(cfg.StateDir, "phases", "issue-1", "implement.prompt")
+	assert.FileExists(t, promptPath)
+
+	prompt, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, ctxmgr.EstimateTokens(string(prompt)), config.DefaultPhaseContextBudget)
+	assert.Contains(t, string(prompt), "[context compacted")
+}
+
 func TestDrainCommandGatePasses(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeTestConfig(dir, 2)
@@ -6311,7 +6361,7 @@ func TestSmoke_S4_BuildTemplateDataExposesRepoAndValidation(t *testing.T) {
 			"schedule.source_name": "security-compliance",
 		},
 	}
-	td := r.buildTemplateData(vessel, phase.IssueData{Number: 42}, "merge", 0, nil, "", phase.EvaluationData{})
+	td := r.buildTemplateData(vessel, nil, phase.IssueData{Number: 42}, "merge", 0, nil, "", phase.EvaluationData{})
 
 	rendered, err := renderCommandTemplate("merge", "command", "gh pr merge {{.Issue.Number}} --repo {{.Repo.Slug}} && echo {{.Source.Name}} {{.Source.Repo}} {{.Repo.DefaultBranch}} {{.Validation.Format}} {{.Validation.Lint}} {{.Validation.Build}} {{.Validation.Test}} {{.Vessel.Ref}} {{index .Vessel.Meta \"schedule.source_name\"}}", td)
 	require.NoError(t, err)

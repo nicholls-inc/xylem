@@ -24,6 +24,7 @@ const DefaultAuditLogPath = "audit.jsonl"
 const DefaultLLMRoutingTier = "med"
 const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
 const DefaultCostOnExceeded = "drain_only"
+const DefaultPhaseContextBudget = 100_000
 const runtimeStateDirName = "state"
 
 // DefaultProtectedSurfaces is the default list of paths that xylem's
@@ -84,6 +85,7 @@ type Config struct {
 	Copilot             CopilotConfig             `yaml:"copilot,omitempty"`
 	Validation          ValidationConfig          `yaml:"validation,omitempty"`
 	Daemon              DaemonConfig              `yaml:"daemon,omitempty"`
+	Phase               PhaseConfig               `yaml:"phase,omitempty"`
 	Harness             HarnessConfig             `yaml:"harness,omitempty"`
 	Observability       ObservabilityConfig       `yaml:"observability,omitempty"`
 	Cost                CostConfig                `yaml:"cost,omitempty"`
@@ -221,6 +223,10 @@ type DaemonConfig struct {
 	AutoMergeReviewer string `yaml:"auto_merge_reviewer,omitempty"`
 }
 
+type PhaseConfig struct {
+	ContextBudget int `yaml:"context_budget,omitempty"`
+}
+
 type StallMonitorConfig struct {
 	PhaseStallThreshold  string `yaml:"phase_stall_threshold,omitempty"`
 	ScannerIdleThreshold string `yaml:"scanner_idle_threshold,omitempty"`
@@ -325,6 +331,15 @@ func load(path string, validate bool) (*Config, error) {
 	}
 	removeYAMLField(&root, "concurrency")
 
+	var phaseProbe struct {
+		Phase struct {
+			ContextBudget *int `yaml:"context_budget"`
+		} `yaml:"phase"`
+	}
+	if err := root.Decode(&phaseProbe); err != nil {
+		return nil, fmt.Errorf("decode phase config probe: %w", err)
+	}
+
 	cfg := &Config{
 		Concurrency:         2,
 		ConcurrencyPerClass: nil,
@@ -348,6 +363,9 @@ func load(path string, validate bool) (*Config, error) {
 				OrphanCheckEnabled:   true,
 			},
 		},
+		Phase: PhaseConfig{
+			ContextBudget: DefaultPhaseContextBudget,
+		},
 		Cost: CostConfig{
 			OnExceeded: DefaultCostOnExceeded,
 		},
@@ -355,6 +373,9 @@ func load(path string, validate bool) (*Config, error) {
 
 	if err := root.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("decode config yaml: %w", err)
+	}
+	if phaseProbe.Phase.ContextBudget != nil && *phaseProbe.Phase.ContextBudget <= 0 {
+		return nil, fmt.Errorf("phase.context_budget must be greater than 0")
 	}
 	if concurrency.Set {
 		cfg.Concurrency = concurrency.Global
@@ -575,6 +596,9 @@ func (c *Config) Validate() error {
 		if _, err := time.ParseDuration(c.Daemon.StallMonitor.ScannerIdleThreshold); err != nil {
 			return fmt.Errorf("daemon.stall_monitor.scanner_idle_threshold must be a valid duration: %w", err)
 		}
+	}
+	if c.Phase.ContextBudget < 0 {
+		return fmt.Errorf("phase.context_budget must be greater than 0")
 	}
 	if strings.TrimSpace(c.Daemon.AutoMergeBranchPattern) != "" {
 		if _, err := regexp.Compile(strings.TrimSpace(c.Daemon.AutoMergeBranchPattern)); err != nil {

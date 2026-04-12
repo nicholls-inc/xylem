@@ -60,6 +60,7 @@ func (g *phaseLoopGenerator) Generate(ctx context.Context, _ string, feedback []
 	g.iteration++
 	td := g.r.buildTemplateData(
 		g.vessel,
+		g.wf,
 		g.issueData,
 		g.phaseDef.Name,
 		g.phaseIdx,
@@ -71,7 +72,10 @@ func (g *phaseLoopGenerator) Generate(ctx context.Context, _ string, feedback []
 			Criteria:  g.criteriaText,
 		},
 	)
-	rendered, err := phase.RenderPrompt(g.promptTemplate, td)
+	rendered, err := phase.RenderPromptWithOptions(g.promptTemplate, td, phase.RenderOptions{
+		ContextBudget: phaseContextBudget(g.r.Config),
+		Preamble:      g.harnessContent,
+	})
 	if err != nil {
 		g.appendTrace("generation", false, "")
 		return "", fmt.Errorf("render prompt for phase %s: %w", g.phaseDef.Name, err)
@@ -134,6 +138,7 @@ func (e *phaseLoopEvaluator) Evaluate(ctx context.Context, output string, criter
 	e.iteration++
 	td := e.r.buildTemplateData(
 		e.vessel,
+		e.wf,
 		e.issueData,
 		e.phaseDef.Name,
 		e.phaseIdx,
@@ -145,7 +150,10 @@ func (e *phaseLoopEvaluator) Evaluate(ctx context.Context, output string, criter
 			Criteria:  formatEvaluatorCriteria(criteria),
 		},
 	)
-	rendered, err := phase.RenderPrompt(e.evalTemplate, td)
+	rendered, err := phase.RenderPromptWithOptions(e.evalTemplate, td, phase.RenderOptions{
+		ContextBudget: phaseContextBudget(e.r.Config),
+		Preamble:      e.harnessContent,
+	})
 	if err != nil {
 		e.appendTrace(false, "")
 		return nil, fmt.Errorf("render evaluator prompt for phase %s: %w", e.phaseDef.Name, err)
