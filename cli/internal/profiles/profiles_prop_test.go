@@ -1,10 +1,11 @@
-package profiles
+package profiles_test
 
 import (
 	"fmt"
 	"strings"
 	"testing"
 
+	. "github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"pgregory.net/rapid"
 )
 

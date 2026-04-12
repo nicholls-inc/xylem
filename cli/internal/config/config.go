@@ -12,6 +12,8 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/cadence"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"gopkg.in/yaml.v3"
 )
 
@@ -85,6 +87,7 @@ type Config struct {
 	Observability       ObservabilityConfig       `yaml:"observability,omitempty"`
 	Cost                CostConfig                `yaml:"cost,omitempty"`
 	Telemetry           TelemetryConfig           `yaml:"telemetry,omitempty"`
+	configPath          string
 }
 
 type ProviderConfig struct {
@@ -345,6 +348,7 @@ func load(path string, validate bool) (*Config, error) {
 		cfg.Concurrency = concurrency.Global
 		cfg.ConcurrencyPerClass = concurrency.PerClass
 	}
+	cfg.configPath = path
 
 	cfg.normalize()
 
@@ -1108,6 +1112,9 @@ func (c *Config) validateTelemetry() error {
 }
 
 func (c *Config) validateWorkflowRequirements() error {
+	if err := c.validateAutoMergeWorkflowClass(); err != nil {
+		return err
+	}
 	active := c.validationRequiredWorkflows()
 	if len(active) == 0 {
 		return nil
@@ -1153,6 +1160,109 @@ func (c *Config) validateValidationCommands() error {
 		}
 	}
 	return nil
+}
+
+func (c *Config) validateAutoMergeWorkflowClass() error {
+	if !c.Daemon.AutoMerge {
+		return nil
+	}
+
+	workflows, err := c.activeWorkflowDefinitions()
+	if err != nil {
+		return fmt.Errorf("validate daemon.auto_merge workflows: %w", err)
+	}
+	hasOps, err := workflowMapHasClass(workflows, policy.Ops)
+	if err != nil {
+		return fmt.Errorf("validate daemon.auto_merge workflows: %w", err)
+	}
+	if !hasOps {
+		return fmt.Errorf("daemon.auto_merge requires an active profile with at least one ops-class workflow")
+	}
+	return nil
+}
+
+func (c *Config) activeWorkflowDefinitions() (map[string][]byte, error) {
+	if len(c.Profiles) > 0 {
+		composed, err := profiles.Compose(c.Profiles...)
+		if err != nil {
+			return nil, err
+		}
+		return composed.Workflows, nil
+	}
+	return c.localWorkflowDefinitions()
+}
+
+func (c *Config) localWorkflowDefinitions() (map[string][]byte, error) {
+	if strings.TrimSpace(c.configPath) == "" {
+		return nil, nil
+	}
+
+	workflowsDir := filepath.Join(ResolveStateDir(filepath.Dir(c.configPath), c.StateDir), "workflows")
+	entries, err := os.ReadDir(workflowsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read workflows dir %q: %w", workflowsDir, err)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	workflows := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(entry.Name())
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+
+		path := filepath.Join(workflowsDir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read workflow %q: %w", path, err)
+		}
+		workflows[strings.TrimSuffix(entry.Name(), ext)] = data
+	}
+
+	return workflows, nil
+}
+
+func composedProfileHasWorkflowClass(composed *profiles.ComposedProfile, want policy.Class) (bool, error) {
+	if composed == nil {
+		return false, fmt.Errorf("composed profile is required")
+	}
+	return workflowMapHasClass(composed.Workflows, want)
+}
+
+func workflowMapHasClass(workflows map[string][]byte, want policy.Class) (bool, error) {
+	for name, data := range workflows {
+		matches, err := workflowBytesHaveClass(name, data, want)
+		if err != nil {
+			return false, err
+		}
+		if matches {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func workflowBytesHaveClass(name string, data []byte, want policy.Class) (bool, error) {
+	var probe struct {
+		Class string `yaml:"class,omitempty"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return false, fmt.Errorf("parse workflow %q: %w", name, err)
+	}
+	class, err := policy.ParseClass(probe.Class)
+	if err != nil {
+		return false, fmt.Errorf("workflow %q: %w", name, err)
+	}
+	return class == want, nil
 }
 
 func invalidGoimportsPackagePatternTarget(command string) (string, bool) {

@@ -1,4 +1,5 @@
 name: merge-pr
+class: ops
 description: "Merge a PR after verifying all merge criteria are met"
 phases:
   - name: check
