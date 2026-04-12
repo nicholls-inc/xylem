@@ -2677,6 +2677,22 @@ func phaseActionType(p *workflow.Phase) string {
 }
 
 const harnessMaintenanceDefaultBranchRule = "policy.class.no-main-commits"
+const deliveryDefaultBranchRule = "delivery.default_branch_commits_denied"
+
+// defaultBranchPushRule returns the audit rule string for default-branch push
+// enforcement for the given workflow class and whether enforcement is active.
+// Only classes that explicitly deny OpCommitDefaultBranch are enforced here;
+// the Ops class is omitted intentionally (no default-branch push path in ops workflows).
+func defaultBranchPushRule(class policy.Class) (ruleMatched string, enforced bool) {
+	switch class {
+	case policy.HarnessMaintenance:
+		return harnessMaintenanceDefaultBranchRule, true
+	case policy.Delivery:
+		return deliveryDefaultBranchRule, true
+	default:
+		return "", false
+	}
+}
 
 var controlPlanePathRe = regexp.MustCompile(`(^|[^A-Za-z0-9._/-])(\.xylem/HARNESS\.md|\.xylem\.yml|\.xylem/workflows/[A-Za-z0-9._/-]+\.yaml|\.xylem/prompts/[A-Za-z0-9._/-]+\.md)([^A-Za-z0-9._/-]|$)`)
 
@@ -3002,15 +3018,15 @@ func (r *Runner) policyMode() intermediary.PolicyMode {
 }
 
 func (r *Runner) enforceDefaultBranchPushPolicy(ctx context.Context, vessel queue.Vessel, workflowClass policy.Class, phaseName, worktreePath string, intent intermediary.Intent) error {
-	if workflowClass != policy.HarnessMaintenance || intent.Action != "git_push" || worktreePath == "" {
+	ruleMatched, enforced := defaultBranchPushRule(workflowClass)
+	if !enforced || intent.Action != "git_push" || worktreePath == "" {
 		return nil
 	}
 
 	defaultBranch, err := r.detectDefaultBranchAtPath(ctx, worktreePath)
-	if err != nil {
-		return fmt.Errorf("detect default branch for policy enforcement: %w", err)
-	}
-	if !pushTargetsDefaultBranch(intent.Resource, defaultBranch) {
+	if err != nil || !pushTargetsDefaultBranch(intent.Resource, defaultBranch) {
+		// Cannot confirm the push targets the default branch; skip enforcement and
+		// let the intermediary policy layer handle the intent instead.
 		return nil
 	}
 
@@ -3018,10 +3034,10 @@ func (r *Runner) enforceDefaultBranchPushPolicy(ctx context.Context, vessel queu
 		Intent:        intent,
 		Decision:      intermediary.Deny,
 		Timestamp:     time.Now().UTC(),
-		Error:         harnessMaintenanceDefaultBranchRule,
+		Error:         ruleMatched,
 		WorkflowClass: string(workflowClass),
 		Operation:     string(policy.OpCommitDefaultBranch),
-		RuleMatched:   harnessMaintenanceDefaultBranchRule,
+		RuleMatched:   ruleMatched,
 		VesselID:      vessel.ID,
 	}); err != nil {
 		return fmt.Errorf("record default branch push denial: %w", err)
@@ -3033,10 +3049,10 @@ func (r *Runner) enforceDefaultBranchPushPolicy(ctx context.Context, vessel queu
 
 	return formatPolicyDecisionError(phaseName, intent, intermediary.PolicyResult{
 		Effect:        intermediary.Deny,
-		Reason:        harnessMaintenanceDefaultBranchRule,
+		Reason:        ruleMatched,
 		WorkflowClass: workflowClass,
 		Operation:     string(policy.OpCommitDefaultBranch),
-		RuleMatched:   harnessMaintenanceDefaultBranchRule,
+		RuleMatched:   ruleMatched,
 		VesselID:      vessel.ID,
 	})
 }
