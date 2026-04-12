@@ -230,6 +230,20 @@ func (s *Scanner) buildSources() []sourceEntry {
 				},
 				configName: name,
 			})
+		case "github-actions":
+			actionsTasks := convertActionsTasks(srcCfg.Tasks)
+			entries = append(entries, sourceEntry{
+				src: &source.GitHubActions{
+					Repo:        srcCfg.Repo,
+					Tasks:       actionsTasks,
+					StateDir:    s.Config.StateDir,
+					ConfigName:  name,
+					DefaultTier: s.Config.LLMRouting.DefaultTier,
+					Queue:       s.Queue,
+					CmdRunner:   s.CmdRunner,
+				},
+				configName: name,
+			})
 		}
 	}
 	return entries
@@ -287,6 +301,24 @@ func convertScheduledTasks(cfgTasks map[string]config.Task) map[string]source.Sc
 			Workflow: t.Workflow,
 			Ref:      t.Ref,
 			Tier:     t.Tier,
+		}
+	}
+	return tasks
+}
+
+func convertActionsTasks(cfgTasks map[string]config.Task) map[string]source.ActionsTask {
+	tasks := make(map[string]source.ActionsTask, len(cfgTasks))
+	for name, t := range cfgTasks {
+		filter := source.ActionsFilter{}
+		if t.Actions != nil {
+			filter.WorkflowName = t.Actions.Workflow
+			filter.Branches = t.Actions.Branches
+			filter.Conclusions = t.Actions.Conclusions
+		}
+		tasks[name] = source.ActionsTask{
+			Workflow: t.Workflow,
+			Tier:     t.Tier,
+			Filter:   filter,
 		}
 	}
 	return tasks
