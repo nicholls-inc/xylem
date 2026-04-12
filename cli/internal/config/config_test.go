@@ -2305,6 +2305,15 @@ func TestSmoke_S3_PathsNoneDisablesProtection(t *testing.T) {
 	assert.Nil(t, cfg.EffectiveProtectedSurfaces())
 }
 
+func TestDefaultProtectedSurfacesComment(t *testing.T) {
+	// Read config.go source to assert the comment stays up-to-date.
+	src, err := os.ReadFile("config.go")
+	require.NoError(t, err)
+	content := string(src)
+	assert.Contains(t, content, "#366", "DefaultProtectedSurfaces comment must reference PR #366")
+	assert.Contains(t, content, "class matrix", "DefaultProtectedSurfaces comment must reference the class matrix")
+}
+
 func TestSmoke_S4_InvalidGlobRejected(t *testing.T) {
 	path := writeSmokeConfigFile(t, `harness:
   protected_surfaces:
