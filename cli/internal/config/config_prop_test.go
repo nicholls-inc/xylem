@@ -9,6 +9,8 @@ import (
 	"testing"
 
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
@@ -491,6 +493,31 @@ func TestPropEffectiveAutoMergeLabelsNeverReturnsBlank(t *testing.T) {
 			if strings.TrimSpace(label) == "" {
 				t.Fatalf("EffectiveAutoMergeLabels() returned blank label in %#v", got)
 			}
+		}
+	})
+}
+
+func TestPropComposedProfileOpsCheckTreatsBlankWorkflowClassAsDelivery(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		classValue := rapid.StringMatching(`[ \t]{0,8}`).Draw(t, "class")
+		composed := &profiles.ComposedProfile{
+			Workflows: map[string][]byte{
+				"sample": []byte(fmt.Sprintf(`name: sample
+class: %q
+phases:
+  - name: analyze
+    prompt_file: prompts/sample/analyze.md
+    max_turns: 1
+`, classValue)),
+			},
+		}
+
+		hasOps, err := composedProfileHasWorkflowClass(composed, policy.Ops)
+		if err != nil {
+			t.Fatalf("composedProfileHasWorkflowClass() error = %v", err)
+		}
+		if hasOps {
+			t.Fatalf("composedProfileHasWorkflowClass() = true for blank class %q, want false", classValue)
 		}
 	})
 }

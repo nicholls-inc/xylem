@@ -144,7 +144,7 @@ daemon:
 | `stall_monitor` | object | see below | No | Deterministic self-monitoring thresholds for phase stalls, idle-with-backlog detection, and orphan repair. |
 | `auto_upgrade` | boolean | `false` | No | Enables periodic self-upgrade checks for the daemon binary. |
 | `upgrade_interval` | string | `"5m"` | No | How often the daemon re-runs auto-upgrade checks while the loop is running. Must be a valid Go duration string. |
-| `auto_merge` | boolean | `false` | No | Enables the merge-ready Copilot review + auto-merge cycle for xylem-authored PRs. |
+| `auto_merge` | boolean | `false` | No | Enables the merge-ready Copilot review + auto-merge cycle for xylem-authored PRs. Requires an active profile or checked-in workflow set that includes at least one `class: ops` workflow. |
 | `auto_merge_repo` | string | current repo remote | No | Optional `owner/name` override for auto-merge GitHub operations. |
 | `auto_merge_labels` | list of strings | `["ready-to-merge"]` | No | Labels a PR must carry before the daemon considers it eligible for auto-merge. Blank entries are ignored. |
 | `auto_merge_branch_pattern` | string | `".*"` | No | Regular expression applied to the PR head branch. Only matching branches participate in daemon auto-merge. |
@@ -295,9 +295,11 @@ To opt out, omit or delete the scheduled `continuous-improvement` source from yo
 1. the scheduled helper checks the release PR age and queued commit count, then adds `ready-to-merge`;
 2. the daemon auto-merge loop performs the usual mergeability, green-CI, and review checks before merging.
 
-The bundled `self-hosting-xylem` profile scaffolds that full contract for you: it installs the `release-cadence` scheduled source and narrows `daemon.auto_merge_branch_pattern` to xylem issue branches plus `release-please`, so unrelated human-authored PRs stay outside the auto-admin-merge path.
+The bundled `self-hosting-xylem` profile scaffolds that full contract for you: it installs the `release-cadence` scheduled source and narrows `daemon.auto_merge_branch_pattern` to xylem issue branches plus `release-please`, so unrelated human-authored PRs stay outside the auto-admin-merge path. With `daemon.auto_merge: true`, xylem now also validates that the active profile composition or checked-in workflow set includes an ops-class workflow such as `merge-pr`.
 
 ```yaml
+profiles: [core, self-hosting-xylem]
+
 sources:
   release-cadence:
     type: scheduled

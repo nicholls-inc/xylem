@@ -1,4 +1,4 @@
-package profiles
+package profiles_test
 
 import (
 	"io/fs"
@@ -8,12 +8,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	. "github.com/nicholls-inc/xylem/cli/internal/profiles"
 	workflowpkg "github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+type profileSourceConfig struct {
+	Type     string                       `yaml:"type"`
+	Repo     string                       `yaml:"repo,omitempty"`
+	Schedule string                       `yaml:"schedule,omitempty"`
+	Tasks    map[string]profileTaskConfig `yaml:"tasks,omitempty"`
+}
+
+type profileTaskConfig struct {
+	Workflow string `yaml:"workflow,omitempty"`
+	Ref      string `yaml:"ref,omitempty"`
+}
 
 func stageProfileWorkflowAsset(t *testing.T, profile *Profile, workflowName string, promptNames []string) string {
 	t.Helper()
@@ -126,6 +139,10 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	require.Len(t, fixBug.Phases, 5)
 	require.NotNil(t, fixBug.Phases[2].Evaluator)
 	assert.Equal(t, ".xylem/prompts/fix-bug/implement_evaluator.md", fixBug.Phases[2].Evaluator.PromptFile)
+
+	var mergePR workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["merge-pr"], &mergePR))
+	assert.Equal(t, policy.Ops, mergePR.Class)
 	assert.Equal(t, 2, fixBug.Phases[2].Evaluator.MaxIterations)
 
 	var implementFeature workflowpkg.Workflow
@@ -216,7 +233,7 @@ func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkf
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-improvement"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)
@@ -253,7 +270,7 @@ func TestSmoke_S4_SelfHostingProfileScaffoldsMonthlyHardeningAuditWorkflow(t *te
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["hardening-audit"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)
@@ -289,7 +306,7 @@ func TestSmoke_S5_SelfHostingProfileScaffoldsDailyBacklogRefinementWorkflow(t *t
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["backlog-refinement"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)
@@ -330,7 +347,7 @@ func TestSmoke_S6_SelfHostingProfileScaffoldsReleaseCadenceWorkflow(t *testing.T
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["release-cadence"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)

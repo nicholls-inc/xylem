@@ -9,6 +9,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -23,6 +24,16 @@ func writeConfigFile(t *testing.T, yaml string) string {
 		t.Fatalf("write config file: %v", err)
 	}
 
+	return path
+}
+
+func writeWorkflowFile(t *testing.T, configPath, name, yaml string) string {
+	t.Helper()
+
+	workflowsDir := filepath.Join(filepath.Dir(configPath), ".xylem", "workflows")
+	path := filepath.Join(workflowsDir, name+".yaml")
+	require.NoError(t, os.MkdirAll(workflowsDir, 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o644))
 	return path
 }
 
@@ -2740,7 +2751,8 @@ claude:
 func TestSmoke_S1_LoadsValidationAndAutoMergeConfig(t *testing.T) {
 	t.Parallel()
 
-	path := writeConfigFile(t, `sources:
+	path := writeConfigFile(t, `profiles: [core]
+sources:
   github:
     type: github
     repo: owner/name
@@ -3058,6 +3070,193 @@ func TestValidateRejectsInvalidAutoMergeBranchPattern(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "daemon.auto_merge_branch_pattern")
+}
+
+func TestValidateAutoMergeWorkflowClass(t *testing.T) {
+	tests := []struct {
+		name      string
+		profiles  []string
+		autoMerge bool
+		wantErr   string
+	}{
+		{
+			name:      "allows disabled auto merge without ops profile",
+			autoMerge: false,
+		},
+		{
+			name:      "rejects enabled auto merge without ops profile",
+			autoMerge: true,
+			wantErr:   "daemon.auto_merge requires an active profile with at least one ops-class workflow",
+		},
+		{
+			name:      "allows enabled auto merge with ops profile",
+			profiles:  []string{"core"},
+			autoMerge: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Profiles = tt.profiles
+			cfg.Daemon.AutoMerge = tt.autoMerge
+
+			err := cfg.validateAutoMergeWorkflowClass()
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestComposedProfileHasWorkflowClassTreatsUnsetClassAsDelivery(t *testing.T) {
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"merge-pr": []byte(`name: merge-pr
+phases:
+  - name: analyze
+    prompt_file: prompts/merge-pr/analyze.md
+    max_turns: 1
+`),
+		},
+	}
+
+	hasOps, err := composedProfileHasWorkflowClass(composed, policy.Ops)
+	require.NoError(t, err)
+	assert.False(t, hasOps)
+}
+
+func TestSmoke_S9_RejectsAutoMergeWithoutOpsProfile(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon.auto_merge requires an active profile with at least one ops-class workflow")
+}
+
+func TestSmoke_S10_AllowsAutoMergeForSelfHostingProfileComposition(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `profiles: [core, self-hosting-xylem]
+sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	workflows, err := cfg.activeWorkflowDefinitions()
+	require.NoError(t, err)
+	hasOps, err := workflowMapHasClass(workflows, policy.Ops)
+	require.NoError(t, err)
+	assert.True(t, hasOps)
+}
+
+func TestSmoke_S11_AllowsAutoMergeWithCheckedInOpsWorkflowWithoutProfiles(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+	writeWorkflowFile(t, path, "merge-pr", `name: merge-pr
+class: ops
+phases:
+  - name: merge
+    prompt_file: prompts/merge-pr/merge.md
+    max_turns: 1
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	workflows, err := cfg.activeWorkflowDefinitions()
+	require.NoError(t, err)
+	hasOps, err := workflowMapHasClass(workflows, policy.Ops)
+	require.NoError(t, err)
+	assert.True(t, hasOps)
+}
+
+func TestSmoke_S12_RejectsAutoMergeWhenWorkflowClassDefaultsToDelivery(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+	writeWorkflowFile(t, path, "merge-pr", `name: merge-pr
+phases:
+  - name: merge
+    prompt_file: prompts/merge-pr/merge.md
+    max_turns: 1
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon.auto_merge requires an active profile with at least one ops-class workflow")
 }
 
 func TestSourceTimeoutValid(t *testing.T) {
