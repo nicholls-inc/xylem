@@ -441,6 +441,7 @@ func looksLikeControlPlaneDir(stateDir string) bool {
 func hasLegacyRuntimeArtifacts(stateDir string) bool {
 	for _, marker := range []string{
 		"queue.jsonl",
+		"audit.jsonl",
 		"phases",
 		"schedules",
 		"reviews",

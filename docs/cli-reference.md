@@ -15,7 +15,7 @@ Before any command runs (except `init`), xylem performs the following checks:
 1. Verifies that `git` is on PATH.
 2. Loads and validates the config file at the `--config` path.
 3. If any configured source has `type: github`, verifies that `gh` is on PATH.
-4. Initializes the JSONL queue at `<state_dir>/queue.jsonl` and the worktree manager.
+4. Initializes the JSONL queue at the resolved runtime path (`<state_dir>/state/queue.jsonl` in the standard `.xylem` layout) and the worktree manager.
 
 ## Exit Codes
 

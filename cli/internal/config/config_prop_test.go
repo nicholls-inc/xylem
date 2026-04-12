@@ -121,15 +121,74 @@ func TestPropRuntimePathAddsSingleStatePrefixForControlPlane(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("state/\n"), 0o644))
 
 		segments := []string{
-			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-a"),
-			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-b"),
-			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-c"),
+			rapid.StringMatching(`[A-Za-z0-9][A-Za-z0-9._-]{0,7}`).Draw(t, "segment-a"),
+			rapid.StringMatching(`[A-Za-z0-9][A-Za-z0-9._-]{0,7}`).Draw(t, "segment-b"),
+			rapid.StringMatching(`[A-Za-z0-9][A-Za-z0-9._-]{0,7}`).Draw(t, "segment-c"),
 		}
 
 		got := RuntimePath(root, segments...)
 		want := filepath.Join(append([]string{root, "state"}, segments...)...)
 		if got != want {
 			t.Fatalf("RuntimePath(%q, %#v) = %q, want %q", root, segments, got, want)
+		}
+	})
+}
+
+func TestPropMigrateFlatStateToRuntimePreservesLegacyArtifacts(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		root, err := os.MkdirTemp("", "runtime-migrate-*")
+		require.NoError(t, err)
+		defer os.RemoveAll(root)
+		stateDir := filepath.Join(root, ".xylem")
+		require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+		queuePayload := rapid.StringMatching(`[A-Za-z0-9._:/# -]{1,48}`).Draw(t, "queue-payload")
+		auditPayload := rapid.StringMatching(`[A-Za-z0-9._:/# -]{1,48}`).Draw(t, "audit-payload")
+
+		require.NoError(t, os.WriteFile(
+			filepath.Join(stateDir, "queue.jsonl"),
+			[]byte(fmt.Sprintf("{\"id\":\"issue-%s\",\"source\":\"manual\",\"state\":\"pending\",\"created_at\":\"2026-04-12T02:00:00Z\",\"prompt\":\"%s\"}\n", queuePayload, queuePayload)),
+			0o644,
+		))
+		require.NoError(t, os.WriteFile(filepath.Join(stateDir, "queue.jsonl.lock"), []byte("legacy queue lock"), 0o644))
+
+		legacyAudit := intermediary.NewAuditLog(filepath.Join(stateDir, DefaultAuditLogPath))
+		require.NoError(t, legacyAudit.Append(intermediary.AuditEntry{
+			Intent: intermediary.Intent{
+				Action:   "phase_execute",
+				Resource: auditPayload,
+				AgentID:  "agent-" + auditPayload,
+			},
+			Decision: intermediary.Allow,
+		}))
+		require.NoError(t, os.WriteFile(filepath.Join(stateDir, "daemon.pid"), []byte(fmt.Sprintf("%d", os.Getpid())), 0o644))
+
+		require.NoError(t, MigrateFlatStateToRuntime(stateDir))
+
+		queueData, err := os.ReadFile(RuntimePath(stateDir, "queue.jsonl"))
+		require.NoError(t, err)
+		if !strings.Contains(string(queueData), `"prompt":"`+queuePayload+`"`) {
+			t.Fatalf("queue payload = %q, want prompt %q", string(queueData), queuePayload)
+		}
+
+		entries, err := intermediary.NewAuditLog(RuntimePath(stateDir, DefaultAuditLogPath)).Entries()
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		if entries[0].Intent.Resource != auditPayload {
+			t.Fatalf("audit resource = %q, want %q", entries[0].Intent.Resource, auditPayload)
+		}
+
+		if !pathExists(filepath.Join(stateDir, "queue.jsonl.migrated")) {
+			t.Fatal("queue migration marker missing")
+		}
+		if !pathExists(filepath.Join(stateDir, DefaultAuditLogPath+".migrated")) {
+			t.Fatal("audit migration marker missing")
+		}
+		if !pathExists(filepath.Join(stateDir, "daemon.pid.migrated")) {
+			t.Fatal("daemon.pid migration marker missing")
+		}
+		if pathExists(RuntimePath(stateDir, "daemon.pid")) {
+			t.Fatal("runtime daemon.pid should be recreated by the lock owner, not migration")
 		}
 	})
 }

@@ -1,11 +1,13 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
@@ -335,6 +337,101 @@ func TestRuntimePathPreservesNonControlPlaneRoots(t *testing.T) {
 	want := filepath.Join(root, "phases", "issue-1", "summary.json")
 	assert.Equal(t, want, got)
 	assert.Equal(t, root, RuntimeRoot(root))
+}
+
+func TestMigrateFlatStateToRuntimeMovesLegacyFiles(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+	legacyQueuePath := filepath.Join(stateDir, "queue.jsonl")
+	legacyAuditPath := filepath.Join(stateDir, DefaultAuditLogPath)
+	legacyPIDPath := filepath.Join(stateDir, "daemon.pid")
+
+	queueLine := `{"id":"issue-388","source":"manual","state":"pending","created_at":"2026-04-12T01:00:00Z"}`
+	require.NoError(t, os.WriteFile(legacyQueuePath, []byte(queueLine+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(legacyQueuePath+".lock", []byte("legacy queue lock"), 0o644))
+
+	legacyAudit := intermediary.NewAuditLog(legacyAuditPath)
+	require.NoError(t, legacyAudit.Append(intermediary.AuditEntry{
+		Intent:    intermediary.Intent{Action: "phase_execute", Resource: "implement", AgentID: "issue-388"},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Date(2026, time.April, 12, 1, 1, 0, 0, time.UTC),
+	}))
+	require.NoError(t, os.WriteFile(legacyPIDPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644))
+
+	require.NoError(t, MigrateFlatStateToRuntime(stateDir))
+
+	runtimeQueuePath := filepath.Join(stateDir, "state", "queue.jsonl")
+	runtimeAuditPath := filepath.Join(stateDir, "state", DefaultAuditLogPath)
+	runtimePIDPath := filepath.Join(stateDir, "state", "daemon.pid")
+
+	assert.NoFileExists(t, legacyQueuePath)
+	assert.NoFileExists(t, legacyAuditPath)
+	assert.NoFileExists(t, legacyPIDPath)
+	assert.NoFileExists(t, legacyQueuePath+".lock")
+	assert.NoFileExists(t, legacyAuditPath+".lock")
+	assert.FileExists(t, legacyQueuePath+".migrated")
+	assert.FileExists(t, legacyAuditPath+".migrated")
+	assert.FileExists(t, legacyPIDPath+".migrated")
+
+	assert.FileExists(t, runtimeQueuePath)
+	assert.FileExists(t, runtimeAuditPath)
+	assert.NoFileExists(t, runtimePIDPath)
+	assert.FileExists(t, runtimeQueuePath+".lock")
+	assert.FileExists(t, runtimeAuditPath+".lock")
+	assert.Equal(t, runtimeQueuePath, RuntimePath(stateDir, "queue.jsonl"))
+	assert.Equal(t, runtimeAuditPath, RuntimePath(stateDir, DefaultAuditLogPath))
+	assert.Equal(t, runtimePIDPath, RuntimePath(stateDir, "daemon.pid"))
+
+	queueData, err := os.ReadFile(RuntimePath(stateDir, "queue.jsonl"))
+	require.NoError(t, err)
+	var vessel struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(string(queueData))), &vessel))
+	assert.Equal(t, "issue-388", vessel.ID)
+
+	runtimeAudit := intermediary.NewAuditLog(RuntimePath(stateDir, DefaultAuditLogPath))
+	entries, err := runtimeAudit.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, intermediary.Allow, entries[0].Decision)
+
+	_, err = os.Stat(runtimePIDPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestMigrateFlatStateToRuntimeRejectsSplitBrainQueue(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "queue.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "state", "queue.jsonl"), []byte("{}\n"), 0o644))
+
+	err := MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime queue.jsonl exist")
+}
+
+func TestMigrateFlatStateToRuntimeRejectsSplitBrainAuditLog(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, DefaultAuditLogPath), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "state", DefaultAuditLogPath), []byte("{}\n"), 0o644))
+
+	err := MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime audit.jsonl exist")
+}
+
+func TestMigrateFlatStateToRuntimeRejectsSplitBrainDaemonPID(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "daemon.pid"), []byte("0"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "state", "daemon.pid"), []byte("0"), 0o644))
+
+	err := MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime daemon.pid exist")
 }
 
 func validConfig() *Config {

@@ -13,7 +13,7 @@ The workload is low-throughput: tens to low hundreds of vessels, infrequent writ
 
 ## Decision
 
-Vessels are persisted in a single JSONL file at `<state_dir>/queue.jsonl`. File-level locking uses `gofrs/flock` with a `.lock` sidecar file. Two lock helpers provide appropriate access levels:
+Vessels are persisted in a single JSONL file at `<state_dir>/state/queue.jsonl` in the standard `.xylem` layout. File-level locking uses `gofrs/flock` with a `.lock` sidecar file. Two lock helpers provide appropriate access levels:
 
 - `withLock` — exclusive write lock for all mutation operations
 - `withRLock` — shared read lock for read-only operations (e.g., `List`)

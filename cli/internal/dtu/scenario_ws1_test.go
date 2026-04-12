@@ -175,7 +175,7 @@ func TestWS1PolicyAllowHappyPathAuditLog(t *testing.T) {
 	cfg := ws1Config(env.stateDir, "fix-bug")
 
 	// When the runner is wired, the audit log should be written to the state dir.
-	auditLogPath := filepath.Join(env.stateDir, "audit.jsonl")
+	auditLogPath := config.RuntimePath(env.stateDir, "audit.jsonl")
 	auditLog := intermediary.NewAuditLog(auditLogPath)
 
 	_, drainResult := ws1Drain(t, env, cfg)
@@ -363,7 +363,7 @@ phases:
 	}
 
 	cfg := ws1Config(env.stateDir, "fix-bug")
-	auditLog := intermediary.NewAuditLog(filepath.Join(env.stateDir, "audit.jsonl"))
+	auditLog := intermediary.NewAuditLog(config.RuntimePath(env.stateDir, "audit.jsonl"))
 	_, drainResult := ws1Drain(t, env, cfg)
 
 	if drainResult.Failed != 1 {
@@ -753,8 +753,20 @@ func TestWS1ConfigDefaultsIntermediaryWiring(t *testing.T) {
 	if err := drainer.AuditLog.Append(entry); err != nil {
 		t.Fatalf("AuditLog.Append() error = %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(env.stateDir, "audit.jsonl")); err != nil {
-		t.Fatalf("Stat(audit.jsonl) error = %v", err)
+	entries, err := intermediary.NewAuditLog(config.RuntimePath(env.stateDir, "audit.jsonl")).Entries()
+	if err != nil {
+		t.Fatalf("AuditLog.Entries() error = %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("len(audit entries) = %d, want 1", len(entries))
+	}
+	if entries[0].Decision != entry.Decision {
+		t.Fatalf("audit entry decision = %q, want %q", entries[0].Decision, entry.Decision)
+	}
+	if entries[0].Intent.Action != entry.Intent.Action ||
+		entries[0].Intent.Resource != entry.Intent.Resource ||
+		entries[0].Intent.AgentID != entry.Intent.AgentID {
+		t.Fatalf("audit entry intent = %+v, want %+v", entries[0].Intent, entry.Intent)
 	}
 }
 
