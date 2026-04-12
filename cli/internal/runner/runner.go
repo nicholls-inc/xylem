@@ -26,6 +26,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/memory"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
@@ -103,6 +104,9 @@ type Runner struct {
 	Intermediary *intermediary.Intermediary // nil = no policy enforcement
 	AuditLog     *intermediary.AuditLog     // nil = no audit logging
 	Tracer       *observability.Tracer      // nil = no tracing
+	// EpisodicStore persists one entry per completed phase for cross-phase
+	// and cross-vessel recall. nil disables episodic persistence.
+	EpisodicStore *memory.EpisodicStore
 	// DrainBudget bounds the wall time that Drain() spends dequeueing new
 	// vessels. When the deadline elapses, Drain() stops dequeueing and
 	// returns immediately while already-started goroutines continue in the
@@ -710,6 +714,23 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 		case "timed_out":
 			return "timed_out"
 		case "completed", "no-op":
+			if r.EpisodicStore != nil {
+				summary := res.output
+				const maxSummaryLen = 512
+				if len(summary) > maxSummaryLen {
+					summary = summary[:maxSummaryLen]
+				}
+				entry := memory.EpisodicEntry{
+					VesselID:   vessel.ID,
+					PhaseName:  p.Name,
+					RecordedAt: r.runtimeNow().UTC(),
+					Outcome:    res.status,
+					Summary:    summary,
+				}
+				if err := r.EpisodicStore.Append(entry); err != nil {
+					log.Printf("warn: episodic store append for vessel %s phase %s: %v", vessel.ID, p.Name, err)
+				}
+			}
 			previousOutputs[p.Name] = res.output
 			vessel.CurrentPhase = i + 1
 			if vessel.PhaseOutputs == nil {
@@ -4093,6 +4114,19 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, wf *workflow.Workflow, i
 			Test:   strings.TrimSpace(r.Config.Validation.Test),
 		}
 	}
+	var episodicCtx []memory.EpisodicEntry
+	if r.EpisodicStore != nil && phaseIndex > 0 {
+		entries, err := r.EpisodicStore.RecentForVessel(vessel.ID, 10)
+		if err != nil {
+			log.Printf("warn: read episodic context for vessel %s: %v", vessel.ID, err)
+		} else {
+			// Reverse so most-recent is first.
+			for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+			episodicCtx = entries
+		}
+	}
 	return phase.TemplateData{
 		Date:  r.runtimeNow().UTC().Format("2006-01-02"),
 		Issue: issueData,
@@ -4118,7 +4152,8 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, wf *workflow.Workflow, i
 			Name: sourceName,
 			Repo: repoSlug,
 		},
-		Validation: validation,
+		Validation:      validation,
+		EpisodicContext: episodicCtx,
 	}
 }
 

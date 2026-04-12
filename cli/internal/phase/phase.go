@@ -8,6 +8,7 @@ import (
 	"text/template"
 
 	"github.com/nicholls-inc/xylem/cli/internal/ctxmgr"
+	"github.com/nicholls-inc/xylem/cli/internal/memory"
 )
 
 // Truncation limits (constants, not configurable).
@@ -39,6 +40,10 @@ type TemplateData struct {
 	Repo                RepoData
 	Source              SourceData
 	Validation          ValidationData
+	// EpisodicContext holds prior episodic entries for this vessel, most
+	// recent first. Populated by the runner for phase index > 0. Template
+	// authors should guard with {{if .EpisodicContext}}.
+	EpisodicContext []memory.EpisodicEntry
 }
 
 type RenderOptions struct {

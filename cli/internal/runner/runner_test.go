@@ -26,6 +26,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/memory"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/policy"
@@ -10421,4 +10422,100 @@ func TestRunVesselLiveGateEmitsStepSpans(t *testing.T) {
 	assert.Equal(t, "http", stepAttrs["xylem.gate.step.mode"])
 	assert.Equal(t, "true", stepAttrs["xylem.gate.step.passed"])
 	assert.Equal(t, gateSpan.SpanContext().SpanID(), stepSpan.Parent().SpanID())
+}
+
+// ---------- Episodic memory integration ----------
+
+// TestEpisodicContextInjectedIntoPhase2 verifies that when an EpisodicStore is
+// set on the Runner and prior entries have been appended for a vessel,
+// buildTemplateData for phase index > 0 includes those entries in
+// EpisodicContext with the most-recent entry first (runner reverses append
+// order so callers see newest-first).
+func TestEpisodicContextInjectedIntoPhase2(t *testing.T) {
+	dir := t.TempDir()
+	episodicPath := filepath.Join(dir, "episodic.jsonl")
+	store := memory.NewEpisodicStore(episodicPath)
+
+	r := New(&config.Config{}, nil, nil, nil)
+	r.EpisodicStore = store
+
+	vessel := queue.Vessel{ID: "v-392", Source: "manual"}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{
+			{Name: "phase-a"},
+			{Name: "phase-b"},
+			{Name: "phase-c"},
+		},
+	}
+
+	// Seed three entries in chronological append order.
+	for _, e := range []memory.EpisodicEntry{
+		{VesselID: "v-392", PhaseName: "phase-a", Outcome: "completed", Summary: "a done"},
+		{VesselID: "v-392", PhaseName: "phase-b", Outcome: "completed", Summary: "b done"},
+		{VesselID: "v-392", PhaseName: "phase-c", Outcome: "failed", Summary: "c failed"},
+	} {
+		if err := store.Append(e); err != nil {
+			t.Fatalf("Append: %v", err)
+		}
+	}
+
+	td := r.buildTemplateData(vessel, wf, phase.IssueData{}, "phase-d", 3,
+		map[string]string{}, "", phase.EvaluationData{})
+
+	if len(td.EpisodicContext) != 3 {
+		t.Fatalf("EpisodicContext: got %d entries, want 3", len(td.EpisodicContext))
+	}
+	// Runner reverses so most-recent is first.
+	wantOrder := []string{"phase-c", "phase-b", "phase-a"}
+	for i, wantPhase := range wantOrder {
+		if td.EpisodicContext[i].PhaseName != wantPhase {
+			t.Errorf("EpisodicContext[%d].PhaseName = %q, want %q", i, td.EpisodicContext[i].PhaseName, wantPhase)
+		}
+		if td.EpisodicContext[i].VesselID != "v-392" {
+			t.Errorf("EpisodicContext[%d].VesselID = %q, want %q", i, td.EpisodicContext[i].VesselID, "v-392")
+		}
+	}
+}
+
+// TestEpisodicContextNilStoreIsEmpty verifies that when EpisodicStore is nil,
+// EpisodicContext is nil regardless of phase index. The nil guard
+// short-circuits before phaseIndex is checked, so a single call is sufficient
+// to cover this branch.
+func TestEpisodicContextNilStoreIsEmpty(t *testing.T) {
+	r := New(&config.Config{}, nil, nil, nil)
+	// r.EpisodicStore is nil
+
+	vessel := queue.Vessel{ID: "v-nil", Source: "manual"}
+	wf := &workflow.Workflow{
+		Phases: []workflow.Phase{{Name: "phase-a"}, {Name: "phase-b"}},
+	}
+
+	td := r.buildTemplateData(vessel, wf, phase.IssueData{}, "phase-b", 1,
+		map[string]string{}, "", phase.EvaluationData{})
+	if td.EpisodicContext != nil {
+		t.Errorf("EpisodicContext with nil store = %v, want nil", td.EpisodicContext)
+	}
+}
+
+// TestEpisodicContextPhaseZeroSkipped verifies that phase index 0 never
+// receives episodic context even when the store contains entries.
+func TestEpisodicContextPhaseZeroSkipped(t *testing.T) {
+	dir := t.TempDir()
+	store := memory.NewEpisodicStore(filepath.Join(dir, "episodic.jsonl"))
+	if err := store.Append(memory.EpisodicEntry{
+		VesselID: "v-1", PhaseName: "prior", Outcome: "completed",
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	r := New(&config.Config{}, nil, nil, nil)
+	r.EpisodicStore = store
+
+	vessel := queue.Vessel{ID: "v-1", Source: "manual"}
+	td := r.buildTemplateData(vessel, nil, phase.IssueData{}, "phase-a", 0,
+		map[string]string{}, "", phase.EvaluationData{})
+
+	if td.EpisodicContext != nil {
+		t.Errorf("EpisodicContext at phase 0 should be nil, got %v", td.EpisodicContext)
+	}
 }
