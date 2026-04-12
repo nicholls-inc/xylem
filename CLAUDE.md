@@ -92,7 +92,7 @@ docker compose -f dev/docker-compose.yml up -d
 docker compose -f dev/docker-compose.yml down
 ```
 
-`.xylem.yml` must have `observability.endpoint` set to `localhost:4317` for traces to export. Without an endpoint, tracing is silently disabled.
+`.xylem.yml` must have `observability.endpoint` set to `localhost:4317` for traces to export. Without an endpoint, tracing is silently disabled. Jaeger in this dev stack is trace-only; xylem keeps daemon logs on stderr and `daemon.log` instead of exporting OTLP logs.
 
 - **UI**: http://localhost:16686
 - **API**: http://localhost:16686/api/
