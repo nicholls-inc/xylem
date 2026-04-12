@@ -9600,6 +9600,8 @@ func TestIsRateLimitError(t *testing.T) {
 		{"api error 429 prefix", errors.New("API Error: 429 retry after 30s"), true},
 		{"unrelated insufficient word", errors.New("insufficient disk space"), false},
 		{"plain rate in unrelated context", errors.New("update rate set to 5"), false},
+		{"auth failure is not rate limit", errors.New("authentication failed: invalid x-api-key"), false},
+		{"provider unavailable is not rate limit", errors.New("service unavailable"), false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -9608,6 +9610,60 @@ func TestIsRateLimitError(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestClassifyProviderError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want providerErrorDisposition
+	}{
+		{name: "nil error", err: nil, want: providerErrorFail},
+		{name: "generic error", err: errors.New("exit status 1"), want: providerErrorFail},
+		{name: "rate limit retry", err: errors.New(`API Error: 429 {"type":"error","error":{"type":"rate_limit_error","message":"rate limited"}}`), want: providerErrorRetrySameProvider},
+		{name: "credit balance retry", err: errors.New("Credit balance is too low"), want: providerErrorRetrySameProvider},
+		{name: "auth failure falls back", err: errors.New("anthropic: authentication failed: invalid x-api-key"), want: providerErrorFallbackNextProvider},
+		{name: "github token failure falls back", err: errors.New("copilot: authentication required: github token missing"), want: providerErrorFallbackNextProvider},
+		{name: "model access failure falls back", err: errors.New("provider: not authorized to access this model"), want: providerErrorFallbackNextProvider},
+		{name: "service unavailable falls back", err: errors.New("provider returned service unavailable"), want: providerErrorFallbackNextProvider},
+		{name: "missing command falls back", err: errors.New("claude: executable file not found in $PATH"), want: providerErrorFallbackNextProvider},
+		{name: "plain unauthorized does not fall back", err: errors.New("unauthorized"), want: providerErrorFail},
+		{name: "plain forbidden does not fall back", err: errors.New("forbidden"), want: providerErrorFail},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyProviderError(tt.err); got != tt.want {
+				t.Fatalf("classifyProviderError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRunPhaseWithRateLimitRetryDoesNotRetryAuthFailures(t *testing.T) {
+	authErr := errors.New("anthropic: authentication failed: invalid x-api-key")
+	var callCount int32
+	cmdRunner := &mockCmdRunner{
+		runPhaseHook: func(dir, prompt, name string, args ...string) ([]byte, error, bool) {
+			atomic.AddInt32(&callCount, 1)
+			return nil, authErr, true
+		},
+	}
+	r := New(&config.Config{Concurrency: 1}, nil, &mockWorktree{}, cmdRunner)
+
+	output, err := r.runPhaseWithRateLimitRetry(
+		context.Background(),
+		"issue-1",
+		"implement",
+		t.TempDir(),
+		"Fix the bug",
+		nil,
+		"claude",
+		[]string{"--model", "claude-med"},
+	)
+	require.ErrorIs(t, err, authErr)
+	assert.Nil(t, output)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&callCount))
 }
 
 // setupDTUClock creates a valid DTU state file so runtimeSleep advances a
