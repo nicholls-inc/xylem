@@ -220,7 +220,7 @@ timeout: "45m"
 state_dir: ".xylem"
 
 # llm selects the global default LLM provider: "claude" (default) or "copilot"
-llm: copilot
+llm: claude
 model: gpt-5.4
 
 claude:
