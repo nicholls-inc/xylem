@@ -191,6 +191,18 @@ sources:
       unblock-deps:
         workflow: unblock-wave
 
+notifications:
+  github_discussion:
+    enabled: true
+    repo: nicholls-inc/xylem
+    category: "Status Reports"
+    interval: "1h"
+  telegram:
+    enabled: true
+    token_env: "TELEGRAM_BOT_TOKEN"
+    chat_id_env: "TELEGRAM_CHAT_ID"
+    levels: [critical, warning]
+
 observability:
   enabled: true
   endpoint: "localhost:4317"
