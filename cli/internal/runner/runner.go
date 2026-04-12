@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/catalog"
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
@@ -92,6 +93,7 @@ type Runner struct {
 	Runner   CommandRunner
 	LiveGate gate.LiveGateRunner
 	Sources  map[string]source.Source
+	Catalog  *catalog.Catalog
 	// BuiltinWorkflows handles workflow names that execute internal logic
 	// instead of loading .xylem/workflows/<name>.yaml.
 	BuiltinWorkflows map[string]BuiltinWorkflowHandler
@@ -948,6 +950,44 @@ func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, sr
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
 	return r.completeVessel(ctx, vessel, "", nil, vrs, nil)
+}
+
+func (r *Runner) phaseToolCatalog() (*catalog.Catalog, error) {
+	if r.Catalog != nil {
+		return r.Catalog, nil
+	}
+	if r.Config == nil {
+		return catalog.NewDefaultPhaseCatalog()
+	}
+	return r.Config.BuildPhaseToolCatalog()
+}
+
+func (r *Runner) resolvePhaseAllowedTools(wf *workflow.Workflow, p *workflow.Phase, provider config.ProviderConfig) (string, error) {
+	if p == nil {
+		return "", nil
+	}
+	toolCatalog, err := r.phaseToolCatalog()
+	if err != nil {
+		return "", fmt.Errorf("resolve phase allowed tools: %w", err)
+	}
+
+	requested := mergeAllowedToolLists(parseAllowedToolsString(pointerStringValue(p.AllowedTools)), provider.AllowedTools)
+	role := catalog.RoleDiagnostic
+	if r.Config != nil {
+		class := policy.Class("")
+		if wf != nil {
+			class = wf.Class
+		}
+		role = r.Config.PhaseToolRole(class, p.Name, p.Type)
+	}
+	resolved, err := toolCatalog.ResolveRoleTools(role, requested)
+	if err != nil {
+		return "", fmt.Errorf("resolve phase %q allowed tools for role %q: %w", p.Name, role, err)
+	}
+	if len(resolved) == 0 {
+		return "", nil
+	}
+	return strings.Join(resolved, ","), nil
 }
 
 func (r *Runner) ensureWorktree(ctx context.Context, vessel *queue.Vessel, src source.Source) (string, bool) {
@@ -4595,6 +4635,49 @@ func providerEnvForName(cfg *config.Config, providerName string) []string {
 	return expandedProviderEnv(provider.Env)
 }
 
+func parseAllowedToolsString(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	return mergeAllowedToolLists(parts, nil)
+}
+
+func mergeAllowedToolLists(first, second []string) []string {
+	total := len(first) + len(second)
+	if total == 0 {
+		return nil
+	}
+	out := make([]string, 0, total)
+	seen := make(map[string]struct{}, total)
+	for _, list := range [][]string{first, second} {
+		for _, item := range list {
+			trimmed := strings.TrimSpace(item)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func pointerStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
 // buildPhaseArgs constructs the claude-style CLI arguments for a phase invocation.
 func buildPhaseArgs(cfg *config.Config, providerName string, provider config.ProviderConfig, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, tier, harnessContent string) []string {
 	args := []string{"-p"}
@@ -4676,11 +4759,7 @@ func buildCopilotPhaseArgs(cfg *config.Config, providerName string, provider con
 // and returns the command binary, argument slice, and stdin reader for the phase invocation.
 // For providers that embed the prompt in CLI args (copilot -p <text>), stdin is nil.
 // For providers that read the prompt from stdin (claude -p), stdin carries the prompt.
-func buildProviderPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, tier, renderedPrompt string, attempt int) (string, []string, io.Reader, string, error) {
-	providerCfg, ok := providerConfigForName(cfg, provider)
-	if !ok {
-		return "", nil, nil, "", fmt.Errorf("provider %q is not configured", provider)
-	}
+func buildProviderPhaseArgs(cfg *config.Config, providerCfg config.ProviderConfig, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, tier, renderedPrompt string, attempt int) (string, []string, io.Reader, string, error) {
 	model := resolvePhaseModel(cfg, srcCfg, wf, p, provider, tier)
 	switch providerCfg.Kind {
 	case "copilot":

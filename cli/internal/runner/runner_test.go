@@ -5042,16 +5042,13 @@ func TestBuildPhaseArgs(t *testing.T) {
 		p := &workflow.Phase{Name: "analyze", MaxTurns: 5, AllowedTools: &allowedTools}
 		args := buildPhaseArgs(cfg, "claude", mustProviderConfigForTest(t, cfg, "claude"), nil, nil, p, "med", "")
 
-		// Should have both phase-level and config-level tools
-		toolCount := 0
-		for _, a := range args {
-			if a == "--allowedTools" {
-				toolCount++
+		var got []string
+		for i := 0; i < len(args); i++ {
+			if args[i] == "--allowedTools" && i+1 < len(args) {
+				got = append(got, args[i+1])
 			}
 		}
-		if toolCount != 2 {
-			t.Errorf("expected 2 --allowedTools flags, got %d in %v", toolCount, args)
-		}
+		require.Equal(t, []string{"Read,Edit", "WebFetch"}, got)
 	})
 
 	t.Run("with harness", func(t *testing.T) {
@@ -5084,6 +5081,91 @@ func mustProviderConfigForTest(t *testing.T, cfg *config.Config, name string) co
 		t.Fatalf("provider %q not configured", name)
 	}
 	return provider
+}
+
+func TestResolvePhaseAllowedTools(t *testing.T) {
+	t.Run("derives defaults from diagnostic role", func(t *testing.T) {
+		cfg := &config.Config{
+			Claude: config.ClaudeConfig{Command: "claude"},
+		}
+		r := New(cfg, nil, nil, nil)
+		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
+
+		got, err := r.resolvePhaseAllowedTools(nil, p, mustProviderConfigForTest(t, cfg, "claude"))
+		require.NoError(t, err)
+		require.Equal(t, "Bash,Glob,Grep,LS,Read,WebFetch,WebSearch", got)
+	})
+
+	t.Run("uses workflow class before phase-name heuristic", func(t *testing.T) {
+		cfg := &config.Config{
+			Claude: config.ClaudeConfig{Command: "claude"},
+		}
+		r := New(cfg, nil, nil, nil)
+		wf := &workflow.Workflow{Class: policy.Delivery}
+		p := &workflow.Phase{Name: "analyze", MaxTurns: 5}
+
+		got, err := r.resolvePhaseAllowedTools(wf, p, mustProviderConfigForTest(t, cfg, "claude"))
+		require.NoError(t, err)
+		require.Equal(t, "Bash,Glob,Grep,LS,Read,WebFetch,WebSearch,Edit,MultiEdit,Write", got)
+	})
+
+	t.Run("rejects unauthorized tool for default role", func(t *testing.T) {
+		cfg := &config.Config{
+			Claude: config.ClaudeConfig{Command: "claude"},
+		}
+		r := New(cfg, nil, nil, nil)
+		p := &workflow.Phase{Name: "analyze", MaxTurns: 5, AllowedTools: strPtrRunner("Edit")}
+
+		_, err := r.resolvePhaseAllowedTools(nil, p, mustProviderConfigForTest(t, cfg, "claude"))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `role "diagnostic"`)
+		require.Contains(t, err.Error(), `tool "Edit"`)
+	})
+
+	t.Run("phase role override wins over workflow class", func(t *testing.T) {
+		baseCfg := &config.Config{
+			Claude: config.ClaudeConfig{Command: "claude"},
+		}
+		baseRunner := New(baseCfg, nil, nil, nil)
+		wf := &workflow.Workflow{Class: policy.Ops}
+		p := &workflow.Phase{Name: "analyze", MaxTurns: 5, AllowedTools: strPtrRunner("Edit")}
+
+		_, err := baseRunner.resolvePhaseAllowedTools(wf, p, mustProviderConfigForTest(t, baseCfg, "claude"))
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `role "housekeeping"`)
+
+		cfg := &config.Config{
+			Claude: config.ClaudeConfig{Command: "claude"},
+			Harness: config.HarnessConfig{
+				ToolPermissions: config.ToolPermissionsConfig{
+					PhaseRoles: map[string]string{"analyze": "delivery"},
+				},
+			},
+		}
+		r := New(cfg, nil, nil, nil)
+
+		got, err := r.resolvePhaseAllowedTools(wf, p, mustProviderConfigForTest(t, cfg, "claude"))
+		require.NoError(t, err)
+		require.Equal(t, "Edit", got)
+	})
+
+	t.Run("merges provider defaults with phase request", func(t *testing.T) {
+		cfg := &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"claude": {
+					Kind:         "claude",
+					Command:      "claude",
+					AllowedTools: []string{"WebFetch"},
+				},
+			},
+		}
+		r := New(cfg, nil, nil, nil)
+		p := &workflow.Phase{Name: "analyze", MaxTurns: 5, AllowedTools: strPtrRunner("Read")}
+
+		got, err := r.resolvePhaseAllowedTools(&workflow.Workflow{Class: policy.Delivery}, p, mustProviderConfigForTest(t, cfg, "claude"))
+		require.NoError(t, err)
+		require.Equal(t, "Read,WebFetch", got)
+	})
 }
 
 func TestBuildPhaseArgsModelResolution(t *testing.T) {
@@ -5486,7 +5568,7 @@ func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
 	phase := &workflow.Phase{MaxTurns: 5}
 
 	t.Run("claude provider returns claude command and stdin", func(t *testing.T) {
-		cmd, args, stdin, model, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "med", "test prompt", 1)
+		cmd, args, stdin, model, err := buildProviderPhaseArgs(cfg, mustProviderConfigForTest(t, cfg, "claude"), nil, nil, phase, "", "claude", "med", "test prompt", 1)
 		require.NoError(t, err)
 		if cmd != claudeCmd {
 			t.Errorf("cmd = %q, want %q", cmd, claudeCmd)
@@ -5507,7 +5589,7 @@ func TestBuildProviderPhaseArgsDispatch(t *testing.T) {
 	})
 
 	t.Run("copilot provider returns copilot command and nil stdin", func(t *testing.T) {
-		cmd, args, stdin, model, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "med", "test prompt", 1)
+		cmd, args, stdin, model, err := buildProviderPhaseArgs(cfg, mustProviderConfigForTest(t, cfg, "copilot"), nil, nil, phase, "", "copilot", "med", "test prompt", 1)
 		require.NoError(t, err)
 		if cmd != copilotCmd {
 			t.Errorf("cmd = %q, want %q", cmd, copilotCmd)
@@ -5543,7 +5625,7 @@ func TestBuildProviderPhaseArgsAddsDTUMetadataWhenDTUActive(t *testing.T) {
 		MaxTurns:   5,
 	}
 
-	_, claudeArgs, _, _, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "claude", "med", "prompt", 2)
+	_, claudeArgs, _, _, err := buildProviderPhaseArgs(cfg, mustProviderConfigForTest(t, cfg, "claude"), nil, nil, phase, "", "claude", "med", "prompt", 2)
 	require.NoError(t, err)
 	if !containsArgSequence(claudeArgs, "--dtu-phase", "implement") {
 		t.Fatalf("claude args missing DTU phase: %v", claudeArgs)
@@ -5555,11 +5637,68 @@ func TestBuildProviderPhaseArgsAddsDTUMetadataWhenDTUActive(t *testing.T) {
 		t.Fatalf("claude args missing DTU attempt: %v", claudeArgs)
 	}
 
-	_, copilotArgs, _, _, err := buildProviderPhaseArgs(cfg, nil, nil, phase, "", "copilot", "med", "prompt", 3)
+	_, copilotArgs, _, _, err := buildProviderPhaseArgs(cfg, mustProviderConfigForTest(t, cfg, "copilot"), nil, nil, phase, "", "copilot", "med", "prompt", 3)
 	require.NoError(t, err)
 	if !containsArgSequence(copilotArgs, "--dtu-attempt", "3") {
 		t.Fatalf("copilot args missing DTU attempt: %v", copilotArgs)
 	}
+}
+
+func TestRunPromptInvocationToolPermissions(t *testing.T) {
+	t.Run("derived tools are passed to provider", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &config.Config{
+			Claude: config.ClaudeConfig{Command: "claude"},
+		}
+		cmdRunner := &mockCmdRunner{}
+		r := New(cfg, nil, nil, cmdRunner)
+
+		_, _, _, _, err := r.runPromptInvocation(context.Background(), queue.Vessel{ID: "v1"}, dir, nil, &workflow.Workflow{Class: policy.Delivery}, &workflow.Phase{Name: "analyze", MaxTurns: 5}, "", "prompt body", 1)
+		require.NoError(t, err)
+		require.Len(t, cmdRunner.phaseCalls, 1)
+		assert.Contains(t, cmdRunner.phaseCalls[0].args, "--allowedTools")
+		assert.Contains(t, cmdRunner.phaseCalls[0].args, "Bash,Glob,Grep,LS,Read,WebFetch,WebSearch,Edit,MultiEdit,Write")
+	})
+
+	t.Run("unauthorized tool fails before subprocess", func(t *testing.T) {
+		dir := t.TempDir()
+		cfg := &config.Config{
+			Claude: config.ClaudeConfig{Command: "claude"},
+		}
+		cmdRunner := &mockCmdRunner{}
+		r := New(cfg, nil, nil, cmdRunner)
+
+		_, _, _, _, err := r.runPromptInvocation(context.Background(), queue.Vessel{ID: "v1"}, dir, nil, nil, &workflow.Phase{Name: "analyze", MaxTurns: 5, AllowedTools: strPtrRunner("Edit")}, "", "prompt body", 1)
+		require.Error(t, err)
+		require.Empty(t, cmdRunner.phaseCalls)
+	})
+}
+
+func TestSmoke_S3_DeliveryPhaseLaunchPassesResolvedAllowedTools(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Claude: config.ClaudeConfig{Command: "claude"},
+	}
+	cmdRunner := &mockCmdRunner{}
+	r := New(cfg, nil, nil, cmdRunner)
+	wf := &workflow.Workflow{Class: policy.Delivery}
+	phase := &workflow.Phase{Name: "analyze", MaxTurns: 5}
+
+	output, promptForCost, provider, model, err := r.runPromptInvocation(context.Background(), queue.Vessel{ID: "v1"}, dir, nil, wf, phase, "", "prompt body", 1)
+	require.NoError(t, err)
+
+	assert.Equal(t, []byte("mock output"), output)
+	assert.Equal(t, "prompt body", promptForCost)
+	assert.Equal(t, "claude", provider)
+	assert.Equal(t, "", model)
+	require.Len(t, cmdRunner.phaseCalls, 1)
+
+	call := cmdRunner.phaseCalls[0]
+	assert.Equal(t, dir, call.dir)
+	assert.Equal(t, "claude", call.name)
+	assert.Contains(t, call.args, "--allowedTools")
+	assert.Contains(t, call.args, "Bash,Glob,Grep,LS,Read,WebFetch,WebSearch,Edit,MultiEdit,Write")
+	assert.Equal(t, "prompt body", call.prompt)
 }
 
 func TestBuildCommandCopilotDirect(t *testing.T) {

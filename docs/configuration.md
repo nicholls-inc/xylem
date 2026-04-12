@@ -446,6 +446,7 @@ The `claude` section controls how xylem invokes the Claude CLI for each session.
 - If `claude.flags` contains `--bare`, then `claude.env` must include a non-empty `ANTHROPIC_API_KEY`. The `--bare` flag disables Claude's built-in authentication, so you must provide your own API key.
 - `claude.template` is no longer supported and produces a hard error if present. Migrate to phase-based workflows in `<state_dir>/workflows/`.
 - `claude.allowed_tools` is no longer supported and produces a hard error if present. Define allowed tools in workflow phase definitions instead.
+- Phase `allowed_tools` are resolved against the harness tool catalog before xylem invokes the provider CLI. When a prompt phase omits `allowed_tools`, xylem derives the role's default tool set instead of leaving the provider unrestricted.
 
 ### Copilot session settings
 
@@ -473,7 +474,7 @@ When `daemon.auto_upgrade` is enabled, start the daemon from the **root of a ded
 
 ### Harness settings
 
-The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, and audit logging.
+The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, phase tool-permission roles, and audit logging.
 
 When `harness.policy.rules` is empty, xylem installs a default policy that denies writes to protected control surfaces and otherwise allows the actions the runner currently classifies, so autonomous drains can finish without a built-in approval pause. Today that boundary is narrow: every phase is classified as `phase_execute` or `external_command`, and the runner may additionally emit `git_commit`, `git_push`, and `pr_create` when it detects those publication steps in rendered prompts or commands. The same `harness.protected_surfaces.paths` list also drives the worktree's read-only hardening and the runner's post-phase surface verification.
 
@@ -490,6 +491,8 @@ When `harness.policy.rules` is empty, xylem installs a default policy that denie
 |-------|------|---------|----------|-------------|
 | `harness.protected_surfaces.paths` | list of strings | `[".xylem/HARNESS.md", ".xylem.yml", ".xylem/workflows/*.yaml", ".xylem/prompts/*/*.md"]` | No | Glob patterns for files agents cannot modify. Set to `["none"]` to disable all surface protections. |
 | `harness.policy.rules` | list of objects | `[]` | No | Policy rules for action authorization. Each rule has `action`, `resource`, and `effect`. |
+| `harness.tool_permissions.phase_roles` | map of string to string | `{}` | No | Exact phase-name to role override for prompt-phase tool resolution. If unset, xylem derives the default role from the workflow class (`delivery` -> `delivery`; `harness-maintenance`/`ops` -> `housekeeping`) and only falls back to phase-name heuristics when no workflow class is available. |
+| `harness.tool_permissions.roles` | map of objects | `{}` | No | Role permission overrides for the phase tool catalog. Each role object may set `max_scope` (`read_only`, `write_with_approval`, `full_autonomy`) and `allowed_tools`. Custom roles must set `max_scope`. |
 | `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the runtime state root (`<state_dir>/state/` in the standard layout). |
 | `harness.review.enabled` | bool | `false` | No | Enables recurring harness review generation after drain runs. Manual `xylem review` works regardless. |
 | `harness.review.cadence` | string | `"manual"` | No | Automatic review cadence. Valid values: `manual`, `every_drain`, `every_n_runs`. |

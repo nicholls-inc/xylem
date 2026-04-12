@@ -194,7 +194,22 @@ func (r *Runner) runPromptInvocation(ctx context.Context, vessel queue.Vessel, w
 	provider := ""
 	model := ""
 	output, provider, model, err := r.runPhaseWithProviderFallback(ctx, vessel.ID, p.Name, worktreePath, providerChain, func(provider string) (providerInvocation, error) {
-		cmd, args, phaseStdin, resolvedModel, err := buildProviderPhaseArgs(r.Config, srcCfg, wf, p, harnessContent, provider, tier, rendered, attempt)
+		providerCfg, ok := providerConfigForName(r.Config, provider)
+		if !ok {
+			return providerInvocation{}, fmt.Errorf("provider %q is not configured", provider)
+		}
+		resolvedAllowedTools, err := r.resolvePhaseAllowedTools(wf, p, providerCfg)
+		if err != nil {
+			return providerInvocation{}, err
+		}
+		phaseDef := *p
+		if resolvedAllowedTools == "" {
+			phaseDef.AllowedTools = nil
+		} else {
+			phaseDef.AllowedTools = &resolvedAllowedTools
+		}
+		providerCfg.AllowedTools = nil
+		cmd, args, phaseStdin, resolvedModel, err := buildProviderPhaseArgs(r.Config, providerCfg, srcCfg, wf, &phaseDef, harnessContent, provider, tier, rendered, attempt)
 		if err != nil {
 			return providerInvocation{}, err
 		}
