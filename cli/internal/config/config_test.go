@@ -1,13 +1,17 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,6 +26,16 @@ func writeConfigFile(t *testing.T, yaml string) string {
 		t.Fatalf("write config file: %v", err)
 	}
 
+	return path
+}
+
+func writeWorkflowFile(t *testing.T, configPath, name, yaml string) string {
+	t.Helper()
+
+	workflowsDir := filepath.Join(filepath.Dir(configPath), ".xylem", "workflows")
+	path := filepath.Join(workflowsDir, name+".yaml")
+	require.NoError(t, os.MkdirAll(workflowsDir, 0o755))
+	require.NoError(t, os.WriteFile(path, []byte(yaml), 0o644))
 	return path
 }
 
@@ -54,6 +68,8 @@ claude:
   flags: "--bare"
   env:
     ANTHROPIC_API_KEY: "test-key"
+phase:
+  context_budget: 120000
 `)
 
 	cfg, err := Load(path)
@@ -108,6 +124,9 @@ claude:
 
 	if cfg.Claude.Env["ANTHROPIC_API_KEY"] != "test-key" {
 		t.Fatalf("Claude.Env[ANTHROPIC_API_KEY] = %q, want test-key", cfg.Claude.Env["ANTHROPIC_API_KEY"])
+	}
+	if cfg.Phase.ContextBudget != 120000 {
+		t.Fatalf("Phase.ContextBudget = %d, want 120000", cfg.Phase.ContextBudget)
 	}
 
 	// Legacy config should be normalized into Sources
@@ -189,10 +208,16 @@ claude:
 	if !cfg.Daemon.StallMonitor.OrphanCheckEnabled {
 		t.Fatal("Daemon.StallMonitor.OrphanCheckEnabled = false, want true")
 	}
+	if cfg.Phase.ContextBudget != DefaultPhaseContextBudget {
+		t.Fatalf("Phase.ContextBudget = %d, want %d", cfg.Phase.ContextBudget, DefaultPhaseContextBudget)
+	}
 
 	// Legacy config should be normalized into Sources
 	if len(cfg.Sources) != 1 {
 		t.Fatalf("expected 1 source after normalization, got %d", len(cfg.Sources))
+	}
+	if got := cfg.CostOnExceeded(); got != DefaultCostOnExceeded {
+		t.Fatalf("CostOnExceeded() = %q, want %q", got, DefaultCostOnExceeded)
 	}
 }
 
@@ -242,6 +267,29 @@ claude:
 
 	_, err := Load(path)
 	requireErrorContains(t, err, "concurrency.global is required when concurrency is a map")
+}
+
+func TestLoadRejectsNonPositivePhaseContextBudget(t *testing.T) {
+	path := writeConfigFile(t, `repo: owner/name
+tasks:
+  fix-bugs:
+    labels: [bug]
+    workflow: fix-bug
+claude:
+  default_model: "claude-sonnet-4-6"
+phase:
+  context_budget: 0
+`)
+
+	_, err := Load(path)
+	requireErrorContains(t, err, "phase.context_budget must be greater than 0")
+}
+
+func TestValidateRejectsNegativePhaseContextBudget(t *testing.T) {
+	cfg := validConfig()
+	cfg.Phase.ContextBudget = -1
+
+	requireErrorContains(t, cfg.Validate(), "phase.context_budget must be greater than 0")
 }
 
 func TestResolveStateDir(t *testing.T) {
@@ -320,6 +368,101 @@ func TestRuntimePathPreservesNonControlPlaneRoots(t *testing.T) {
 	want := filepath.Join(root, "phases", "issue-1", "summary.json")
 	assert.Equal(t, want, got)
 	assert.Equal(t, root, RuntimeRoot(root))
+}
+
+func TestMigrateFlatStateToRuntimeMovesLegacyFiles(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+	legacyQueuePath := filepath.Join(stateDir, "queue.jsonl")
+	legacyAuditPath := filepath.Join(stateDir, DefaultAuditLogPath)
+	legacyPIDPath := filepath.Join(stateDir, "daemon.pid")
+
+	queueLine := `{"id":"issue-388","source":"manual","state":"pending","created_at":"2026-04-12T01:00:00Z"}`
+	require.NoError(t, os.WriteFile(legacyQueuePath, []byte(queueLine+"\n"), 0o644))
+	require.NoError(t, os.WriteFile(legacyQueuePath+".lock", []byte("legacy queue lock"), 0o644))
+
+	legacyAudit := intermediary.NewAuditLog(legacyAuditPath)
+	require.NoError(t, legacyAudit.Append(intermediary.AuditEntry{
+		Intent:    intermediary.Intent{Action: "phase_execute", Resource: "implement", AgentID: "issue-388"},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Date(2026, time.April, 12, 1, 1, 0, 0, time.UTC),
+	}))
+	require.NoError(t, os.WriteFile(legacyPIDPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0o644))
+
+	require.NoError(t, MigrateFlatStateToRuntime(stateDir))
+
+	runtimeQueuePath := filepath.Join(stateDir, "state", "queue.jsonl")
+	runtimeAuditPath := filepath.Join(stateDir, "state", DefaultAuditLogPath)
+	runtimePIDPath := filepath.Join(stateDir, "state", "daemon.pid")
+
+	assert.NoFileExists(t, legacyQueuePath)
+	assert.NoFileExists(t, legacyAuditPath)
+	assert.NoFileExists(t, legacyPIDPath)
+	assert.NoFileExists(t, legacyQueuePath+".lock")
+	assert.NoFileExists(t, legacyAuditPath+".lock")
+	assert.FileExists(t, legacyQueuePath+".migrated")
+	assert.FileExists(t, legacyAuditPath+".migrated")
+	assert.FileExists(t, legacyPIDPath+".migrated")
+
+	assert.FileExists(t, runtimeQueuePath)
+	assert.FileExists(t, runtimeAuditPath)
+	assert.NoFileExists(t, runtimePIDPath)
+	assert.FileExists(t, runtimeQueuePath+".lock")
+	assert.FileExists(t, runtimeAuditPath+".lock")
+	assert.Equal(t, runtimeQueuePath, RuntimePath(stateDir, "queue.jsonl"))
+	assert.Equal(t, runtimeAuditPath, RuntimePath(stateDir, DefaultAuditLogPath))
+	assert.Equal(t, runtimePIDPath, RuntimePath(stateDir, "daemon.pid"))
+
+	queueData, err := os.ReadFile(RuntimePath(stateDir, "queue.jsonl"))
+	require.NoError(t, err)
+	var vessel struct {
+		ID string `json:"id"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(string(queueData))), &vessel))
+	assert.Equal(t, "issue-388", vessel.ID)
+
+	runtimeAudit := intermediary.NewAuditLog(RuntimePath(stateDir, DefaultAuditLogPath))
+	entries, err := runtimeAudit.Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, intermediary.Allow, entries[0].Decision)
+
+	_, err = os.Stat(runtimePIDPath)
+	require.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestMigrateFlatStateToRuntimeRejectsSplitBrainQueue(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "queue.jsonl"), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "state", "queue.jsonl"), []byte("{}\n"), 0o644))
+
+	err := MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime queue.jsonl exist")
+}
+
+func TestMigrateFlatStateToRuntimeRejectsSplitBrainAuditLog(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, DefaultAuditLogPath), []byte("{}\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "state", DefaultAuditLogPath), []byte("{}\n"), 0o644))
+
+	err := MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime audit.jsonl exist")
+}
+
+func TestMigrateFlatStateToRuntimeRejectsSplitBrainDaemonPID(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "daemon.pid"), []byte("0"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "state", "daemon.pid"), []byte("0"), 0o644))
+
+	err := MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime daemon.pid exist")
 }
 
 func validConfig() *Config {
@@ -733,12 +876,177 @@ claude:
 	requireErrorContains(t, err, "claude.allowed_tools is no longer supported")
 }
 
+func TestValidateHarnessToolPermissionsRejectsUnknownTool(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"diagnostic": {
+			AllowedTools: []string{"Read", "NotARealTool"},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `role "diagnostic"`)
+	requireErrorContains(t, err, `tool "NotARealTool" not found`)
+}
+
+func TestValidateHarnessToolPermissionsRejectsCustomRoleWithoutScope(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"custom": {
+			AllowedTools: []string{"Read"},
+		},
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `role "custom": max_scope is required for custom roles`)
+}
+
+func TestBuildPhaseToolCatalogAppliesOverrides(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.PhaseRoles = map[string]string{
+		"implement": "diagnostic",
+	}
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"diagnostic": {
+			AllowedTools: []string{"Read", "Edit"},
+			MaxScope:     "full_autonomy",
+		},
+	}
+
+	role := cfg.PhaseToolRole(policy.Delivery, "implement", "prompt")
+	require.Equal(t, "diagnostic", role)
+
+	toolCatalog, err := cfg.BuildPhaseToolCatalog()
+	require.NoError(t, err)
+
+	allowed, err := toolCatalog.ResolveRoleTools(role, []string{"Read", "Edit"})
+	require.NoError(t, err)
+	require.Equal(t, []string{"Read", "Edit"}, allowed)
+}
+
+func TestSmoke_S2_ConfigToolOverridesTakePrecedenceOverWorkflowClass(t *testing.T) {
+	cfg := validConfig()
+	cfg.Harness.ToolPermissions.PhaseRoles = map[string]string{
+		"implement": "diagnostic",
+	}
+	cfg.Harness.ToolPermissions.Roles = map[string]ToolRoleConfig{
+		"diagnostic": {
+			AllowedTools: []string{"Read", "Edit"},
+			MaxScope:     "full_autonomy",
+		},
+	}
+
+	role := cfg.PhaseToolRole(policy.Ops, "implement", "prompt")
+	require.Equal(t, "diagnostic", role)
+
+	toolCatalog, err := cfg.BuildPhaseToolCatalog()
+	require.NoError(t, err)
+
+	allowed, err := toolCatalog.ResolveRoleTools(role, []string{"Read", "Edit"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Read", "Edit"}, allowed)
+
+	_, err = toolCatalog.ResolveRoleTools("housekeeping", []string{"Read", "Edit"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `role "housekeeping" is not allowed to use tool "Edit"`)
+}
+
+func TestPhaseToolRoleDefaults(t *testing.T) {
+	cfg := validConfig()
+
+	assert.Equal(t, "delivery", cfg.PhaseToolRole(policy.Delivery, "analyze", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole(policy.HarnessMaintenance, "analyze", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole(policy.Ops, "merge_pr", "prompt"))
+	assert.Equal(t, "diagnostic", cfg.PhaseToolRole("", "analyze", "prompt"))
+	assert.Equal(t, "delivery", cfg.PhaseToolRole("", "implement", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole("", "review", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole("", "pr_draft", "prompt"))
+	assert.Equal(t, "housekeeping", cfg.PhaseToolRole("", "smoke", "command"))
+}
+
 func TestValidateCostBudgetNegativeMaxTokens(t *testing.T) {
 	cfg := validConfig()
 	cfg.Cost.Budget = &BudgetConfig{MaxTokens: -1}
 
 	err := cfg.Validate()
 	requireErrorContains(t, err, "cost.budget.max_tokens")
+}
+
+func TestValidateCostDailyBudgetNegative(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.DailyBudgetUSD = -1
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.daily_budget_usd")
+}
+
+func TestValidateCostPerClassLimitNegative(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.PerClassLimit = map[string]float64{"delivery": -1}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, `cost.per_class_limit["delivery"]`)
+}
+
+func TestValidateCostPerClassLimitRejectsBlankClassName(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.PerClassLimit = map[string]float64{"   ": 1}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.per_class_limit keys must be non-empty")
+}
+
+func TestValidateCostPerClassLimitOversubscribed(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.DailyBudgetUSD = 10
+	cfg.Cost.PerClassLimit = map[string]float64{
+		"delivery":            8,
+		"harness-maintenance": 3,
+	}
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.per_class_limit total")
+}
+
+func TestValidateCostPerClassLimitAllowsUnlimitedDailyBudget(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.DailyBudgetUSD = 0
+	cfg.Cost.PerClassLimit = map[string]float64{
+		"delivery":            40,
+		"harness-maintenance": 5,
+	}
+
+	require.NoError(t, cfg.Validate())
+}
+
+func TestValidateCostOnExceededRejectsUnknownValue(t *testing.T) {
+	cfg := validConfig()
+	cfg.Cost.OnExceeded = "stop"
+
+	err := cfg.Validate()
+	requireErrorContains(t, err, "cost.on_exceeded")
+}
+
+func TestCostOnExceededDefaultsAndNormalizes(t *testing.T) {
+	tests := []struct {
+		name string
+		mode string
+		want string
+	}{
+		{name: "empty defaults", mode: "", want: DefaultCostOnExceeded},
+		{name: "whitespace defaults", mode: "   ", want: DefaultCostOnExceeded},
+		{name: "drain only trims", mode: " drain_only ", want: DefaultCostOnExceeded},
+		{name: "pause normalizes case", mode: " Pause ", want: "pause"},
+		{name: "alert normalizes case", mode: "ALERT", want: "alert"},
+		{name: "unknown falls back", mode: "stop", want: DefaultCostOnExceeded},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Cost: CostConfig{OnExceeded: tt.mode}}
+			assert.Equal(t, tt.want, cfg.CostOnExceeded())
+		})
+	}
 }
 
 func TestLoadDefaultModel(t *testing.T) {
@@ -1904,7 +2212,9 @@ func newSmokeIntermediary(t *testing.T, cfg *Config) *intermediary.Intermediary 
 	t.Helper()
 
 	auditLog := intermediary.NewAuditLog(filepath.Join(t.TempDir(), "audit.jsonl"))
-	return intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+	inter := intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+	inter.SetMode(cfg.HarnessPolicyMode())
+	return inter
 }
 
 func TestSmoke_S1_FullConfigLoadsWithHarnessSection(t *testing.T) {
@@ -1918,6 +2228,7 @@ harness:
       - ".xylem/workflows/*.yaml"
       - ".xylem/prompts/*/*.md"
   policy:
+    mode: "warn"
     rules:
       - action: "file_write"
         resource: ".xylem/*"
@@ -1946,6 +2257,7 @@ cost:
 	assert.Equal(t, "audit.jsonl", cfg.Harness.AuditLog)
 	require.Len(t, cfg.Harness.ProtectedSurfaces.Paths, 4)
 	require.Len(t, cfg.Harness.Policy.Rules, 4)
+	assert.Equal(t, intermediary.PolicyModeWarn, cfg.HarnessPolicyMode())
 	require.NotNil(t, cfg.Observability.Enabled)
 	assert.True(t, *cfg.Observability.Enabled)
 	assert.Equal(t, 1.0, cfg.Observability.SampleRate)
@@ -1973,6 +2285,9 @@ func TestSmoke_S2_NoHarnessSectionDefaultsActivate(t *testing.T) {
 	assert.Equal(t, "reviews", cfg.HarnessReviewOutputDir())
 	assert.True(t, cfg.ObservabilityEnabled())
 	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
+	assert.Zero(t, cfg.Cost.DailyBudgetUSD)
+	assert.Nil(t, cfg.Cost.PerClassLimit)
+	assert.Equal(t, DefaultCostOnExceeded, cfg.CostOnExceeded())
 	assert.Nil(t, cfg.VesselBudget())
 
 	policies := cfg.BuildIntermediaryPolicies()
@@ -1988,6 +2303,15 @@ func TestSmoke_S3_PathsNoneDisablesProtection(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, cfg)
 	assert.Nil(t, cfg.EffectiveProtectedSurfaces())
+}
+
+func TestDefaultProtectedSurfacesComment(t *testing.T) {
+	// Read config.go source to assert the comment stays up-to-date.
+	src, err := os.ReadFile("config.go")
+	require.NoError(t, err)
+	content := string(src)
+	assert.Contains(t, content, "#366", "DefaultProtectedSurfaces comment must reference PR #366")
+	assert.Contains(t, content, "class matrix", "DefaultProtectedSurfaces comment must reference the class matrix")
 }
 
 func TestSmoke_S4_InvalidGlobRejected(t *testing.T) {
@@ -2020,40 +2344,53 @@ func TestSmoke_S5_InvalidPolicyEffectRejected(t *testing.T) {
 	assert.Contains(t, err.Error(), "approve_maybe")
 }
 
+func TestSmoke_S5b_InvalidPolicyModeRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `harness:
+  policy:
+    mode: "observe"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "harness.policy.mode")
+	assert.Contains(t, err.Error(), "invalid policy mode")
+}
+
 func TestSmoke_S6_DefaultPolicyDeniesHarnessWrite(t *testing.T) {
-	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+	result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 		Action:   "file_write",
 		Resource: ".xylem/HARNESS.md",
 		AgentID:  "vessel-001",
-	})
+	}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-001"})
 
 	assert.Equal(t, intermediary.Deny, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, "file_write", result.MatchedRule.Action)
-	assert.Equal(t, ".xylem/HARNESS.md", result.MatchedRule.Resource)
+	assert.Equal(t, "write_control_plane", result.Operation)
+	assert.Equal(t, "delivery.no_control_plane_writes", result.RuleMatched)
+	assert.Equal(t, policy.Delivery, result.WorkflowClass)
 }
 
 func TestSmoke_S7_DefaultPolicyAllowsGitPush(t *testing.T) {
 	// Autonomous self-healing requires git_push to succeed without manual
 	// approval. Operators who want approval gates can override via
 	// harness.policy in .xylem.yml.
-	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+	result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 		Action:   "git_push",
 		Resource: "main",
 		AgentID:  "vessel-002",
-	})
+	}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-002"})
 
 	assert.Equal(t, intermediary.Allow, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, "*", result.MatchedRule.Action)
-	assert.Equal(t, "*", result.MatchedRule.Resource)
+	assert.Equal(t, "push_branch", result.Operation)
+	assert.Equal(t, "delivery.feature_branch_push_allowed", result.RuleMatched)
 }
 
 func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
 	tests := []struct {
-		name     string
-		action   string
-		resource string
+		name            string
+		action          string
+		resource        string
+		wantOperation   string
+		wantRuleMatched string
 	}{
 		{
 			name:     "git commit",
@@ -2061,43 +2398,54 @@ func TestDefaultPolicyAllowsClassifiedGitLifecycleActions(t *testing.T) {
 			resource: "*",
 		},
 		{
-			name:     "git push",
-			action:   "git_push",
-			resource: "main",
+			name:            "git push",
+			action:          "git_push",
+			resource:        "main",
+			wantOperation:   "push_branch",
+			wantRuleMatched: "delivery.feature_branch_push_allowed",
 		},
 		{
-			name:     "pull request create",
-			action:   "pr_create",
-			resource: "owner/name",
+			name:            "pull request create",
+			action:          "pr_create",
+			resource:        "owner/name",
+			wantOperation:   "create_pr",
+			wantRuleMatched: "delivery.pr_creation_allowed",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+			result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 				Action:   tt.action,
 				Resource: tt.resource,
 				AgentID:  "vessel-009",
-			})
+			}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-009"})
 
 			assert.Equal(t, intermediary.Allow, result.Effect)
-			require.NotNil(t, result.MatchedRule)
-			assert.Equal(t, "*", result.MatchedRule.Action)
-			assert.Equal(t, "*", result.MatchedRule.Resource)
+			assert.Equal(t, policy.Delivery, result.WorkflowClass)
+			if tt.action == "git_commit" {
+				assert.Empty(t, result.Operation)
+				assert.NotNil(t, result.MatchedRule)
+				assert.Equal(t, "*", result.MatchedRule.Action)
+				assert.Equal(t, "*", result.MatchedRule.Resource)
+				return
+			}
+			assert.Equal(t, tt.wantOperation, result.Operation)
+			assert.Equal(t, tt.wantRuleMatched, result.RuleMatched)
 		})
 	}
 }
 
 func TestDefaultPolicyDeniesPromptFileWrite(t *testing.T) {
-	result := newSmokeIntermediary(t, validConfig()).Evaluate(intermediary.Intent{
+	result := newSmokeIntermediary(t, validConfig()).EvaluateWithContext(intermediary.Intent{
 		Action:   "file_write",
 		Resource: ".xylem/prompts/fix-bug/analyze.md",
 		AgentID:  "vessel-004",
-	})
+	}, intermediary.EvaluationContext{WorkflowClass: policy.Delivery, VesselID: "vessel-004"})
 
 	assert.Equal(t, intermediary.Deny, result.Effect)
-	require.NotNil(t, result.MatchedRule)
-	assert.Equal(t, ".xylem/prompts/*/*.md", result.MatchedRule.Resource)
+	assert.Equal(t, "write_control_plane", result.Operation)
+	assert.Equal(t, "delivery.no_control_plane_writes", result.RuleMatched)
 }
 
 func TestSmoke_S8_DefaultPolicyAllowsPhaseExecute(t *testing.T) {
@@ -2120,11 +2468,17 @@ func TestSmoke_S29_ObservabilityDefaultsWhenAbsent(t *testing.T) {
 	assert.Equal(t, 1.0, cfg.ObservabilitySampleRate())
 }
 
-func TestSmoke_S30_CostBudgetLoadsCorrectly(t *testing.T) {
+func TestSmoke_S30_CostConfigLoadsBudgetAndDailyBudgetPolicy(t *testing.T) {
 	path := writeSmokeConfigFile(t, `cost:
   budget:
     max_cost_usd: 5.0
     max_tokens: 500000
+  daily_budget_usd: 50
+  per_class_limit:
+    " delivery ": 40
+    " harness-maintenance ": 5
+    ops: 5
+  on_exceeded: " Pause "
 `)
 
 	cfg, err := Load(path)
@@ -2135,6 +2489,37 @@ func TestSmoke_S30_CostBudgetLoadsCorrectly(t *testing.T) {
 	require.NotNil(t, budget)
 	assert.Equal(t, 5.0, budget.CostLimitUSD)
 	assert.Equal(t, 500000, budget.TokenLimit)
+	assert.Equal(t, 50.0, cfg.Cost.DailyBudgetUSD)
+	assert.Equal(t, map[string]float64{
+		"delivery":            40,
+		"harness-maintenance": 5,
+		"ops":                 5,
+	}, cfg.Cost.PerClassLimit)
+	assert.Equal(t, "pause", cfg.CostOnExceeded())
+}
+
+func TestLoadDailyBudgetOversubscriptionRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  daily_budget_usd: 10
+  per_class_limit:
+    delivery: 8
+    ops: 4
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cost.per_class_limit total")
+}
+
+func TestLoadDailyBudgetUnknownOnExceededRejected(t *testing.T) {
+	path := writeSmokeConfigFile(t, `cost:
+  daily_budget_usd: 50
+  on_exceeded: stop
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cost.on_exceeded")
 }
 
 func TestSmoke_S31_NegativeSampleRateRejected(t *testing.T) {
@@ -2591,7 +2976,8 @@ claude:
 func TestSmoke_S1_LoadsValidationAndAutoMergeConfig(t *testing.T) {
 	t.Parallel()
 
-	path := writeConfigFile(t, `sources:
+	path := writeConfigFile(t, `profiles: [core]
+sources:
   github:
     type: github
     repo: owner/name
@@ -2644,6 +3030,9 @@ func TestSmoke_S2_RejectsEmptyValidationForActivePRValidationWorkflows(t *testin
       resolve-conflicts:
         labels: [merge]
         workflow: resolve-conflicts
+      adapt-repo:
+        labels: [bootstrap]
+        workflow: adapt-repo
 concurrency: 2
 max_turns: 50
 timeout: "30m"
@@ -2655,6 +3044,7 @@ claude:
 	_, err := Load(path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "validation: at least one of format, lint, build, or test must be set")
+	assert.Contains(t, err.Error(), "adapt-repo")
 	assert.Contains(t, err.Error(), "fix-pr-checks")
 	assert.Contains(t, err.Error(), "resolve-conflicts")
 }
@@ -2669,7 +3059,7 @@ func TestSmoke_S3_AllowsPartialValidationForActivePRValidationWorkflow(t *testin
     tasks:
       fix-checks:
         labels: [ci]
-        workflow: fix-pr-checks
+        workflow: adapt-repo
 validation:
   test: "go test ./..."
 concurrency: 2
@@ -2687,7 +3077,7 @@ claude:
 }
 
 func TestSmoke_S4_RejectsGoimportsPackagePatternForValidationRequiredWorkflows(t *testing.T) {
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 
@@ -2718,7 +3108,7 @@ claude:
 }
 
 func TestSmoke_S5_AllowsGoimportsDirectoryTargetsForValidationRequiredWorkflows(t *testing.T) {
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 
@@ -2749,7 +3139,7 @@ claude:
 }
 
 func TestSmoke_S6_AllowsGoimportsLocalPrefixContainingEllipsisForValidationRequiredWorkflows(t *testing.T) {
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		t.Run(workflow, func(t *testing.T) {
 			t.Parallel()
 
@@ -2808,7 +3198,7 @@ func TestSmoke_S7_RejectsRepoRootGoCLIPathsForValidationRequiredWorkflows(t *tes
 		},
 	}
 
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		workflow := workflow
 		for _, tc := range testCases {
 			tc := tc
@@ -2855,7 +3245,7 @@ func TestSmoke_S8_AllowsCLIWorkingDirGoCommandsForValidationRequiredWorkflows(t 
 		{name: "test", field: "test", command: "cd cli && go test ./..."},
 	}
 
-	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts"} {
+	for _, workflow := range []string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"} {
 		workflow := workflow
 		for _, tc := range testCases {
 			tc := tc
@@ -2905,6 +3295,193 @@ func TestValidateRejectsInvalidAutoMergeBranchPattern(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "daemon.auto_merge_branch_pattern")
+}
+
+func TestValidateAutoMergeWorkflowClass(t *testing.T) {
+	tests := []struct {
+		name      string
+		profiles  []string
+		autoMerge bool
+		wantErr   string
+	}{
+		{
+			name:      "allows disabled auto merge without ops profile",
+			autoMerge: false,
+		},
+		{
+			name:      "rejects enabled auto merge without ops profile",
+			autoMerge: true,
+			wantErr:   "daemon.auto_merge requires an active profile with at least one ops-class workflow",
+		},
+		{
+			name:      "allows enabled auto merge with ops profile",
+			profiles:  []string{"core"},
+			autoMerge: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validConfig()
+			cfg.Profiles = tt.profiles
+			cfg.Daemon.AutoMerge = tt.autoMerge
+
+			err := cfg.validateAutoMergeWorkflowClass()
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestComposedProfileHasWorkflowClassTreatsUnsetClassAsDelivery(t *testing.T) {
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"merge-pr": []byte(`name: merge-pr
+phases:
+  - name: analyze
+    prompt_file: prompts/merge-pr/analyze.md
+    max_turns: 1
+`),
+		},
+	}
+
+	hasOps, err := composedProfileHasWorkflowClass(composed, policy.Ops)
+	require.NoError(t, err)
+	assert.False(t, hasOps)
+}
+
+func TestSmoke_S9_RejectsAutoMergeWithoutOpsProfile(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon.auto_merge requires an active profile with at least one ops-class workflow")
+}
+
+func TestSmoke_S10_AllowsAutoMergeForSelfHostingProfileComposition(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `profiles: [core, self-hosting-xylem]
+sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	workflows, err := cfg.activeWorkflowDefinitions()
+	require.NoError(t, err)
+	hasOps, err := workflowMapHasClass(workflows, policy.Ops)
+	require.NoError(t, err)
+	assert.True(t, hasOps)
+}
+
+func TestSmoke_S11_AllowsAutoMergeWithCheckedInOpsWorkflowWithoutProfiles(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+	writeWorkflowFile(t, path, "merge-pr", `name: merge-pr
+class: ops
+phases:
+  - name: merge
+    prompt_file: prompts/merge-pr/merge.md
+    max_turns: 1
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	require.NotNil(t, cfg)
+
+	workflows, err := cfg.activeWorkflowDefinitions()
+	require.NoError(t, err)
+	hasOps, err := workflowMapHasClass(workflows, policy.Ops)
+	require.NoError(t, err)
+	assert.True(t, hasOps)
+}
+
+func TestSmoke_S12_RejectsAutoMergeWhenWorkflowClassDefaultsToDelivery(t *testing.T) {
+	t.Parallel()
+
+	path := writeConfigFile(t, `sources:
+  github:
+    type: github
+    repo: owner/name
+    tasks:
+      fix:
+        labels: [bug]
+        workflow: fix-bug
+daemon:
+  auto_merge: true
+concurrency: 2
+max_turns: 50
+timeout: "30m"
+claude:
+  command: "claude"
+  default_model: "claude-sonnet-4-6"
+`)
+	writeWorkflowFile(t, path, "merge-pr", `name: merge-pr
+phases:
+  - name: merge
+    prompt_file: prompts/merge-pr/merge.md
+    max_turns: 1
+`)
+
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "daemon.auto_merge requires an active profile with at least one ops-class workflow")
 }
 
 func TestSourceTimeoutValid(t *testing.T) {

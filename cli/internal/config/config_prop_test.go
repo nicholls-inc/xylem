@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
 )
@@ -33,6 +36,24 @@ func outOfRangeSampleRateGen() *rapid.Generator[float64] {
 		}
 		return rapid.Float64Range(1.001, 1e9).Draw(t, "sample-rate")
 	})
+}
+
+func variedCaseAndSpacing(t *rapid.T, value string) string {
+	var b strings.Builder
+	b.WriteString(strings.Repeat(" ", rapid.IntRange(0, 3).Draw(t, "leading-spaces")))
+	for i, r := range value {
+		ch := string(r)
+		if ('a' <= r && r <= 'z') || ('A' <= r && r <= 'Z') {
+			if rapid.Bool().Draw(t, fmt.Sprintf("upper-%d", i)) {
+				ch = strings.ToUpper(ch)
+			} else {
+				ch = strings.ToLower(ch)
+			}
+		}
+		b.WriteString(ch)
+	}
+	b.WriteString(strings.Repeat(" ", rapid.IntRange(0, 3).Draw(t, "trailing-spaces")))
+	return b.String()
 }
 
 func TestPropEffectiveProtectedSurfacesNeverAliasesInput(t *testing.T) {
@@ -100,15 +121,74 @@ func TestPropRuntimePathAddsSingleStatePrefixForControlPlane(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(root, ".gitignore"), []byte("state/\n"), 0o644))
 
 		segments := []string{
-			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-a"),
-			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-b"),
-			rapid.StringMatching(`[A-Za-z0-9._-]{1,8}`).Draw(t, "segment-c"),
+			rapid.StringMatching(`[A-Za-z0-9][A-Za-z0-9._-]{0,7}`).Draw(t, "segment-a"),
+			rapid.StringMatching(`[A-Za-z0-9][A-Za-z0-9._-]{0,7}`).Draw(t, "segment-b"),
+			rapid.StringMatching(`[A-Za-z0-9][A-Za-z0-9._-]{0,7}`).Draw(t, "segment-c"),
 		}
 
 		got := RuntimePath(root, segments...)
 		want := filepath.Join(append([]string{root, "state"}, segments...)...)
 		if got != want {
 			t.Fatalf("RuntimePath(%q, %#v) = %q, want %q", root, segments, got, want)
+		}
+	})
+}
+
+func TestPropMigrateFlatStateToRuntimePreservesLegacyArtifacts(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		root, err := os.MkdirTemp("", "runtime-migrate-*")
+		require.NoError(t, err)
+		defer os.RemoveAll(root)
+		stateDir := filepath.Join(root, ".xylem")
+		require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+		queuePayload := rapid.StringMatching(`[A-Za-z0-9._:/# -]{1,48}`).Draw(t, "queue-payload")
+		auditPayload := rapid.StringMatching(`[A-Za-z0-9._:/# -]{1,48}`).Draw(t, "audit-payload")
+
+		require.NoError(t, os.WriteFile(
+			filepath.Join(stateDir, "queue.jsonl"),
+			[]byte(fmt.Sprintf("{\"id\":\"issue-%s\",\"source\":\"manual\",\"state\":\"pending\",\"created_at\":\"2026-04-12T02:00:00Z\",\"prompt\":\"%s\"}\n", queuePayload, queuePayload)),
+			0o644,
+		))
+		require.NoError(t, os.WriteFile(filepath.Join(stateDir, "queue.jsonl.lock"), []byte("legacy queue lock"), 0o644))
+
+		legacyAudit := intermediary.NewAuditLog(filepath.Join(stateDir, DefaultAuditLogPath))
+		require.NoError(t, legacyAudit.Append(intermediary.AuditEntry{
+			Intent: intermediary.Intent{
+				Action:   "phase_execute",
+				Resource: auditPayload,
+				AgentID:  "agent-" + auditPayload,
+			},
+			Decision: intermediary.Allow,
+		}))
+		require.NoError(t, os.WriteFile(filepath.Join(stateDir, "daemon.pid"), []byte(fmt.Sprintf("%d", os.Getpid())), 0o644))
+
+		require.NoError(t, MigrateFlatStateToRuntime(stateDir))
+
+		queueData, err := os.ReadFile(RuntimePath(stateDir, "queue.jsonl"))
+		require.NoError(t, err)
+		if !strings.Contains(string(queueData), `"prompt":"`+queuePayload+`"`) {
+			t.Fatalf("queue payload = %q, want prompt %q", string(queueData), queuePayload)
+		}
+
+		entries, err := intermediary.NewAuditLog(RuntimePath(stateDir, DefaultAuditLogPath)).Entries()
+		require.NoError(t, err)
+		require.Len(t, entries, 1)
+		if entries[0].Intent.Resource != auditPayload {
+			t.Fatalf("audit resource = %q, want %q", entries[0].Intent.Resource, auditPayload)
+		}
+
+		if !pathExists(filepath.Join(stateDir, "queue.jsonl.migrated")) {
+			t.Fatal("queue migration marker missing")
+		}
+		if !pathExists(filepath.Join(stateDir, DefaultAuditLogPath+".migrated")) {
+			t.Fatal("audit migration marker missing")
+		}
+		if !pathExists(filepath.Join(stateDir, "daemon.pid.migrated")) {
+			t.Fatal("daemon.pid migration marker missing")
+		}
+		if pathExists(RuntimePath(stateDir, "daemon.pid")) {
+			t.Fatal("runtime daemon.pid should be recreated by the lock owner, not migration")
 		}
 	})
 }
@@ -126,6 +206,58 @@ func TestPropVesselBudgetNilWhenBothLimitsNonPositive(t *testing.T) {
 
 		if budget := cfg.VesselBudget(); budget != nil {
 			t.Fatalf("VesselBudget() = %#v, want nil", budget)
+		}
+	})
+}
+
+func TestPropValidateCostRejectsOversubscribedPerClassTotals(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		daily := rapid.IntRange(2, 1_000_000).Draw(t, "daily-budget-usd")
+		delivery := rapid.IntRange(1, daily).Draw(t, "delivery-budget-usd")
+		opsMin := daily - delivery + 1
+		ops := rapid.IntRange(opsMin, daily).Draw(t, "ops-budget-usd")
+		cfg := Config{
+			Cost: CostConfig{
+				DailyBudgetUSD: float64(daily),
+				PerClassLimit: map[string]float64{
+					"delivery": float64(delivery),
+					"ops":      float64(ops),
+				},
+			},
+		}
+
+		err := cfg.validateCost()
+		if err == nil {
+			t.Fatal("Validate() error = nil, want oversubscription rejection")
+		}
+		if !strings.Contains(err.Error(), "cost.per_class_limit total") {
+			t.Fatalf("Validate() error = %v, want cost.per_class_limit total", err)
+		}
+	})
+}
+
+func TestPropCostOnExceededDefaultsAndNormalizes(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		base := rapid.SampledFrom([]string{"", "drain_only", "pause", "alert", "stop"}).Draw(t, "mode-base")
+		mode := variedCaseAndSpacing(t, base)
+		cfg := Config{
+			Cost: CostConfig{
+				OnExceeded: mode,
+			},
+		}
+
+		got := cfg.CostOnExceeded()
+		switch base {
+		case "", "drain_only", "stop":
+			if got != DefaultCostOnExceeded {
+				t.Fatalf("CostOnExceeded() = %q, want %q", got, DefaultCostOnExceeded)
+			}
+		case "pause", "alert":
+			if got != base {
+				t.Fatalf("CostOnExceeded() = %q, want %q", got, base)
+			}
+		default:
+			t.Fatalf("unexpected sampled base %q", base)
 		}
 	})
 }
@@ -172,6 +304,63 @@ func TestPropHarnessReviewOutputDirRejectsTraversal(t *testing.T) {
 		}
 		if !strings.Contains(err.Error(), "harness.review.output_dir") {
 			t.Fatalf("validateHarness() error = %v, want harness.review.output_dir", err)
+		}
+	})
+}
+
+func TestPropPhaseToolRoleOverrideWins(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		phaseName := rapid.StringMatching(`[a-z][a-z0-9_]{2,12}`).Draw(t, "phase-name")
+		role := rapid.SampledFrom([]string{"diagnostic", "delivery", "housekeeping"}).Draw(t, "role")
+		cfg := Config{
+			Harness: HarnessConfig{
+				ToolPermissions: ToolPermissionsConfig{
+					PhaseRoles: map[string]string{
+						phaseName: role,
+					},
+				},
+			},
+		}
+
+		if got := cfg.PhaseToolRole(policy.Delivery, phaseName, "prompt"); got != role {
+			t.Fatalf("PhaseToolRole(%q) = %q, want %q", phaseName, got, role)
+		}
+	})
+}
+
+func TestPropHarnessPolicyModeDefaultsToWarn(t *testing.T) {
+	// Contract:
+	//   - Empty / whitespace-only / invalid modes resolve to warn (the zero-
+	//     value default per docs/plans/sota-gap-implementation-2026-04-11.md).
+	//   - "enforce" (case-insensitive, trimmed) resolves to enforce.
+	//   - "warn" (case-insensitive, trimmed) resolves to warn.
+	rapid.Check(t, func(t *rapid.T) {
+		mode := rapid.SampledFrom([]string{
+			"",
+			"warn",
+			"enforce",
+			" WARN ",
+			" ENFORCE ",
+			"observe",
+			" warn-only ",
+			"enforced",
+		}).Draw(t, "mode")
+		cfg := Config{
+			Harness: HarnessConfig{
+				Policy: PolicyConfig{Mode: mode},
+			},
+		}
+
+		got := cfg.HarnessPolicyMode()
+		switch strings.TrimSpace(strings.ToLower(mode)) {
+		case "enforce":
+			if got != intermediary.PolicyModeEnforce {
+				t.Fatalf("HarnessPolicyMode() = %q, want %q", got, intermediary.PolicyModeEnforce)
+			}
+		default:
+			if got != intermediary.PolicyModeWarn {
+				t.Fatalf("HarnessPolicyMode() = %q, want %q", got, intermediary.PolicyModeWarn)
+			}
 		}
 	})
 }
@@ -258,7 +447,7 @@ func TestPropNormalizeLegacyProvidersPreservesDefaultTierModels(t *testing.T) {
 func TestPropValidationRequirementAcceptsAnyNonEmptyNonGoimportsValidationCommand(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		commands := []*string{
 			&cfg.Validation.Format,
@@ -278,7 +467,7 @@ func TestPropValidationRequirementAcceptsAnyNonEmptyNonGoimportsValidationComman
 func TestPropValidationRequirementRejectsGoimportsPackagePatternTargets(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		target := rapid.SampledFrom([]string{"./...", "./cli/...", "./internal/...", "cli/..."}).Draw(t, "target")
 		cfg.Validation.Format = "goimports -l " + target
@@ -296,7 +485,7 @@ func TestPropValidationRequirementRejectsGoimportsPackagePatternTargets(t *testi
 func TestPropValidationRequirementAcceptsGoimportsDirectoryTargets(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		target := rapid.StringMatching(`[./a-z0-9_-]{1,16}`).Draw(t, "target")
 		target = strings.TrimSpace(target)
@@ -314,7 +503,7 @@ func TestPropValidationRequirementAcceptsGoimportsDirectoryTargets(t *testing.T)
 func TestPropValidationRequirementRejectsRepoRootGoCLITargets(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		target := rapid.SampledFrom([]string{"./cli/...", "./cli/cmd/xylem", "cli/...", "cli/internal/config"}).Draw(t, "target")
 		field := rapid.SampledFrom([]string{"lint", "build", "test"}).Draw(t, "field")
@@ -346,7 +535,7 @@ func TestPropValidationRequirementRejectsRepoRootGoCLITargets(t *testing.T) {
 func TestPropValidationRequirementAcceptsCLIWorkingDirGoCommands(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		cfg := validConfig()
-		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts"}).Draw(t, "workflow")
+		workflow := rapid.SampledFrom([]string{"fix-pr-checks", "resolve-conflicts", "adapt-repo"}).Draw(t, "workflow")
 		cfg.Sources = validationRequiredSourceConfig(workflow)
 		field := rapid.SampledFrom([]string{"lint", "build", "test"}).Draw(t, "field")
 
@@ -383,6 +572,31 @@ func TestPropEffectiveAutoMergeLabelsNeverReturnsBlank(t *testing.T) {
 			if strings.TrimSpace(label) == "" {
 				t.Fatalf("EffectiveAutoMergeLabels() returned blank label in %#v", got)
 			}
+		}
+	})
+}
+
+func TestPropComposedProfileOpsCheckTreatsBlankWorkflowClassAsDelivery(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		classValue := rapid.StringMatching(`[ \t]{0,8}`).Draw(t, "class")
+		composed := &profiles.ComposedProfile{
+			Workflows: map[string][]byte{
+				"sample": []byte(fmt.Sprintf(`name: sample
+class: %q
+phases:
+  - name: analyze
+    prompt_file: prompts/sample/analyze.md
+    max_turns: 1
+`, classValue)),
+			},
+		}
+
+		hasOps, err := composedProfileHasWorkflowClass(composed, policy.Ops)
+		if err != nil {
+			t.Fatalf("composedProfileHasWorkflowClass() error = %v", err)
+		}
+		if hasOps {
+			t.Fatalf("composedProfileHasWorkflowClass() = true for blank class %q, want false", classValue)
 		}
 	})
 }

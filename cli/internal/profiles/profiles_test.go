@@ -1,4 +1,4 @@
-package profiles
+package profiles_test
 
 import (
 	"io/fs"
@@ -8,12 +8,25 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	. "github.com/nicholls-inc/xylem/cli/internal/profiles"
 	workflowpkg "github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 )
+
+type profileSourceConfig struct {
+	Type     string                       `yaml:"type"`
+	Repo     string                       `yaml:"repo,omitempty"`
+	Schedule string                       `yaml:"schedule,omitempty"`
+	Tasks    map[string]profileTaskConfig `yaml:"tasks,omitempty"`
+}
+
+type profileTaskConfig struct {
+	Workflow string `yaml:"workflow,omitempty"`
+	Ref      string `yaml:"ref,omitempty"`
+}
 
 func stageProfileWorkflowAsset(t *testing.T, profile *Profile, workflowName string, promptNames []string) string {
 	t.Helper()
@@ -100,6 +113,8 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/plan")
 	assert.Contains(t, sortedKeys(composed.Prompts), "adapt-repo/pr")
 	assert.Contains(t, sortedKeys(composed.Prompts), "doc-garden/analyze")
+	assert.Contains(t, sortedKeys(composed.Prompts), "fix-bug/implement_evaluator")
+	assert.Contains(t, sortedKeys(composed.Prompts), "implement-feature/implement_evaluator")
 	assert.Contains(t, sortedKeys(composed.Prompts), "security-compliance/synthesize")
 	assert.Contains(t, sortedKeys(composed.Prompts), "workflow-health-report/report")
 	assert.Contains(t, sortedKeys(composed.Sources), "doc-gardener")
@@ -111,11 +126,31 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	assert.Contains(t, string(composed.Workflows["fix-bug"]), "name: fix-bug")
 	assert.Contains(t, string(composed.Workflows["implement-feature"]), "name: implement-feature")
 	assert.Contains(t, string(composed.Workflows["doc-garden"]), "name: doc-garden")
+	assert.Contains(t, string(composed.Prompts["fix-bug/implement"]), "{{.Evaluation.Feedback}}")
+	assert.Contains(t, string(composed.Prompts["implement-feature/implement"]), "{{.Evaluation.Feedback}}")
 	assert.Contains(t, string(composed.Prompts["adapt-repo/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), "Create a pull request")
 	assert.Contains(t, string(composed.Prompts["fix-bug/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.Prompts["implement-feature/pr"]), `--label "ready-to-merge"`)
 	assert.Contains(t, string(composed.ConfigOverlays[0]), `repo: "{{ .Repo }}"`)
+
+	var fixBug workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["fix-bug"], &fixBug))
+	require.Len(t, fixBug.Phases, 5)
+	require.NotNil(t, fixBug.Phases[2].Evaluator)
+	assert.Equal(t, ".xylem/prompts/fix-bug/implement_evaluator.md", fixBug.Phases[2].Evaluator.PromptFile)
+
+	var mergePR workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["merge-pr"], &mergePR))
+	assert.Equal(t, policy.Ops, mergePR.Class)
+	assert.Equal(t, 2, fixBug.Phases[2].Evaluator.MaxIterations)
+
+	var implementFeature workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["implement-feature"], &implementFeature))
+	require.Len(t, implementFeature.Phases, 5)
+	require.NotNil(t, implementFeature.Phases[2].Evaluator)
+	assert.Equal(t, ".xylem/prompts/implement-feature/implement_evaluator.md", implementFeature.Phases[2].Evaluator.PromptFile)
+	assert.Equal(t, 2, implementFeature.Phases[2].Evaluator.MaxIterations)
 }
 
 func TestSmoke_S3_ComposeUnknownProfileReturnsClearError(t *testing.T) {
@@ -198,7 +233,7 @@ func TestSmoke_S3_SelfHostingProfileScaffoldsContinuousImprovementScheduledWorkf
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["continuous-improvement"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)
@@ -235,7 +270,7 @@ func TestSmoke_S4_SelfHostingProfileScaffoldsMonthlyHardeningAuditWorkflow(t *te
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["hardening-audit"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)
@@ -271,7 +306,7 @@ func TestSmoke_S5_SelfHostingProfileScaffoldsDailyBacklogRefinementWorkflow(t *t
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["backlog-refinement"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)
@@ -312,7 +347,7 @@ func TestSmoke_S6_SelfHostingProfileScaffoldsReleaseCadenceWorkflow(t *testing.T
 	composed, err := Compose("core", "self-hosting-xylem")
 	require.NoError(t, err)
 
-	var source config.SourceConfig
+	var source profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["release-cadence"], &source))
 	assert.Equal(t, "scheduled", source.Type)
 	assert.Equal(t, "{{ .Repo }}", source.Repo)
@@ -328,7 +363,7 @@ func TestSmoke_S6_SelfHostingProfileScaffoldsReleaseCadenceWorkflow(t *testing.T
 	require.Len(t, wf.Phases, 1)
 	assert.Equal(t, "label_ready", wf.Phases[0].Name)
 	assert.Equal(t, "command", wf.Phases[0].Type)
-	assert.Contains(t, wf.Phases[0].Run, "xylem release-cadence label-ready --repo {{ .Repo }}")
+	assert.Contains(t, wf.Phases[0].Run, "./cli/xylem release-cadence label-ready --repo {{ .Repo }}")
 	require.NotNil(t, wf.Phases[0].NoOp)
 	assert.Equal(t, "XYLEM_NOOP", wf.Phases[0].NoOp.Match)
 }

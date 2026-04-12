@@ -73,6 +73,7 @@ type CostReport struct {
 	MissionID              string                `json:"mission_id"`
 	Source                 string                `json:"source,omitempty"`
 	Workflow               string                `json:"workflow,omitempty"`
+	WorkflowClass          string                `json:"workflow_class,omitempty"`
 	Ref                    string                `json:"ref,omitempty"`
 	State                  string                `json:"state,omitempty"`
 	TotalTokens            int                   `json:"total_tokens"`

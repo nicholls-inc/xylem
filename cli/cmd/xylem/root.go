@@ -31,7 +31,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			commandPath := cmd.CommandPath()
-			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || commandPath == "xylem dtu" || strings.HasPrefix(commandPath, "xylem dtu ") || commandPath == "xylem bootstrap" || strings.HasPrefix(commandPath, "xylem bootstrap ") || strings.HasPrefix(commandPath, "xylem continuous-simplicity") {
+			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || commandPath == "xylem dtu" || strings.HasPrefix(commandPath, "xylem dtu ") || commandPath == "xylem bootstrap" || strings.HasPrefix(commandPath, "xylem bootstrap ") || commandPath == "xylem config" || strings.HasPrefix(commandPath, "xylem config ") || strings.HasPrefix(commandPath, "xylem continuous-simplicity") {
 				return nil
 			}
 
@@ -42,6 +42,8 @@ func newRootCmd() *cobra.Command {
 			// by a command phase. harden inventory/score/track are the same.
 			skipTooling := cmd.Name() == "visualize" ||
 				strings.HasPrefix(commandPath, "xylem visualize") ||
+				commandPath == "xylem workflow validate" ||
+				strings.HasPrefix(commandPath, "xylem workflow ") ||
 				cmd.Name() == "review" ||
 				cmd.Name() == "recovery" ||
 				strings.HasPrefix(commandPath, "xylem recovery") ||
@@ -50,8 +52,12 @@ func newRootCmd() *cobra.Command {
 				commandPath == "xylem harden score" ||
 				commandPath == "xylem harden track" ||
 				commandPath == "xylem field-report generate" ||
+				commandPath == "xylem audit" ||
+				strings.HasPrefix(commandPath, "xylem audit ") ||
 				commandPath == "xylem daemon stop" ||
-				commandPath == "xylem daemon reload"
+				commandPath == "xylem daemon reload" ||
+				commandPath == "xylem eval" ||
+				strings.HasPrefix(commandPath, "xylem eval ")
 
 			if !skipTooling {
 				if _, err := exec.LookPath("git"); err != nil {
@@ -95,6 +101,8 @@ func newRootCmd() *cobra.Command {
 	cmd.AddCommand(
 		newInitCmd(),
 		newBootstrapCmd(),
+		newConfigCmd(),
+		newWorkflowCmd(),
 		newContinuousImprovementCmd(),
 		newContinuousSimplicityCmd(),
 		newReleaseCadenceCmd(),
@@ -114,12 +122,15 @@ func newRootCmd() *cobra.Command {
 		newCancelCmd(),
 		newCleanupCmd(),
 		newDoctorCmd(),
+		newReportCmd(),
 		newDaemonCmd(),
 		newDaemonSupervisorCmd(),
 		newRetryCmd(),
 		newVisualizeCmd(),
 		newVersionCmd(),
 		newFieldReportCmd(),
+		newAuditCmd(),
+		newEvalCmd(),
 	)
 
 	return cmd

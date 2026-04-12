@@ -4,13 +4,16 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/spf13/cobra"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/memory"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
@@ -19,7 +22,15 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
 
+type drainCommandRunner interface {
+	runner.CommandRunner
+	source.CommandRunner
+}
+
 var newTracer = observability.NewTracer
+var newCommandRunner = func(cfg *config.Config) drainCommandRunner {
+	return newCmdRunner(cfg)
+}
 
 func newDrainCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -52,7 +63,7 @@ func cmdDrain(cfg *config.Config, q *queue.Queue, wt *worktree.Manager, dryRun b
 		return commandErr
 	}
 
-	cmdRunner := newCmdRunner(cfg)
+	cmdRunner := newCommandRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.Reporter = buildReporter(cfg, cmdRunner)
@@ -109,7 +120,7 @@ func finishCommandSpan(tracer *observability.Tracer, span observability.SpanCont
 	span.End()
 }
 
-func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeManager, cmdRunner *realCmdRunner) (*runner.Runner, func()) {
+func buildDrainRunner(cfg *config.Config, q *queue.Queue, wt runner.WorktreeManager, cmdRunner drainCommandRunner) (*runner.Runner, func()) {
 	tracer := buildConfiguredTracer(cfg)
 	if configurable, ok := wt.(interface{ SetProtectedSurfaces([]string) }); ok {
 		configurable.SetProtectedSurfaces(cfg.EffectiveProtectedSurfaces())
@@ -130,8 +141,16 @@ func wireRunnerScaffolding(cfg *config.Config, r *runner.Runner, tracer *observa
 	auditLog := intermediary.NewAuditLog(auditLogPath)
 
 	r.Intermediary = intermediary.NewIntermediary(cfg.BuildIntermediaryPolicies(), auditLog, nil)
+	r.Intermediary.SetMode(cfg.HarnessPolicyMode())
 	r.AuditLog = auditLog
 	r.Tracer = tracer
+
+	episodicPath := config.RuntimePath(cfg.StateDir, "state", "memory", "episodic.jsonl")
+	if err := os.MkdirAll(filepath.Dir(episodicPath), 0o755); err != nil {
+		slog.Warn("create episodic memory dir", "error", err)
+	} else {
+		r.EpisodicStore = memory.NewEpisodicStore(episodicPath)
+	}
 }
 
 var newConfiguredTracer = func(cfg observability.TracerConfig) (*observability.Tracer, error) {

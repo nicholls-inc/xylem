@@ -3,6 +3,9 @@ package catalog
 import (
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // --- helper ---
@@ -347,6 +350,134 @@ func TestSetRolePermissionsValidation(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestNewDefaultPhaseCatalog(t *testing.T) {
+	c, err := NewDefaultPhaseCatalog()
+	if err != nil {
+		t.Fatalf("NewDefaultPhaseCatalog() error = %v", err)
+	}
+
+	tests := []struct {
+		role string
+		want []string
+	}{
+		{
+			role: RoleDiagnostic,
+			want: []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch"},
+		},
+		{
+			role: RoleDelivery,
+			want: []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch", "Edit", "MultiEdit", "Write"},
+		},
+		{
+			role: RoleHousekeeping,
+			want: []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch", "Write"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			got, err := c.AllowedToolsForRole(tt.role)
+			if err != nil {
+				t.Fatalf("AllowedToolsForRole(%q) error = %v", tt.role, err)
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("AllowedToolsForRole(%q) len = %d, want %d (%v)", tt.role, len(got), len(tt.want), got)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("AllowedToolsForRole(%q)[%d] = %q, want %q", tt.role, i, got[i], tt.want[i])
+				}
+			}
+		})
+	}
+	if _, err := c.Get("Read"); err != nil {
+		t.Fatalf("default catalog missing Read: %v", err)
+	}
+	if _, err := c.Get("Edit"); err != nil {
+		t.Fatalf("default catalog missing Edit: %v", err)
+	}
+	if _, err := c.Get("Write"); err != nil {
+		t.Fatalf("default catalog missing Write: %v", err)
+	}
+}
+
+func TestResolveRoleTools(t *testing.T) {
+	c, err := NewDefaultPhaseCatalog()
+	if err != nil {
+		t.Fatalf("NewDefaultPhaseCatalog() error = %v", err)
+	}
+
+	t.Run("derives role defaults", func(t *testing.T) {
+		got, err := c.ResolveRoleTools(RoleDiagnostic, nil)
+		if err != nil {
+			t.Fatalf("ResolveRoleTools() error = %v", err)
+		}
+		want := []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch"}
+		if len(got) != len(want) {
+			t.Fatalf("ResolveRoleTools() len = %d, want %d (%v)", len(got), len(want), got)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Fatalf("ResolveRoleTools()[%d] = %q, want %q", i, got[i], want[i])
+			}
+		}
+	})
+
+	t.Run("rejects unauthorized tool", func(t *testing.T) {
+		_, err := c.ResolveRoleTools(RoleDiagnostic, []string{"Edit"})
+		if err == nil {
+			t.Fatal("ResolveRoleTools() error = nil, want unauthorized tool rejection")
+		}
+	})
+}
+
+func TestSmoke_S1_DefaultPhaseCatalogMapsRolesToExpectedToolSets(t *testing.T) {
+	c, err := NewDefaultPhaseCatalog()
+	require.NoError(t, err)
+
+	tests := []struct {
+		role      string
+		wantScope PermissionScope
+		wantTools []string
+	}{
+		{
+			role:      RoleDiagnostic,
+			wantScope: ScopeFullAutonomy,
+			wantTools: []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch"},
+		},
+		{
+			role:      RoleDelivery,
+			wantScope: ScopeFullAutonomy,
+			wantTools: []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch", "Edit", "MultiEdit", "Write"},
+		},
+		{
+			role:      RoleHousekeeping,
+			wantScope: ScopeFullAutonomy,
+			wantTools: []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch", "Write"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.role, func(t *testing.T) {
+			rp, err := c.GetRolePermissions(tt.role)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantScope, rp.MaxScope)
+			assert.Equal(t, tt.wantTools, rp.AllowedTools)
+
+			got, err := c.ResolveRoleTools(tt.role, nil)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantTools, got)
+		})
+	}
+
+	allowed, err := c.Authorize(RoleDelivery, "Edit")
+	require.NoError(t, err)
+	assert.True(t, allowed)
+
+	allowed, err = c.Authorize(RoleDiagnostic, "Edit")
+	require.NoError(t, err)
+	assert.False(t, allowed)
 }
 
 // --- Metrics tests ---

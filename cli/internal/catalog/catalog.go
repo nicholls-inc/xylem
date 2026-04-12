@@ -72,6 +72,12 @@ type RolePermissions struct {
 	AllowedTools []string
 }
 
+const (
+	RoleDiagnostic   = "diagnostic"
+	RoleDelivery     = "delivery"
+	RoleHousekeeping = "housekeeping"
+)
+
 // Catalog is a centralised registry of tools, metrics, and role permissions.
 type Catalog struct {
 	mu      sync.RWMutex
@@ -87,6 +93,24 @@ func NewCatalog() *Catalog {
 		metrics: make(map[string]*ToolMetrics),
 		roles:   make(map[string]*RolePermissions),
 	}
+}
+
+// NewDefaultPhaseCatalog returns a catalog preloaded with the common prompt tools
+// xylem exposes to provider CLIs plus the default phase-role permissions used by
+// runner prompt phases.
+func NewDefaultPhaseCatalog() (*Catalog, error) {
+	c := NewCatalog()
+	for _, tool := range defaultPhaseTools() {
+		if err := c.Register(tool); err != nil {
+			return nil, fmt.Errorf("register default tool %q: %w", tool.Name, err)
+		}
+	}
+	for _, rp := range defaultPhaseRolePermissions() {
+		if err := c.SetRolePermissions(rp); err != nil {
+			return nil, fmt.Errorf("set default role permissions %q: %w", rp.Role, err)
+		}
+	}
+	return c, nil
 }
 
 // ValidateTool checks that a tool's required fields are populated and its
@@ -240,6 +264,19 @@ func (c *Catalog) SetRolePermissions(rp RolePermissions) error {
 	return nil
 }
 
+// GetRolePermissions returns a copy of the permissions for the named role.
+func (c *Catalog) GetRolePermissions(role string) (*RolePermissions, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	rp, ok := c.roles[role]
+	if !ok {
+		return nil, fmt.Errorf("get role permissions: role %q not found", role)
+	}
+	cpy := *rp
+	cpy.AllowedTools = append([]string(nil), rp.AllowedTools...)
+	return &cpy, nil
+}
+
 // Authorize checks whether the given role is allowed to invoke the named tool.
 // It verifies both that the tool appears in the role's allowed list and that the
 // tool's scope does not exceed the role's maximum scope.
@@ -263,6 +300,43 @@ func (c *Catalog) Authorize(agentRole, toolName string) (bool, error) {
 		}
 	}
 	return false, nil
+}
+
+// AllowedToolsForRole returns the configured tool list for a role after
+// validating that every listed tool exists in the catalog.
+func (c *Catalog) AllowedToolsForRole(role string) ([]string, error) {
+	rp, err := c.GetRolePermissions(role)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rp.AllowedTools))
+	for _, toolName := range rp.AllowedTools {
+		if _, err := c.Get(toolName); err != nil {
+			return nil, fmt.Errorf("allowed tools for role %q: %w", role, err)
+		}
+		out = append(out, toolName)
+	}
+	return out, nil
+}
+
+// ResolveRoleTools validates an explicit requested tool list against the named
+// role. When requested is empty, it derives the role's full allowed set.
+func (c *Catalog) ResolveRoleTools(role string, requested []string) ([]string, error) {
+	if len(requested) == 0 {
+		return c.AllowedToolsForRole(role)
+	}
+	out := make([]string, 0, len(requested))
+	for _, toolName := range requested {
+		allowed, err := c.Authorize(role, toolName)
+		if err != nil {
+			return nil, fmt.Errorf("resolve role tools: %w", err)
+		}
+		if !allowed {
+			return nil, fmt.Errorf("resolve role tools: role %q is not allowed to use tool %q", role, toolName)
+		}
+		out = append(out, toolName)
+	}
+	return out, nil
 }
 
 // RecordUsage records a single invocation of the named tool.
@@ -395,4 +469,42 @@ func jaccardStrings(a, b []string) float64 {
 		return 0
 	}
 	return math.Round(float64(intersection)/float64(union)*1000) / 1000
+}
+
+func defaultPhaseTools() []Tool {
+	return []Tool{
+		{Name: "Bash", Description: "Run shell commands in the repository worktree", Scope: ScopeFullAutonomy, Tags: []string{"shell", "command"}},
+		{Name: "Edit", Description: "Modify an existing file", Scope: ScopeWriteWithApproval, Tags: []string{"file", "write"}},
+		{Name: "Glob", Description: "Find files by glob pattern", Scope: ScopeReadOnly, Tags: []string{"file", "search"}},
+		{Name: "Grep", Description: "Search file contents by pattern", Scope: ScopeReadOnly, Tags: []string{"file", "search"}},
+		{Name: "LS", Description: "List files and directories", Scope: ScopeReadOnly, Tags: []string{"file", "read"}},
+		{Name: "MultiEdit", Description: "Apply multiple edits to an existing file", Scope: ScopeWriteWithApproval, Tags: []string{"file", "write"}},
+		{Name: "Read", Description: "Read file contents", Scope: ScopeReadOnly, Tags: []string{"file", "read"}},
+		{Name: "Task", Description: "Delegate work to a sub-agent", Scope: ScopeFullAutonomy, Tags: []string{"agent", "orchestration"}},
+		{Name: "WebFetch", Description: "Fetch content from the web", Scope: ScopeReadOnly, Tags: []string{"web", "read"}},
+		{Name: "WebSearch", Description: "Search the web for current information", Scope: ScopeReadOnly, Tags: []string{"web", "search"}},
+		{Name: "Write", Description: "Create or replace a file", Scope: ScopeWriteWithApproval, Tags: []string{"file", "write"}},
+	}
+}
+
+func defaultPhaseRolePermissions() []RolePermissions {
+	diagnosticTools := []string{"Bash", "Glob", "Grep", "LS", "Read", "WebFetch", "WebSearch"}
+	return []RolePermissions{
+		{
+			Role:         RoleDiagnostic,
+			MaxScope:     ScopeFullAutonomy,
+			AllowedTools: append([]string(nil), diagnosticTools...),
+		},
+		{
+			Role:     RoleDelivery,
+			MaxScope: ScopeFullAutonomy,
+			AllowedTools: append(append([]string(nil), diagnosticTools...),
+				"Edit", "MultiEdit", "Write"),
+		},
+		{
+			Role:         RoleHousekeeping,
+			MaxScope:     ScopeFullAutonomy,
+			AllowedTools: append(append([]string(nil), diagnosticTools...), "Write"),
+		},
+	}
 }

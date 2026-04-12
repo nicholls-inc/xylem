@@ -19,15 +19,18 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/catalog"
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 	"github.com/nicholls-inc/xylem/cli/internal/evidence"
 	"github.com/nicholls-inc/xylem/cli/internal/gate"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/memory"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/orchestrator"
 	"github.com/nicholls-inc/xylem/cli/internal/phase"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
@@ -91,6 +94,7 @@ type Runner struct {
 	Runner   CommandRunner
 	LiveGate gate.LiveGateRunner
 	Sources  map[string]source.Source
+	Catalog  *catalog.Catalog
 	// BuiltinWorkflows handles workflow names that execute internal logic
 	// instead of loading .xylem/workflows/<name>.yaml.
 	BuiltinWorkflows map[string]BuiltinWorkflowHandler
@@ -100,6 +104,9 @@ type Runner struct {
 	Intermediary *intermediary.Intermediary // nil = no policy enforcement
 	AuditLog     *intermediary.AuditLog     // nil = no audit logging
 	Tracer       *observability.Tracer      // nil = no tracing
+	// EpisodicStore persists one entry per completed phase for cross-phase
+	// and cross-vessel recall. nil disables episodic persistence.
+	EpisodicStore *memory.EpisodicStore
 	// DrainBudget bounds the wall time that Drain() spends dequeueing new
 	// vessels. When the deadline elapses, Drain() stops dequeueing and
 	// returns immediately while already-started goroutines continue in the
@@ -679,8 +686,6 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 
 	// Rebuild previousOutputs from .xylem/phases/<id>/*.output (for resume)
 	previousOutputs := r.rebuildPreviousOutputs(vessel.ID, sk)
-	srcCfg := r.sourceConfigFromMeta(vessel)
-
 	// Execute phases sequentially (no explicit dependencies)
 	var phaseResults []reporter.PhaseResult
 	for i := vessel.CurrentPhase; i < len(sk.Phases); i++ {
@@ -688,533 +693,68 @@ func (r *Runner) runVessel(ctx context.Context, vessel queue.Vessel) (outcome st
 			return r.cancelVessel(vessel, worktreePath, vrs, claims)
 		}
 		p := sk.Phases[i]
-		gateResult := ""
-
-		// Initialize gate retries for this phase (once, before retry loop)
-		if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") && p.Gate.Retries > 0 && vessel.GateRetries == 0 {
-			vessel.GateRetries = p.Gate.Retries
+		res := r.runSinglePhase(ctx, vessel, sk, i, previousOutputs, issueData, harnessContent, worktreePath, src, vrs, true)
+		if res.phaseSummary.Name != "" {
+			vrs.addPhase(res.phaseSummary)
+		}
+		if res.evaluationReport != nil {
+			vrs.addEvaluationReport(*res.evaluationReport)
+		}
+		if len(res.evidenceClaims) > 0 {
+			claims = append(claims, res.evidenceClaims...)
 		}
 
-		// Gate retry loop: may re-run the same phase with gate output appended
-		for {
-			if r.vesselCancelled(ctx, vessel.ID) {
-				return r.cancelVessel(vessel, worktreePath, vrs, claims)
-			}
-			log.Printf("%sphase %q starting (%d/%d)", vesselLabel(vessel), p.Name, i+1, len(sk.Phases))
-			phaseStart := r.runtimeNow()
-
-			// Build template data
-			td := r.buildTemplateData(vessel, issueData, p.Name, i, previousOutputs, gateResult)
-
-			var output []byte
-			var runErr error
-			var beforeSnapshot surface.Snapshot
-			var checkProtectedSurfaces bool
-			var promptForCost string
-			tier, providerChain := resolvePhaseProviderChain(r.Config, srcCfg, vessel, sk, &p)
-			provider := ""
-			model := ""
-			if len(providerChain) > 0 {
-				provider = providerChain[0]
-				model = resolvePhaseModel(r.Config, srcCfg, sk, &p, provider, tier)
-			}
-			retryAttempt := 0
-			if p.Gate != nil && (p.Gate.Type == "command" || p.Gate.Type == "live") {
-				retryAttempt = providerAttempt(&p, vessel.GateRetries)
-			}
-			phaseSpan := startPhaseSpan(r.Tracer, ctx, r.Config, sk, p, i, retryAttempt, "", "", tier)
-			phaseSpanEnded := false
-			var phaseDuration time.Duration
-			phaseSpanStatus := "running"
-			phaseOutputArtifactPath := ""
-			finishCurrentPhaseSpan := func(err error) {
-				if phaseSpanEnded {
-					return
+		switch res.status {
+		case "failed":
+			return "failed"
+		case "waiting":
+			return "waiting"
+		case "cancelled":
+			return r.cancelVessel(vessel, worktreePath, vrs, claims)
+		case "timed_out":
+			return "timed_out"
+		case "completed", "no-op":
+			if r.EpisodicStore != nil {
+				summary := res.output
+				const maxSummaryLen = 512
+				if len(summary) > maxSummaryLen {
+					summary = summary[:maxSummaryLen]
 				}
-				if err != nil && phaseSpanStatus == "running" {
-					phaseSpanStatus = "failed"
+				entry := memory.EpisodicEntry{
+					VesselID:   vessel.ID,
+					PhaseName:  p.Name,
+					RecordedAt: r.runtimeNow().UTC(),
+					Outcome:    res.status,
+					Summary:    summary,
 				}
-				if phaseDuration == 0 {
-					phaseDuration = r.runtimeSince(phaseStart)
-				}
-				finishPhaseSpan(r.Tracer, phaseSpan, buildPhaseResultData(r.Config, p, promptForCost, string(output), phaseDuration, phaseSpanStatus, phaseOutputArtifactPath, provider, model, tier), err)
-				phaseSpanEnded = true
-			}
-
-			// Create phases dir early
-			phasesDir := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID)
-			if err := os.MkdirAll(phasesDir, 0o755); err != nil {
-				finishCurrentPhaseSpan(err)
-				r.failVessel(vessel.ID, fmt.Sprintf("create phases dir: %v", err))
-				if failErr := src.OnFail(ctx, vessel); failErr != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
-				}
-				return "failed"
-			}
-
-			if p.Type == "command" {
-				// Command phase: render and execute shell command
-				rendered, err := renderCommandTemplate(p.Name, "command", p.Run, td)
-				if err != nil {
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, err.Error())
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					return "failed"
-				}
-				if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
-					log.Printf("warn: write command file: %v", wErr)
-				}
-				if policyErr := r.enforcePhasePolicy(vessel, p, rendered, ""); policyErr != nil {
-					finishCurrentPhaseSpan(policyErr)
-					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
-					vessel.FailedPhase = p.Name
-					r.failUpdatedVessel(&vessel, policyErr.Error())
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					issueNum := r.parseIssueNum(vessel)
-					if issueNum > 0 && r.Reporter != nil {
-						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, policyErr.Error(), ""))
-					}
-					return "failed"
-				}
-				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
-				if err != nil {
-					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
-					finishCurrentPhaseSpan(snapErr)
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, snapErr))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					issueNum := r.parseIssueNum(vessel)
-					if issueNum > 0 && r.Reporter != nil {
-						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, snapErr.Error(), ""))
-					}
-					return "failed"
-				}
-				outputPath := filepath.Join(phasesDir, p.Name+".output")
-				if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
-					log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
-				}
-				cmdOut, cmdErr := gate.RunCommand(ctx, r.Runner, worktreePath, rendered)
-				output = []byte(cmdOut)
-				runErr = cmdErr
-			} else {
-				// LLM phase: existing code
-				promptContent, err := os.ReadFile(p.PromptFile)
-				if err != nil {
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, fmt.Sprintf("read prompt file %s: %v", p.PromptFile, err))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					return "failed"
-				}
-				promptTemplate := string(promptContent)
-				rendered, err := phase.RenderPrompt(promptTemplate, td)
-				if err != nil {
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					return "failed"
-				}
-				promptForCost = rendered
-				if harnessContent != "" {
-					promptForCost = harnessContent + "\n\n" + rendered
-				}
-				promptPath := filepath.Join(phasesDir, p.Name+".prompt")
-				if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
-					log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
-				}
-				if policyErr := r.enforcePhasePolicy(vessel, p, "", promptTemplate); policyErr != nil {
-					finishCurrentPhaseSpan(policyErr)
-					log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
-					vessel.FailedPhase = p.Name
-					r.failUpdatedVessel(&vessel, policyErr.Error())
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					issueNum := r.parseIssueNum(vessel)
-					if issueNum > 0 && r.Reporter != nil {
-						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, policyErr.Error(), ""))
-					}
-					return "failed"
-				}
-				beforeSnapshot, checkProtectedSurfaces, err = r.takeProtectedSurfaceSnapshot(ctx, worktreePath)
-				if err != nil {
-					snapErr := fmt.Errorf("protected surface snapshot failed: %w", err)
-					finishCurrentPhaseSpan(snapErr)
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s: %v", p.Name, snapErr))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					issueNum := r.parseIssueNum(vessel)
-					if issueNum > 0 && r.Reporter != nil {
-						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, snapErr.Error(), ""))
-					}
-					return "failed"
-				}
-				attempt := providerAttempt(&p, vessel.GateRetries)
-				outputPath := filepath.Join(phasesDir, p.Name+".output")
-				if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
-					log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
-				}
-				output, provider, model, runErr = r.runPhaseWithProviderFallback(ctx, vessel.ID, p.Name, worktreePath, providerChain, func(provider string) (providerInvocation, error) {
-					cmd, args, phaseStdin, model, err := buildProviderPhaseArgs(r.Config, srcCfg, sk, &p, harnessContent, provider, tier, rendered, attempt)
-					if err != nil {
-						return providerInvocation{}, err
-					}
-					stdinContent := ""
-					if phaseStdin != nil {
-						stdinContent = rendered
-					}
-					return providerInvocation{
-						Provider:     provider,
-						Model:        model,
-						Env:          providerEnvForName(r.Config, provider),
-						Command:      cmd,
-						Args:         args,
-						StdinContent: stdinContent,
-					}, nil
-				})
-			}
-
-			if r.vesselCancelled(ctx, vessel.ID) {
-				finishCurrentPhaseSpan(context.Canceled)
-				return r.cancelVessel(vessel, worktreePath, vrs, claims)
-			}
-			if r.isVesselTimedOut(vessel.ID) {
-				finishCurrentPhaseSpan(context.DeadlineExceeded)
-				return "timed_out"
-			}
-
-			// Shared: Write phase output
-			outputPath := filepath.Join(phasesDir, p.Name+".output")
-			phaseOutputArtifactPath = phaseArtifactRelativePath(vessel.ID, p.Name)
-			if wErr := os.WriteFile(outputPath, output, 0o644); wErr != nil {
-				log.Printf("warn: write output file %s: %v", outputPath, wErr)
-			}
-			fmt.Printf("Phase %s complete: %s\n", p.Name, outputPath)
-			phaseDuration = r.runtimeSince(phaseStart)
-
-			if runErr != nil {
-				phaseSpanStatus = "failed"
-				finishCurrentPhaseSpan(runErr)
-				log.Printf("%sphase %q failed: %v", vesselLabel(vessel), p.Name, runErr)
-				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error(), provider, model))
-				vessel.FailedPhase = p.Name
-				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, runErr))
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				issueNum := r.parseIssueNum(vessel)
-				if issueNum > 0 && r.Reporter != nil {
-					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
-				}
-				return "failed"
-			}
-
-			if checkProtectedSurfaces {
-				if err := r.verifyProtectedSurfaces(vessel, p, worktreePath, beforeSnapshot); err != nil {
-					phaseSpanStatus = "failed"
-					finishCurrentPhaseSpan(err)
-					log.Printf("%sphase %q violated protected surfaces: %v", vesselLabel(vessel), p.Name, err)
-					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error(), provider, model))
-					vessel.FailedPhase = p.Name
-					r.failUpdatedVessel(&vessel, err.Error())
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					issueNum := r.parseIssueNum(vessel)
-					if issueNum > 0 && r.Reporter != nil {
-						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
-					}
-					return "failed"
+				if err := r.EpisodicStore.Append(entry); err != nil {
+					log.Printf("warn: episodic store append for vessel %s phase %s: %v", vessel.ID, p.Name, err)
 				}
 			}
-
-			recordedAt := r.runtimeNow()
-			inputTokensEst, outputTokensEst, costUSDEst := vrs.recordPhaseTokens(p, model, promptForCost, string(output), recordedAt)
-			if vrs.costTracker != nil && vrs.costTracker.BudgetExceeded() {
-				errMsg := fmt.Sprintf("budget exceeded after phase %q: estimated cost $%.4f, estimated tokens %d",
-					p.Name, vrs.costTracker.TotalCost(), vrs.costTracker.TotalTokens())
-				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg, provider, model))
-				vessel.FailedPhase = p.Name
-				r.failUpdatedVessel(&vessel, errMsg)
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				issueNum := r.parseIssueNum(vessel)
-				if issueNum > 0 && r.Reporter != nil {
-					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, errMsg, ""))
-				}
-				phaseSpanStatus = "failed"
-				finishCurrentPhaseSpan(fmt.Errorf("%s", errMsg))
-				return "failed"
-			}
-
-			if err := r.publishPhaseOutput(ctx, vessel, p, td, string(output)); err != nil {
-				phaseSpanStatus = "failed"
-				finishCurrentPhaseSpan(err)
-				log.Printf("%sphase %q failed while publishing output: %v", vesselLabel(vessel), p.Name, err)
-				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error(), provider, model))
-				vessel.FailedPhase = p.Name
-				r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: %v", p.Name, err))
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				issueNum := r.parseIssueNum(vessel)
-				if issueNum > 0 && r.Reporter != nil {
-					r.logReporterError("post vessel-failed comment", vessel.ID,
-						r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
-				}
-				return "failed"
-			}
-
-			// Store output for subsequent phases
-			previousOutputs[p.Name] = string(output)
-
-			// Update current phase, persist
+			previousOutputs[p.Name] = res.output
 			vessel.CurrentPhase = i + 1
 			if vessel.PhaseOutputs == nil {
 				vessel.PhaseOutputs = make(map[string]string)
 			}
-			vessel.PhaseOutputs[p.Name] = outputPath
+			vessel.PhaseOutputs[p.Name] = config.RuntimePath(r.Config.StateDir, "phases", vessel.ID, p.Name+".output")
 			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
 				if r.cancelledTransition(vessel.ID, updateErr) {
-					finishCurrentPhaseSpan(context.Canceled)
 					return r.cancelVessel(vessel, worktreePath, vrs, claims)
 				}
 				if r.timedOutTransition(vessel.ID, updateErr) {
-					finishCurrentPhaseSpan(context.DeadlineExceeded)
 					return "timed_out"
 				}
 				log.Printf("warn: persist phase progress for %s: %v", vessel.ID, updateErr)
 			}
-
-			log.Printf("%sphase %q completed (%s)", vesselLabel(vessel), p.Name, phaseDuration.Truncate(time.Second))
-
-			issueNum := r.parseIssueNum(vessel)
-
-			phaseStatus := "completed"
-			if phaseMatchedNoOp(&p, string(output)) {
-				phaseStatus = "no-op"
+			if res.phaseReport.Name != "" {
+				phaseResults = append(phaseResults, res.phaseReport)
 			}
-			phaseSpanStatus = phaseStatus
-
-			// Report phase completion (non-fatal)
-			phaseReport := reporter.PhaseResult{
-				Name:                   p.Name,
-				Duration:               phaseDuration,
-				Status:                 phaseStatus,
-				Provider:               provider,
-				Model:                  model,
-				InputTokensEst:         inputTokensEst,
-				OutputTokensEst:        outputTokensEst,
-				CostUSDEst:             costUSDEst,
-				UsageSource:            cost.UsageSourceEstimated,
-				UsageUnavailableReason: "",
-			}
-			if p.Type == "command" {
-				phaseReport.UsageSource = cost.UsageSourceNotApplicable
-				phaseReport.UsageUnavailableReason = "non-llm phase"
-			}
-			if phaseStatus == "no-op" {
-				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, "", provider, model))
-				phaseResults = append(phaseResults, phaseReport)
-				r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
+			if res.status == "no-op" {
 				log.Printf("%sphase %q triggered no-op; completing workflow early", vesselLabel(vessel), p.Name)
-				finishCurrentPhaseSpan(nil)
 				if r.vesselCancelled(ctx, vessel.ID) {
 					return r.cancelVessel(vessel, worktreePath, vrs, claims)
 				}
 				return r.completeVessel(ctx, vessel, worktreePath, phaseResults, vrs, claims)
-			}
-
-			// Handle gate
-			if p.Gate == nil {
-				vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, nil, "", provider, model))
-				phaseResults = append(phaseResults, phaseReport)
-				r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
-				finishCurrentPhaseSpan(nil)
-				break // no gate, proceed to next phase
-			}
-
-			switch p.Gate.Type {
-			case "command", "live":
-				gateResultExec := r.executeVerificationGate(ctx, phaseSpan, vessel, p, td, worktreePath, retryAttempt)
-				if r.vesselCancelled(ctx, vessel.ID) {
-					finishCurrentPhaseSpan(context.Canceled)
-					return r.cancelVessel(vessel, worktreePath, vrs, claims)
-				}
-				if r.isVesselTimedOut(vessel.ID) {
-					finishCurrentPhaseSpan(context.DeadlineExceeded)
-					return "timed_out"
-				}
-				gateOut, passed, gateErr := gateResultExec.output, gateResultExec.passed, gateResultExec.err
-				if gateErr != nil {
-					phaseSpanStatus = "failed"
-					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error(), provider, model))
-					finishCurrentPhaseSpan(nil)
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate error: %v", p.Name, gateErr))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					return "failed"
-				}
-				if passed {
-					log.Printf("%sgate passed for phase %q", vesselLabel(vessel), p.Name)
-					phaseSpanStatus = phaseStatus
-					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, phaseStatus, gatePassedPointer(true), "", provider, model))
-					if gateResultExec.evidenceClaim != nil {
-						claims = append(claims, *gateResultExec.evidenceClaim)
-					}
-					phaseResults = append(phaseResults, phaseReport)
-					r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
-					finishCurrentPhaseSpan(nil)
-					break // gate passed, proceed to next phase
-				}
-
-				// Gate failed
-				retryDelay := 10 * time.Second
-				if p.Gate.RetryDelay != "" {
-					if parsed, pErr := time.ParseDuration(p.Gate.RetryDelay); pErr == nil {
-						retryDelay = parsed
-					}
-				}
-
-				if vessel.GateRetries <= 0 {
-					log.Printf("%sgate failed for phase %q, retries exhausted", vesselLabel(vessel), p.Name)
-					phaseSpanStatus = "failed"
-					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted", provider, model))
-					finishCurrentPhaseSpan(nil)
-					vessel.FailedPhase = p.Name
-					vessel.GateOutput = gateOut
-					r.failUpdatedVessel(&vessel, fmt.Sprintf("phase %s: gate failed, retries exhausted", p.Name))
-					if err := src.OnFail(ctx, vessel); err != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-					}
-					if issueNum > 0 && r.Reporter != nil {
-						r.logReporterError("post vessel-failed comment", vessel.ID,
-							r.Reporter.VesselFailed(ctx, issueNum, p.Name, "gate failed, retries exhausted", gateOut))
-					}
-					return "failed"
-				}
-
-				vessel.GateRetries--
-				log.Printf("%sgate failed for phase %q, retries remaining=%d", vesselLabel(vessel), p.Name, vessel.GateRetries)
-				if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
-					if r.cancelledTransition(vessel.ID, updateErr) {
-						finishCurrentPhaseSpan(context.Canceled)
-						return r.cancelVessel(vessel, worktreePath, vrs, claims)
-					}
-					if r.timedOutTransition(vessel.ID, updateErr) {
-						finishCurrentPhaseSpan(context.DeadlineExceeded)
-						return "timed_out"
-					}
-					log.Printf("warn: persist gate retries for %s: %v", vessel.ID, updateErr)
-				}
-
-				// Re-render prompt with gate output context
-				gateResult = fmt.Sprintf("The following gate check failed after the previous phase. Fix the issues and try again:\n\n%s", gateOut)
-
-				if err := r.runtimeSleep(ctx, retryDelay); err != nil {
-					if r.vesselCancelled(ctx, vessel.ID) {
-						finishCurrentPhaseSpan(context.Canceled)
-						return r.cancelVessel(vessel, worktreePath, vrs, claims)
-					}
-					if r.isVesselTimedOut(vessel.ID) {
-						finishCurrentPhaseSpan(context.DeadlineExceeded)
-						return "timed_out"
-					}
-					vrs.addPhase(vrs.phaseSummaryWithLLM(r.Config, srcCfg, sk, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error(), provider, model))
-					phaseSpanStatus = "failed"
-					finishCurrentPhaseSpan(err)
-					r.failVessel(vessel.ID, fmt.Sprintf("phase %s gate retry interrupted: %v", p.Name, err))
-					if failErr := src.OnFail(ctx, vessel); failErr != nil {
-						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, failErr)
-					}
-					return "failed"
-				}
-				phaseSpanStatus = "retrying"
-				finishCurrentPhaseSpan(nil)
-				continue // re-run same phase
-
-			case "label":
-				gateSpan := startGateSpan(r.Tracer, phaseSpan, ctx, p.Gate.Type)
-				finishGateSpan(r.Tracer, gateSpan, observability.GateSpanData{
-					Type:         p.Gate.Type,
-					Passed:       false,
-					RetryAttempt: retryAttempt,
-				}, nil)
-				log.Printf("%swaiting for label %q after phase %q", vesselLabel(vessel), p.Gate.WaitFor, p.Name)
-				r.reportPhaseComplete(ctx, vessel, phaseReport, string(output))
-				// Set vessel to waiting state
-				vessel.FailedPhase = p.Name
-				vessel.WaitingFor = p.Gate.WaitFor
-				now := r.runtimeNow()
-				vessel.WaitingSince = &now
-				vessel.CurrentPhase = i + 1
-				vessel.State = queue.StateWaiting
-				if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
-					if r.cancelledTransition(vessel.ID, updateErr) {
-						finishCurrentPhaseSpan(context.Canceled)
-						return r.cancelVessel(vessel, worktreePath, vrs, claims)
-					}
-					if r.timedOutTransition(vessel.ID, updateErr) {
-						finishCurrentPhaseSpan(context.DeadlineExceeded)
-						return "timed_out"
-					}
-					log.Printf("warn: persist waiting state for %s: %v", vessel.ID, updateErr)
-					finishCurrentPhaseSpan(updateErr)
-					return "failed"
-				}
-				if err := src.OnWait(ctx, vessel); err != nil {
-					log.Printf("warn: OnWait hook for vessel %s: %v", vessel.ID, err)
-				}
-				waitSpan := r.startWaitTransitionSpan(ctx, vessel, "waiting", 0)
-				r.finishWaitTransitionSpan(waitSpan, nil)
-				phaseSpanStatus = "waiting"
-				finishCurrentPhaseSpan(nil)
-				return "waiting"
-			}
-
-			finishCurrentPhaseSpan(nil)
-			break // gate passed or unknown gate type
-		}
-
-		// Reset gate retries so the next phase's initialization guard fires correctly.
-		// This is only reached after the inner loop exits via break (gate passed or no gate),
-		// never after a retry continue or early return.
-		//
-		// Also persist the reset when needed: the UpdateVessel inside the inner loop may have
-		// written a non-zero GateRetries from this phase (e.g. retries:2 that passed on the
-		// first attempt). Without this write, a daemon restart during the next phase's
-		// RunPhase execution would load the stale non-zero count and give that phase
-		// phantom retries. If GateRetries is already zero, skip the write to avoid an
-		// unnecessary full queue rewrite under lock.
-		prevRetries := vessel.GateRetries
-		vessel.GateRetries = 0
-		if prevRetries != 0 {
-			if updateErr := r.Queue.UpdateVessel(vessel); updateErr != nil {
-				if r.cancelledTransition(vessel.ID, updateErr) {
-					return r.cancelVessel(vessel, worktreePath, vrs, claims)
-				}
-				if r.timedOutTransition(vessel.ID, updateErr) {
-					return "timed_out"
-				}
-				log.Printf("warn: persist gate retry reset for %s: %v", vessel.ID, updateErr)
 			}
 		}
 	}
@@ -1431,6 +971,44 @@ func (r *Runner) runBuiltinWorkflow(ctx context.Context, vessel queue.Vessel, sr
 		log.Printf("warn: OnComplete hook for vessel %s: %v", vessel.ID, err)
 	}
 	return r.completeVessel(ctx, vessel, "", nil, vrs, nil)
+}
+
+func (r *Runner) phaseToolCatalog() (*catalog.Catalog, error) {
+	if r.Catalog != nil {
+		return r.Catalog, nil
+	}
+	if r.Config == nil {
+		return catalog.NewDefaultPhaseCatalog()
+	}
+	return r.Config.BuildPhaseToolCatalog()
+}
+
+func (r *Runner) resolvePhaseAllowedTools(wf *workflow.Workflow, p *workflow.Phase, provider config.ProviderConfig) (string, error) {
+	if p == nil {
+		return "", nil
+	}
+	toolCatalog, err := r.phaseToolCatalog()
+	if err != nil {
+		return "", fmt.Errorf("resolve phase allowed tools: %w", err)
+	}
+
+	requested := mergeAllowedToolLists(parseAllowedToolsString(pointerStringValue(p.AllowedTools)), provider.AllowedTools)
+	role := catalog.RoleDiagnostic
+	if r.Config != nil {
+		class := policy.Class("")
+		if wf != nil {
+			class = wf.Class
+		}
+		role = r.Config.PhaseToolRole(class, p.Name, p.Type)
+	}
+	resolved, err := toolCatalog.ResolveRoleTools(role, requested)
+	if err != nil {
+		return "", fmt.Errorf("resolve phase %q allowed tools for role %q: %w", p.Name, role, err)
+	}
+	if len(resolved) == 0 {
+		return "", nil
+	}
+	return strings.Join(resolved, ","), nil
 }
 
 func (r *Runner) ensureWorktree(ctx context.Context, vessel *queue.Vessel, src source.Source) (string, bool) {
@@ -1820,20 +1398,18 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	if latest, err := r.Queue.FindByID(vessel.ID); err == nil && latest != nil {
 		artifactVessel = *latest
 	}
-	var manifest *evidence.Manifest
-	if len(claims) > 0 {
-		manifest = &evidence.Manifest{
-			VesselID:  vessel.ID,
-			Workflow:  vessel.Workflow,
-			Claims:    append([]evidence.Claim(nil), claims...),
-			CreatedAt: now.UTC(),
-		}
-		if err := evidence.SaveManifest(r.Config.StateDir, vessel.ID, manifest); err != nil {
-			log.Printf("warn: save evidence manifest: %v", err)
-		} else {
-			summary.EvidenceManifestPath = evidenceManifestRelativePath(vessel.ID)
-			reviewArtifacts.EvidenceManifest = summary.EvidenceManifestPath
-		}
+	manifest := &evidence.Manifest{
+		VesselID:  vessel.ID,
+		Workflow:  vessel.Workflow,
+		Claims:    append([]evidence.Claim(nil), claims...),
+		CreatedAt: now.UTC(),
+	}
+	if err := evidence.SaveManifest(r.Config.StateDir, vessel.ID, manifest); err != nil {
+		log.Printf("warn: save evidence manifest: %v", err)
+		manifest = nil
+	} else {
+		summary.EvidenceManifestPath = evidenceManifestRelativePath(vessel.ID)
+		reviewArtifacts.EvidenceManifest = summary.EvidenceManifestPath
 	}
 
 	if vrs.costTracker != nil {
@@ -1858,7 +1434,14 @@ func (r *Runner) persistRunArtifacts(vessel queue.Vessel, state string, vrs *ves
 	}
 
 	evalPath := config.RuntimePath(r.Config.StateDir, "phases", vessel.ID, evalReportFileName)
-	if info, err := os.Stat(evalPath); err == nil && !info.IsDir() {
+	if artifact := vrs.evaluationArtifact(); artifact != nil {
+		if err := saveJSONArtifact(evalPath, artifact); err != nil {
+			log.Printf("warn: save eval report: %v", err)
+		} else {
+			summary.EvalReportPath = evalReportRelativePath(vessel.ID)
+			reviewArtifacts.EvalReport = summary.EvalReportPath
+		}
+	} else if info, err := os.Stat(evalPath); err == nil && !info.IsDir() {
 		summary.EvalReportPath = evalReportRelativePath(vessel.ID)
 		reviewArtifacts.EvalReport = summary.EvalReportPath
 	}
@@ -2106,8 +1689,11 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 			if result.phaseSummary.Name != "" {
 				vrs.addPhase(result.phaseSummary)
 			}
-			if result.evidenceClaim != nil && claims != nil {
-				*claims = append(*claims, *result.evidenceClaim)
+			if result.evaluationReport != nil {
+				vrs.addEvaluationReport(*result.evaluationReport)
+			}
+			if len(result.evidenceClaims) > 0 && claims != nil {
+				*claims = append(*claims, result.evidenceClaims...)
 			}
 
 			switch result.status {
@@ -2131,11 +1717,15 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 			}
 
 			if result.status == "completed" || result.status == "no-op" {
-				allPhaseResults = append(allPhaseResults, reporter.PhaseResult{
-					Name:     p.Name,
-					Duration: result.duration,
-					Status:   result.status,
-				})
+				if result.phaseReport.Name != "" {
+					allPhaseResults = append(allPhaseResults, result.phaseReport)
+				} else {
+					allPhaseResults = append(allPhaseResults, reporter.PhaseResult{
+						Name:     p.Name,
+						Duration: result.duration,
+						Status:   result.status,
+					})
+				}
 			}
 
 			if result.status == "no-op" {
@@ -2218,12 +1808,14 @@ func (r *Runner) runVesselOrchestrated(ctx context.Context, vessel queue.Vessel,
 
 // singlePhaseResult holds the outcome of executing one phase including its gate.
 type singlePhaseResult struct {
-	output        string
-	status        string // "completed", "no-op", "failed", "waiting", "cancelled", "timed_out"
-	duration      time.Duration
-	gateOut       string
-	phaseSummary  PhaseSummary
-	evidenceClaim *evidence.Claim
+	output           string
+	status           string // "completed", "no-op", "failed", "waiting", "cancelled", "timed_out"
+	duration         time.Duration
+	gateOut          string
+	phaseSummary     PhaseSummary
+	phaseReport      reporter.PhaseResult
+	evaluationReport *PhaseEvaluationReport
+	evidenceClaims   []evidence.Claim
 }
 
 type gateExecutionResult struct {
@@ -2253,16 +1845,18 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		if r.vesselCancelled(ctx, vessel.ID) {
 			return singlePhaseResult{status: "cancelled"}
 		}
-		log.Printf("%sphase %q starting (orchestrated)", vesselLabel(vessel), p.Name)
+		log.Printf("%sphase %q starting", vesselLabel(vessel), p.Name)
 		phaseStart := r.runtimeNow()
 
-		td := r.buildTemplateData(vessel, issueData, p.Name, phaseIdx, previousOutputs, gateResult)
+		td := r.buildTemplateData(vessel, wf, issueData, p.Name, phaseIdx, previousOutputs, gateResult, phase.EvaluationData{})
 
 		var output []byte
 		var runErr error
 		var beforeSnapshot surface.Snapshot
 		var checkProtectedSurfaces bool
 		var promptForCost string
+		var evaluationReport *PhaseEvaluationReport
+		var evidenceClaims []evidence.Claim
 		tier, providerChain := resolvePhaseProviderChain(r.Config, srcCfg, vessel, wf, &p)
 		provider := ""
 		model := ""
@@ -2316,7 +1910,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if wErr := os.WriteFile(filepath.Join(phasesDir, p.Name+".command"), []byte(rendered), 0o644); wErr != nil {
 				log.Printf("warn: write command file: %v", wErr)
 			}
-			if policyErr := r.enforcePhasePolicy(vessel, p, rendered, ""); policyErr != nil {
+			if policyErr := r.enforcePhasePolicy(ctx, vessel, wf, p, worktreePath, rendered, ""); policyErr != nil {
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
@@ -2364,24 +1958,7 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 			}
 			promptTemplate := string(promptContent)
-			rendered, err := phase.RenderPrompt(promptTemplate, td)
-			if err != nil {
-				finishCurrentPhaseSpan(err)
-				r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
-				if err := src.OnFail(ctx, vessel); err != nil {
-					log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
-				}
-				return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
-			}
-			promptForCost = rendered
-			if harnessContent != "" {
-				promptForCost = harnessContent + "\n\n" + rendered
-			}
-			promptPath := filepath.Join(phasesDir, p.Name+".prompt")
-			if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
-				log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
-			}
-			if policyErr := r.enforcePhasePolicy(vessel, p, "", promptTemplate); policyErr != nil {
+			if policyErr := r.enforcePhasePolicy(ctx, vessel, wf, p, worktreePath, "", promptTemplate); policyErr != nil {
 				finishCurrentPhaseSpan(policyErr)
 				log.Printf("%sphase %q blocked: %v", vesselLabel(vessel), p.Name, policyErr)
 				vessel.FailedPhase = p.Name
@@ -2416,24 +1993,43 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			if touchErr := r.touchPhaseActivity(outputPath); touchErr != nil {
 				log.Printf("warn: touch phase activity %s: %v", outputPath, touchErr)
 			}
-			output, provider, model, runErr = r.runPhaseWithProviderFallback(ctx, vessel.ID, p.Name, worktreePath, providerChain, func(provider string) (providerInvocation, error) {
-				cmd, args, phaseStdin, model, err := buildProviderPhaseArgs(r.Config, srcCfg, wf, &p, harnessContent, provider, tier, rendered, attempt)
+			if p.Evaluator != nil {
+				exec, err := r.runPhaseEvaluationLoop(ctx, vessel, wf, phaseIdx, previousOutputs, issueData, gateResult, harnessContent, worktreePath, phasesDir, promptTemplate, vrs, attempt)
+				if exec != nil {
+					output = exec.output
+					promptForCost = exec.promptForCost
+					provider = exec.provider
+					model = exec.model
+					evaluationReport = exec.evaluationReport
+					if evaluationReport != nil {
+						evidenceClaims = append(evidenceClaims, buildEvaluationClaim(vessel.ID, p, *evaluationReport, r.runtimeNow()))
+						if r.Tracer != nil {
+							phaseSpan.AddAttributes(phaseEvaluationSpanAttributes(*evaluationReport))
+						}
+					}
+				}
 				if err != nil {
-					return providerInvocation{}, err
+					runErr = err
 				}
-				stdinContent := ""
-				if phaseStdin != nil {
-					stdinContent = rendered
+			} else {
+				rendered, err := phase.RenderPromptWithOptions(promptTemplate, td, phase.RenderOptions{
+					ContextBudget: phaseContextBudget(r.Config),
+					Preamble:      harnessContent,
+				})
+				if err != nil {
+					finishCurrentPhaseSpan(err)
+					r.failVessel(vessel.ID, fmt.Sprintf("render prompt for phase %s: %v", p.Name, err))
+					if err := src.OnFail(ctx, vessel); err != nil {
+						log.Printf("warn: OnFail hook for vessel %s: %v", vessel.ID, err)
+					}
+					return singlePhaseResult{status: "failed", duration: r.runtimeSince(phaseStart)}
 				}
-				return providerInvocation{
-					Provider:     provider,
-					Model:        model,
-					Env:          providerEnvForName(r.Config, provider),
-					Command:      cmd,
-					Args:         args,
-					StdinContent: stdinContent,
-				}, nil
-			})
+				promptPath := filepath.Join(phasesDir, p.Name+".prompt")
+				if wErr := os.WriteFile(promptPath, []byte(rendered), 0o644); wErr != nil {
+					log.Printf("warn: write prompt file %s: %v", promptPath, wErr)
+				}
+				output, promptForCost, provider, model, runErr = r.runPromptInvocation(ctx, vessel, worktreePath, srcCfg, wf, &p, harnessContent, rendered, attempt)
+			}
 		}
 
 		if r.vesselCancelled(ctx, vessel.ID) {
@@ -2469,9 +2065,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					r.Reporter.VesselFailed(ctx, issueNum, p.Name, runErr.Error(), ""))
 			}
 			return singlePhaseResult{
-				status:       "failed",
-				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error(), provider, model),
+				status:           "failed",
+				duration:         phaseDuration,
+				phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, runErr.Error(), provider, model), evaluationReport),
+				evaluationReport: evaluationReport,
+				evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 			}
 		}
 
@@ -2491,9 +2089,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 						r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
 				}
 				return singlePhaseResult{
-					status:       "failed",
-					duration:     phaseDuration,
-					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error(), provider, model),
+					status:           "failed",
+					duration:         phaseDuration,
+					phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, 0, 0, 0.0, phaseDuration, "failed", nil, err.Error(), provider, model), evaluationReport),
+					evaluationReport: evaluationReport,
+					evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 				}
 			}
 		}
@@ -2516,9 +2116,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			phaseSpanStatus = "failed"
 			finishCurrentPhaseSpan(fmt.Errorf("%s", errMsg))
 			return singlePhaseResult{
-				status:       "failed",
-				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg, provider, model),
+				status:           "failed",
+				duration:         phaseDuration,
+				phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, errMsg, provider, model), evaluationReport),
+				evaluationReport: evaluationReport,
+				evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 			}
 		}
 
@@ -2537,9 +2139,11 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 					r.Reporter.VesselFailed(ctx, issueNum, p.Name, err.Error(), ""))
 			}
 			return singlePhaseResult{
-				status:       "failed",
-				duration:     phaseDuration,
-				phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error(), provider, model),
+				status:           "failed",
+				duration:         phaseDuration,
+				phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", nil, err.Error(), provider, model), evaluationReport),
+				evaluationReport: evaluationReport,
+				evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 			}
 		}
 
@@ -2566,11 +2170,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			phaseSpanStatus = "no-op"
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{
-				output:        string(output),
-				status:        "no-op",
-				duration:      phaseDuration,
-				phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "no-op", nil, "", provider, model),
-				evidenceClaim: nil,
+				output:           string(output),
+				status:           "no-op",
+				duration:         phaseDuration,
+				phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "no-op", nil, "", provider, model), evaluationReport),
+				phaseReport:      phaseReport,
+				evaluationReport: evaluationReport,
+				evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 			}
 		}
 
@@ -2582,11 +2188,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			phaseSpanStatus = "completed"
 			finishCurrentPhaseSpan(nil)
 			return singlePhaseResult{
-				output:        string(output),
-				status:        "completed",
-				duration:      phaseDuration,
-				phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "", provider, model),
-				evidenceClaim: nil,
+				output:           string(output),
+				status:           "completed",
+				duration:         phaseDuration,
+				phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "", provider, model), evaluationReport),
+				phaseReport:      phaseReport,
+				evaluationReport: evaluationReport,
+				evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 			}
 		}
 
@@ -2610,10 +2218,12 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
-					status:       "failed",
-					duration:     phaseDuration,
-					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error(), provider, model),
+					status:           "failed",
+					duration:         phaseDuration,
+					gateOut:          gateOut,
+					phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), gateErr.Error(), provider, model), evaluationReport),
+					evaluationReport: evaluationReport,
+					evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 				}
 			}
 			if passed {
@@ -2622,11 +2232,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				phaseSpanStatus = "completed"
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
-					output:        string(output),
-					status:        "completed",
-					duration:      phaseDuration,
-					phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", gatePassedPointer(true), "", provider, model),
-					evidenceClaim: gateResultExec.evidenceClaim,
+					output:           string(output),
+					status:           "completed",
+					duration:         phaseDuration,
+					phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", gatePassedPointer(true), "", provider, model), evaluationReport),
+					phaseReport:      phaseReport,
+					evaluationReport: evaluationReport,
+					evidenceClaims:   appendEvidenceClaim(evidenceClaims, gateResultExec.evidenceClaim),
 				}
 			}
 
@@ -2652,10 +2264,12 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(nil)
 				return singlePhaseResult{
-					status:       "failed",
-					duration:     phaseDuration,
-					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted", provider, model),
+					status:           "failed",
+					duration:         phaseDuration,
+					gateOut:          gateOut,
+					phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), "gate failed, retries exhausted", provider, model), evaluationReport),
+					evaluationReport: evaluationReport,
+					evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 				}
 			}
 			gateRetries--
@@ -2677,10 +2291,12 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 				phaseSpanStatus = "failed"
 				finishCurrentPhaseSpan(err)
 				return singlePhaseResult{
-					status:       "failed",
-					duration:     phaseDuration,
-					gateOut:      gateOut,
-					phaseSummary: vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error(), provider, model),
+					status:           "failed",
+					duration:         phaseDuration,
+					gateOut:          gateOut,
+					phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "failed", gatePassedPointer(false), err.Error(), provider, model), evaluationReport),
+					evaluationReport: evaluationReport,
+					evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 				}
 			}
 			phaseSpanStatus = "retrying"
@@ -2722,7 +2338,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 			r.finishWaitTransitionSpan(waitSpan, nil)
 			phaseSpanStatus = "waiting"
 			finishCurrentPhaseSpan(nil)
-			return singlePhaseResult{output: string(output), status: "waiting", duration: r.runtimeSince(phaseStart)}
+			return singlePhaseResult{
+				output:           string(output),
+				status:           "waiting",
+				duration:         r.runtimeSince(phaseStart),
+				evaluationReport: evaluationReport,
+				evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
+			}
 		}
 
 		// Unknown gate type: treat as passed.
@@ -2730,11 +2352,13 @@ func (r *Runner) runSinglePhase(ctx context.Context, vessel queue.Vessel, wf *wo
 		phaseSpanStatus = "completed"
 		finishCurrentPhaseSpan(nil)
 		return singlePhaseResult{
-			output:        string(output),
-			status:        "completed",
-			duration:      phaseDuration,
-			phaseSummary:  vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "", provider, model),
-			evidenceClaim: nil,
+			output:           string(output),
+			status:           "completed",
+			duration:         phaseDuration,
+			phaseSummary:     applyPhaseEvaluationSummary(vrs.phaseSummaryWithLLM(r.Config, srcCfg, wf, p, harnessContent, inputTokensEst, outputTokensEst, costUSDEst, phaseDuration, "completed", nil, "", provider, model), evaluationReport),
+			phaseReport:      phaseReport,
+			evaluationReport: evaluationReport,
+			evidenceClaims:   append([]evidence.Claim(nil), evidenceClaims...),
 		}
 	}
 }
@@ -2767,6 +2391,23 @@ func finishPhaseSpan(tracer *observability.Tracer, span observability.SpanContex
 		span.RecordError(err)
 	}
 	span.End()
+}
+
+func phaseEvaluationSpanAttributes(report PhaseEvaluationReport) []observability.SpanAttribute {
+	attrs := []observability.SpanAttribute{
+		{Key: "xylem.eval.enabled", Value: "true"},
+		{Key: "xylem.eval.iterations", Value: fmt.Sprintf("%d", report.Iterations)},
+		{Key: "xylem.eval.converged", Value: fmt.Sprintf("%t", report.Converged)},
+		{Key: "xylem.eval.intensity", Value: report.Intensity},
+		{Key: "xylem.eval.criteria_count", Value: fmt.Sprintf("%d", len(report.Criteria))},
+	}
+	if report.FinalResult != nil {
+		attrs = append(attrs,
+			observability.SpanAttribute{Key: "xylem.eval.pass", Value: fmt.Sprintf("%t", report.FinalResult.Pass)},
+			observability.SpanAttribute{Key: "xylem.eval.feedback_count", Value: fmt.Sprintf("%d", len(report.FinalResult.Feedback))},
+		)
+	}
+	return append(attrs, observability.SignalSetSpanAttributes(report.Signals)...)
 }
 
 func startGateSpan(tracer *observability.Tracer, phaseSpan observability.SpanContext, ctx context.Context, gateType string) observability.SpanContext {
@@ -2977,7 +2618,9 @@ func buildGateClaim(p workflow.Phase, passed bool, artifactPath string, recorded
 			}
 			claim.TrustBoundary = "Running system observation"
 		default:
+			claim.Level = evidence.BehaviorallyChecked
 			claim.Checker = p.Gate.Run
+			claim.TrustBoundary = "Command gate output"
 		}
 	}
 	if p.Gate == nil || p.Gate.Evidence == nil {
@@ -3000,6 +2643,32 @@ func buildGateClaim(p workflow.Phase, passed bool, artifactPath string, recorded
 	return claim
 }
 
+func buildEvaluationClaim(vesselID string, p workflow.Phase, report PhaseEvaluationReport, recordedAt time.Time) evidence.Claim {
+	passed := report.Converged && report.FinalResult != nil && report.FinalResult.Pass
+	claimText := fmt.Sprintf("Evaluator review for phase %q did not meet configured quality thresholds", p.Name)
+	if passed {
+		claimText = fmt.Sprintf("Evaluator review for phase %q met configured quality thresholds", p.Name)
+	}
+	return evidence.Claim{
+		Claim:         claimText,
+		Level:         evidence.BehaviorallyChecked,
+		Checker:       "generator-evaluator loop",
+		TrustBoundary: "LLM evaluator review of generated output",
+		ArtifactPath:  evalReportRelativePath(vesselID),
+		Phase:         p.Name,
+		Passed:        passed,
+		Timestamp:     recordedAt.UTC(),
+	}
+}
+
+func appendEvidenceClaim(claims []evidence.Claim, claim *evidence.Claim) []evidence.Claim {
+	if claim == nil {
+		return append([]evidence.Claim(nil), claims...)
+	}
+	out := append([]evidence.Claim(nil), claims...)
+	return append(out, *claim)
+}
+
 func phaseActionType(p *workflow.Phase) string {
 	if p != nil && p.Type == "command" {
 		return "external_command"
@@ -3007,17 +2676,54 @@ func phaseActionType(p *workflow.Phase) string {
 	return "phase_execute"
 }
 
-func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase, renderedCommand, renderedPrompt string) error {
-	if r.Intermediary == nil {
-		return nil
+const harnessMaintenanceDefaultBranchRule = "policy.class.no-main-commits"
+const deliveryDefaultBranchRule = "delivery.default_branch_commits_denied"
+
+// defaultBranchPushRule returns the audit rule string for default-branch push
+// enforcement for the given workflow class and whether enforcement is active.
+// Only classes that explicitly deny OpCommitDefaultBranch are enforced here;
+// the Ops class is omitted intentionally (no default-branch push path in ops workflows).
+func defaultBranchPushRule(class policy.Class) (ruleMatched string, enforced bool) {
+	switch class {
+	case policy.HarnessMaintenance:
+		return harnessMaintenanceDefaultBranchRule, true
+	case policy.Delivery:
+		return deliveryDefaultBranchRule, true
+	default:
+		return "", false
+	}
+}
+
+var controlPlanePathRe = regexp.MustCompile(`(^|[^A-Za-z0-9._/-])(\.xylem/HARNESS\.md|\.xylem\.yml|\.xylem/workflows/[A-Za-z0-9._/-]+\.yaml|\.xylem/prompts/[A-Za-z0-9._/-]+\.md)([^A-Za-z0-9._/-]|$)`)
+
+func (r *Runner) enforcePhasePolicy(ctx context.Context, vessel queue.Vessel, sk *workflow.Workflow, p workflow.Phase, worktreePath, renderedCommand, renderedPrompt string) error {
+	workflowClass := policy.Delivery
+	if sk != nil && sk.Class != "" {
+		workflowClass = sk.Class
 	}
 
 	for _, intent := range r.phasePolicyIntents(vessel, p, renderedCommand, renderedPrompt) {
-		result := r.Intermediary.Evaluate(intent)
+		if guardErr := r.enforceDefaultBranchPushPolicy(ctx, vessel, workflowClass, p.Name, worktreePath, intent); guardErr != nil {
+			return guardErr
+		}
+		if r.Intermediary == nil {
+			continue
+		}
+
+		result := r.Intermediary.EvaluateWithContext(intent, intermediary.EvaluationContext{
+			WorkflowClass: workflowClass,
+			FilePath:      auditFilePath(worktreePath, intent.Resource),
+			VesselID:      vessel.ID,
+		})
 		entry := intermediary.AuditEntry{
-			Intent:    intent,
-			Decision:  result.Effect,
-			Timestamp: time.Now().UTC(),
+			Intent:        intent,
+			Decision:      result.Effect,
+			Timestamp:     time.Now().UTC(),
+			WorkflowClass: string(workflowClass),
+			Operation:     result.Operation,
+			RuleMatched:   result.RuleMatched,
+			FilePath:      result.FilePath,
+			VesselID:      vessel.ID,
 		}
 		if result.Effect != intermediary.Allow {
 			entry.Error = result.Reason
@@ -3025,7 +2731,7 @@ func (r *Runner) enforcePhasePolicy(vessel queue.Vessel, p workflow.Phase, rende
 		if err := r.appendAuditEntry(entry); err != nil {
 			return fmt.Errorf("record audit evidence: %w", err)
 		}
-		if result.Effect != intermediary.Allow {
+		if r.Intermediary.ShouldBlock(result.Effect) {
 			return formatPolicyDecisionError(p.Name, intent, result)
 		}
 	}
@@ -3083,6 +2789,9 @@ func (r *Runner) phasePolicyIntents(vessel queue.Vessel, p workflow.Phase, rende
 	}
 	if indicatesPRCreate(classificationText) {
 		appendIntent("pr_create", extractRepoFlag(classificationText, sourceRepo))
+	}
+	for _, resource := range extractControlPlaneWriteResources(classificationText) {
+		appendIntent("file_write", resource)
 	}
 
 	return intents
@@ -3161,6 +2870,64 @@ func indicatesPRCreate(rendered string) bool {
 		strings.Contains(lower, "create a pr")
 }
 
+func indicatesControlPlaneWrite(rendered string) bool {
+	lower := strings.ToLower(rendered)
+	markers := []string{
+		"write ",
+		"edit ",
+		"update ",
+		"modify ",
+		"change ",
+		"create ",
+		"append ",
+		"overwrite ",
+		"replace ",
+		"rewrite ",
+		"touch ",
+		"echo ",
+		"printf ",
+		"tee ",
+		"sed ",
+		"cp ",
+		"mv ",
+		">",
+		">>",
+	}
+	for _, marker := range markers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func extractControlPlaneWriteResources(rendered string) []string {
+	if !indicatesControlPlaneWrite(rendered) {
+		return nil
+	}
+	matches := controlPlanePathRe.FindAllStringSubmatch(rendered, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(matches))
+	resources := make([]string, 0, len(matches))
+	for _, match := range matches {
+		if len(match) < 3 {
+			continue
+		}
+		resource := match[2]
+		if !intermediary.IsControlPlaneResource(resource) {
+			continue
+		}
+		if _, ok := seen[resource]; ok {
+			continue
+		}
+		seen[resource] = struct{}{}
+		resources = append(resources, resource)
+	}
+	return resources
+}
+
 func extractGitPushResource(rendered string) string {
 	fields := strings.Fields(rendered)
 	for i := 0; i < len(fields)-1; i++ {
@@ -3207,6 +2974,87 @@ func extractRepoFlag(rendered, fallback string) string {
 		return fallback
 	}
 	return "*"
+}
+
+func auditFilePath(worktreePath, resource string) string {
+	resource = strings.TrimSpace(resource)
+	if worktreePath == "" || resource == "" || !intermediary.IsControlPlaneResource(resource) {
+		return ""
+	}
+	if filepath.IsAbs(resource) {
+		return resource
+	}
+	return filepath.Join(worktreePath, filepath.FromSlash(resource))
+}
+
+func normalizeBranchRef(ref string) string {
+	ref = strings.TrimSpace(ref)
+	ref = strings.Trim(ref, "\"'")
+	ref = strings.TrimSpace(ref)
+	if ref == "" {
+		return ""
+	}
+	if parts := strings.SplitN(ref, ":", 2); len(parts) == 2 {
+		ref = parts[1]
+	}
+	ref = strings.TrimPrefix(ref, "refs/heads/")
+	return ref
+}
+
+func pushTargetsDefaultBranch(resource, defaultBranch string) bool {
+	target := normalizeBranchRef(resource)
+	defaultBranch = normalizeBranchRef(defaultBranch)
+	return target != "" && defaultBranch != "" && target == defaultBranch
+}
+
+func (r *Runner) policyMode() intermediary.PolicyMode {
+	if r != nil && r.Config != nil {
+		return r.Config.HarnessPolicyMode()
+	}
+	if r != nil && r.Intermediary != nil {
+		return r.Intermediary.Mode()
+	}
+	return intermediary.PolicyModeEnforce
+}
+
+func (r *Runner) enforceDefaultBranchPushPolicy(ctx context.Context, vessel queue.Vessel, workflowClass policy.Class, phaseName, worktreePath string, intent intermediary.Intent) error {
+	ruleMatched, enforced := defaultBranchPushRule(workflowClass)
+	if !enforced || intent.Action != "git_push" || worktreePath == "" {
+		return nil
+	}
+
+	defaultBranch, err := r.detectDefaultBranchAtPath(ctx, worktreePath)
+	if err != nil || !pushTargetsDefaultBranch(intent.Resource, defaultBranch) {
+		// Cannot confirm the push targets the default branch; skip enforcement and
+		// let the intermediary policy layer handle the intent instead.
+		return nil
+	}
+
+	if err := r.appendAuditEntry(intermediary.AuditEntry{
+		Intent:        intent,
+		Decision:      intermediary.Deny,
+		Timestamp:     time.Now().UTC(),
+		Error:         ruleMatched,
+		WorkflowClass: string(workflowClass),
+		Operation:     string(policy.OpCommitDefaultBranch),
+		RuleMatched:   ruleMatched,
+		VesselID:      vessel.ID,
+	}); err != nil {
+		return fmt.Errorf("record default branch push denial: %w", err)
+	}
+
+	if r.policyMode() == intermediary.PolicyModeWarn {
+		return nil
+	}
+
+	return formatPolicyDecisionError(phaseName, intent, intermediary.PolicyResult{
+		Effect:        intermediary.Deny,
+		Reason:        ruleMatched,
+		WorkflowClass: workflowClass,
+		Operation:     string(policy.OpCommitDefaultBranch),
+		RuleMatched:   ruleMatched,
+		VesselID:      vessel.ID,
+	})
 }
 
 func (r *Runner) takeProtectedSurfaceSnapshot(ctx context.Context, worktreePath string) (surface.Snapshot, bool, error) {
@@ -3333,7 +3181,7 @@ func (r *Runner) verifyProtectedSurfaces(vessel queue.Vessel, p workflow.Phase, 
 	}
 
 	errMsg := fmt.Sprintf("phase %q violated protected surfaces: %s", p.Name, formatViolations(violations))
-	if err := r.recordProtectedSurfaceViolations(vessel, p, errMsg, violations); err != nil {
+	if err := r.recordProtectedSurfaceViolations(vessel, p, worktreePath, errMsg, violations); err != nil {
 		return fmt.Errorf("%s (record audit evidence: %w)", errMsg, err)
 	}
 	if err := r.restoreDeletedProtectedSurfaces(context.Background(), worktreePath, violations); err != nil {
@@ -3723,7 +3571,15 @@ func (r *Runner) detectDefaultBranchAtPath(ctx context.Context, worktreePath str
 	return "", fmt.Errorf("could not detect default branch from origin")
 }
 
-func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, errMsg string, violations []surface.Violation) error {
+func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflow.Phase, worktreePath, errMsg string, violations []surface.Violation) error {
+	workflowClass, workflowClassErr := r.workflowClassForAudit(vessel)
+	ruleMatched := ""
+	if workflowClassErr != nil {
+		log.Printf("runner: determine workflow class for audit for vessel %s workflow %q: %v", vessel.ID, vessel.Workflow, workflowClassErr)
+		workflowClass = ""
+	} else if classDecision := policy.Evaluate(workflowClass, policy.OpWriteControlPlane); !classDecision.Allowed {
+		ruleMatched = classDecision.Rule
+	}
 	for _, violation := range violations {
 		if err := r.appendAuditEntry(intermediary.AuditEntry{
 			Intent: intermediary.Intent{
@@ -3739,9 +3595,14 @@ func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflo
 					"workflow": vessel.Workflow,
 				},
 			},
-			Decision:  intermediary.Deny,
-			Timestamp: time.Now().UTC(),
-			Error:     errMsg,
+			Decision:      intermediary.Deny,
+			Timestamp:     time.Now().UTC(),
+			Error:         errMsg,
+			WorkflowClass: string(workflowClass),
+			Operation:     string(policy.OpWriteControlPlane),
+			RuleMatched:   ruleMatched,
+			FilePath:      auditFilePath(worktreePath, violation.Path),
+			VesselID:      vessel.ID,
 		}); err != nil {
 			return fmt.Errorf("append surface violation audit for %s: %w", violation.Path, err)
 		}
@@ -3752,6 +3613,9 @@ func (r *Runner) recordProtectedSurfaceViolations(vessel queue.Vessel, p workflo
 func (r *Runner) appendAuditEntry(entry intermediary.AuditEntry) error {
 	if r.AuditLog == nil {
 		return nil
+	}
+	if entry.VesselID == "" {
+		entry.VesselID = entry.Intent.AgentID
 	}
 	if err := r.AuditLog.Append(entry); err != nil {
 		return fmt.Errorf("append audit entry: %w", err)
@@ -3886,6 +3750,20 @@ func (r *Runner) writeWorkflowSnapshot(srcPath, snapshotPath string) error {
 func (r *Runner) loadWorkflow(name string) (*workflow.Workflow, string, error) {
 	path := filepath.Join(".xylem", "workflows", name+".yaml")
 	return workflow.LoadWithDigest(path)
+}
+
+func (r *Runner) workflowClassForAudit(vessel queue.Vessel) (policy.Class, error) {
+	if strings.TrimSpace(vessel.Workflow) == "" {
+		return policy.Delivery, nil
+	}
+	sk, _, err := r.loadWorkflow(vessel.Workflow)
+	if err != nil {
+		return policy.Delivery, fmt.Errorf("load workflow %q: %w", vessel.Workflow, err)
+	}
+	if sk == nil || sk.Class == "" {
+		return policy.Delivery, nil
+	}
+	return sk.Class, nil
 }
 
 func (r *Runner) workflowSnapshotPath(vesselID, workflowName string) string {
@@ -4237,7 +4115,7 @@ func (r *Runner) resolveDefaultBranch() string {
 	return "main"
 }
 
-func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string) phase.TemplateData {
+func (r *Runner) buildTemplateData(vessel queue.Vessel, wf *workflow.Workflow, issueData phase.IssueData, phaseName string, phaseIndex int, previousOutputs map[string]string, gateResult string, evaluation phase.EvaluationData) phase.TemplateData {
 	sourceName := vessel.Source
 	if configSource := r.sourceConfigNameFromMeta(vessel); configSource != "" {
 		sourceName = configSource
@@ -4252,6 +4130,24 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			Test:   strings.TrimSpace(r.Config.Validation.Test),
 		}
 	}
+	var episodicCtx []memory.EpisodicEntry
+	if r.EpisodicStore != nil && phaseIndex > 0 {
+		entries, err := r.EpisodicStore.RecentForVessel(vessel.ID, 10)
+		if err != nil {
+			log.Printf("warn: read episodic context for vessel %s: %v", vessel.ID, err)
+		} else {
+			// Reverse so most-recent is first.
+			for i, j := 0, len(entries)-1; i < j; i, j = i+1, j-1 {
+				entries[i], entries[j] = entries[j], entries[i]
+			}
+			episodicCtx = entries
+		}
+	}
+	daemonBinary, err := os.Executable()
+	if err != nil {
+		log.Printf("warn: os.Executable: %v", err)
+		daemonBinary = ""
+	}
 	return phase.TemplateData{
 		Date:  r.runtimeNow().UTC().Format("2006-01-02"),
 		Issue: issueData,
@@ -4259,8 +4155,10 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			Name:  phaseName,
 			Index: phaseIndex,
 		},
-		PreviousOutputs: previousOutputs,
-		GateResult:      gateResult,
+		PreviousOutputs:     previousOutputs,
+		PreviousOutputOrder: orderedPreviousOutputNames(wf, phaseIndex, previousOutputs),
+		GateResult:          gateResult,
+		Evaluation:          evaluation,
 		Vessel: phase.VesselData{
 			ID:     vessel.ID,
 			Ref:    vessel.Ref,
@@ -4275,8 +4173,48 @@ func (r *Runner) buildTemplateData(vessel queue.Vessel, issueData phase.IssueDat
 			Name: sourceName,
 			Repo: repoSlug,
 		},
-		Validation: validation,
+		Validation:      validation,
+		EpisodicContext: episodicCtx,
+		DaemonBinary:    daemonBinary,
 	}
+}
+
+func orderedPreviousOutputNames(wf *workflow.Workflow, phaseIndex int, previousOutputs map[string]string) []string {
+	if len(previousOutputs) == 0 {
+		return nil
+	}
+	ordered := make([]string, 0, len(previousOutputs))
+	seen := make(map[string]struct{}, len(previousOutputs))
+	if wf != nil {
+		limit := phaseIndex
+		if limit > len(wf.Phases) {
+			limit = len(wf.Phases)
+		}
+		for i := 0; i < limit; i++ {
+			name := wf.Phases[i].Name
+			if _, ok := previousOutputs[name]; !ok {
+				continue
+			}
+			ordered = append(ordered, name)
+			seen[name] = struct{}{}
+		}
+	}
+	extras := make([]string, 0, len(previousOutputs)-len(ordered))
+	for name := range previousOutputs {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		extras = append(extras, name)
+	}
+	sort.Strings(extras)
+	return append(ordered, extras...)
+}
+
+func phaseContextBudget(cfg *config.Config) int {
+	if cfg == nil || cfg.Phase.ContextBudget <= 0 {
+		return config.DefaultPhaseContextBudget
+	}
+	return cfg.Phase.ContextBudget
 }
 
 func vesselLabel(v queue.Vessel) string {
@@ -4545,6 +4483,14 @@ type providerInvocation struct {
 	StdinContent string
 }
 
+type providerErrorDisposition uint8
+
+const (
+	providerErrorFail providerErrorDisposition = iota
+	providerErrorRetrySameProvider
+	providerErrorFallbackNextProvider
+)
+
 // isRateLimitError reports whether the error indicates a transient LLM
 // provider error that should be retried with backoff. This includes HTTP 429
 // rate limits (rate_limit_error), insufficient credit balance, and generic
@@ -4583,6 +4529,59 @@ func isRateLimitError(err error) bool {
 	return false
 }
 
+func classifyProviderError(err error) providerErrorDisposition {
+	if err == nil {
+		return providerErrorFail
+	}
+	if isRateLimitError(err) {
+		return providerErrorRetrySameProvider
+	}
+
+	msg := strings.ToLower(err.Error())
+	fallbackPatterns := []string{
+		"authentication failed",
+		"authentication required",
+		"authentication_error",
+		"invalid api key",
+		"api key is invalid",
+		"missing api key",
+		"invalid x-api-key",
+		"anthropic_api_key",
+		"github token",
+		"github_token",
+		"bad credentials",
+		"invalid token",
+		"token is invalid",
+		"oauth token",
+		"not authorized to access this model",
+		"permission denied for model",
+		"model access denied",
+		"service unavailable",
+		"temporarily unavailable",
+		"provider unavailable",
+		"overloaded_error",
+		"model is overloaded",
+		"currently overloaded",
+		"executable file not found",
+		"command not found",
+		"no quota", // copilot: "402 You have no quota (Request ID: ...)"
+	}
+	for _, pattern := range fallbackPatterns {
+		if strings.Contains(msg, pattern) {
+			return providerErrorFallbackNextProvider
+		}
+	}
+	if strings.Contains(msg, "unauthorized") &&
+		(strings.Contains(msg, "api key") || strings.Contains(msg, "token") || strings.Contains(msg, "authentication")) {
+		return providerErrorFallbackNextProvider
+	}
+	if strings.Contains(msg, "forbidden") &&
+		(strings.Contains(msg, "api key") || strings.Contains(msg, "token") || strings.Contains(msg, "model")) {
+		return providerErrorFallbackNextProvider
+	}
+	return providerErrorFail
+}
+
 // runPhaseWithRateLimitRetry wraps RunPhase with retry logic for API rate limit
 // errors (HTTP 429). It retries up to rateLimitMaxRetries times with exponential
 // backoff (30s, 60s, 120s) before returning the final error.
@@ -4609,7 +4608,7 @@ func (r *Runner) runPhaseWithRateLimitRetry(
 		} else {
 			output, err = r.Runner.RunPhaseWithEnv(ctx, dir, extraEnv, stdin, cmd, args...)
 		}
-		if err == nil || !isRateLimitError(err) {
+		if err == nil || classifyProviderError(err) != providerErrorRetrySameProvider {
 			return output, err
 		}
 		if attempt == rateLimitMaxRetries {
@@ -4650,10 +4649,18 @@ func (r *Runner) runPhaseWithProviderFallback(
 		if err == nil {
 			return output, invocation.Provider, invocation.Model, nil
 		}
-		if !isRateLimitError(err) || idx == len(providers)-1 {
+
+		disposition := classifyProviderError(err)
+		if disposition == providerErrorFail || idx == len(providers)-1 {
 			return output, invocation.Provider, invocation.Model, err
 		}
-		log.Printf("provider %s rate-limited, falling back to %s", invocation.Provider, providers[idx+1])
+
+		switch disposition {
+		case providerErrorRetrySameProvider:
+			log.Printf("provider %s exhausted rate-limit retries, falling back to %s", invocation.Provider, providers[idx+1])
+		case providerErrorFallbackNextProvider:
+			log.Printf("provider %s unavailable for phase %s, falling back to %s: %v", invocation.Provider, phaseName, providers[idx+1], err)
+		}
 	}
 	return nil, "", "", nil
 }
@@ -4724,6 +4731,49 @@ func providerEnvForName(cfg *config.Config, providerName string) []string {
 		return nil
 	}
 	return expandedProviderEnv(provider.Env)
+}
+
+func parseAllowedToolsString(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.FieldsFunc(raw, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	return mergeAllowedToolLists(parts, nil)
+}
+
+func mergeAllowedToolLists(first, second []string) []string {
+	total := len(first) + len(second)
+	if total == 0 {
+		return nil
+	}
+	out := make([]string, 0, total)
+	seen := make(map[string]struct{}, total)
+	for _, list := range [][]string{first, second} {
+		for _, item := range list {
+			trimmed := strings.TrimSpace(item)
+			if trimmed == "" {
+				continue
+			}
+			if _, ok := seen[trimmed]; ok {
+				continue
+			}
+			seen[trimmed] = struct{}{}
+			out = append(out, trimmed)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func pointerStringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
 }
 
 // buildPhaseArgs constructs the claude-style CLI arguments for a phase invocation.
@@ -4807,11 +4857,7 @@ func buildCopilotPhaseArgs(cfg *config.Config, providerName string, provider con
 // and returns the command binary, argument slice, and stdin reader for the phase invocation.
 // For providers that embed the prompt in CLI args (copilot -p <text>), stdin is nil.
 // For providers that read the prompt from stdin (claude -p), stdin carries the prompt.
-func buildProviderPhaseArgs(cfg *config.Config, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, tier, renderedPrompt string, attempt int) (string, []string, io.Reader, string, error) {
-	providerCfg, ok := providerConfigForName(cfg, provider)
-	if !ok {
-		return "", nil, nil, "", fmt.Errorf("provider %q is not configured", provider)
-	}
+func buildProviderPhaseArgs(cfg *config.Config, providerCfg config.ProviderConfig, srcCfg *config.SourceConfig, wf *workflow.Workflow, p *workflow.Phase, harnessContent, provider, tier, renderedPrompt string, attempt int) (string, []string, io.Reader, string, error) {
 	model := resolvePhaseModel(cfg, srcCfg, wf, p, provider, tier)
 	switch providerCfg.Kind {
 	case "copilot":

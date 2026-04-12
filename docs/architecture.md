@@ -43,7 +43,7 @@ The following diagram traces work from discovery through execution:
 ```
 Sources                     xylem scan            Queue
 +--------------+            +----------+          +----------------------+
-| github       |--Scan()--> | Scanner  |--Enqueue>| .xylem/queue.jsonl   |
+| github       |--Scan()--> | Scanner  |--Enqueue>| .xylem/state/queue.jsonl |
 | (manual)     |            +----------+          +----------+-----------+
 +--------------+                                             |
                             xylem drain                      | Dequeue
@@ -69,13 +69,13 @@ Sources                     xylem scan            Queue
 
 1. **Scan** -- The scanner queries each configured source (currently GitHub issues by label). The GitHub source calls `gh search issues`, filters out excluded labels, deduplicates against the existing queue and remote branches, and returns candidate vessels.
 
-2. **Enqueue** -- The scanner writes each new vessel to `queue.jsonl` in `pending` state. The queue is a JSONL file protected by file-level locking (`gofrs/flock`). Deduplication uses `HasRef()` to prevent the same issue URL from being enqueued twice.
+2. **Enqueue** -- The scanner writes each new vessel to `state/queue.jsonl` in `pending` state. The queue is a JSONL file protected by file-level locking (`gofrs/flock`). Deduplication uses `HasRef()` to prevent the same issue URL from being enqueued twice.
 
 3. **Dequeue** -- The runner atomically reads the queue, finds the first `pending` vessel that fits both the global and per-workflow concurrency limits, transitions it to `running`, sets `StartedAt`, and returns it. The runner enforces the global limit with a buffered-channel semaphore and tracks optional per-workflow caps in-memory.
 
 4. **Worktree creation** -- The runner asks the source for a branch name (e.g. `fix/issue-42-login-crash`), then creates an isolated git worktree at `.claude/worktrees/<branch>` branched from `origin/<default-branch>`. Provider config files (`.claude/settings.json`, rules) are copied into the worktree.
 
-5. **Phase execution** -- The runner loads the workflow YAML, reads `.xylem/HARNESS.md`, then iterates through phases. Prompt phases render a Go template with issue data and previous phase outputs, then invoke the resolved provider (`claude` or `copilot`). Command phases render and run a shell command directly in the worktree. Phase outputs are persisted to `.xylem/phases/<vessel-id>/<phase>.output`.
+5. **Phase execution** -- The runner loads the workflow YAML, reads `.xylem/HARNESS.md`, then iterates through phases. Prompt phases render a Go template with issue data and previous phase outputs, then invoke the resolved provider (`claude` or `copilot`). Command phases render and run a shell command directly in the worktree. Phase outputs are persisted to `.xylem/state/phases/<vessel-id>/<phase>.output`.
 
 6. **Gate evaluation** -- After each phase, if a gate is defined:
    - **Command gate**: runs a shell command (e.g. `make test`). On failure, the same phase re-runs with gate output appended to the prompt, up to `retries` times.
@@ -171,7 +171,7 @@ type Source interface {
 | `GitHubPR` | `github-pr` | `review/pr-<N>-<slug>` | Adds status label (default: `in-progress`) |
 | `GitHubPREvents` | `github-pr-events` | `event/pr-<N>-<eventType>-<slug>` | None |
 | `GitHubMerge` | `github-merge` | `merge/pr-<N>-<slug>` | None |
-| `Schedule` | `schedule` | `chore/<source-name>-<tick>` | Persists cadence state in `.xylem/schedule-state.json` |
+| `Schedule` | `schedule` | `chore/<source-name>-<tick>` | Persists cadence state in `.xylem/state/schedule-state.json` |
 | `Scheduled` | `scheduled` | `scheduled/<task>-<vessel>` | Persists per-task schedule buckets in `.xylem/schedules/` |
 | `Manual` | `manual` | `task/<id>-<slug>` | None |
 
@@ -207,7 +207,7 @@ phases:
 
 The workflow name must match the YAML filename. Phase names must be unique within a workflow. Prompt files are Go templates rendered with issue data, previous phase outputs, and gate results.
 
-Prompt phases can also override the LLM provider and model at the workflow or phase level, and can set per-phase `allowed_tools` restrictions that the runner forwards to the selected provider CLI. Provider resolution is `phase.llm` -> `workflow.llm` -> `.xylem.yml llm`, with support for both `claude` and `copilot`. `xylem init` also scaffolds `.xylem/HARNESS.md`; the runner reads that file and passes it as a system prompt for prompt phases.
+Prompt phases can also override the LLM provider and model at the workflow or phase level, and can set per-phase `allowed_tools` restrictions. The runner resolves those tool requests through the harness catalog's role permissions first, then forwards the effective list to the selected provider CLI. Provider resolution is `phase.llm` -> `workflow.llm` -> `.xylem.yml llm`, with support for both `claude` and `copilot`. `xylem init` also scaffolds `.xylem/HARNESS.md`; the runner reads that file and passes it as a system prompt for prompt phases.
 
 **Built-in workflows:**
 
@@ -296,7 +296,7 @@ scanner.Scan(ctx)
   |     +-- For each candidate vessel:
   |           |
   |           +-- queue.HasRef(ref) -> skip if already enqueued
-  |           +-- queue.Enqueue(vessel) -> append to queue.jsonl
+  |           +-- queue.Enqueue(vessel) -> append to state/queue.jsonl
   |
   +-- Return ScanResult{Added, Skipped, Paused}
 ```
@@ -334,20 +334,20 @@ runner.runVessel(ctx, vessel)
   +-- loadWorkflow(vessel.Workflow) -> parse .xylem/workflows/<name>.yaml
   +-- fetchIssueData(ctx, vessel) -> gh issue view (cached in Meta)
   +-- readHarness() -> read .xylem/HARNESS.md
-  +-- rebuildPreviousOutputs(vesselID, workflow) -> read .xylem/phases/<id>/*.output
+  +-- rebuildPreviousOutputs(vesselID, workflow) -> read .xylem/state/phases/<id>/*.output
   |
   +-- For each phase (starting from vessel.CurrentPhase):
         |
         +-- If prompt phase:
         |     +-- Render prompt template with issue data, previous outputs, gate result
-        |     +-- Write rendered prompt to .xylem/phases/<id>/<phase>.prompt
+        |     +-- Write rendered prompt to .xylem/state/phases/<id>/<phase>.prompt
         |     +-- Resolve provider + model, add harness + allowed_tools
         |     +-- runner.RunPhase(ctx, worktreePath, stdin, <provider-cmd>, args...)
         +-- If command phase:
         |     +-- Render phase.run as a template
-        |     +-- Write rendered command to .xylem/phases/<id>/<phase>.command
+        |     +-- Write rendered command to .xylem/state/phases/<id>/<phase>.command
         |     +-- Run shell command in worktree
-        +-- Write output to .xylem/phases/<id>/<phase>.output
+        +-- Write output to .xylem/state/phases/<id>/<phase>.output
         +-- Persist CurrentPhase + PhaseOutputs to queue
         |
         +-- Gate evaluation:
@@ -453,7 +453,7 @@ For now, treat them as two independent codebases that happen to share a Go modul
 
 ## Queue persistence
 
-The queue is a single JSONL file (`<state_dir>/queue.jsonl`). Each line is a JSON-encoded `Vessel`. Reads and writes are protected by a file lock (`gofrs/flock`) stored at `<state_dir>/queue.jsonl.lock`.
+The queue is a single JSONL file (`<state_dir>/state/queue.jsonl` in the standard `.xylem` layout). Each line is a JSON-encoded `Vessel`. Reads and writes are protected by a file lock (`gofrs/flock`) stored at `<state_dir>/state/queue.jsonl.lock`.
 
 - **Read operations** (`List`, `FindByID`, `ListByState`, `HasRef`) acquire a read lock.
 - **Write operations** (`Enqueue`, `Dequeue`, `Update`, `UpdateVessel`, `Cancel`) acquire an exclusive write lock.

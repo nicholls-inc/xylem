@@ -11,12 +11,6 @@ import (
 	"sync"
 
 	"github.com/spf13/cobra"
-	"go.opentelemetry.io/contrib/bridges/otelslog"
-	"go.opentelemetry.io/otel/attribute"
-	otlploggrpc "go.opentelemetry.io/otel/exporters/otlp/otlplog/otlploggrpc"
-	otelglobal "go.opentelemetry.io/otel/log/global"
-	sdklog "go.opentelemetry.io/otel/sdk/log"
-	"go.opentelemetry.io/otel/sdk/resource"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 )
@@ -27,7 +21,6 @@ var (
 	commandLoggerCleanup func()
 	commandLoggerMu      sync.Mutex
 	registerFinalizeOnce sync.Once
-	buildOTelLogHandler  = newOTelLogHandler
 )
 
 func init() {
@@ -73,9 +66,8 @@ type loggerOptions struct {
 
 func newConfiguredLogger(cfg *config.Config, opts loggerOptions) (*slog.Logger, func(), error) {
 	handlers := []slog.Handler{newTextHandler(os.Stderr)}
-	cleanups := make([]func(), 0, 3)
+	cleanups := make([]func(), 0, 1)
 	restoreLogger := slog.Default()
-	restoreProvider := otelglobal.GetLoggerProvider()
 
 	if opts.daemonFile {
 		file, err := openDaemonLogFile(cfg.StateDir)
@@ -86,22 +78,6 @@ func newConfiguredLogger(cfg *config.Config, opts loggerOptions) (*slog.Logger, 
 		cleanups = append(cleanups, func() {
 			_ = file.Close()
 		})
-	}
-
-	if cfg.ObservabilityEnabled() && cfg.Observability.Endpoint != "" {
-		handler, provider, err := buildOTelLogHandler(cfg)
-		if err != nil {
-			slog.New(newTextHandler(os.Stderr)).Warn("initialize OTel log exporter", "error", err)
-		} else {
-			otelglobal.SetLoggerProvider(provider)
-			handlers = append(handlers, handler)
-			cleanups = append(cleanups, func() {
-				otelglobal.SetLoggerProvider(restoreProvider)
-				if err := provider.Shutdown(context.Background()); err != nil {
-					slog.New(newTextHandler(os.Stderr)).Warn("shutdown OTel log provider", "error", err)
-				}
-			})
-		}
 	}
 
 	logger := slog.New(newMultiHandler(handlers...))
@@ -127,29 +103,6 @@ func openDaemonLogFile(stateDir string) (*os.File, error) {
 		return nil, fmt.Errorf("open daemon log file %q: %w", logPath, err)
 	}
 	return file, nil
-}
-
-func newOTelLogHandler(cfg *config.Config) (slog.Handler, *sdklog.LoggerProvider, error) {
-	opts := []otlploggrpc.Option{
-		otlploggrpc.WithEndpoint(cfg.Observability.Endpoint),
-	}
-	if cfg.Observability.Insecure {
-		opts = append(opts, otlploggrpc.WithInsecure())
-	}
-
-	exporter, err := otlploggrpc.New(context.Background(), opts...)
-	if err != nil {
-		return nil, nil, fmt.Errorf("initialize OTel log exporter: %w", err)
-	}
-
-	res := resource.NewWithAttributes("", attribute.String("service.name", "xylem"))
-	provider := sdklog.NewLoggerProvider(
-		sdklog.WithResource(res),
-		sdklog.WithProcessor(sdklog.NewBatchProcessor(exporter)),
-	)
-
-	handler := otelslog.NewHandler("github.com/nicholls-inc/xylem/cli/cmd/xylem", otelslog.WithLoggerProvider(provider))
-	return handler, provider, nil
 }
 
 func newTextLogger(w io.Writer) *slog.Logger {

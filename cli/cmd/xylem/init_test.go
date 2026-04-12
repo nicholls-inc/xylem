@@ -1239,3 +1239,88 @@ func TestSmoke_S18_ScenariosDirectoryPresentEvenWithNoScenariosYetPopulated(t *t
 	require.NoError(t, err)
 	assert.True(t, info.IsDir())
 }
+
+func TestInitEmitsAgentsMd(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	captureStdout(func() {
+		require.NoError(t, cmdInitWithProfile(configPath, false, "core"))
+	})
+
+	agentsPath := filepath.Join(dir, "AGENTS.md")
+	_, err := os.Stat(agentsPath)
+	require.NoError(t, err, "AGENTS.md should be created")
+
+	data, err := os.ReadFile(agentsPath)
+	require.NoError(t, err)
+	content := string(data)
+
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	assert.GreaterOrEqual(t, len(lines), 30, "AGENTS.md should be at least 30 lines")
+	assert.LessOrEqual(t, len(lines), 50, "AGENTS.md should be at most 50 lines")
+	assert.Equal(t, "# Agents guide", lines[0], "first line must be '# Agents guide'")
+}
+
+func TestInitAgentsMdSkippedWithoutForce(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	existing := "# My custom agents file\n\nDo not overwrite me.\n"
+	require.NoError(t, os.WriteFile("AGENTS.md", []byte(existing), 0o644))
+
+	out := captureStdout(func() {
+		require.NoError(t, cmdInitWithProfile(configPath, false, "core"))
+	})
+
+	data, _ := os.ReadFile("AGENTS.md")
+	assert.Equal(t, existing, string(data), "existing AGENTS.md must not be modified without --force")
+	assert.Contains(t, out, "skipped")
+}
+
+func TestInitAgentsMdForceSkipsWhenFirstLineDiffers(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	existing := "# My custom agents file\n\nDo not overwrite me.\n"
+	require.NoError(t, os.WriteFile("AGENTS.md", []byte(existing), 0o644))
+
+	out := captureStdout(func() {
+		require.NoError(t, cmdInitWithProfile(configPath, true, "core"))
+	})
+
+	data, _ := os.ReadFile("AGENTS.md")
+	assert.Equal(t, existing, string(data), "--force must not overwrite when first line is not '# Agents guide'")
+	assert.Contains(t, out, "skipped")
+}
+
+func TestInitAgentsMdForceOverwritesWhenFirstLineMatches(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, ".xylem.yml")
+	orig, _ := os.Getwd()
+	os.Chdir(dir)                        //nolint:errcheck
+	t.Cleanup(func() { os.Chdir(orig) }) //nolint:errcheck
+
+	existing := "# Agents guide\n\nOld content.\n"
+	require.NoError(t, os.WriteFile("AGENTS.md", []byte(existing), 0o644))
+
+	captureStdout(func() {
+		require.NoError(t, cmdInitWithProfile(configPath, true, "core"))
+	})
+
+	data, _ := os.ReadFile("AGENTS.md")
+	content := string(data)
+	assert.NotEqual(t, existing, content, "--force should overwrite when first line is '# Agents guide'")
+	assert.Equal(t, "# Agents guide", strings.SplitN(content, "\n", 2)[0])
+	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
+	assert.GreaterOrEqual(t, len(lines), 30, "overwritten AGENTS.md should still be the full template")
+}

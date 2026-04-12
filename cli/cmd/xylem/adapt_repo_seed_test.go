@@ -151,6 +151,41 @@ func TestEnsureAdaptRepoSeededSkipsConfigsWithoutGitHubRepo(t *testing.T) {
 	assert.Empty(t, runner.calls)
 }
 
+func TestEnsureAdaptRepoSeededDedupesClosedIssues(t *testing.T) {
+	// Acceptance-criteria name for the scenario covered by S4.
+	// Asserts: closed-issue match → marker reflects existing issue, no gh issue create call, marker written to disk.
+	cfg := &config.Config{
+		StateDir: t.TempDir(),
+		Sources: map[string]config.SourceConfig{
+			"adapt-repo": {Type: "github", Repo: "owner/repo"},
+		},
+	}
+	runner := &seedRunnerStub{
+		outputs: map[string][]byte{
+			adaptRepoSearchCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoSearchCallForState("owner/repo", "closed"): []byte(`[{"number":21,"title":"[xylem] adapt harness to this repository","url":"https://github.com/owner/repo/issues/21"}]`),
+		},
+	}
+
+	marker, err := ensureAdaptRepoSeeded(context.Background(), cfg, runner, adaptRepoSeededByDaemon)
+	require.NoError(t, err)
+	require.NotNil(t, marker)
+	assert.Equal(t, 21, marker.IssueNumber)
+	assert.Equal(t, "https://github.com/owner/repo/issues/21", marker.IssueURL)
+	assert.Equal(t, adaptRepoSeededByDaemon, marker.SeededBy)
+
+	written, err := readAdaptRepoSeedMarker(filepath.Join(cfg.StateDir, "state", "bootstrap", "adapt-repo-seeded.json"))
+	require.NoError(t, err)
+	assert.Equal(t, marker, written)
+
+	// Exactly 2 calls (open search + closed search): no gh issue create.
+	assert.Len(t, runner.calls, 2)
+	for _, call := range runner.calls {
+		assert.NotContains(t, strings.Join(call, " "), "issue create",
+			"must not call gh issue create when closed issue exists")
+	}
+}
+
 func TestFindExistingAdaptRepoIssueStopsAfterOpenMatch(t *testing.T) {
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{

@@ -2,6 +2,14 @@ import glob
 import json
 import os
 
+try:
+    import tomllib
+except ImportError:
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ImportError:
+        tomllib = None  # type: ignore[assignment]
+
 
 def find_vessel_dir(work_dir: str) -> str:
     """Locate the single vessel directory under .xylem/phases/."""
@@ -50,6 +58,194 @@ def load_audit_log(work_dir: str) -> list[dict]:
             if line:
                 entries.append(json.loads(line))
     return entries
+
+
+def load_phase_latency(summary: dict, phase_name: str) -> float | None:
+    """Extract duration_seconds from a named phase in the summary, or None."""
+    for phase in summary.get("phases", []):
+        if phase.get("name") == phase_name:
+            return phase.get("duration_seconds") or phase.get("latency_seconds")
+    return None
+
+
+def load_rubric(rubric_name: str) -> dict:
+    """Load .xylem/eval/rubrics/<rubric_name>.toml relative to repo root.
+
+    Falls back to searching upward from this file's location so tests can
+    find the rubrics directory regardless of working directory.
+    """
+    if tomllib is None:
+        return {}
+
+    # Try to find the rubrics directory relative to this helper file
+    helpers_dir = os.path.dirname(os.path.abspath(__file__))
+    rubrics_dir = os.path.join(helpers_dir, "..", "rubrics")
+    rubric_path = os.path.join(rubrics_dir, f"{rubric_name}.toml")
+
+    if not os.path.exists(rubric_path):
+        return {}
+
+    with open(rubric_path, "rb") as f:
+        return tomllib.load(f)
+
+
+def load_baseline(scenario_id: str, baselines_dir: str) -> dict | None:
+    """Load baselines/<scenario_id>.json, or None if absent."""
+    path = os.path.join(baselines_dir, f"{scenario_id}.json")
+    if not os.path.exists(path):
+        return None
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_baseline(
+    task_dir: str,
+    scenario_id: str,
+    checks: list[tuple[str, bool]],
+    reward: float,
+    summary: dict,
+    latency_seconds: float,
+    evidence_level: str,
+) -> None:
+    """Write a baseline JSON to .xylem/eval/baselines/<scenario_id>.json.
+
+    The baselines directory is resolved from task_dir by walking upward to
+    find the eval directory, then writing to baselines/ within it.
+    """
+    from datetime import datetime, timezone
+
+    # Resolve baselines_dir relative to task_dir (task_dir is the scenario dir)
+    helpers_dir = os.path.dirname(os.path.abspath(__file__))
+    baselines_dir = os.path.join(helpers_dir, "..", "baselines")
+    os.makedirs(baselines_dir, exist_ok=True)
+
+    # Extract task version from task.toml if present
+    version = "1"
+    task_toml = os.path.join(task_dir, "task.toml")
+    if tomllib is not None and os.path.exists(task_toml):
+        with open(task_toml, "rb") as f:
+            task_data = tomllib.load(f)
+        version = str(task_data.get("task", {}).get("version", "1"))
+
+    baseline = {
+        "scenario_id": scenario_id,
+        "version": version,
+        "captured_at": datetime.now(timezone.utc).isoformat(),
+        "reward": reward,
+        "checks": [{"name": name, "passed": passed} for name, passed in checks],
+        "summary_state": summary.get("state", ""),
+        "latency_seconds": latency_seconds,
+        "budget_exceeded": summary.get("budget_exceeded", False),
+        "evidence_level": evidence_level,
+    }
+
+    path = os.path.join(baselines_dir, f"{scenario_id}.json")
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(baseline, f, indent=2)
+        f.write("\n")
+
+
+def compare_to_baseline(
+    current_checks: list[tuple[str, bool]],
+    current_reward: float,
+    baseline: dict,
+    regression_threshold: float = 0.05,
+) -> dict:
+    """Diff current run against a stored baseline.
+
+    Returns a dict with:
+      regressions  — checks that passed in baseline but fail now, plus a
+                     "reward_drop" entry if the reward fell by more than
+                     regression_threshold
+      improvements — checks that failed in baseline but pass now
+      delta        — current_reward - baseline["reward"]
+    """
+    baseline_check_map = {
+        c["name"]: c["passed"] for c in baseline.get("checks", [])
+    }
+    current_check_map = dict(current_checks)
+
+    regressions = []
+    improvements = []
+
+    all_names = set(baseline_check_map) | set(current_check_map)
+    for name in sorted(all_names):
+        was_passing = baseline_check_map.get(name, False)
+        now_passing = current_check_map.get(name, False)
+        if was_passing and not now_passing:
+            regressions.append(name)
+        elif not was_passing and now_passing:
+            improvements.append(name)
+
+    delta = current_reward - baseline.get("reward", 0.0)
+    if delta < -regression_threshold:
+        regressions.append("reward_drop")
+
+    return {
+        "regressions": regressions,
+        "improvements": improvements,
+        "delta": delta,
+    }
+
+
+def score_with_rubric(phase_output: str, rubric: dict) -> float:
+    """Score phase output text against a rubric using keyword heuristics.
+
+    Each criterion is evaluated by checking for indicator keywords in the
+    output. Returns a weighted score in [0.0, 1.0].
+    """
+    if not rubric or not phase_output:
+        return 0.0
+
+    criteria = rubric.get("rubric", {}).get("criteria", [])
+    if not criteria:
+        return 0.0
+
+    # Keyword sets per criterion name (heuristic, not ML)
+    _CRITERION_KEYWORDS: dict[str, list[str]] = {
+        "root_cause_identification": [
+            "root cause", "because", "caused by", "reason:", "the issue is",
+            "nil pointer", "null", "dereference", "panic",
+        ],
+        "reasoning_chain": [
+            "therefore", "thus", "since", "as a result", "which means",
+            "this leads to", "consequently", "follows that",
+        ],
+        "scope_accuracy": [
+            "only", "minimal", "limited to", "scope", "without changing",
+            "no other", "focused", "targeted",
+        ],
+        "trust_boundary_clarity": [
+            "verified", "not verified", "boundary", "trust", "assumption",
+            "confirmed", "unconfirmed",
+        ],
+        "evidence_completeness": [
+            "evidence", "claim", "all phases", "complete", "covered",
+            "missing", "gap",
+        ],
+    }
+
+    output_lower = phase_output.lower()
+    weighted_sum = 0.0
+    total_weight = 0.0
+
+    for criterion in criteria:
+        name = criterion.get("name", "")
+        weight = float(criterion.get("weight", 1.0))
+        keywords = _CRITERION_KEYWORDS.get(name, [])
+
+        if keywords:
+            matched = sum(1 for kw in keywords if kw.lower() in output_lower)
+            # Score is proportion of keywords matched, capped at 1.0
+            criterion_score = min(1.0, matched / max(1, len(keywords) // 2))
+        else:
+            # No keywords defined: neutral 0.5 score
+            criterion_score = 0.5
+
+        weighted_sum += weight * criterion_score
+        total_weight += weight
+
+    return weighted_sum / total_weight if total_weight > 0 else 0.0
 
 
 EVIDENCE_RANK = {

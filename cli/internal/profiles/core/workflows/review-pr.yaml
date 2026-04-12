@@ -7,8 +7,8 @@ phases:
   - name: verify
     prompt_file: .xylem/prompts/review-pr/verify.md
     max_turns: 60
-  - name: test-critic
-    prompt_file: .xylem/prompts/review-pr/test-critic.md
+  - name: test_critic
+    prompt_file: .xylem/prompts/review-pr/test_critic.md
     max_turns: 20
   - name: review
     prompt_file: .xylem/prompts/review-pr/review.md

@@ -109,3 +109,22 @@ func TestPropLookupPricingPrefixAppendNeverNil(t *testing.T) {
 		}
 	})
 }
+
+func TestPropLookupPricingWithOverridesAlwaysReturnsOverride(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		model := genPricedModel().Draw(t, "model")
+		override := ModelPricing{
+			InputPer1M:  rapid.Float64Range(0, 200).Draw(t, "input_per_1m"),
+			OutputPer1M: rapid.Float64Range(0, 200).Draw(t, "output_per_1m"),
+		}
+		overrides := map[string]ModelPricing{model: override}
+		got := LookupPricingWithOverrides(model, overrides)
+		if got == nil {
+			t.Fatalf("LookupPricingWithOverrides(%q) returned nil with override present", model)
+			return
+		}
+		if got.InputPer1M != override.InputPer1M || got.OutputPer1M != override.OutputPer1M {
+			t.Fatalf("override not returned: got %+v, want %+v", *got, override)
+		}
+	})
+}

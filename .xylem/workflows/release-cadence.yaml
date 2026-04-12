@@ -4,6 +4,6 @@ description: "Periodically promote mature release-please PRs into the daemon aut
 phases:
   - name: label_ready
     type: command
-    run: xylem release-cadence label-ready --repo nicholls-inc/xylem
+    run: "{{.DaemonBinary}} release-cadence label-ready --repo nicholls-inc/xylem"
     noop:
       match: XYLEM_NOOP

@@ -20,6 +20,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/daemonhealth"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
@@ -35,14 +36,15 @@ func newDaemonCmd() *cobra.Command {
 		Use:   "daemon",
 		Short: "Run continuous scan-drain loop",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return cmdDaemon(deps.cfg, deps.q, deps.wt)
+			return cmdDaemon(cmd, deps.cfg, deps.q, deps.wt)
 		},
 	}
+	cmd.Flags().Bool("no-profile-sync", false, "Skip profile asset re-sync on startup")
 	cmd.AddCommand(newDaemonStopCmd(), newDaemonReloadCmd())
 	return cmd
 }
 
-func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
+func cmdDaemon(cmd *cobra.Command, cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	slog.Info("daemon starting", "commit", buildInfo())
 
 	// Isolation check: refuse to run in the main git worktree because vessel
@@ -51,6 +53,18 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	if !logDaemonWorktreeCheck() {
 		return fmt.Errorf("daemon refused to start in main worktree; see log for instructions")
 	}
+
+	rootDir, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("resolve working directory: %w", err)
+	}
+	if err := loadDaemonStartupEnv(rootDir); err != nil {
+		return err
+	}
+	if err := config.MigrateFlatStateToRuntime(cfg.StateDir); err != nil {
+		return err
+	}
+	q = queue.New(config.RuntimePath(cfg.StateDir, "queue.jsonl"))
 
 	scanInterval, drainInterval := parseDaemonIntervals(cfg.Daemon)
 
@@ -84,7 +98,8 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	// P0-2: Reconcile any vessels left in running state from a previous daemon.
 	// The singleton lock guarantees no other daemon is running, so all running
 	// vessels are definitionally orphaned.
-	if err := daemonStartup(context.Background(), cfg, q, wt, newCmdRunner(cfg)); err != nil {
+	noProfileSync, _ := cmd.Flags().GetBool("no-profile-sync")
+	if err := daemonStartup(context.Background(), cfg, q, wt, newCommandRunner(cfg), noProfileSync); err != nil {
 		return err
 	}
 
@@ -93,11 +108,6 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	reloadSignals := make(chan os.Signal, 1)
 	signal.Notify(reloadSignals, syscall.SIGHUP)
 	defer signal.Stop(reloadSignals)
-
-	rootDir, err := os.Getwd()
-	if err != nil {
-		return fmt.Errorf("resolve working directory: %w", err)
-	}
 	runtime, err := newDaemonRuntime(rootDir, viper.GetString("config"), q, wt, cfg)
 	if err != nil {
 		return fmt.Errorf("create daemon runtime: %w", err)
@@ -160,6 +170,9 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		stallChecks = daemonChecksFromFindings(findings, daemonNow())
 	}
 
+	// Notification system: periodic status reports + escalation alerts.
+	dn := newDaemonNotifier(cfg, q)
+
 	tickHook := func(now time.Time, state daemonTickState) {
 		if !state.LastUpgrade.IsZero() {
 			lastUpgradeAt = state.LastUpgrade
@@ -183,6 +196,14 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 		if err := daemonhealth.Save(cfg.StateDir, snapshot); err != nil {
 			slog.Warn("daemon save health failed", "error", err)
 		}
+
+		// Dispatch notifications (status reports + escalation alerts).
+		if dn != nil {
+			upgradeOverdue := upgrade != nil && upgradeInterval > 0 &&
+				now.Sub(lastUpgradeAt) >= upgradeInterval*3
+			upgradeOverdueBy := now.Sub(lastUpgradeAt) - upgradeInterval
+			dn.tick(ctx, now, checks, upgradeOverdue, upgradeOverdueBy)
+		}
 	}
 
 	go func() {
@@ -202,12 +223,39 @@ func cmdDaemon(cfg *config.Config, q *queue.Queue, wt *worktree.Manager) error {
 	return commandErr
 }
 
-func daemonStartup(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, seedRunner adaptRepoSeedRunner) error {
+func daemonStartup(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, seedRunner adaptRepoSeedRunner, noProfileSync bool) error {
 	reconcileStaleVessels(q, wt)
+
+	if !noProfileSync && len(cfg.Profiles) > 0 {
+		if err := maybeResyncProfileAssets(cfg); err != nil {
+			slog.Warn("daemon profile re-sync failed, continuing", "error", err)
+		}
+	}
 
 	if _, err := ensureAdaptRepoSeeded(ctx, cfg, seedRunner, adaptRepoSeededByDaemon); err != nil {
 		slog.Warn("seed adapt-repo issue failed, continuing", "error", err)
 	}
+	return nil
+}
+
+func maybeResyncProfileAssets(cfg *config.Config) error {
+	composed, err := profiles.Compose(cfg.Profiles...)
+	if err != nil {
+		return fmt.Errorf("compose profiles for digest check: %w", err)
+	}
+	embedded := profiles.ComputeEmbeddedDigest(composed)
+	runtime := profiles.ComputeRuntimeDigest(cfg.StateDir)
+	if embedded == runtime {
+		slog.Debug("daemon profile assets up-to-date", "digest", embedded)
+		return nil
+	}
+	slog.Info("daemon profile assets stale; re-syncing",
+		"embedded_digest", embedded,
+		"runtime_digest", runtime)
+	if err := syncProfileAssets(cfg.StateDir, composed, true); err != nil {
+		return fmt.Errorf("re-sync profile assets: %w", err)
+	}
+	slog.Info("daemon profile assets re-synced")
 	return nil
 }
 
@@ -474,13 +522,13 @@ func daemonLoop(ctx context.Context, q *queue.Queue, tracker inFlightTracker, sc
 }
 
 func runScan(ctx context.Context, cfg *config.Config, q *queue.Queue) (scanner.ScanResult, error) {
-	cmdRunner := newCmdRunner(cfg)
+	cmdRunner := newCommandRunner(cfg)
 	s := scanner.New(cfg, q, cmdRunner)
 	return s.Scan(ctx)
 }
 
 func runDrain(ctx context.Context, cfg *config.Config, q *queue.Queue, wt *worktree.Manager, budget time.Duration) (runner.DrainResult, error) {
-	cmdRunner := newCmdRunner(cfg)
+	cmdRunner := newCommandRunner(cfg)
 	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
 	defer cleanup()
 	r.DrainBudget = budget

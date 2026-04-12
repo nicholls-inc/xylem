@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -61,6 +62,13 @@ type configurableWorktreeStub struct {
 	removedPaths []string
 }
 
+type smokeCommandRunner struct {
+	runHook       func(context.Context, string, ...string) ([]byte, error)
+	runOutputHook func(context.Context, string, ...string) ([]byte, error)
+	processHook   func(context.Context, string, string, ...string) error
+	phaseHook     func(context.Context, string, string, string, ...string) ([]byte, error)
+}
+
 func (w *configurableWorktreeStub) Create(context.Context, string) (string, error) { return "", nil }
 
 func (w *configurableWorktreeStub) Remove(_ context.Context, worktreePath string) error {
@@ -70,6 +78,42 @@ func (w *configurableWorktreeStub) Remove(_ context.Context, worktreePath string
 
 func (w *configurableWorktreeStub) SetProtectedSurfaces(patterns []string) {
 	w.patterns = append([]string(nil), patterns...)
+}
+
+func (r *smokeCommandRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if r.runHook != nil {
+		return r.runHook(ctx, name, args...)
+	}
+	return []byte("[]"), nil
+}
+
+func (r *smokeCommandRunner) RunOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if r.runOutputHook != nil {
+		return r.runOutputHook(ctx, name, args...)
+	}
+	return []byte("[]"), nil
+}
+
+func (r *smokeCommandRunner) RunProcess(ctx context.Context, dir string, name string, args ...string) error {
+	if r.processHook != nil {
+		return r.processHook(ctx, dir, name, args...)
+	}
+	return nil
+}
+
+func (r *smokeCommandRunner) RunPhase(ctx context.Context, dir string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	return r.RunPhaseWithEnv(ctx, dir, nil, stdin, name, args...)
+}
+
+func (r *smokeCommandRunner) RunPhaseWithEnv(ctx context.Context, dir string, _ []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
+	prompt, err := io.ReadAll(stdin)
+	if err != nil {
+		return nil, err
+	}
+	if r.phaseHook != nil {
+		return r.phaseHook(ctx, dir, string(prompt), name, args...)
+	}
+	return []byte("mock output"), nil
 }
 
 func (e *recordingSpanExporter) ExportSpans(_ context.Context, spans []sdktrace.ReadOnlySpan) error {
@@ -157,6 +201,16 @@ func stubConfiguredTracerFactory(t *testing.T, fn func(observability.TracerConfi
 	})
 }
 
+func stubCommandRunnerFactory(t *testing.T, fn func(*config.Config) drainCommandRunner) {
+	t.Helper()
+
+	prev := newCommandRunner
+	newCommandRunner = fn
+	t.Cleanup(func() {
+		newCommandRunner = prev
+	})
+}
+
 func withBufferedDefaultLogger(t *testing.T) *bytes.Buffer {
 	t.Helper()
 
@@ -179,6 +233,21 @@ func requireSpanNamed(t *testing.T, spans []exportedSpanSnapshot, want string) e
 	}
 	t.Fatalf("span %q not found in %#v", want, spans)
 	return exportedSpanSnapshot{}
+}
+
+func enqueuePromptVessel(t *testing.T, q *queue.Queue, id string, worktreePath string) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(worktreePath, 0o755))
+	_, err := q.Enqueue(queue.Vessel{
+		ID:           id,
+		Source:       "manual",
+		Prompt:       "print hello",
+		WorktreePath: worktreePath,
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+	})
+	require.NoError(t, err)
 }
 
 func TestDrainDryRun(t *testing.T) {
@@ -337,7 +406,7 @@ func TestBuildDrainRunnerWiresSharedScaffolding(t *testing.T) {
 		t.Fatal("r.AuditLog = nil, want audit log")
 	}
 	if r.Tracer == nil {
-		t.Fatal("r.Tracer = nil, want stdout tracer when observability is enabled")
+		t.Fatal("r.Tracer = nil, want stdout tracer without an observability endpoint")
 	}
 
 	result := r.Intermediary.Evaluate(intermediary.Intent{
@@ -574,69 +643,103 @@ func TestSmoke_S8_TracerInitializationFailureLogsWarningAndContinuesWithoutTraci
 	assert.Equal(t, worktreePath, wt.removedPaths[0])
 }
 
+func TestBuildConfiguredTracerWithoutEndpointUsesStdoutExporter(t *testing.T) {
+	cfg := makeDrainConfig(t.TempDir())
+	tracer := buildConfiguredTracer(cfg)
+	require.NotNil(t, tracer)
+	assert.NoError(t, tracer.Shutdown(context.Background()))
+}
+
 func TestSmoke_S30_TracerWiredInDrainGoAfterConfigLoad(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
-	cfg.Observability.Endpoint = "localhost:4317"
-	cfg.Observability.Insecure = true
+	cfg.Observability.Endpoint = ""
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	cmdRunner := newCmdRunner(cfg)
-	tracer, exporter := newRecordingTracer()
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
+	})
+	wt := worktree.New(dir, cmdRunner)
+	enqueuePromptVessel(t, q, "prompt-1", filepath.Join(dir, "prompt-worktree"))
 
-	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
-		return tracer, nil
+	r, cleanup := buildDrainRunner(cfg, q, wt, cmdRunner)
+	require.NotNil(t, r.Tracer)
+	cleanup()
+
+	out := captureStdout(func() {
+		require.NoError(t, cmdDrain(cfg, q, wt, false))
 	})
 
-	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
-	require.NotNil(t, r.Tracer)
-	require.Zero(t, exporter.shutdownCount())
-
-	result, err := r.Drain(context.Background())
-	require.NoError(t, err)
-	assert.Equal(t, runner.DrainResult{}, result)
-
-	spans := exporter.snapshots()
-	drainSpan := requireSpanNamed(t, spans, "drain_run")
-	assert.Equal(t, "2", drainSpan.Attributes["xylem.drain.concurrency"])
-	assert.Equal(t, "30m", drainSpan.Attributes["xylem.drain.timeout"])
-
-	assert.Zero(t, exporter.shutdownCount())
-	cleanup()
-	assert.Equal(t, 1, exporter.shutdownCount())
+	assert.Contains(t, out, "Completed 1, failed 0, skipped 0, waiting 0")
+	assert.Contains(t, out, `"Name":"drain_run"`)
 }
 
 func TestSmoke_S32_TracerShutdownDeferredInBothDrainAndDaemonPaths(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
-	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-	cmdRunner := newCmdRunner(cfg)
-
-	var exporters []*recordingSpanExporter
-	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
-		tracer, exporter := newRecordingTracer()
-		exporters = append(exporters, exporter)
-		return tracer, nil
+	cfg.Observability.Endpoint = ""
+	cfg.Concurrency = 2
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
 	})
 
-	cancelledCtx, cancel := context.WithCancel(context.Background())
-	cancel()
+	makePhaseGate := func() (chan string, chan struct{}) {
+		started := make(chan string, 2)
+		release := make(chan struct{})
+		cmdRunner.phaseHook = func(_ context.Context, _ string, _ string, _ string, _ ...string) ([]byte, error) {
+			started <- "started"
+			<-release
+			return []byte("ok"), nil
+		}
+		return started, release
+	}
 
-	drainRunner, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
-	require.NotNil(t, drainRunner.Tracer)
-	result, err := drainRunner.Drain(cancelledCtx)
-	require.NoError(t, err)
-	assert.Equal(t, runner.DrainResult{}, result)
-	require.Len(t, exporters, 1)
-	assert.Zero(t, exporters[0].shutdownCount())
-	requireSpanNamed(t, exporters[0].snapshots(), "drain_run")
+	runInterruptedDrain := func(t *testing.T, started chan string, release chan struct{}, invoke func(context.Context) (runner.DrainResult, error)) string {
+		t.Helper()
 
-	cleanup()
-	assert.Equal(t, 1, exporters[0].shutdownCount())
+		ctx, cancel := context.WithCancel(context.Background())
+		return captureStdout(func() {
+			ready := make(chan struct{})
+			go func() {
+				defer close(ready)
+				<-started
+				<-started
+				cancel()
+				close(release)
+			}()
 
-	daemonResult, err := runDrain(cancelledCtx, cfg, q, worktree.New(dir, cmdRunner), 0)
-	require.NoError(t, err)
-	assert.Equal(t, runner.DrainResult{}, daemonResult)
-	require.Len(t, exporters, 2)
-	requireSpanNamed(t, exporters[1].snapshots(), "drain_run")
-	assert.Equal(t, 1, exporters[1].shutdownCount())
+			result, err := invoke(ctx)
+			require.NoError(t, err)
+			assert.Equal(t, 2, result.Completed)
+			assert.Zero(t, result.Failed)
+			assert.Zero(t, result.Waiting)
+			<-ready
+		})
+	}
+
+	drainQueue := queue.New(filepath.Join(dir, "drain-queue.jsonl"))
+	enqueuePromptVessel(t, drainQueue, "drain-1", filepath.Join(dir, "drain-one"))
+	enqueuePromptVessel(t, drainQueue, "drain-2", filepath.Join(dir, "drain-two"))
+	drainStarted, drainRelease := makePhaseGate()
+	drainOut := runInterruptedDrain(t, drainStarted, drainRelease, func(ctx context.Context) (runner.DrainResult, error) {
+		drainRunner, cleanup := buildDrainRunner(cfg, drainQueue, &configurableWorktreeStub{}, cmdRunner)
+		result, err := drainRunner.DrainAndWait(ctx)
+		cleanup()
+		return result, err
+	})
+	assert.Contains(t, drainOut, `"Name":"drain_run"`)
+	assert.Equal(t, 1, strings.Count(drainOut, `"Name":"vessel:drain-1"`))
+	assert.Equal(t, 1, strings.Count(drainOut, `"Name":"vessel:drain-2"`))
+
+	daemonQueue := queue.New(filepath.Join(dir, "daemon-queue.jsonl"))
+	enqueuePromptVessel(t, daemonQueue, "daemon-1", filepath.Join(dir, "daemon-one"))
+	enqueuePromptVessel(t, daemonQueue, "daemon-2", filepath.Join(dir, "daemon-two"))
+	daemonStarted, daemonRelease := makePhaseGate()
+	daemonOut := runInterruptedDrain(t, daemonStarted, daemonRelease, func(ctx context.Context) (runner.DrainResult, error) {
+		return runDrain(ctx, cfg, daemonQueue, worktree.New(dir, cmdRunner), 0)
+	})
+	assert.Contains(t, daemonOut, `"Name":"drain_run"`)
+	assert.Equal(t, 1, strings.Count(daemonOut, `"Name":"vessel:daemon-1"`))
+	assert.Equal(t, 1, strings.Count(daemonOut, `"Name":"vessel:daemon-2"`))
 }

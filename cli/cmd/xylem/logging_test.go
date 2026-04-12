@@ -2,63 +2,18 @@ package main
 
 import (
 	"bytes"
-	"context"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.opentelemetry.io/contrib/bridges/otelslog"
-	otellog "go.opentelemetry.io/otel/log"
-	otelglobal "go.opentelemetry.io/otel/log/global"
-	sdklog "go.opentelemetry.io/otel/sdk/log"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 )
-
-type recordingLogExporter struct {
-	mu            sync.Mutex
-	records       []sdklog.Record
-	shutdownCalls int
-}
-
-func (e *recordingLogExporter) Export(_ context.Context, records []sdklog.Record) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	for _, record := range records {
-		e.records = append(e.records, record.Clone())
-	}
-	return nil
-}
-
-func (e *recordingLogExporter) Shutdown(context.Context) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.shutdownCalls++
-	return nil
-}
-
-func (e *recordingLogExporter) ForceFlush(context.Context) error {
-	return nil
-}
-
-func (e *recordingLogExporter) snapshot() []sdklog.Record {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	out := make([]sdklog.Record, len(e.records))
-	for i, record := range e.records {
-		out[i] = record.Clone()
-	}
-	return out
-}
 
 func cleanupConfiguredCommandLogger(t *testing.T) {
 	t.Helper()
@@ -72,6 +27,16 @@ func cleanupConfiguredCommandLogger(t *testing.T) {
 			cleanup()
 		}
 	})
+}
+
+func normalizeSlogOutput(raw string) string {
+	lines := strings.Split(strings.TrimSpace(raw), "\n")
+	for i, line := range lines {
+		if idx := strings.Index(line, " level="); idx >= 0 {
+			lines[i] = line[idx+1:]
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 func TestNewConfiguredLoggerDaemonWritesToFile(t *testing.T) {
@@ -145,90 +110,47 @@ func TestNewConfiguredLoggerRestoresDefaultLogger(t *testing.T) {
 	}
 }
 
-func TestNewConfiguredLoggerWithOTelBridgeExportsRecordsAndRestoresProvider(t *testing.T) {
-	dir := t.TempDir()
-	cfg := makeDrainConfig(dir)
-	cfg.Observability.Endpoint = "collector:4317"
-	cfg.Observability.Insecure = true
-
-	exporter := &recordingLogExporter{}
-	provider := sdklog.NewLoggerProvider(sdklog.WithProcessor(sdklog.NewSimpleProcessor(exporter)))
-
-	prevBuilder := buildOTelLogHandler
-	buildOTelLogHandler = func(*config.Config) (slog.Handler, *sdklog.LoggerProvider, error) {
-		return otelslog.NewHandler("test/logger", otelslog.WithLoggerProvider(provider)), provider, nil
-	}
-	defer func() {
-		buildOTelLogHandler = prevBuilder
-	}()
-
-	prevProvider := otelglobal.GetLoggerProvider()
-
-	logger, cleanup, err := newConfiguredLogger(cfg, loggerOptions{})
-	if err != nil {
-		t.Fatalf("newConfiguredLogger() error = %v", err)
+func TestNewConfiguredLoggerIgnoresObservabilitySettings(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*config.Config)
+	}{
+		{
+			name: "malformed endpoint still keeps local handlers",
+			mutate: func(cfg *config.Config) {
+				cfg.Observability.Endpoint = ":// malformed endpoint with spaces"
+				cfg.Observability.Insecure = true
+			},
+		},
+		{
+			name: "disabled observability still keeps local handlers",
+			mutate: func(cfg *config.Config) {
+				cfg.Observability.Endpoint = "collector:4317"
+				disabled := false
+				cfg.Observability.Enabled = &disabled
+			},
+		},
 	}
 
-	logger.Info("otel bridge message", "workflow", "fix-bug")
-	cleanup()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			cfg := makeDrainConfig(dir)
+			tt.mutate(cfg)
 
-	if got := otelglobal.GetLoggerProvider(); got != prevProvider {
-		t.Fatal("global logger provider was not restored")
-	}
-	if exporter.shutdownCalls != 1 {
-		t.Fatalf("shutdown calls = %d, want 1", exporter.shutdownCalls)
-	}
+			logger, cleanup, err := newConfiguredLogger(cfg, loggerOptions{daemonFile: true})
+			require.NoError(t, err)
 
-	records := exporter.snapshot()
-	if len(records) != 1 {
-		t.Fatalf("exported records = %d, want 1", len(records))
-	}
-	if got := records[0].Body().AsString(); got != "otel bridge message" {
-		t.Fatalf("record body = %q, want %q", got, "otel bridge message")
-	}
+			logger.Info("local log entry", "mode", "local")
+			cleanup()
 
-	attrs := map[string]string{}
-	records[0].WalkAttributes(func(kv otellog.KeyValue) bool {
-		attrs[kv.Key] = kv.Value.AsString()
-		return true
-	})
-	if got := attrs["workflow"]; got != "fix-bug" {
-		t.Fatalf("record workflow = %q, want %q", got, "fix-bug")
-	}
-}
+			data, err := os.ReadFile(daemonLogPath(dir))
+			require.NoError(t, err)
 
-func TestNewConfiguredLoggerWithOTelBridgeFailureFallsBackToLocalHandlers(t *testing.T) {
-	dir := t.TempDir()
-	cfg := makeDrainConfig(dir)
-	cfg.Observability.Endpoint = "collector:4317"
-	cfg.Observability.Insecure = true
-
-	prevBuilder := buildOTelLogHandler
-	buildOTelLogHandler = func(*config.Config) (slog.Handler, *sdklog.LoggerProvider, error) {
-		return nil, nil, errors.New("bridge down")
-	}
-	defer func() {
-		buildOTelLogHandler = prevBuilder
-	}()
-
-	logger, cleanup, err := newConfiguredLogger(cfg, loggerOptions{daemonFile: true})
-	if err != nil {
-		t.Fatalf("newConfiguredLogger() error = %v", err)
-	}
-
-	logger.Info("fallback log entry", "mode", "local")
-	cleanup()
-
-	data, err := os.ReadFile(daemonLogPath(dir))
-	if err != nil {
-		t.Fatalf("ReadFile(%q) error = %v", daemonLogPath(dir), err)
-	}
-	got := string(data)
-	if !strings.Contains(got, "msg=\"fallback log entry\"") {
-		t.Fatalf("daemon log file missing fallback message: %q", got)
-	}
-	if !strings.Contains(got, "mode=local") {
-		t.Fatalf("daemon log file missing fallback attribute: %q", got)
+			got := normalizeSlogOutput(string(data))
+			assert.Contains(t, got, `level=INFO msg="local log entry"`)
+			assert.Contains(t, got, "mode=local")
+		})
 	}
 }
 

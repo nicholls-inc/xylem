@@ -3,12 +3,12 @@ description: "Implement a harness spec step with verification, testing, and smok
 phases:
   - name: analyze
     prompt_file: .xylem/prompts/implement-harness/analyze.md
-    max_turns: 30
+    max_turns: 50
     noop:
       match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/implement-harness/plan.md
-    max_turns: 30
+    max_turns: 50
   - name: implement
     prompt_file: .xylem/prompts/implement-harness/implement.md
     max_turns: 80
@@ -25,7 +25,7 @@ phases:
       retries: 2
   - name: test_critic
     prompt_file: .xylem/prompts/implement-harness/test_critic.md
-    max_turns: 30
+    max_turns: 50
     gate:
       type: command
       run: "cd cli && go test ./..."
@@ -39,7 +39,7 @@ phases:
       retries: 2
   - name: pr_draft
     prompt_file: .xylem/prompts/implement-harness/pr_draft.md
-    max_turns: 30
+    max_turns: 50
     gate:
       type: command
       run: |

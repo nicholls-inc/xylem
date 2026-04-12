@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
 )
 
 // mockExecutor records whether Execute was called and optionally returns an error.
@@ -194,6 +196,76 @@ func TestEvaluate(t *testing.T) {
 	}
 }
 
+func TestEvaluateWithContextWorkflowClassMatrix(t *testing.T) {
+	inter := NewIntermediary([]Policy{{
+		Name:  "default",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, newTestAuditLog(t), &mockExecutor{})
+
+	deny := inter.EvaluateWithContext(Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "issue-1",
+	}, EvaluationContext{
+		WorkflowClass: policy.Delivery,
+		FilePath:      "/tmp/worktree/.xylem/HARNESS.md",
+		VesselID:      "issue-1",
+	})
+	if deny.Effect != Deny {
+		t.Fatalf("delivery write effect = %q, want %q", deny.Effect, Deny)
+	}
+	if deny.Operation != string(policy.OpWriteControlPlane) {
+		t.Fatalf("delivery write operation = %q, want %q", deny.Operation, policy.OpWriteControlPlane)
+	}
+	if deny.RuleMatched != "delivery.no_control_plane_writes" {
+		t.Fatalf("delivery write rule = %q, want %q", deny.RuleMatched, "delivery.no_control_plane_writes")
+	}
+	if deny.FilePath != "/tmp/worktree/.xylem/HARNESS.md" {
+		t.Fatalf("delivery write file path = %q", deny.FilePath)
+	}
+
+	allow := inter.EvaluateWithContext(Intent{
+		Action:   "file_write",
+		Resource: ".xylem/HARNESS.md",
+		AgentID:  "issue-2",
+	}, EvaluationContext{
+		WorkflowClass: policy.HarnessMaintenance,
+		FilePath:      "/tmp/worktree/.xylem/HARNESS.md",
+		VesselID:      "issue-2",
+	})
+	if allow.Effect != Allow {
+		t.Fatalf("harness-maintenance write effect = %q, want %q", allow.Effect, Allow)
+	}
+	if allow.RuleMatched != "harness_maintenance.worktree_writes_allowed" {
+		t.Fatalf("harness-maintenance write rule = %q, want %q", allow.RuleMatched, "harness_maintenance.worktree_writes_allowed")
+	}
+}
+
+func TestEvaluateWithContextUserRulesTightenMatrix(t *testing.T) {
+	inter := NewIntermediary([]Policy{{
+		Name:  "user",
+		Rules: []Rule{{Action: "git_push", Resource: "*", Effect: RequireApproval}},
+	}}, newTestAuditLog(t), &mockExecutor{})
+
+	result := inter.EvaluateWithContext(Intent{
+		Action:   "git_push",
+		Resource: "feature-1",
+		AgentID:  "issue-1",
+	}, EvaluationContext{
+		WorkflowClass: policy.Delivery,
+		VesselID:      "issue-1",
+	})
+	if result.Effect != RequireApproval {
+		t.Fatalf("git push effect = %q, want %q", result.Effect, RequireApproval)
+	}
+	if result.Operation != string(policy.OpPushBranch) {
+		t.Fatalf("git push operation = %q, want %q", result.Operation, policy.OpPushBranch)
+	}
+	if result.RuleMatched != "policy.user[0]" {
+		t.Fatalf("git push rule = %q, want %q", result.RuleMatched, "policy.user[0]")
+	}
+}
+
 func TestSubmit_AllowedIntentExecutes(t *testing.T) {
 	exec := &mockExecutor{}
 	al := newTestAuditLog(t)
@@ -223,6 +295,45 @@ func TestSubmit_AllowedIntentExecutes(t *testing.T) {
 	}
 	if entries[0].Decision != Allow {
 		t.Fatalf("audit decision: got %q, want %q", entries[0].Decision, Allow)
+	}
+}
+
+func TestSubmit_WarnModeExecutesDeniedIntent(t *testing.T) {
+	exec := &mockExecutor{}
+	al := newTestAuditLog(t)
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, al, exec)
+	inter.SetMode(PolicyModeWarn)
+
+	intent := Intent{Action: "file_write", Resource: ".xylem/HARNESS.md", AgentID: "agent-1", Justification: "test"}
+	effect, err := inter.Submit(context.Background(), intent)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if effect != Deny {
+		t.Fatalf("warn-mode effect = %q, want %q", effect, Deny)
+	}
+	if exec.calls() != 1 {
+		t.Fatalf("executor calls: got %d, want 1", exec.calls())
+	}
+
+	entries, err := al.Entries()
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("audit entries: got %d, want 1", len(entries))
+	}
+	if entries[0].Decision != Deny {
+		t.Fatalf("audit decision: got %q, want %q", entries[0].Decision, Deny)
+	}
+	if entries[0].WorkflowClass != "delivery" {
+		t.Fatalf("audit workflow class: got %q, want delivery", entries[0].WorkflowClass)
+	}
+	if entries[0].Operation != "write_control_plane" {
+		t.Fatalf("audit operation: got %q, want write_control_plane", entries[0].Operation)
 	}
 }
 
@@ -282,6 +393,40 @@ func TestSubmit_ExecutorErrorCaptured(t *testing.T) {
 	}
 	if len(entries) != 1 {
 		t.Fatalf("audit entries: got %d, want 1", len(entries))
+	}
+	if entries[0].Error != "disk full" {
+		t.Fatalf("audit error: got %q, want %q", entries[0].Error, "disk full")
+	}
+}
+
+func TestSubmit_WarnModeExecutorErrorReturnsEvaluatedEffect(t *testing.T) {
+	execErr := errors.New("disk full")
+	exec := &mockExecutor{err: execErr}
+	al := newTestAuditLog(t)
+	inter := NewIntermediary([]Policy{{
+		Name:  "allow-all",
+		Rules: []Rule{{Action: "*", Resource: "*", Effect: Allow}},
+	}}, al, exec)
+	inter.SetMode(PolicyModeWarn)
+
+	intent := Intent{Action: "file_write", Resource: ".xylem/HARNESS.md", AgentID: "agent-1", Justification: "test"}
+	effect, err := inter.Submit(context.Background(), intent)
+	if effect != Deny {
+		t.Fatalf("warn-mode effect = %q, want %q", effect, Deny)
+	}
+	if err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("expected executor error, got %v", err)
+	}
+
+	entries, err := al.Entries()
+	if err != nil {
+		t.Fatalf("read audit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("audit entries: got %d, want 1", len(entries))
+	}
+	if entries[0].Decision != Deny {
+		t.Fatalf("audit decision: got %q, want %q", entries[0].Decision, Deny)
 	}
 	if entries[0].Error != "disk full" {
 		t.Fatalf("audit error: got %q, want %q", entries[0].Error, "disk full")

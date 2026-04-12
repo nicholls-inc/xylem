@@ -11,7 +11,7 @@ URL: {{.Issue.URL}}
 {{.PreviousOutputs.verify}}
 
 ## Test Critic Findings
-{{.PreviousOutputs.test-critic}}
+{{.PreviousOutputs.test_critic}}
 
 ## Comment Quality Filter
 

@@ -6,14 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
+	"github.com/nicholls-inc/xylem/cli/internal/evaluator"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
+	"github.com/nicholls-inc/xylem/cli/internal/signal"
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 )
 
@@ -29,14 +32,15 @@ var safeSummaryPathComponent = regexp.MustCompile(`^[a-zA-Z0-9._-]+$`)
 
 // VesselSummary is the JSON artifact written after vessel completion or failure.
 type VesselSummary struct {
-	VesselID   string    `json:"vessel_id"`
-	Source     string    `json:"source"`
-	Workflow   string    `json:"workflow"`
-	Ref        string    `json:"ref,omitempty"`
-	State      string    `json:"state"`
-	StartedAt  time.Time `json:"started_at"`
-	EndedAt    time.Time `json:"ended_at"`
-	DurationMS int64     `json:"duration_ms"`
+	VesselID      string    `json:"vessel_id"`
+	Source        string    `json:"source"`
+	Workflow      string    `json:"workflow"`
+	WorkflowClass string    `json:"workflow_class,omitempty"`
+	Ref           string    `json:"ref,omitempty"`
+	State         string    `json:"state"`
+	StartedAt     time.Time `json:"started_at"`
+	EndedAt       time.Time `json:"ended_at"`
+	DurationMS    int64     `json:"duration_ms"`
 
 	Phases []PhaseSummary `json:"phases"`
 
@@ -95,6 +99,9 @@ type PhaseSummary struct {
 	Model                  string           `json:"model,omitempty"`
 	DurationMS             int64            `json:"duration_ms"`
 	Status                 string           `json:"status"`
+	EvalIterations         int              `json:"eval_iterations,omitempty"`
+	EvalConverged          bool             `json:"eval_converged,omitempty"`
+	EvalIntensity          string           `json:"eval_intensity,omitempty"`
 	InputTokensEst         int              `json:"input_tokens_est"`
 	OutputTokensEst        int              `json:"output_tokens_est"`
 	CostUSDEst             float64          `json:"cost_usd_est"`
@@ -106,17 +113,21 @@ type PhaseSummary struct {
 }
 
 type vesselRunState struct {
-	startedAt time.Time
-	phases    []PhaseSummary
+	startedAt   time.Time
+	phases      []PhaseSummary
+	evalReports map[string]PhaseEvaluationReport
 
-	costTracker *cost.Tracker
-	vesselID    string
-	source      string
-	workflow    string
-	ref         string
+	costTracker   *cost.Tracker
+	vesselID      string
+	source        string
+	workflow      string
+	workflowClass string
+	ref           string
 
 	budgetMaxCostUSD *float64
 	budgetMaxTokens  *int
+
+	pricingOverrides map[string]cost.ModelPricing
 
 	extraInputTokensEst  int
 	extraOutputTokensEst int
@@ -124,14 +135,31 @@ type vesselRunState struct {
 	trace                *TraceArtifacts
 }
 
+type PhaseEvaluationReport struct {
+	Phase       string                 `json:"phase"`
+	Intensity   string                 `json:"intensity"`
+	Signals     signal.SignalSet       `json:"signals"`
+	Criteria    []evaluator.Criterion  `json:"criteria,omitempty"`
+	Iterations  int                    `json:"iterations"`
+	Converged   bool                   `json:"converged"`
+	History     []evaluator.EvalResult `json:"history,omitempty"`
+	FinalResult *evaluator.EvalResult  `json:"final_result,omitempty"`
+}
+
+type EvaluationArtifact struct {
+	Phases []PhaseEvaluationReport `json:"phases"`
+}
+
 func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.Time) *vesselRunState {
 	s := &vesselRunState{
-		startedAt: startedAt.UTC(),
-		phases:    make([]PhaseSummary, 0),
-		vesselID:  vessel.ID,
-		source:    vessel.Source,
-		workflow:  vessel.Workflow,
-		ref:       vessel.Ref,
+		startedAt:     startedAt.UTC(),
+		phases:        make([]PhaseSummary, 0),
+		evalReports:   make(map[string]PhaseEvaluationReport),
+		vesselID:      vessel.ID,
+		source:        vessel.Source,
+		workflow:      vessel.Workflow,
+		workflowClass: vessel.WorkflowClass,
+		ref:           vessel.Ref,
 	}
 
 	if cfg == nil {
@@ -148,6 +176,16 @@ func newVesselRunState(cfg *config.Config, vessel queue.Vessel, startedAt time.T
 			v := budget.TokenLimit
 			s.budgetMaxTokens = &v
 		}
+	}
+
+	overrides := make(map[string]cost.ModelPricing)
+	for _, p := range cfg.Providers {
+		for model, pricing := range p.Pricing {
+			overrides[model] = pricing
+		}
+	}
+	if len(overrides) > 0 {
+		s.pricingOverrides = overrides
 	}
 
 	return s
@@ -167,6 +205,16 @@ func (s *vesselRunState) addPhase(ps PhaseSummary) {
 	s.phases = append(s.phases, ps)
 }
 
+func (s *vesselRunState) addEvaluationReport(report PhaseEvaluationReport) {
+	if s == nil || strings.TrimSpace(report.Phase) == "" {
+		return
+	}
+	if s.evalReports == nil {
+		s.evalReports = make(map[string]PhaseEvaluationReport)
+	}
+	s.evalReports[report.Phase] = report
+}
+
 func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSummary {
 	if endedAt.IsZero() {
 		endedAt = time.Now().UTC()
@@ -181,6 +229,7 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 		VesselID:         s.vesselID,
 		Source:           s.source,
 		Workflow:         s.workflow,
+		WorkflowClass:    s.workflowClass,
 		Ref:              s.ref,
 		State:            state,
 		StartedAt:        s.startedAt,
@@ -218,7 +267,7 @@ func (s *vesselRunState) buildSummary(state string, endedAt time.Time) *VesselSu
 func (s *vesselRunState) recordLLMUsage(model, inputText, outputText string, recordedAt time.Time) (int, int, float64) {
 	inputTokens := cost.EstimateTokens(inputText)
 	outputTokens := cost.EstimateTokens(outputText)
-	costUSDEst := cost.EstimateCost(inputTokens, outputTokens, cost.LookupPricing(model))
+	costUSDEst := cost.EstimateCost(inputTokens, outputTokens, cost.LookupPricingWithOverrides(model, s.pricingOverrides))
 
 	if s.costTracker != nil {
 		_ = s.costTracker.Record(cost.UsageRecord{
@@ -238,6 +287,30 @@ func (s *vesselRunState) recordLLMUsage(model, inputText, outputText string, rec
 
 func (s *vesselRunState) recordPromptOnlyUsage(model, prompt, output string, recordedAt time.Time) (int, int, float64) {
 	inputTokens, outputTokens, costUSDEst := s.recordLLMUsage(model, prompt, output, recordedAt)
+	s.extraInputTokensEst += inputTokens
+	s.extraOutputTokensEst += outputTokens
+	s.extraCostUSDEst += costUSDEst
+	return inputTokens, outputTokens, costUSDEst
+}
+
+func (s *vesselRunState) recordEvaluationUsage(model, prompt, output string, recordedAt time.Time) (int, int, float64) {
+	inputTokens := cost.EstimateTokens(prompt)
+	outputTokens := cost.EstimateTokens(output)
+	costUSDEst := cost.EstimateCost(inputTokens, outputTokens, cost.LookupPricingWithOverrides(model, s.pricingOverrides))
+
+	if s.costTracker != nil {
+		_ = s.costTracker.Record(cost.UsageRecord{
+			MissionID:    s.vesselID,
+			AgentRole:    cost.RoleEvaluator,
+			Purpose:      cost.PurposeEvaluation,
+			Model:        model,
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			CostUSD:      costUSDEst,
+			Timestamp:    recordedAt.UTC(),
+		})
+	}
+
 	s.extraInputTokensEst += inputTokens
 	s.extraOutputTokensEst += outputTokens
 	s.extraCostUSDEst += costUSDEst
@@ -302,6 +375,7 @@ func (s *vesselRunState) buildCostReport(summary *VesselSummary) *cost.CostRepor
 	report := s.costTracker.Report(s.vesselID)
 	report.Source = summary.Source
 	report.Workflow = summary.Workflow
+	report.WorkflowClass = summary.WorkflowClass
 	report.Ref = summary.Ref
 	report.State = summary.State
 	report.TotalDurationMS = summary.DurationMS
@@ -386,6 +460,20 @@ func hasBudgetWarning(alerts []cost.BudgetAlert) bool {
 		}
 	}
 	return false
+}
+
+func (s *vesselRunState) evaluationArtifact() *EvaluationArtifact {
+	if s == nil || len(s.evalReports) == 0 {
+		return nil
+	}
+	phases := make([]PhaseEvaluationReport, 0, len(s.evalReports))
+	for _, report := range s.evalReports {
+		phases = append(phases, report)
+	}
+	sort.Slice(phases, func(i, j int) bool {
+		return phases[i].Phase < phases[j].Phase
+	})
+	return &EvaluationArtifact{Phases: phases}
 }
 
 func evidenceManifestRelativePath(vesselID string) string {

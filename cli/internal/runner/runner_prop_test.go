@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -21,6 +22,60 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"pgregory.net/rapid"
 )
+
+func TestProp_ClassifyProviderError_RateLimitSentinelsRemainRetryable(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		prefix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "prefix")
+		suffix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "suffix")
+		sentinel := rapid.SampledFrom([]string{
+			"rate_limit_error",
+			"credit balance is too low",
+			"insufficient_quota",
+			"too many requests",
+			"api error: 429",
+			"status 429",
+			"429 too many",
+		}).Draw(t, "sentinel")
+
+		if got := classifyProviderError(errors.New(prefix + sentinel + suffix)); got != providerErrorRetrySameProvider {
+			t.Fatalf("classifyProviderError() = %v, want %v", got, providerErrorRetrySameProvider)
+		}
+	})
+}
+
+func TestProp_ClassifyProviderError_AuthSentinelsAreFallbackOnly(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		prefix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "prefix")
+		suffix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "suffix")
+		sentinel := rapid.SampledFrom([]string{
+			"authentication failed",
+			"authentication required",
+			"invalid api key",
+			"github token",
+			"not authorized to access this model",
+		}).Draw(t, "sentinel")
+
+		got := classifyProviderError(errors.New(prefix + sentinel + suffix))
+		if got != providerErrorFallbackNextProvider {
+			t.Fatalf("classifyProviderError() = %v, want %v", got, providerErrorFallbackNextProvider)
+		}
+	})
+}
+
+func TestProp_ClassifyProviderError_QuotaSentinelsAreFallback(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		prefix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "prefix")
+		suffix := rapid.StringMatching(`[A-Za-z0-9 _:/.]{0,32}`).Draw(t, "suffix")
+		sentinel := rapid.SampledFrom([]string{
+			"no quota",
+		}).Draw(t, "sentinel")
+
+		got := classifyProviderError(errors.New(prefix + sentinel + suffix))
+		if got != providerErrorFallbackNextProvider {
+			t.Fatalf("classifyProviderError() = %v, want %v", got, providerErrorFallbackNextProvider)
+		}
+	})
+}
 
 func TestProp_FilterAdditiveProtectedSurfaceViolationsDropsOnlyAdditions(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
@@ -404,6 +459,26 @@ func TestProp_ResolvePhaseProviderChainPrefersMostSpecificTier(t *testing.T) {
 		}
 		if !reflect.DeepEqual(gotProviders, wantProviders) {
 			t.Fatalf("resolvePhaseProviderChain() providers = %#v, want %#v", gotProviders, wantProviders)
+		}
+	})
+}
+
+func TestProp_PushTargetsDefaultBranchNormalizesRefspecs(t *testing.T) {
+	rapid.Check(t, func(t *rapid.T) {
+		branch := rapid.StringMatching(`[a-z0-9][a-z0-9._/-]{0,19}`).Draw(t, "branch")
+		resource := rapid.SampledFrom([]string{
+			branch,
+			"refs/heads/" + branch,
+			"HEAD:" + branch,
+			"refs/heads/source:refs/heads/" + branch,
+			" '" + branch + "' ",
+		}).Draw(t, "resource")
+
+		if !pushTargetsDefaultBranch(resource, branch) {
+			t.Fatalf("pushTargetsDefaultBranch(%q, %q) = false, want true", resource, branch)
+		}
+		if pushTargetsDefaultBranch(resource, branch+"-other") {
+			t.Fatalf("pushTargetsDefaultBranch(%q, %q) = true, want false", resource, branch+"-other")
 		}
 	})
 }

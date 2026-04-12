@@ -20,6 +20,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/dtushim"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
 	"github.com/nicholls-inc/xylem/cli/internal/observability"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
 	"github.com/nicholls-inc/xylem/cli/internal/scanner"
@@ -107,7 +108,7 @@ func newDaemonDTUEnv(t *testing.T, fixtureName string) (string, *dtu.Store, *que
 			dtu.EnvUniverseID + "=" + manifest.Metadata.Name,
 		},
 	}
-	return repoDir, store, queue.New(filepath.Join(stateDir, "queue.jsonl")), cmdRunner
+	return repoDir, store, queue.New(config.RuntimePath(stateDir, "queue.jsonl")), cmdRunner
 }
 
 func loadDaemonDTUState(t *testing.T, store *dtu.Store) *dtu.State {
@@ -198,6 +199,108 @@ func (r daemonBacklogRunner) Run(_ context.Context, _ string, _ ...string) ([]by
 	return r.output, nil
 }
 
+func TestSmoke_S1_LegacyFlatLayoutMigratesAndDrainKeepsWorking(t *testing.T) {
+	repoDir := t.TempDir()
+	stateDir := filepath.Join(repoDir, ".xylem")
+	require.NoError(t, os.MkdirAll(stateDir, 0o755))
+
+	cfg := makeDrainConfig(stateDir)
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
+	})
+
+	legacyQueue := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	enqueuePromptVessel(t, legacyQueue, "issue-388", filepath.Join(repoDir, "legacy-worktree"))
+
+	legacyAuditPath := filepath.Join(stateDir, config.DefaultAuditLogPath)
+	legacyAudit := intermediary.NewAuditLog(legacyAuditPath)
+	require.NoError(t, legacyAudit.Append(intermediary.AuditEntry{
+		Intent: intermediary.Intent{
+			Action:   "phase_execute",
+			Resource: "prompt",
+			AgentID:  "issue-388",
+		},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Now().UTC(),
+	}))
+	require.NoError(t, os.WriteFile(filepath.Join(stateDir, "daemon.pid"), []byte(fmt.Sprintf("%d", os.Getpid())), 0o644))
+
+	logBuf := withBufferedDefaultLogger(t)
+	require.NoError(t, config.MigrateFlatStateToRuntime(stateDir))
+
+	runtimeQueuePath := config.RuntimePath(stateDir, "queue.jsonl")
+	q := queue.New(runtimeQueuePath)
+	result, err := runDrain(context.Background(), cfg, q, worktree.New(repoDir, cmdRunner), 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Completed)
+	assert.FileExists(t, runtimeQueuePath)
+	assert.FileExists(t, config.RuntimePath(stateDir, config.DefaultAuditLogPath))
+	assert.FileExists(t, filepath.Join(stateDir, "queue.jsonl.migrated"))
+	assert.FileExists(t, filepath.Join(stateDir, config.DefaultAuditLogPath+".migrated"))
+	assert.FileExists(t, filepath.Join(stateDir, "daemon.pid.migrated"))
+	assert.Contains(t, logBuf.String(), "migrated legacy runtime file")
+	assert.Contains(t, logBuf.String(), "prepared daemon pid migration")
+
+	vessel, err := q.FindByID("issue-388")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+}
+
+func TestSmoke_S2_NewLayoutStartupDoesNotRenameAndDrainWorks(t *testing.T) {
+	repoDir := t.TempDir()
+	stateDir := filepath.Join(repoDir, ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+
+	cfg := makeDrainConfig(stateDir)
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
+	})
+
+	runtimeQueuePath := config.RuntimePath(stateDir, "queue.jsonl")
+	q := queue.New(runtimeQueuePath)
+	enqueuePromptVessel(t, q, "issue-389", filepath.Join(repoDir, "runtime-worktree"))
+
+	logBuf := withBufferedDefaultLogger(t)
+	require.NoError(t, config.MigrateFlatStateToRuntime(stateDir))
+
+	result, err := runDrain(context.Background(), cfg, q, worktree.New(repoDir, cmdRunner), 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1, result.Completed)
+	assert.FileExists(t, runtimeQueuePath)
+	assert.NoFileExists(t, filepath.Join(stateDir, "queue.jsonl"))
+	assert.NoFileExists(t, filepath.Join(stateDir, config.DefaultAuditLogPath+".migrated"))
+	assert.NoFileExists(t, filepath.Join(stateDir, "queue.jsonl.migrated"))
+	assert.NoFileExists(t, filepath.Join(stateDir, "daemon.pid.migrated"))
+	assert.NotContains(t, logBuf.String(), "migrated legacy runtime file")
+	assert.NotContains(t, logBuf.String(), "prepared daemon pid migration")
+
+	vessel, err := q.FindByID("issue-389")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateCompleted, vessel.State)
+}
+
+func TestSmoke_S3_SplitBrainLayoutErrorsLoudly(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "state"), 0o755))
+
+	legacyQueue := queue.New(filepath.Join(stateDir, "queue.jsonl"))
+	enqueuePromptVessel(t, legacyQueue, "issue-390", filepath.Join(stateDir, "legacy-worktree"))
+
+	runtimeQueue := queue.New(filepath.Join(stateDir, "state", "queue.jsonl"))
+	enqueuePromptVessel(t, runtimeQueue, "issue-391", filepath.Join(stateDir, "runtime-worktree"))
+
+	logBuf := withBufferedDefaultLogger(t)
+	err := config.MigrateFlatStateToRuntime(stateDir)
+	require.Error(t, err)
+	require.ErrorContains(t, err, "both legacy and runtime queue.jsonl exist")
+	assert.NoFileExists(t, filepath.Join(stateDir, "queue.jsonl.migrated"))
+	assert.NotContains(t, logBuf.String(), "migrated legacy runtime file")
+}
+
 func TestSmoke_S7_DaemonStartupContinuesWhenAdaptRepoSearchFails(t *testing.T) {
 	dir := t.TempDir()
 	cfg := &config.Config{
@@ -218,7 +321,7 @@ func TestSmoke_S7_DaemonStartupContinuesWhenAdaptRepoSearchFails(t *testing.T) {
 		},
 	}
 
-	err := daemonStartup(context.Background(), cfg, q, nil, runner)
+	err := daemonStartup(context.Background(), cfg, q, nil, runner, true)
 	require.NoError(t, err)
 	_, statErr := os.Stat(markerPath)
 	require.Error(t, statErr)
@@ -255,7 +358,7 @@ func TestSmoke_S8_DaemonStartupLeavesMarkerAbsentWhenAdaptRepoCreateFails(t *tes
 	require.Error(t, statErr)
 	require.True(t, os.IsNotExist(statErr))
 
-	err := daemonStartup(context.Background(), cfg, q, nil, runner)
+	err := daemonStartup(context.Background(), cfg, q, nil, runner, true)
 	require.NoError(t, err)
 	_, statErr = os.Stat(markerPath)
 	require.Error(t, statErr)
@@ -445,7 +548,7 @@ func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
 	if err := os.MkdirAll(cfg.StateDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", cfg.StateDir, err)
 	}
-	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
+	q := queue.New(config.RuntimePath(cfg.StateDir, "queue.jsonl"))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -484,35 +587,51 @@ func TestSmoke_S3_DaemonTickDrainsScheduledVessel(t *testing.T) {
 func TestSmoke_S31_TracerWiredInDaemonRunDrain(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
-	cfg.Observability.Endpoint = "localhost:4317"
-	cfg.Observability.Insecure = true
+	cfg.Observability.Endpoint = ""
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
-
-	var exporters []*recordingSpanExporter
-	stubConfiguredTracerFactory(t, func(observability.TracerConfig) (*observability.Tracer, error) {
-		tracer, exporter := newRecordingTracer()
-		exporters = append(exporters, exporter)
-		return tracer, nil
+	cmdRunner := &smokeCommandRunner{}
+	stubCommandRunnerFactory(t, func(*config.Config) drainCommandRunner {
+		return cmdRunner
 	})
 
-	result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
-	require.NoError(t, err)
-	assert.Equal(t, runner.DrainResult{}, result)
+	var tracers []*observability.Tracer
+	stubConfiguredTracerFactory(t, func(cfg observability.TracerConfig) (*observability.Tracer, error) {
+		tracer, err := observability.NewTracer(cfg)
+		if err == nil {
+			tracers = append(tracers, tracer)
+		}
+		return tracer, err
+	})
 
-	secondResult, secondErr := runDrain(context.Background(), cfg, q, worktree.New(dir, newCmdRunner(cfg)), 0)
-	require.NoError(t, secondErr)
-	assert.Equal(t, runner.DrainResult{}, secondResult)
+	enqueuePromptVessel(t, q, "daemon-1", filepath.Join(dir, "daemon-one"))
+	firstOut := captureStdout(func() {
+		result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, cmdRunner), 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.Completed)
+	})
 
-	require.Len(t, exporters, 2)
-	for _, exporter := range exporters {
-		requireSpanNamed(t, exporter.snapshots(), "drain_run")
-		assert.Equal(t, 1, exporter.shutdownCount())
-	}
+	enqueuePromptVessel(t, q, "daemon-2", filepath.Join(dir, "daemon-two"))
+	secondOut := captureStdout(func() {
+		result, err := runDrain(context.Background(), cfg, q, worktree.New(dir, cmdRunner), 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, result.Completed)
+	})
+
+	require.Len(t, tracers, 2)
+	assert.NotSame(t, tracers[0], tracers[1])
+	assert.Contains(t, firstOut, `"Name":"drain_run"`)
+	assert.Contains(t, firstOut, `"Name":"vessel:daemon-1"`)
+	assert.NotContains(t, firstOut, `"Name":"vessel:daemon-2"`)
+	assert.Contains(t, secondOut, `"Name":"drain_run"`)
+	assert.Contains(t, secondOut, `"Name":"vessel:daemon-2"`)
+	assert.NotContains(t, secondOut, `"Name":"vessel:daemon-1"`)
 }
 
 func TestSmoke_S32_TracerShutdownDeferredInDaemonPath(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
+	cfg.Observability.Endpoint = "localhost:4317"
+	cfg.Observability.Insecure = true
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 
 	var exporter *recordingSpanExporter
@@ -1016,13 +1135,11 @@ func TestLogTickSummary(t *testing.T) {
 	}
 }
 
-// TestWS1S28DaemonPathWiresScaffolding verifies that the daemon drain path
-// produces a Runner with Intermediary and AuditLog wired. runDrain delegates
-// directly to buildDrainRunner, so constructing the runner here exercises the
-// same daemon-side wiring.
-//
-// Covers: WS1 S28.
-func TestWS1S28DaemonPathWiresScaffolding(t *testing.T) {
+// TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig verifies that
+// the daemon drain path produces a Runner with Intermediary and AuditLog wired.
+// runDrain delegates directly to buildDrainRunner, so constructing the runner
+// here exercises the same daemon-side wiring.
+func TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfg := makeDrainConfig(dir)
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
@@ -1031,21 +1148,160 @@ func TestWS1S28DaemonPathWiresScaffolding(t *testing.T) {
 	r, cleanup := buildDrainRunner(cfg, q, worktree.New(dir, cmdRunner), cmdRunner)
 	defer cleanup()
 
-	if r.Intermediary == nil {
-		t.Fatal("r.Intermediary = nil: daemon runDrain must wire Intermediary")
-	}
-	if r.AuditLog == nil {
-		t.Fatal("r.AuditLog = nil: daemon runDrain must wire AuditLog")
-	}
+	require.NotNil(t, r)
+	require.NotNil(t, r.Intermediary)
+	require.NotNil(t, r.AuditLog)
 
 	result := r.Intermediary.Evaluate(intermediary.Intent{
 		Action:   "file_write",
 		Resource: ".xylem/HARNESS.md",
 		AgentID:  "issue-1",
 	})
-	if result.Effect != intermediary.Deny {
-		t.Fatalf("default protected-surface effect = %q, want %q", result.Effect, intermediary.Deny)
+	assert.Equal(t, intermediary.Deny, result.Effect)
+
+	entry := intermediary.AuditEntry{
+		Intent: intermediary.Intent{
+			Action:   "phase_execute",
+			Resource: "fix",
+			AgentID:  "issue-1",
+		},
+		Decision:  intermediary.Allow,
+		Timestamp: time.Now().UTC(),
 	}
+	require.NoError(t, r.AuditLog.Append(entry))
+
+	auditLogPath := config.RuntimePath(cfg.StateDir, cfg.EffectiveAuditLogPath())
+	entries, err := intermediary.NewAuditLog(auditLogPath).Entries()
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.Equal(t, entry.Intent, entries[0].Intent)
+	assert.Equal(t, entry.Decision, entries[0].Decision)
+}
+
+// TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts verifies
+// that daemonStartup overwrites stale workflow files when the embedded digest
+// differs from the runtime digest.
+func TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "workflows"), 0o755))
+	// Write stale content to one workflow file so the runtime digest differs.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, "workflows", "fix-bug.yaml"),
+		[]byte("stale: true"),
+		0o644,
+	))
+
+	cfg := &config.Config{
+		Profiles: []string{"core"},
+		StateDir: stateDir,
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err)
+
+	// Embedded content should have replaced the stale file — assert the exact
+	// embedded bytes, not just that the stale value is gone.
+	composed, composeErr := profiles.Compose("core")
+	require.NoError(t, composeErr)
+	embeddedContent, ok := composed.Workflows["fix-bug"]
+	require.True(t, ok, "core profile must contain fix-bug workflow")
+
+	data, readErr := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, readErr)
+	assert.Equal(t, embeddedContent, data, "stale workflow should be replaced with the exact embedded content")
+	assert.Contains(t, logs.String(), "daemon profile assets stale; re-syncing")
+}
+
+// TestSmoke_S50_DaemonStartupSkipsResyncWhenDigestsMatch verifies that
+// daemonStartup does not re-write files when the runtime digest already
+// matches the embedded digest.
+func TestSmoke_S50_DaemonStartupSkipsResyncWhenDigestsMatch(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+
+	// Run a full init-style sync first so the runtime dir is current.
+	cfg := &config.Config{
+		Profiles: []string{"core"},
+		StateDir: stateDir,
+	}
+	composed, err := profiles.Compose("core")
+	require.NoError(t, err)
+	require.NoError(t, syncProfileAssets(stateDir, composed, true))
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err = daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err)
+
+	assert.NotContains(t, logs.String(), "daemon profile assets stale; re-syncing",
+		"no re-sync expected when digests already match")
+}
+
+// TestSmoke_S51_DaemonStartupNoProfileSyncFlagSkipsResync verifies that
+// noProfileSync=true prevents re-sync even when the runtime dir is stale.
+func TestSmoke_S51_DaemonStartupNoProfileSyncFlagSkipsResync(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "workflows"), 0o755))
+	staleContent := []byte("stale: true")
+	require.NoError(t, os.WriteFile(
+		filepath.Join(stateDir, "workflows", "fix-bug.yaml"),
+		staleContent,
+		0o644,
+	))
+
+	cfg := &config.Config{
+		Profiles: []string{"core"},
+		StateDir: stateDir,
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, true)
+	require.NoError(t, err)
+
+	// File must NOT have been overwritten.
+	data, readErr := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, readErr)
+	assert.Equal(t, staleContent, data, "no-profile-sync should leave stale file untouched")
+	assert.NotContains(t, logs.String(), "daemon profile assets stale; re-syncing")
+}
+
+// TestSmoke_S52_DaemonStartupContinuesWhenProfileComposeFails verifies that
+// a profile compose error is logged as a warning and daemonStartup returns nil.
+func TestSmoke_S52_DaemonStartupContinuesWhenProfileComposeFails(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Profiles: []string{"nonexistent-profile"},
+		StateDir: filepath.Join(dir, ".xylem"),
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err, "daemonStartup must continue even when profile compose fails")
+	assert.Contains(t, logs.String(), "daemon profile re-sync failed, continuing")
+}
+
+// TestSmoke_S53_DaemonStartupSkipsResyncWhenProfilesEmpty verifies that
+// daemonStartup does not attempt any profile sync when cfg.Profiles is empty.
+func TestSmoke_S53_DaemonStartupSkipsResyncWhenProfilesEmpty(t *testing.T) {
+	dir := t.TempDir()
+	cfg := &config.Config{
+		Profiles: nil,
+		StateDir: filepath.Join(dir, ".xylem"),
+	}
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	logs := withBufferedDefaultLogger(t)
+
+	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
+	require.NoError(t, err)
+	assert.NotContains(t, logs.String(), "re-sync")
+	assert.NotContains(t, logs.String(), "compose profiles")
 }
 
 func TestReconcileStaleVessels(t *testing.T) {

@@ -148,3 +148,57 @@ func TestSmoke_S4_ImplementHarnessPRDraftPromptRequiresRebaseRetestAndForcePush(
 		"git push --force-with-lease",
 	))
 }
+
+func TestSmoke_S5_AnalyzePhaseMaxTurnsIs50(t *testing.T) {
+	t.Parallel()
+
+	workflowPath := checkedInWorkflowPath(t, "implement-harness.yaml")
+	data, err := os.ReadFile(workflowPath)
+	require.NoError(t, err, "ReadFile(%q)", workflowPath)
+
+	var wf Workflow
+	require.NoError(t, yaml.Unmarshal(data, &wf), "yaml.Unmarshal(%q)", workflowPath)
+
+	analyze := findPhaseByName(t, wf.Phases, "analyze")
+	assert.Equal(t, 50, analyze.MaxTurns, "analyze phase max_turns should be 50")
+}
+
+func TestSmoke_S6_PlanPhaseMaxTurnsIs50(t *testing.T) {
+	t.Parallel()
+
+	workflowPath := checkedInWorkflowPath(t, "implement-harness.yaml")
+	data, err := os.ReadFile(workflowPath)
+	require.NoError(t, err, "ReadFile(%q)", workflowPath)
+
+	var wf Workflow
+	require.NoError(t, yaml.Unmarshal(data, &wf), "yaml.Unmarshal(%q)", workflowPath)
+
+	plan := findPhaseByName(t, wf.Phases, "plan")
+	assert.Equal(t, 50, plan.MaxTurns, "plan phase max_turns should be 50")
+}
+
+func TestSmoke_S7_OtherPhaseMaxTurnsAreUnchanged(t *testing.T) {
+	t.Parallel()
+
+	workflowPath := checkedInWorkflowPath(t, "implement-harness.yaml")
+	data, err := os.ReadFile(workflowPath)
+	require.NoError(t, err, "ReadFile(%q)", workflowPath)
+
+	var wf Workflow
+	require.NoError(t, yaml.Unmarshal(data, &wf), "yaml.Unmarshal(%q)", workflowPath)
+
+	cases := []struct {
+		name      string
+		wantTurns int
+	}{
+		{"implement", 80},
+		{"verify", 80},
+		{"test_critic", 50},
+		{"smoke", 60},
+		{"pr_draft", 50},
+	}
+	for _, tc := range cases {
+		phase := findPhaseByName(t, wf.Phases, tc.name)
+		assert.Equal(t, tc.wantTurns, phase.MaxTurns, "phase %q max_turns", tc.name)
+	}
+}

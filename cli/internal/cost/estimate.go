@@ -21,6 +21,8 @@ var DefaultPricingTable = map[string]ModelPricing{
 	"claude-haiku-4":  {InputPer1M: 0.80, OutputPer1M: 4.00},
 	"claude-haiku-3":  {InputPer1M: 0.25, OutputPer1M: 1.25},
 	"claude-sonnet-3": {InputPer1M: 3.00, OutputPer1M: 15.00},
+	"gpt-5.4-mini":    {InputPer1M: 0.15, OutputPer1M: 0.60},
+	"gpt-5.4":         {InputPer1M: 2.50, OutputPer1M: 10.00},
 }
 
 // EstimateCost computes approximate cost from token counts and pricing.
@@ -54,4 +56,13 @@ func LookupPricing(model string) *ModelPricing {
 
 	pricing := DefaultPricingTable[bestKey]
 	return &pricing
+}
+
+// LookupPricingWithOverrides checks overrides first, then falls back to
+// DefaultPricingTable via LookupPricing. Returns nil if no match in either.
+func LookupPricingWithOverrides(model string, overrides map[string]ModelPricing) *ModelPricing {
+	if p, ok := overrides[model]; ok {
+		return &p
+	}
+	return LookupPricing(model)
 }

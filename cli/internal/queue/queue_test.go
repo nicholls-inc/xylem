@@ -2114,3 +2114,179 @@ func TestCompactDryRun(t *testing.T) {
 		t.Fatalf("dry run modified the file: before=%d lines, after=%d lines", len(linesBefore), len(linesAfter))
 	}
 }
+
+func TestCompactOlderThan(t *testing.T) {
+	q, path := newTestQueue(t)
+	now := time.Now().UTC()
+
+	// Three failed vessels: 8d ago, 6d ago, 1d ago.
+	for i, age := range []time.Duration{8 * 24 * time.Hour, 6 * 24 * time.Hour, 1 * 24 * time.Hour} {
+		v := testVessel(100 + i)
+		if _, err := q.Enqueue(v); err != nil {
+			t.Fatalf("enqueue %d: %v", i, err)
+		}
+		helperFailVessel(t, q, v.ID)
+		// Manually patch EndedAt in the JSONL by reading and writing.
+		vessels, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		for j := range vessels {
+			if vessels[j].ID == v.ID {
+				ended := now.Add(-age)
+				vessels[j].EndedAt = &ended
+			}
+		}
+		// Re-write queue with patched EndedAt.
+		f, err := os.Create(path)
+		if err != nil {
+			t.Fatalf("create: %v", err)
+		}
+		enc := json.NewEncoder(f)
+		for _, vv := range vessels {
+			if err := enc.Encode(vv); err != nil {
+				f.Close()
+				t.Fatalf("encode: %v", err)
+			}
+		}
+		f.Close()
+	}
+
+	linesBefore := readNonEmptyLines(t, path)
+	if len(linesBefore) != 3 {
+		t.Fatalf("expected 3 lines before compaction, got %d", len(linesBefore))
+	}
+
+	// Cutoff at 7 days ago — should remove only the 8d-old vessel.
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	removed, err := q.CompactOlderThan(cutoff)
+	if err != nil {
+		t.Fatalf("CompactOlderThan: %v", err)
+	}
+	if removed != 1 {
+		t.Fatalf("expected 1 removed, got %d", removed)
+	}
+
+	linesAfter := readNonEmptyLines(t, path)
+	if len(linesAfter) != 2 {
+		t.Fatalf("expected 2 lines after compaction, got %d", len(linesAfter))
+	}
+}
+
+func TestCompactOlderThanDryRun(t *testing.T) {
+	q, path := newTestQueue(t)
+	now := time.Now().UTC()
+
+	// One failed vessel with EndedAt 8 days ago.
+	v := testVessel(200)
+	if _, err := q.Enqueue(v); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	helperFailVessel(t, q, v.ID)
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	ended := now.Add(-8 * 24 * time.Hour)
+	vessels[0].EndedAt = &ended
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	enc := json.NewEncoder(f)
+	for _, vv := range vessels {
+		if err := enc.Encode(vv); err != nil {
+			f.Close()
+			t.Fatalf("encode: %v", err)
+		}
+	}
+	f.Close()
+
+	linesBefore := readNonEmptyLines(t, path)
+
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	removable, err := q.CompactOlderThanDryRun(cutoff)
+	if err != nil {
+		t.Fatalf("CompactOlderThanDryRun: %v", err)
+	}
+	if removable != 1 {
+		t.Fatalf("expected 1 removable, got %d", removable)
+	}
+
+	// File must be unchanged.
+	linesAfter := readNonEmptyLines(t, path)
+	if len(linesAfter) != len(linesBefore) {
+		t.Fatalf("dry-run modified the file: before=%d lines, after=%d lines", len(linesBefore), len(linesAfter))
+	}
+}
+
+func TestCompactOlderThan_NilEndedAt(t *testing.T) {
+	q, _ := newTestQueue(t)
+
+	// Enqueue and fail without setting EndedAt (simulates legacy records).
+	v := testVessel(300)
+	if _, err := q.Enqueue(v); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update(v.ID, StateFailed, "legacy"); err != nil {
+		t.Fatalf("update: %v", err)
+	}
+
+	// Patch EndedAt to nil by directly reading/writing the JSONL file.
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	// The queue normally sets EndedAt on failure; nil it out to simulate legacy.
+	f, err := os.Create(q.path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	enc := json.NewEncoder(f)
+	for i := range vessels {
+		vessels[i].EndedAt = nil
+		if err := enc.Encode(vessels[i]); err != nil {
+			f.Close()
+			t.Fatalf("encode: %v", err)
+		}
+	}
+	f.Close()
+
+	// Compact with a future cutoff — nil EndedAt vessels must be kept.
+	removed, err := q.CompactOlderThan(time.Now().Add(24 * time.Hour))
+	if err != nil {
+		t.Fatalf("CompactOlderThan: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("expected 0 removed (nil EndedAt guard), got %d", removed)
+	}
+}
+
+func TestCompactOlderThan_NonTerminalKept(t *testing.T) {
+	q, _ := newTestQueue(t)
+
+	// Enqueue a pending vessel — must never be evicted.
+	v := testVessel(400)
+	if _, err := q.Enqueue(v); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	removed, err := q.CompactOlderThan(time.Now().Add(24 * time.Hour))
+	if err != nil {
+		t.Fatalf("CompactOlderThan: %v", err)
+	}
+	if removed != 0 {
+		t.Fatalf("expected 0 removed for non-terminal vessel, got %d", removed)
+	}
+
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
+	}
+}

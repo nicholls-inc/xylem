@@ -10,8 +10,11 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/cadence"
+	"github.com/nicholls-inc/xylem/cli/internal/catalog"
 	"github.com/nicholls-inc/xylem/cli/internal/cost"
 	"github.com/nicholls-inc/xylem/cli/internal/intermediary"
+	"github.com/nicholls-inc/xylem/cli/internal/policy"
+	"github.com/nicholls-inc/xylem/cli/internal/profiles"
 	"gopkg.in/yaml.v3"
 )
 
@@ -20,6 +23,8 @@ const minTimeout = 30 * time.Second
 const DefaultAuditLogPath = "audit.jsonl"
 const DefaultLLMRoutingTier = "med"
 const DefaultAutoAdminMergeOptOutLabel = "no-auto-admin-merge"
+const DefaultCostOnExceeded = "drain_only"
+const DefaultPhaseContextBudget = 100_000
 const runtimeStateDirName = "state"
 
 // DefaultProtectedSurfaces is the default list of paths that xylem's
@@ -57,6 +62,10 @@ const runtimeStateDirName = "state"
 // suspenders in place.
 //
 // See issue #194 for the design discussion.
+//
+// Post-PR #366, the policy matrix in cli/internal/policy/ became the
+// authoritative enforcement layer for protected-surface class routing.
+// See issue #366 for the class matrix design and migration notes.
 var DefaultProtectedSurfaces = []string{}
 
 type Config struct {
@@ -80,19 +89,23 @@ type Config struct {
 	Copilot             CopilotConfig             `yaml:"copilot,omitempty"`
 	Validation          ValidationConfig          `yaml:"validation,omitempty"`
 	Daemon              DaemonConfig              `yaml:"daemon,omitempty"`
+	Phase               PhaseConfig               `yaml:"phase,omitempty"`
 	Harness             HarnessConfig             `yaml:"harness,omitempty"`
 	Observability       ObservabilityConfig       `yaml:"observability,omitempty"`
 	Cost                CostConfig                `yaml:"cost,omitempty"`
 	Telemetry           TelemetryConfig           `yaml:"telemetry,omitempty"`
+	Notifications       NotificationsConfig       `yaml:"notifications,omitempty"`
+	configPath          string
 }
 
 type ProviderConfig struct {
-	Kind         string            `yaml:"kind"`
-	Command      string            `yaml:"command"`
-	Flags        string            `yaml:"flags,omitempty"`
-	Tiers        map[string]string `yaml:"tiers,omitempty"`
-	Env          map[string]string `yaml:"env,omitempty"`
-	AllowedTools []string          `yaml:"allowed_tools,omitempty"`
+	Kind         string                       `yaml:"kind"`
+	Command      string                       `yaml:"command"`
+	Flags        string                       `yaml:"flags,omitempty"`
+	Tiers        map[string]string            `yaml:"tiers,omitempty"`
+	Env          map[string]string            `yaml:"env,omitempty"`
+	AllowedTools []string                     `yaml:"allowed_tools,omitempty"`
+	Pricing      map[string]cost.ModelPricing `yaml:"pricing,omitempty"`
 }
 
 type LLMRoutingConfig struct {
@@ -216,6 +229,10 @@ type DaemonConfig struct {
 	AutoMergeReviewer string `yaml:"auto_merge_reviewer,omitempty"`
 }
 
+type PhaseConfig struct {
+	ContextBudget int `yaml:"context_budget,omitempty"`
+}
+
 type StallMonitorConfig struct {
 	PhaseStallThreshold  string `yaml:"phase_stall_threshold,omitempty"`
 	ScannerIdleThreshold string `yaml:"scanner_idle_threshold,omitempty"`
@@ -225,8 +242,19 @@ type StallMonitorConfig struct {
 type HarnessConfig struct {
 	ProtectedSurfaces ProtectedSurfacesConfig `yaml:"protected_surfaces,omitempty"`
 	Policy            PolicyConfig            `yaml:"policy,omitempty"`
+	ToolPermissions   ToolPermissionsConfig   `yaml:"tool_permissions,omitempty"`
 	AuditLog          string                  `yaml:"audit_log,omitempty"`
 	Review            HarnessReviewConfig     `yaml:"review,omitempty"`
+}
+
+type ToolPermissionsConfig struct {
+	PhaseRoles map[string]string         `yaml:"phase_roles,omitempty"`
+	Roles      map[string]ToolRoleConfig `yaml:"roles,omitempty"`
+}
+
+type ToolRoleConfig struct {
+	MaxScope     string   `yaml:"max_scope,omitempty"`
+	AllowedTools []string `yaml:"allowed_tools,omitempty"`
 }
 
 type HarnessReviewConfig struct {
@@ -243,6 +271,7 @@ type ProtectedSurfacesConfig struct {
 }
 
 type PolicyConfig struct {
+	Mode  string             `yaml:"mode,omitempty"`
 	Rules []PolicyRuleConfig `yaml:"rules,omitempty"`
 }
 
@@ -266,12 +295,35 @@ type TelemetryConfig struct {
 }
 
 type CostConfig struct {
-	Budget *BudgetConfig `yaml:"budget,omitempty"`
+	Budget         *BudgetConfig      `yaml:"budget,omitempty"`
+	DailyBudgetUSD float64            `yaml:"daily_budget_usd,omitempty"`
+	PerClassLimit  map[string]float64 `yaml:"per_class_limit,omitempty"`
+	OnExceeded     string             `yaml:"on_exceeded,omitempty"`
 }
 
 type BudgetConfig struct {
 	MaxCostUSD float64 `yaml:"max_cost_usd,omitempty"`
 	MaxTokens  int     `yaml:"max_tokens,omitempty"`
+}
+
+type NotificationsConfig struct {
+	GitHubDiscussion DiscussionNotifyConfig `yaml:"github_discussion,omitempty"`
+	Telegram         TelegramNotifyConfig   `yaml:"telegram,omitempty"`
+}
+
+type DiscussionNotifyConfig struct {
+	Enabled  bool   `yaml:"enabled,omitempty"`
+	Repo     string `yaml:"repo,omitempty"`
+	Category string `yaml:"category,omitempty"`
+	Interval string `yaml:"interval,omitempty"`
+	Title    string `yaml:"title,omitempty"`
+}
+
+type TelegramNotifyConfig struct {
+	Enabled   bool     `yaml:"enabled,omitempty"`
+	TokenEnv  string   `yaml:"token_env,omitempty"`
+	ChatIDEnv string   `yaml:"chat_id_env,omitempty"`
+	Levels    []string `yaml:"levels,omitempty"`
 }
 
 type parsedConcurrency struct {
@@ -281,6 +333,14 @@ type parsedConcurrency struct {
 }
 
 func Load(path string) (*Config, error) {
+	return load(path, true)
+}
+
+func LoadUnvalidated(path string) (*Config, error) {
+	return load(path, false)
+}
+
+func load(path string, validate bool) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, fmt.Errorf("read config file %q: %w", path, err)
@@ -296,6 +356,15 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 	removeYAMLField(&root, "concurrency")
+
+	var phaseProbe struct {
+		Phase struct {
+			ContextBudget *int `yaml:"context_budget"`
+		} `yaml:"phase"`
+	}
+	if err := root.Decode(&phaseProbe); err != nil {
+		return nil, fmt.Errorf("decode phase config probe: %w", err)
+	}
 
 	cfg := &Config{
 		Concurrency:         2,
@@ -320,20 +389,44 @@ func Load(path string) (*Config, error) {
 				OrphanCheckEnabled:   true,
 			},
 		},
+		Phase: PhaseConfig{
+			ContextBudget: DefaultPhaseContextBudget,
+		},
+		Cost: CostConfig{
+			OnExceeded: DefaultCostOnExceeded,
+		},
+		Notifications: NotificationsConfig{
+			GitHubDiscussion: DiscussionNotifyConfig{
+				Category: "Reports",
+				Interval: "1h",
+				Title:    "Xylem Daemon Status Log",
+			},
+			Telegram: TelegramNotifyConfig{
+				TokenEnv:  "XYLEM_TELEGRAM_TOKEN",
+				ChatIDEnv: "XYLEM_TELEGRAM_CHAT_ID",
+				Levels:    []string{"critical", "warning"},
+			},
+		},
 	}
 
 	if err := root.Decode(cfg); err != nil {
 		return nil, fmt.Errorf("decode config yaml: %w", err)
 	}
+	if phaseProbe.Phase.ContextBudget != nil && *phaseProbe.Phase.ContextBudget <= 0 {
+		return nil, fmt.Errorf("phase.context_budget must be greater than 0")
+	}
 	if concurrency.Set {
 		cfg.Concurrency = concurrency.Global
 		cfg.ConcurrencyPerClass = concurrency.PerClass
 	}
+	cfg.configPath = path
 
 	cfg.normalize()
 
-	if err := cfg.Validate(); err != nil {
-		return nil, err
+	if validate {
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
 	}
 
 	return cfg, nil
@@ -419,6 +512,7 @@ func looksLikeControlPlaneDir(stateDir string) bool {
 func hasLegacyRuntimeArtifacts(stateDir string) bool {
 	for _, marker := range []string{
 		"queue.jsonl",
+		"audit.jsonl",
 		"phases",
 		"schedules",
 		"reviews",
@@ -458,6 +552,7 @@ func (c *Config) normalize() {
 		}
 	}
 	c.ConcurrencyPerClass = normalizeConcurrencyPerClass(c.ConcurrencyPerClass)
+	c.Cost.PerClassLimit = normalizeCostPerClassLimit(c.Cost.PerClassLimit)
 	c.normalizeProviders()
 }
 
@@ -539,6 +634,9 @@ func (c *Config) Validate() error {
 		if _, err := time.ParseDuration(c.Daemon.StallMonitor.ScannerIdleThreshold); err != nil {
 			return fmt.Errorf("daemon.stall_monitor.scanner_idle_threshold must be a valid duration: %w", err)
 		}
+	}
+	if c.Phase.ContextBudget < 0 {
+		return fmt.Errorf("phase.context_budget must be greater than 0")
 	}
 	if strings.TrimSpace(c.Daemon.AutoMergeBranchPattern) != "" {
 		if _, err := regexp.Compile(strings.TrimSpace(c.Daemon.AutoMergeBranchPattern)); err != nil {
@@ -723,6 +821,28 @@ func (c *Config) EffectiveAuditLogPath() string {
 	return DefaultAuditLogPath
 }
 
+// HarnessPolicyMode returns the effective policy mode for the harness.
+//
+// The zero-value (empty string) resolves to warn mode so that xylem ships in
+// observe-and-warn by default: guest repos can adopt the harness incrementally
+// without their existing workflows hitting the first deny rule cold. Operators
+// who want hard enforcement set harness.policy.mode: "enforce" explicitly.
+//
+// Values that fail to parse still fall back to warn (not enforce) so that a
+// typo in the config file cannot escalate a previously-permissive deployment
+// into a blocking one. Config load-time validation at validateHarness rejects
+// unknown modes up-front, so this branch is a belt-and-suspenders fallback.
+func (c *Config) HarnessPolicyMode() intermediary.PolicyMode {
+	if strings.TrimSpace(c.Harness.Policy.Mode) == "" {
+		return intermediary.PolicyModeWarn
+	}
+	mode, err := intermediary.ParsePolicyMode(c.Harness.Policy.Mode)
+	if err != nil {
+		return intermediary.PolicyModeWarn
+	}
+	return mode
+}
+
 func (c *Config) HarnessReviewCadence() string {
 	if !c.Harness.Review.Enabled {
 		return "manual"
@@ -884,6 +1004,17 @@ func normalizeConcurrencyPerClass(in map[string]int) map[string]int {
 	return out
 }
 
+func normalizeCostPerClassLimit(in map[string]float64) map[string]float64 {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(in))
+	for class, limit := range in {
+		out[strings.TrimSpace(class)] = limit
+	}
+	return out
+}
+
 func (c *Config) VesselBudget() *cost.Budget {
 	if c.Cost.Budget == nil {
 		return nil
@@ -896,6 +1027,18 @@ func (c *Config) VesselBudget() *cost.Budget {
 	return &cost.Budget{
 		TokenLimit:   c.Cost.Budget.MaxTokens,
 		CostLimitUSD: c.Cost.Budget.MaxCostUSD,
+	}
+}
+
+func (c *Config) CostOnExceeded() string {
+	mode := strings.ToLower(strings.TrimSpace(c.Cost.OnExceeded))
+	switch mode {
+	case "", DefaultCostOnExceeded:
+		return DefaultCostOnExceeded
+	case "pause", "alert":
+		return mode
+	default:
+		return DefaultCostOnExceeded
 	}
 }
 
@@ -919,28 +1062,75 @@ func (c *Config) BuildIntermediaryPolicies() []intermediary.Policy {
 	}}
 }
 
-// DefaultPolicy returns the default intermediary policy. Protected control
-// surfaces are denied, and all currently classified execution actions —
-// including git_commit, git_push, and pr_create — are allowed so the daemon can
-// operate autonomously.
-//
-// Destructive git operations and deploy-class actions are not yet emitted as
-// separate intents at the runner/intermediary boundary; they currently inherit
-// the enclosing phase action. Operators who want human gates on those surfaces
-// can override the defaults with `harness.policy.rules` or workflow gates.
+func (c *Config) BuildPhaseToolCatalog() (*catalog.Catalog, error) {
+	toolCatalog, err := catalog.NewDefaultPhaseCatalog()
+	if err != nil {
+		return nil, fmt.Errorf("build phase tool catalog: %w", err)
+	}
+	if c == nil {
+		return toolCatalog, nil
+	}
+
+	roleNames := make([]string, 0, len(c.Harness.ToolPermissions.Roles))
+	for role := range c.Harness.ToolPermissions.Roles {
+		roleNames = append(roleNames, role)
+	}
+	sort.Strings(roleNames)
+	for _, role := range roleNames {
+		override := c.Harness.ToolPermissions.Roles[role]
+		existing, existingErr := toolCatalog.GetRolePermissions(role)
+		maxScope := catalog.ScopeFullAutonomy
+		var allowedTools []string
+		if existingErr == nil {
+			maxScope = existing.MaxScope
+			allowedTools = append([]string(nil), existing.AllowedTools...)
+		}
+		if strings.TrimSpace(override.MaxScope) != "" {
+			parsedScope, err := parseToolPermissionScope(override.MaxScope)
+			if err != nil {
+				return nil, fmt.Errorf("build phase tool catalog: role %q: %w", role, err)
+			}
+			maxScope = parsedScope
+		} else if existingErr != nil {
+			return nil, fmt.Errorf("build phase tool catalog: role %q: max_scope is required for custom roles", role)
+		}
+
+		if len(override.AllowedTools) > 0 {
+			allowedTools = normalizeToolPermissionTools(override.AllowedTools)
+		}
+		for _, toolName := range allowedTools {
+			if _, err := toolCatalog.Get(toolName); err != nil {
+				return nil, fmt.Errorf("build phase tool catalog: role %q: %w", role, err)
+			}
+		}
+		if err := toolCatalog.SetRolePermissions(catalog.RolePermissions{
+			Role:         role,
+			MaxScope:     maxScope,
+			AllowedTools: allowedTools,
+		}); err != nil {
+			return nil, fmt.Errorf("build phase tool catalog: role %q: %w", role, err)
+		}
+	}
+	return toolCatalog, nil
+}
+
+func (c *Config) PhaseToolRole(class policy.Class, phaseName, phaseType string) string {
+	if c != nil {
+		if role := strings.TrimSpace(c.Harness.ToolPermissions.PhaseRoles[strings.TrimSpace(phaseName)]); role != "" {
+			return role
+		}
+	}
+	return defaultPhaseToolRole(class, phaseName, phaseType)
+}
+
+// DefaultPolicy returns the default user policy layer. Workflow-class matrix
+// decisions are enforced separately inside the intermediary; this default layer
+// simply keeps autonomous execution unblocked unless operators opt into tighter
+// rules via harness.policy.rules.
 func DefaultPolicy() intermediary.Policy {
 	return intermediary.Policy{
 		Name: "default",
 		Rules: []intermediary.Rule{
-			// Protected control surfaces are denied.
-			{Action: "file_write", Resource: ".xylem/HARNESS.md", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem.yml", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem/workflows/*", Effect: intermediary.Deny},
-			{Action: "file_write", Resource: ".xylem/prompts/*/*.md", Effect: intermediary.Deny},
-			// All other actions — including git_commit, git_push, and pr_create
-			// — are allowed. Autonomous operation requires publication steps to
-			// complete without a built-in approval pause. Override via
-			// harness.policy for stricter rules.
 			{Action: "*", Resource: "*", Effect: intermediary.Allow},
 		},
 	}
@@ -969,6 +1159,37 @@ func (c *Config) validateHarness() error {
 		default:
 			return fmt.Errorf("harness.policy.rules[%d]: invalid effect %q (must be allow, deny, or require_approval)", i, rule.Effect)
 		}
+	}
+
+	if _, err := intermediary.ParsePolicyMode(c.Harness.Policy.Mode); err != nil {
+		return fmt.Errorf("harness.policy.mode: %w", err)
+	}
+
+	for phaseName, role := range c.Harness.ToolPermissions.PhaseRoles {
+		if strings.TrimSpace(phaseName) == "" {
+			return fmt.Errorf("harness.tool_permissions.phase_roles keys must be non-empty")
+		}
+		if strings.TrimSpace(role) == "" {
+			return fmt.Errorf("harness.tool_permissions.phase_roles[%q] must be non-empty", phaseName)
+		}
+	}
+	for role, cfg := range c.Harness.ToolPermissions.Roles {
+		if strings.TrimSpace(role) == "" {
+			return fmt.Errorf("harness.tool_permissions.roles keys must be non-empty")
+		}
+		if strings.TrimSpace(cfg.MaxScope) != "" {
+			if _, err := parseToolPermissionScope(cfg.MaxScope); err != nil {
+				return fmt.Errorf("harness.tool_permissions.roles[%q].max_scope: %w", role, err)
+			}
+		}
+		for i, tool := range cfg.AllowedTools {
+			if strings.TrimSpace(tool) == "" {
+				return fmt.Errorf("harness.tool_permissions.roles[%q].allowed_tools[%d] must be non-empty", role, i)
+			}
+		}
+	}
+	if _, err := c.BuildPhaseToolCatalog(); err != nil {
+		return err
 	}
 
 	if cadence := c.Harness.Review.Cadence; cadence != "" {
@@ -1011,16 +1232,36 @@ func (c *Config) validateObservability() error {
 }
 
 func (c *Config) validateCost() error {
-	if c.Cost.Budget == nil {
+	if c.Cost.Budget != nil {
+		if c.Cost.Budget.MaxCostUSD < 0 {
+			return fmt.Errorf("cost.budget.max_cost_usd must be non-negative")
+		}
+		if c.Cost.Budget.MaxTokens < 0 {
+			return fmt.Errorf("cost.budget.max_tokens must be non-negative")
+		}
+	}
+	if c.Cost.DailyBudgetUSD < 0 {
+		return fmt.Errorf("cost.daily_budget_usd must be non-negative")
+	}
+	totalPerClass := 0.0
+	for class, limit := range c.Cost.PerClassLimit {
+		if strings.TrimSpace(class) == "" {
+			return fmt.Errorf("cost.per_class_limit keys must be non-empty")
+		}
+		if limit < 0 {
+			return fmt.Errorf("cost.per_class_limit[%q] must be non-negative", class)
+		}
+		totalPerClass += limit
+	}
+	if c.Cost.DailyBudgetUSD > 0 && totalPerClass > c.Cost.DailyBudgetUSD {
+		return fmt.Errorf("cost.per_class_limit total must not exceed cost.daily_budget_usd")
+	}
+	switch strings.ToLower(strings.TrimSpace(c.Cost.OnExceeded)) {
+	case "", DefaultCostOnExceeded, "pause", "alert":
 		return nil
+	default:
+		return fmt.Errorf("cost.on_exceeded must be one of drain_only, pause, or alert")
 	}
-	if c.Cost.Budget.MaxCostUSD < 0 {
-		return fmt.Errorf("cost.budget.max_cost_usd must be non-negative")
-	}
-	if c.Cost.Budget.MaxTokens < 0 {
-		return fmt.Errorf("cost.budget.max_tokens must be non-negative")
-	}
-	return nil
 }
 
 func (c *Config) validateTelemetry() error {
@@ -1033,7 +1274,87 @@ func (c *Config) validateTelemetry() error {
 	return nil
 }
 
+func defaultPhaseToolRole(class policy.Class, phaseName, phaseType string) string {
+	switch class {
+	case policy.Delivery:
+		return catalog.RoleDelivery
+	case policy.HarnessMaintenance, policy.Ops:
+		return catalog.RoleHousekeeping
+	}
+
+	if strings.EqualFold(strings.TrimSpace(phaseType), "command") {
+		return catalog.RoleHousekeeping
+	}
+
+	name := strings.ToLower(strings.TrimSpace(phaseName))
+	switch {
+	case strings.HasPrefix(name, "pr"),
+		strings.Contains(name, "review"),
+		strings.Contains(name, "release"),
+		strings.Contains(name, "merge"),
+		strings.Contains(name, "report"),
+		strings.Contains(name, "lessons"),
+		strings.Contains(name, "audit"),
+		strings.Contains(name, "backlog"):
+		return catalog.RoleHousekeeping
+	case strings.Contains(name, "implement"),
+		strings.Contains(name, "fix"),
+		strings.Contains(name, "resolve"),
+		strings.Contains(name, "refactor"),
+		strings.Contains(name, "patch"),
+		strings.Contains(name, "write"):
+		return catalog.RoleDelivery
+	default:
+		return catalog.RoleDiagnostic
+	}
+}
+
+func parseToolPermissionScope(raw string) (catalog.PermissionScope, error) {
+	switch normalizeToolPermissionToken(raw) {
+	case "readonly", "read_only", "read-only":
+		return catalog.ScopeReadOnly, nil
+	case "writewithapproval", "write_with_approval", "write-with-approval":
+		return catalog.ScopeWriteWithApproval, nil
+	case "fullautonomy", "full_autonomy", "full-autonomy":
+		return catalog.ScopeFullAutonomy, nil
+	default:
+		return 0, fmt.Errorf("invalid value %q (must be read_only, write_with_approval, or full_autonomy)", raw)
+	}
+}
+
+func normalizeToolPermissionTools(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		trimmed := strings.TrimSpace(value)
+		if trimmed == "" {
+			continue
+		}
+		if _, ok := seen[trimmed]; ok {
+			continue
+		}
+		seen[trimmed] = struct{}{}
+		out = append(out, trimmed)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func normalizeToolPermissionToken(value string) string {
+	trimmed := strings.TrimSpace(strings.ToLower(value))
+	trimmed = strings.ReplaceAll(trimmed, "-", "_")
+	return strings.ReplaceAll(trimmed, " ", "")
+}
+
 func (c *Config) validateWorkflowRequirements() error {
+	if err := c.validateAutoMergeWorkflowClass(); err != nil {
+		return err
+	}
 	active := c.validationRequiredWorkflows()
 	if len(active) == 0 {
 		return nil
@@ -1048,7 +1369,7 @@ func (c *Config) validateWorkflowRequirements() error {
 }
 
 func (c *Config) validationRequiredWorkflows() []string {
-	required := []string{"fix-pr-checks", "resolve-conflicts"}
+	required := []string{"adapt-repo", "fix-pr-checks", "resolve-conflicts"}
 	active := make([]string, 0, len(required))
 	for _, workflowName := range required {
 		if c.workflowActive(workflowName) {
@@ -1079,6 +1400,109 @@ func (c *Config) validateValidationCommands() error {
 		}
 	}
 	return nil
+}
+
+func (c *Config) validateAutoMergeWorkflowClass() error {
+	if !c.Daemon.AutoMerge {
+		return nil
+	}
+
+	workflows, err := c.activeWorkflowDefinitions()
+	if err != nil {
+		return fmt.Errorf("validate daemon.auto_merge workflows: %w", err)
+	}
+	hasOps, err := workflowMapHasClass(workflows, policy.Ops)
+	if err != nil {
+		return fmt.Errorf("validate daemon.auto_merge workflows: %w", err)
+	}
+	if !hasOps {
+		return fmt.Errorf("daemon.auto_merge requires an active profile with at least one ops-class workflow")
+	}
+	return nil
+}
+
+func (c *Config) activeWorkflowDefinitions() (map[string][]byte, error) {
+	if len(c.Profiles) > 0 {
+		composed, err := profiles.Compose(c.Profiles...)
+		if err != nil {
+			return nil, err
+		}
+		return composed.Workflows, nil
+	}
+	return c.localWorkflowDefinitions()
+}
+
+func (c *Config) localWorkflowDefinitions() (map[string][]byte, error) {
+	if strings.TrimSpace(c.configPath) == "" {
+		return nil, nil
+	}
+
+	workflowsDir := filepath.Join(ResolveStateDir(filepath.Dir(c.configPath), c.StateDir), "workflows")
+	entries, err := os.ReadDir(workflowsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read workflows dir %q: %w", workflowsDir, err)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Name() < entries[j].Name()
+	})
+
+	workflows := make(map[string][]byte, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		ext := filepath.Ext(entry.Name())
+		if ext != ".yaml" && ext != ".yml" {
+			continue
+		}
+
+		path := filepath.Join(workflowsDir, entry.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read workflow %q: %w", path, err)
+		}
+		workflows[strings.TrimSuffix(entry.Name(), ext)] = data
+	}
+
+	return workflows, nil
+}
+
+func composedProfileHasWorkflowClass(composed *profiles.ComposedProfile, want policy.Class) (bool, error) {
+	if composed == nil {
+		return false, fmt.Errorf("composed profile is required")
+	}
+	return workflowMapHasClass(composed.Workflows, want)
+}
+
+func workflowMapHasClass(workflows map[string][]byte, want policy.Class) (bool, error) {
+	for name, data := range workflows {
+		matches, err := workflowBytesHaveClass(name, data, want)
+		if err != nil {
+			return false, err
+		}
+		if matches {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func workflowBytesHaveClass(name string, data []byte, want policy.Class) (bool, error) {
+	var probe struct {
+		Class string `yaml:"class,omitempty"`
+	}
+	if err := yaml.Unmarshal(data, &probe); err != nil {
+		return false, fmt.Errorf("parse workflow %q: %w", name, err)
+	}
+	class, err := policy.ParseClass(probe.Class)
+	if err != nil {
+		return false, fmt.Errorf("workflow %q: %w", name, err)
+	}
+	return class == want, nil
 }
 
 func invalidGoimportsPackagePatternTarget(command string) (string, bool) {

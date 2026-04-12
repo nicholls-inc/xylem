@@ -1,0 +1,12 @@
+[task]
+id = "failure-recovery"
+version = "1"
+
+[task.environment]
+timeout_seconds = 600
+
+[task.metadata]
+category = "failure-recovery"
+tags = ["retry", "failure", "recovery"]
+difficulty = "medium"
+canary = "CANARY-XYLEM-EVAL-e3b9"

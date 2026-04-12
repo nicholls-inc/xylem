@@ -69,6 +69,58 @@ func TestSmoke_S24_LookupPricingReturnsNilForUnrecognisedModel(t *testing.T) {
 	assert.Nil(t, LookupPricing("gpt-4o"))
 }
 
+func TestSmoke_S25_LookupPricingGPT54ReturnsNonNilWithPositiveRates(t *testing.T) {
+	pricing := LookupPricing("gpt-5.4")
+
+	require.NotNil(t, pricing)
+	assert.Greater(t, pricing.InputPer1M, 0.0)
+	assert.Greater(t, pricing.OutputPer1M, 0.0)
+}
+
+func TestSmoke_S26_LookupPricingGPT54MiniReturnsNonNilWithPositiveRates(t *testing.T) {
+	pricing := LookupPricing("gpt-5.4-mini")
+
+	require.NotNil(t, pricing)
+	assert.Greater(t, pricing.InputPer1M, 0.0)
+	assert.Greater(t, pricing.OutputPer1M, 0.0)
+}
+
+func TestSmoke_S27_LookupPricingWithOverridesOverrideWinsOverDefault(t *testing.T) {
+	overrides := map[string]ModelPricing{
+		"claude-sonnet-4": {InputPer1M: 99.0, OutputPer1M: 199.0},
+	}
+	pricing := LookupPricingWithOverrides("claude-sonnet-4", overrides)
+
+	require.NotNil(t, pricing)
+	assert.InDelta(t, 99.0, pricing.InputPer1M, 1e-9)
+	assert.InDelta(t, 199.0, pricing.OutputPer1M, 1e-9)
+}
+
+func TestSmoke_S28_LookupPricingWithOverridesFallsBackToDefaultWhenModelAbsent(t *testing.T) {
+	overrides := map[string]ModelPricing{
+		"other-model": {InputPer1M: 1.0, OutputPer1M: 2.0},
+	}
+	pricing := LookupPricingWithOverrides("claude-sonnet-4", overrides)
+
+	require.NotNil(t, pricing)
+	assert.InDelta(t, 3.00, pricing.InputPer1M, 1e-9)
+	assert.InDelta(t, 15.00, pricing.OutputPer1M, 1e-9)
+}
+
+func TestSmoke_S29_LookupPricingWithNilOverridesReturnsTableValues(t *testing.T) {
+	got := LookupPricingWithOverrides("claude-haiku-4", nil)
+
+	require.NotNil(t, got)
+	assert.InDelta(t, 0.80, got.InputPer1M, 1e-9)
+	assert.InDelta(t, 4.00, got.OutputPer1M, 1e-9)
+}
+
+func TestSmoke_S30_LookupPricingWithOverridesUnknownModelReturnsNil(t *testing.T) {
+	pricing := LookupPricingWithOverrides("model-xyz-unknown", nil)
+
+	assert.Nil(t, pricing)
+}
+
 func TestEstimateTokensMatchesCtxmgr(t *testing.T) {
 	tests := []struct {
 		name    string

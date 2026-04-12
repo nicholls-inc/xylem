@@ -300,7 +300,7 @@ DTU environments are ephemeral and isolated. To start fresh:
 # The shim directory is shared; the state is per-universe
 rm -rf "/Users/harry.nicholls/repos/xylem/cli/.xylem/dtu/ws1-policy-allow-happy-path/"
 rm -rf "$XYLEM_DTU_WORKDIR/.xylem/phases" "$XYLEM_DTU_WORKDIR/.xylem/worktrees"
-rm -f "$XYLEM_DTU_WORKDIR/.xylem/queue.jsonl" "$XYLEM_DTU_WORKDIR/.xylem/queue.jsonl.lock"
+rm -f "$XYLEM_DTU_WORKDIR/.xylem/state/queue.jsonl" "$XYLEM_DTU_WORKDIR/.xylem/state/queue.jsonl.lock"
 
 # Re-materialize the environment
 eval "$("$XYLEM_BIN" dtu env \

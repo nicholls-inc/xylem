@@ -507,7 +507,7 @@ violations := []surface.Violation{
 
 **Action:** Inspect the `Runner` struct after `cmdDrain` constructs it, before `r.Drain()` is called.
 
-**Expected outcome:** `r.Intermediary` is non-nil. `r.AuditLog` is non-nil. The audit log path is `filepath.Join(cfg.StateDir, "audit.jsonl")` (the default). The intermediary's policies include the default policy with at least the `file_write` deny rule for `.xylem/HARNESS.md`.
+**Expected outcome:** `r.Intermediary` is non-nil. `r.AuditLog` is non-nil. The audit log path is `config.RuntimePath(cfg.StateDir, "audit.jsonl")` (which resolves to `filepath.Join(cfg.StateDir, "state", "audit.jsonl")` in the standard layout). The intermediary's policies include the default policy with at least the `file_write` deny rule for `.xylem/HARNESS.md`.
 
 **Verification:** In a unit test that stubs the queue and CommandRunner, assert `r.Intermediary != nil` and `r.AuditLog != nil` after construction.
 

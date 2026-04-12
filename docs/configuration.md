@@ -9,12 +9,14 @@ xylem looks for `.xylem.yml` in the root of your repository. Run `xylem init` to
 ```
 your-repo/
   .xylem.yml          <-- configuration file
-  .xylem/              <-- state directory (queue, workflows, prompts, phase outputs)
-    queue.jsonl
+  .xylem/              <-- xylem control plane + runtime root
     HARNESS.md
     workflows/
     prompts/
-    phases/
+    state/
+      queue.jsonl
+      audit.jsonl
+      phases/
 ```
 
 ## Minimal config
@@ -78,7 +80,7 @@ timeout: "30m"          # per-session timeout (Go duration string)
 # ---------------------------------------------------------------------------
 # State and branch management
 # ---------------------------------------------------------------------------
-state_dir: ".xylem"     # directory for queue, workflows, prompts, phase outputs
+state_dir: ".xylem"     # control-plane directory; runtime files live under state/
 default_branch: "main"  # branch to create worktrees from (auto-detected if omitted)
 cleanup_after: "168h"   # remove worktrees older than this (default: 7 days)
 
@@ -123,7 +125,7 @@ daemon:
 | `concurrency` | integer | `2` | No | Maximum number of simultaneous sessions. Must be greater than 0. |
 | `max_turns` | integer | `50` | No | Maximum turns per prompt phase or prompt-only run. Must be greater than 0. |
 | `timeout` | string | `"30m"` | No | Per-session timeout. Must be a valid Go duration string and at least `30s`. |
-| `state_dir` | string | `".xylem"` | No | Directory for queue file, workflows, prompts, and phase outputs. |
+| `state_dir` | string | `".xylem"` | No | Control-plane directory. In the standard repo layout, runtime files are resolved under `<state_dir>/state/`. |
 | `default_branch` | string | auto-detected | No | Git branch to create worktrees from. If omitted, xylem detects it from the repository. |
 | `cleanup_after` | string | `"168h"` | No | Age threshold for worktree cleanup. Must be a valid Go duration string. |
 | `llm` | string | `"claude"` | No | Default LLM provider. Valid values: `claude`, `copilot`. |
@@ -144,7 +146,7 @@ daemon:
 | `stall_monitor` | object | see below | No | Deterministic self-monitoring thresholds for phase stalls, idle-with-backlog detection, and orphan repair. |
 | `auto_upgrade` | boolean | `false` | No | Enables periodic self-upgrade checks for the daemon binary. |
 | `upgrade_interval` | string | `"5m"` | No | How often the daemon re-runs auto-upgrade checks while the loop is running. Must be a valid Go duration string. |
-| `auto_merge` | boolean | `false` | No | Enables the merge-ready Copilot review + auto-merge cycle for xylem-authored PRs. |
+| `auto_merge` | boolean | `false` | No | Enables the merge-ready Copilot review + auto-merge cycle for xylem-authored PRs. Requires an active profile or checked-in workflow set that includes at least one `class: ops` workflow. |
 | `auto_merge_repo` | string | current repo remote | No | Optional `owner/name` override for auto-merge GitHub operations. |
 | `auto_merge_labels` | list of strings | `["ready-to-merge"]` | No | Labels a PR must carry before the daemon considers it eligible for auto-merge. Blank entries are ignored. |
 | `auto_merge_branch_pattern` | string | `".*"` | No | Regular expression applied to the PR head branch. Only matching branches participate in daemon auto-merge. |
@@ -249,7 +251,7 @@ sources:
         ref: sota-gap-analysis
 ```
 
-The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
+The built-in `context-weight-audit` workflow is another `scheduled` use case: it reads persisted run summaries from `<state_dir>/state/phases/`, writes `context-weight-audit.{json,md}` under `<state_dir>/<harness.review.output_dir>/`, and opens de-duplicated GitHub hygiene issues for repeated high-footprint findings.
 
 `harness-gap-analysis` is a sibling built-in scheduled workflow for xylem self-hosting. It reads existing daemon telemetry (for example `<state_dir>/daemon.log`), current GitHub state, and git drift, then writes `harness-gap-analysis.{json,md}` plus a durable issue-dedup state file under `<state_dir>/<harness.review.output_dir>/`.
 
@@ -295,9 +297,11 @@ To opt out, omit or delete the scheduled `continuous-improvement` source from yo
 1. the scheduled helper checks the release PR age and queued commit count, then adds `ready-to-merge`;
 2. the daemon auto-merge loop performs the usual mergeability, green-CI, and review checks before merging.
 
-The bundled `self-hosting-xylem` profile scaffolds that full contract for you: it installs the `release-cadence` scheduled source and narrows `daemon.auto_merge_branch_pattern` to xylem issue branches plus `release-please`, so unrelated human-authored PRs stay outside the auto-admin-merge path.
+The bundled `self-hosting-xylem` profile scaffolds that full contract for you: it installs the `release-cadence` scheduled source and narrows `daemon.auto_merge_branch_pattern` to xylem issue branches plus `release-please`, so unrelated human-authored PRs stay outside the auto-admin-merge path. With `daemon.auto_merge: true`, xylem now also validates that the active profile composition or checked-in workflow set includes an ops-class workflow such as `merge-pr`.
 
 ```yaml
+profiles: [core, self-hosting-xylem]
+
 sources:
   release-cadence:
     type: scheduled
@@ -442,6 +446,7 @@ The `claude` section controls how xylem invokes the Claude CLI for each session.
 - If `claude.flags` contains `--bare`, then `claude.env` must include a non-empty `ANTHROPIC_API_KEY`. The `--bare` flag disables Claude's built-in authentication, so you must provide your own API key.
 - `claude.template` is no longer supported and produces a hard error if present. Migrate to phase-based workflows in `<state_dir>/workflows/`.
 - `claude.allowed_tools` is no longer supported and produces a hard error if present. Define allowed tools in workflow phase definitions instead.
+- Phase `allowed_tools` are resolved against the harness tool catalog before xylem invokes the provider CLI. When a prompt phase omits `allowed_tools`, xylem derives the role's default tool set instead of leaving the provider unrestricted.
 
 ### Copilot session settings
 
@@ -469,7 +474,7 @@ When `daemon.auto_upgrade` is enabled, start the daemon from the **root of a ded
 
 ### Harness settings
 
-The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, and audit logging.
+The `harness` section configures agent safety guardrails: protected file surfaces, policy rules, phase tool-permission roles, and audit logging.
 
 When `harness.policy.rules` is empty, xylem installs a default policy that denies writes to protected control surfaces and otherwise allows the actions the runner currently classifies, so autonomous drains can finish without a built-in approval pause. Today that boundary is narrow: every phase is classified as `phase_execute` or `external_command`, and the runner may additionally emit `git_commit`, `git_push`, and `pr_create` when it detects those publication steps in rendered prompts or commands. The same `harness.protected_surfaces.paths` list also drives the worktree's read-only hardening and the runner's post-phase surface verification.
 
@@ -486,7 +491,9 @@ When `harness.policy.rules` is empty, xylem installs a default policy that denie
 |-------|------|---------|----------|-------------|
 | `harness.protected_surfaces.paths` | list of strings | `[".xylem/HARNESS.md", ".xylem.yml", ".xylem/workflows/*.yaml", ".xylem/prompts/*/*.md"]` | No | Glob patterns for files agents cannot modify. Set to `["none"]` to disable all surface protections. |
 | `harness.policy.rules` | list of objects | `[]` | No | Policy rules for action authorization. Each rule has `action`, `resource`, and `effect`. |
-| `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the state directory. |
+| `harness.tool_permissions.phase_roles` | map of string to string | `{}` | No | Exact phase-name to role override for prompt-phase tool resolution. If unset, xylem derives the default role from the workflow class (`delivery` -> `delivery`; `harness-maintenance`/`ops` -> `housekeeping`) and only falls back to phase-name heuristics when no workflow class is available. |
+| `harness.tool_permissions.roles` | map of objects | `{}` | No | Role permission overrides for the phase tool catalog. Each role object may set `max_scope` (`read_only`, `write_with_approval`, `full_autonomy`) and `allowed_tools`. Custom roles must set `max_scope`. |
+| `harness.audit_log` | string | `"audit.jsonl"` | No | Path to the audit log file for policy decisions, relative to the runtime state root (`<state_dir>/state/` in the standard layout). |
 | `harness.review.enabled` | bool | `false` | No | Enables recurring harness review generation after drain runs. Manual `xylem review` works regardless. |
 | `harness.review.cadence` | string | `"manual"` | No | Automatic review cadence. Valid values: `manual`, `every_drain`, `every_n_runs`. |
 | `harness.review.every_n_runs` | integer | `10` | No | When cadence is `every_n_runs`, regenerate after this many new reviewed runs. |
@@ -533,11 +540,11 @@ harness:
     output_dir: "reviews"
 ```
 
-`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs. Built-in `harness-gap-analysis` runs do the same for `harness-gap-analysis.{json,md}` while surfacing recurring daemon-operation gaps such as drift, idle backlog episodes, stale conflict labels, and parked failed backlog. When failed or timed-out runs also have `<state_dir>/phases/<vessel-id>/failure-review.json`, the review loader reconstructs those recovery decisions alongside the existing evidence/cost/eval artifacts.
+`xylem review` writes `harness-review.json` and `harness-review.md` under `<state_dir>/<output_dir>/`. Automatic reviews are best-effort: failed review generation never fails `drain` or `daemon`. Built-in context-weight audits also write `context-weight-audit.json`, `context-weight-audit.md`, and a durable issue-dedup state file in the same directory when a scheduled `context-weight-audit` vessel runs. Built-in `harness-gap-analysis` runs do the same for `harness-gap-analysis.{json,md}` while surfacing recurring daemon-operation gaps such as drift, idle backlog episodes, stale conflict labels, and parked failed backlog. When failed or timed-out runs also have `<state_dir>/state/phases/<vessel-id>/failure-review.json`, the review loader reconstructs those recovery decisions alongside the existing evidence/cost/eval artifacts.
 
 ### Observability settings
 
-The `observability` section controls OpenTelemetry instrumentation for tracing agent execution. Tracing requires an OTLP endpoint — when no endpoint is configured, tracing is silently disabled (no stdout fallback).
+The `observability` section controls OpenTelemetry instrumentation for tracing agent execution. Tracing requires an OTLP endpoint — when no endpoint is configured, tracing is silently disabled (no stdout fallback). This endpoint is used for traces only; xylem keeps daemon logs on stderr and `daemon.log`, and the bundled Jaeger dev stack does not ingest OTLP logs.
 
 | Field | Type | Default | Required | Description |
 |-------|------|---------|----------|-------------|

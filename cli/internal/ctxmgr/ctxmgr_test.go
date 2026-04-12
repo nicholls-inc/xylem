@@ -373,6 +373,64 @@ func TestCompact(t *testing.T) {
 	}
 }
 
+func TestCompactToFit(t *testing.T) {
+	tests := []struct {
+		name      string
+		window    Window
+		config    CompactionConfig
+		wantNames []string
+		wantUsed  int
+	}{
+		{
+			name: "keeps highest priority working segments that fit",
+			window: Window{
+				Segments: []Segment{
+					{Name: "old", Tokens: 400, Priority: 10},
+					{Name: "recent", Tokens: 400, Priority: 30},
+					{Name: "gate", Tokens: 100, Priority: 20},
+				},
+				MaxTokens: 500,
+			},
+			config:    CompactionConfig{Threshold: 0.95, PreserveDurable: true},
+			wantNames: []string{"recent", "gate"},
+			wantUsed:  500,
+		},
+		{
+			name: "preserves durable segments when they alone exceed budget",
+			window: Window{
+				Segments: []Segment{
+					{Name: "harness", Tokens: 600, Durable: true},
+					{Name: "history", Tokens: 300, Priority: 5},
+				},
+				MaxTokens: 500,
+			},
+			config:    CompactionConfig{Threshold: 0.95, PreserveDurable: true},
+			wantNames: []string{"harness"},
+			wantUsed:  600,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := CompactToFit(&tt.window, tt.config)
+			if got == nil {
+				t.Fatal("CompactToFit() = nil")
+			}
+			if got.UsedTokens() != tt.wantUsed {
+				t.Fatalf("UsedTokens() = %d, want %d", got.UsedTokens(), tt.wantUsed)
+			}
+			if len(got.Segments) != len(tt.wantNames) {
+				t.Fatalf("len(Segments) = %d, want %d", len(got.Segments), len(tt.wantNames))
+			}
+			for i, want := range tt.wantNames {
+				if got.Segments[i].Name != want {
+					t.Fatalf("Segments[%d].Name = %q, want %q", i, got.Segments[i].Name, want)
+				}
+			}
+		})
+	}
+}
+
 func TestSelectStrategy(t *testing.T) {
 	tests := []struct {
 		name           string
