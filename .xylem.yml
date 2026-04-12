@@ -124,7 +124,7 @@ sources:
   sota-gap:
     type: scheduled
     repo: nicholls-inc/xylem
-    schedule: "@weekly"
+    schedule: "@daily"
     timeout: "90m"
     tasks:
       weekly-self-gap-analysis:
@@ -134,7 +134,7 @@ sources:
   continuous-simplicity:
     type: scheduled
     repo: nicholls-inc/xylem
-    schedule: "@weekly"
+    schedule: "@daily"
     timeout: "90m"
     tasks:
       weekly-continuous-simplicity:
@@ -164,7 +164,7 @@ sources:
   backlog-refinement:
     type: scheduled
     repo: nicholls-inc/xylem
-    schedule: "@daily"
+    schedule: "2h"
     timeout: "60m"
     tasks:
       daily-backlog-refinement:
@@ -227,13 +227,13 @@ concurrency:
   global: 3
   per_class:
     backlog-refinement: 1
-max_turns: 80
+max_turns: 100
 timeout: "45m"
 state_dir: ".xylem"
 
 # llm selects the global default LLM provider: "claude" (default) or "copilot"
 llm: claude
-model: gpt-5.4
+model: claude-sonnet-4-6
 
 claude:
   command: "claude"
