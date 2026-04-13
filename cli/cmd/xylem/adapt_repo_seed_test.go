@@ -11,8 +11,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func adaptRepoSearchCallForState(repo, state string) string {
-	return "gh search issues --repo " + repo + " --state " + state + " --json number,title,url --limit 100 --search " + adaptRepoIssueTitle
+func adaptRepoListCallForState(repo, state string) string {
+	return "gh issue list --repo " + repo + " --state " + state + " --label " + adaptRepoSeedLabel + " --json number,title,url --limit 100"
 }
 
 func adaptRepoCreateCall(repo string) string {
@@ -52,9 +52,9 @@ func TestSmoke_S3_DaemonSeedingCreatesIssueAndMarkerOnFreshRepo(t *testing.T) {
 	}
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCallForState("owner/repo", "open"):   []byte("[]"),
-			adaptRepoSearchCallForState("owner/repo", "closed"): []byte("[]"),
-			adaptRepoCreateCall("owner/repo"):                   []byte("https://github.com/owner/repo/issues/34\n"),
+			adaptRepoListCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoListCallForState("owner/repo", "closed"): []byte("[]"),
+			adaptRepoCreateCall("owner/repo"):                 []byte("https://github.com/owner/repo/issues/34\n"),
 		},
 	}
 
@@ -84,8 +84,8 @@ func TestSmoke_S4_DaemonSeedingDedupesMatchingClosedIssueByTitle(t *testing.T) {
 	}
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCallForState("owner/repo", "open"):   []byte("[]"),
-			adaptRepoSearchCallForState("owner/repo", "closed"): []byte(`[{"number":21,"title":"[xylem] adapt harness to this repository","url":"https://github.com/owner/repo/issues/21"}]`),
+			adaptRepoListCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoListCallForState("owner/repo", "closed"): []byte(`[{"number":21,"title":"[xylem] adapt harness to this repository","url":"https://github.com/owner/repo/issues/21"}]`),
 		},
 	}
 
@@ -114,9 +114,9 @@ func TestSmoke_S5_AdaptRepoSeedMarkerPreventsReseedingOnSubsequentBoots(t *testi
 	}
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCallForState("owner/repo", "open"):   []byte("[]"),
-			adaptRepoSearchCallForState("owner/repo", "closed"): []byte("[]"),
-			adaptRepoCreateCall("owner/repo"):                   []byte("https://github.com/owner/repo/issues/34\n"),
+			adaptRepoListCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoListCallForState("owner/repo", "closed"): []byte("[]"),
+			adaptRepoCreateCall("owner/repo"):                 []byte("https://github.com/owner/repo/issues/34\n"),
 		},
 	}
 
@@ -162,8 +162,8 @@ func TestEnsureAdaptRepoSeededDedupesClosedIssues(t *testing.T) {
 	}
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCallForState("owner/repo", "open"):   []byte("[]"),
-			adaptRepoSearchCallForState("owner/repo", "closed"): []byte(`[{"number":21,"title":"[xylem] adapt harness to this repository","url":"https://github.com/owner/repo/issues/21"}]`),
+			adaptRepoListCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoListCallForState("owner/repo", "closed"): []byte(`[{"number":21,"title":"[xylem] adapt harness to this repository","url":"https://github.com/owner/repo/issues/21"}]`),
 		},
 	}
 
@@ -189,7 +189,7 @@ func TestEnsureAdaptRepoSeededDedupesClosedIssues(t *testing.T) {
 func TestFindExistingAdaptRepoIssueStopsAfterOpenMatch(t *testing.T) {
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCallForState("owner/repo", "open"): []byte(`[{"number":13,"title":"[xylem] adapt harness to this repository","url":"https://github.com/owner/repo/issues/13"}]`),
+			adaptRepoListCallForState("owner/repo", "open"): []byte(`[{"number":13,"title":"[xylem] adapt harness to this repository","url":"https://github.com/owner/repo/issues/13"}]`),
 		},
 	}
 
@@ -198,4 +198,19 @@ func TestFindExistingAdaptRepoIssueStopsAfterOpenMatch(t *testing.T) {
 	require.NotNil(t, issue)
 	assert.Equal(t, 13, issue.Number)
 	assert.Len(t, runner.calls, 1)
+}
+
+func TestFindAdaptRepoIssueByStateHandlesEmptyList(t *testing.T) {
+	// gh issue list returns [] with exit 0 on zero results.
+	// Confirms no error is returned and nil issue is returned when both states are empty.
+	runner := &seedRunnerStub{
+		outputs: map[string][]byte{
+			adaptRepoListCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoListCallForState("owner/repo", "closed"): []byte("[]"),
+		},
+	}
+
+	issue, err := findExistingAdaptRepoIssue(context.Background(), runner, "owner/repo")
+	require.NoError(t, err)
+	assert.Nil(t, issue)
 }

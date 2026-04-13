@@ -171,20 +171,20 @@ func findExistingAdaptRepoIssue(ctx context.Context, runner adaptRepoSeedRunner,
 }
 
 func findAdaptRepoIssueByState(ctx context.Context, runner adaptRepoSeedRunner, repo, state string) (*adaptRepoIssue, error) {
-	out, err := runner.Run(ctx, "gh", "search", "issues",
+	out, err := runner.Run(ctx, "gh", "issue", "list",
 		"--repo", repo,
 		"--state", state,
+		"--label", adaptRepoSeedLabel,
 		"--json", "number,title,url",
 		"--limit", "100",
-		"--search", adaptRepoIssueTitle,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("search adapt-repo seed issue in %s state: %w", state, err)
+		return nil, fmt.Errorf("list adapt-repo seed issues in %s state: %w", state, err)
 	}
 
 	var issues []adaptRepoIssue
 	if err := json.Unmarshal(out, &issues); err != nil {
-		return nil, fmt.Errorf("parse adapt-repo seed issue search output for %s state: %w", state, err)
+		return nil, fmt.Errorf("parse adapt-repo seed issue list output for %s state: %w", state, err)
 	}
 	for _, issue := range issues {
 		if issue.Title == adaptRepoIssueTitle {

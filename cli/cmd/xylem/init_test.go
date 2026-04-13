@@ -443,9 +443,9 @@ func TestSmoke_S6_InitSeedCreatesAdaptRepoMarkerSynchronously(t *testing.T) {
 
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCallForState("owner/name", "open"):   []byte("[]"),
-			adaptRepoSearchCallForState("owner/name", "closed"): []byte("[]"),
-			adaptRepoCreateCall("owner/name"):                   []byte("https://github.com/owner/name/issues/12\n"),
+			adaptRepoListCallForState("owner/name", "open"):   []byte("[]"),
+			adaptRepoListCallForState("owner/name", "closed"): []byte("[]"),
+			adaptRepoCreateCall("owner/name"):                 []byte("https://github.com/owner/name/issues/12\n"),
 		},
 	}
 

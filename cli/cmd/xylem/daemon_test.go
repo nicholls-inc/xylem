@@ -317,7 +317,7 @@ func TestSmoke_S7_DaemonStartupContinuesWhenAdaptRepoSearchFails(t *testing.T) {
 	markerPath := adaptRepoSeedMarkerPath(cfg.StateDir)
 	runner := &seedRunnerStub{
 		errors: map[string]error{
-			adaptRepoSearchCallForState("owner/repo", "open"): fmt.Errorf("gh unavailable"),
+			adaptRepoListCallForState("owner/repo", "open"): fmt.Errorf("gh unavailable"),
 		},
 	}
 
@@ -346,8 +346,8 @@ func TestSmoke_S8_DaemonStartupLeavesMarkerAbsentWhenAdaptRepoCreateFails(t *tes
 	logBuf := withBufferedDefaultLogger(t)
 	runner := &seedRunnerStub{
 		outputs: map[string][]byte{
-			adaptRepoSearchCallForState("owner/repo", "open"):   []byte("[]"),
-			adaptRepoSearchCallForState("owner/repo", "closed"): []byte("[]"),
+			adaptRepoListCallForState("owner/repo", "open"):   []byte("[]"),
+			adaptRepoListCallForState("owner/repo", "closed"): []byte("[]"),
 		},
 		errors: map[string]error{
 			adaptRepoCreateCall("owner/repo"): fmt.Errorf("gh create failed"),
