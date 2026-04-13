@@ -227,6 +227,174 @@ func LoadWithDigest(path string) (*Workflow, string, error) {
 	return s, digest, nil
 }
 
+// LoadFromBytes parses and validates a workflow definition from raw YAML bytes.
+// It performs all structural checks (phase names, gate configs, LLM settings,
+// dependency graphs, etc.) but skips prompt-file existence checks, since there
+// is no filesystem context. name must match the "name" field in data.
+func LoadFromBytes(name string, data []byte) (*Workflow, error) {
+	var raw workflowYAML
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse workflow yaml %q: %w", name, err)
+	}
+
+	s, err := workflowFromYAML(raw)
+	if err != nil {
+		return nil, fmt.Errorf("parse workflow yaml %q: %w", name, err)
+	}
+
+	if err := s.validateNoFS(name); err != nil {
+		return nil, fmt.Errorf("validate workflow %q: %w", name, err)
+	}
+
+	return s, nil
+}
+
+// validateNoFS performs the same structural checks as Validate but omits
+// prompt-file existence checks that require a real filesystem.
+func (s *Workflow) validateNoFS(name string) error {
+	if s.Name == "" {
+		return fmt.Errorf(`"name" is required`)
+	}
+
+	if s.Class == "" {
+		s.Class = policy.Delivery
+	} else if parsedClass, err := policy.ParseClass(string(s.Class)); err != nil {
+		return fmt.Errorf(`"class" is invalid: %w`, err)
+	} else {
+		s.Class = parsedClass
+	}
+
+	if err := validateLegacyClassConsistency(s); err != nil {
+		return err
+	}
+
+	if s.Name != name {
+		return fmt.Errorf("workflow name %q does not match filename %q", s.Name, name+".yaml")
+	}
+
+	if len(s.Phases) == 0 {
+		return fmt.Errorf(`"phases" is required`)
+	}
+
+	if err := validateLLM(s.LLM, "workflow"); err != nil {
+		return err
+	}
+
+	allNames := make(map[string]bool, len(s.Phases))
+	for _, p := range s.Phases {
+		allNames[p.Name] = true
+	}
+
+	seen := make(map[string]bool, len(s.Phases))
+	for _, p := range s.Phases {
+		if p.Name == "" {
+			return fmt.Errorf("each phase must have a non-empty name")
+		}
+
+		if seen[p.Name] {
+			return fmt.Errorf("duplicate phase name %q", p.Name)
+		}
+		seen[p.Name] = true
+
+		if !validPhaseName.MatchString(p.Name) {
+			return fmt.Errorf("phase name %q is invalid; must start with a lowercase letter and contain only lowercase letters, digits, and underscores", p.Name)
+		}
+
+		switch p.Type {
+		case "", "prompt":
+			if p.PromptFile == "" {
+				return fmt.Errorf("phase %q: prompt_file is required", p.Name)
+			}
+			if p.MaxTurns <= 0 {
+				return fmt.Errorf("phase %q: max_turns must be greater than 0", p.Name)
+			}
+		case "command":
+			if strings.TrimSpace(p.Run) == "" {
+				return fmt.Errorf("phase %q: run is required for command phase", p.Name)
+			}
+		default:
+			return fmt.Errorf("phase %q: type must be \"prompt\" or \"command\", got %q", p.Name, p.Type)
+		}
+
+		if p.Gate != nil {
+			if err := validateGate(p.Name, p.Gate); err != nil {
+				return err
+			}
+		}
+
+		if p.Evaluator != nil {
+			if err := validatePhaseEvaluatorNoFS(p); err != nil {
+				return err
+			}
+		}
+
+		if p.NoOp != nil {
+			if err := validateNoOp(p.Name, p.NoOp); err != nil {
+				return err
+			}
+		}
+
+		if err := validatePhaseOutput(p); err != nil {
+			return err
+		}
+
+		if p.AllowedTools != nil && *p.AllowedTools == "" {
+			return fmt.Errorf("phase %q: allowed_tools must not be empty when specified", p.Name)
+		}
+
+		if err := validateLLM(p.LLM, fmt.Sprintf("phase %q", p.Name)); err != nil {
+			return err
+		}
+
+		seenDeps := make(map[string]bool, len(p.DependsOn))
+		for _, dep := range p.DependsOn {
+			if seenDeps[dep] {
+				return fmt.Errorf("phase %q: depends_on contains duplicate entry %q", p.Name, dep)
+			}
+			seenDeps[dep] = true
+			if dep == p.Name {
+				return fmt.Errorf("phase %q: depends_on contains self-reference", p.Name)
+			}
+			if !allNames[dep] {
+				return fmt.Errorf("phase %q: depends_on references unknown phase %q", p.Name, dep)
+			}
+		}
+	}
+
+	return validateDependencyCycles(s.Phases)
+}
+
+// validatePhaseEvaluatorNoFS validates a phase evaluator without checking
+// that the evaluator prompt file exists on disk.
+func validatePhaseEvaluatorNoFS(p Phase) error {
+	if p.Type == "command" {
+		return fmt.Errorf("phase %q: evaluator is only supported for prompt phases", p.Name)
+	}
+	if p.Evaluator == nil {
+		return nil
+	}
+	if strings.TrimSpace(p.Evaluator.PromptFile) == "" {
+		return fmt.Errorf("phase %q: evaluator.prompt_file is required", p.Name)
+	}
+	if p.Evaluator.MaxTurns <= 0 {
+		return fmt.Errorf("phase %q: evaluator.max_turns must be greater than 0", p.Name)
+	}
+	if p.Evaluator.AllowedTools != nil && *p.Evaluator.AllowedTools == "" {
+		return fmt.Errorf("phase %q: evaluator.allowed_tools must not be empty when specified", p.Name)
+	}
+	if err := validateLLM(p.Evaluator.LLM, fmt.Sprintf("phase %q evaluator", p.Name)); err != nil {
+		return err
+	}
+	if err := evaluator.ValidateConfig(evaluator.EvalConfig{
+		Criteria:      p.Evaluator.Criteria,
+		MaxIterations: p.Evaluator.MaxIterations,
+		PassThreshold: p.Evaluator.PassThreshold,
+	}); err != nil {
+		return fmt.Errorf("phase %q: evaluator: %w", p.Name, err)
+	}
+	return nil
+}
+
 func digestWorkflowData(data []byte) string {
 	sum := sha256.Sum256(data)
 	return fmt.Sprintf("wf-%x", sum)
