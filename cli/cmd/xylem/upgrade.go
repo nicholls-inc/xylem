@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"fmt"
 	"io"
@@ -110,10 +111,26 @@ func gitPull(repoDir string) error {
 		return fmt.Errorf("git fetch: %w\n%s", err, out)
 	}
 
+	// Preserve .xylem.yml across the hard reset so user customisations are not
+	// discarded when the file has local changes that are ahead of origin/main.
+	configPath := filepath.Join(repoDir, ".xylem.yml")
+	savedConfig, _ := os.ReadFile(configPath) // nil if missing — handled below
+
 	reset := exec.Command("git", "reset", "--hard", "origin/main")
 	reset.Dir = repoDir
 	if out, err := reset.CombinedOutput(); err != nil {
 		return fmt.Errorf("git reset: %w\n%s", err, out)
+	}
+
+	if savedConfig != nil {
+		postReset, _ := os.ReadFile(configPath)
+		if !bytes.Equal(savedConfig, postReset) {
+			if err := os.WriteFile(configPath, savedConfig, 0o644); err != nil {
+				slog.Warn("daemon upgrade: failed to restore .xylem.yml after reset", "error", err)
+			} else {
+				slog.Info("daemon upgrade: restored .xylem.yml after git reset --hard")
+			}
+		}
 	}
 
 	return nil

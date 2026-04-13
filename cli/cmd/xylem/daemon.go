@@ -252,7 +252,7 @@ func maybeResyncProfileAssets(cfg *config.Config) error {
 	slog.Info("daemon profile assets stale; re-syncing",
 		"embedded_digest", embedded,
 		"runtime_digest", runtime)
-	if err := syncProfileAssets(cfg.StateDir, composed, true); err != nil {
+	if err := resyncProfileAssets(cfg.StateDir, composed); err != nil {
 		return fmt.Errorf("re-sync profile assets: %w", err)
 	}
 	slog.Info("daemon profile assets re-synced")
