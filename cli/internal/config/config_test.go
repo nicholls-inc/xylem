@@ -545,6 +545,86 @@ func TestValidateRejectsInvalidPhaseStallThreshold(t *testing.T) {
 	requireErrorContains(t, cfg.Validate(), "daemon.stall_monitor.phase_stall_threshold")
 }
 
+func TestValidateScheduledSourceRejectsSkipFirstRun(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"weekly-jobs": {
+			Type:         "scheduled",
+			Repo:         "owner/repo",
+			Schedule:     "@weekly",
+			SkipFirstRun: true,
+			Tasks: map[string]Task{
+				"job": {Workflow: "some-workflow"},
+			},
+		},
+	}
+
+	requireErrorContains(t, cfg.Validate(), `source "weekly-jobs" (scheduled): skip_first_run is only valid for type: schedule`)
+}
+
+func TestValidateGitHubSourceRejectsSkipFirstRun(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"my-github": {
+			Type:         "github",
+			Repo:         "owner/repo",
+			SkipFirstRun: true,
+			Tasks: map[string]Task{
+				"fix": {Labels: []string{"xylem"}, Workflow: "fix-bug"},
+			},
+		},
+	}
+	requireErrorContains(t, cfg.Validate(), `source "my-github" (github): skip_first_run is only valid for type: schedule`)
+}
+
+func TestValidateGitHubPREventsSourceRejectsSkipFirstRun(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"my-pr-events": {
+			Type:         "github-pr-events",
+			Repo:         "owner/repo",
+			SkipFirstRun: true,
+			Tasks: map[string]Task{
+				"review": {
+					Workflow: "fix-bug",
+					On:       &PREventsConfig{Labels: []string{"xylem"}},
+				},
+			},
+		},
+	}
+	requireErrorContains(t, cfg.Validate(), `source "my-pr-events" (github-pr-events): skip_first_run is only valid for type: schedule`)
+}
+
+func TestValidateGitHubMergeSourceRejectsSkipFirstRun(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"my-merge": {
+			Type:         "github-merge",
+			Repo:         "owner/repo",
+			SkipFirstRun: true,
+			Tasks: map[string]Task{
+				"merge": {Workflow: "merge-pr"},
+			},
+		},
+	}
+	requireErrorContains(t, cfg.Validate(), `source "my-merge" (github-merge): skip_first_run is only valid for type: schedule`)
+}
+
+func TestValidateGitHubActionsSourceRejectsSkipFirstRun(t *testing.T) {
+	cfg := validConfig()
+	cfg.Sources = map[string]SourceConfig{
+		"my-actions": {
+			Type:         "github-actions",
+			Repo:         "owner/repo",
+			SkipFirstRun: true,
+			Tasks: map[string]Task{
+				"fix": {Workflow: "fix-bug"},
+			},
+		},
+	}
+	requireErrorContains(t, cfg.Validate(), `source "my-actions" (github-actions): skip_first_run is only valid for type: schedule`)
+}
+
 func TestValidateScheduleSourceRejectsMalformedCadence(t *testing.T) {
 	cfg := validConfig()
 	cfg.Sources = map[string]SourceConfig{

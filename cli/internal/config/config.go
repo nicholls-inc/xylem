@@ -118,16 +118,17 @@ type TierRouting struct {
 }
 
 type SourceConfig struct {
-	Type     string          `yaml:"type"`
-	Repo     string          `yaml:"repo,omitempty"`
-	Schedule string          `yaml:"schedule,omitempty"`
-	Cadence  string          `yaml:"cadence,omitempty"`
-	Workflow string          `yaml:"workflow,omitempty"`
-	LLM      string          `yaml:"llm,omitempty"`
-	Model    string          `yaml:"model,omitempty"`
-	Timeout  string          `yaml:"timeout,omitempty"`
-	Exclude  []string        `yaml:"exclude,omitempty"`
-	Tasks    map[string]Task `yaml:"tasks,omitempty"`
+	Type         string          `yaml:"type"`
+	Repo         string          `yaml:"repo,omitempty"`
+	Schedule     string          `yaml:"schedule,omitempty"`
+	Cadence      string          `yaml:"cadence,omitempty"`
+	Workflow     string          `yaml:"workflow,omitempty"`
+	LLM          string          `yaml:"llm,omitempty"`
+	Model        string          `yaml:"model,omitempty"`
+	Timeout      string          `yaml:"timeout,omitempty"`
+	Exclude      []string        `yaml:"exclude,omitempty"`
+	Tasks        map[string]Task `yaml:"tasks,omitempty"`
+	SkipFirstRun bool            `yaml:"skip_first_run,omitempty"`
 }
 
 type StatusLabels struct {
@@ -1803,6 +1804,9 @@ func validateGitHubSource(name string, src SourceConfig) error {
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		return fmt.Errorf("source %q (github): repo must be in owner/name format", name)
 	}
+	if src.SkipFirstRun {
+		return fmt.Errorf("source %q (github): skip_first_run is only valid for type: schedule", name)
+	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (github): at least one task is required", name)
 	}
@@ -1825,6 +1829,9 @@ func validateGitHubPREventsSource(name string, src SourceConfig) error {
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		return fmt.Errorf("source %q (github-pr-events): repo must be in owner/name format", name)
+	}
+	if src.SkipFirstRun {
+		return fmt.Errorf("source %q (github-pr-events): skip_first_run is only valid for type: schedule", name)
 	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (github-pr-events): at least one task is required", name)
@@ -1872,6 +1879,9 @@ func validateGitHubMergeSource(name string, src SourceConfig) error {
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		return fmt.Errorf("source %q (github-merge): repo must be in owner/name format", name)
 	}
+	if src.SkipFirstRun {
+		return fmt.Errorf("source %q (github-merge): skip_first_run is only valid for type: schedule", name)
+	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (github-merge): at least one task is required", name)
 	}
@@ -1898,6 +1908,9 @@ func validateScheduledSource(name string, src SourceConfig) error {
 	if _, err := parseScheduleValue(src.Schedule); err != nil {
 		return fmt.Errorf("source %q (scheduled): schedule is invalid: %w", name, err)
 	}
+	if src.SkipFirstRun {
+		return fmt.Errorf("source %q (scheduled): skip_first_run is only valid for type: schedule", name)
+	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (scheduled): at least one task is required", name)
 	}
@@ -1917,6 +1930,9 @@ func validateGitHubActionsSource(name string, src SourceConfig) error {
 	parts := strings.Split(repo, "/")
 	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
 		return fmt.Errorf("source %q (github-actions): repo must be in owner/name format", name)
+	}
+	if src.SkipFirstRun {
+		return fmt.Errorf("source %q (github-actions): skip_first_run is only valid for type: schedule", name)
 	}
 	if len(src.Tasks) == 0 {
 		return fmt.Errorf("source %q (github-actions): at least one task is required", name)
