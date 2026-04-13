@@ -206,7 +206,7 @@ notifications:
     enabled: true
     repo: nicholls-inc/xylem
     category: "Status Reports"
-    interval: "1h"
+    interval: "@daily"
   telegram:
     enabled: true
     token_env: "TELEGRAM_BOT_TOKEN"
