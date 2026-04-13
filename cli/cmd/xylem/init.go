@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -268,6 +269,68 @@ func syncProfileAssets(stateDir string, composed *profiles.ComposedProfile, forc
 		scriptPath := filepath.Join(stateDir, "scripts", filepath.FromSlash(name))
 		if err := writeFileIfNeeded(scriptPath, composed.Scripts[name], force); err != nil {
 			return fmt.Errorf("sync script %q: %w", name, err)
+		}
+		if err := os.Chmod(scriptPath, 0o755); err != nil {
+			return fmt.Errorf("chmod script %q: %w", name, err)
+		}
+	}
+
+	return nil
+}
+
+// writeFileIfNotModified writes content to path with resync-safe semantics:
+// - If the file does not exist, it is created.
+// - If the file exists and its content matches the incoming content, it is a no-op.
+// - If the file exists with different content (user-modified), a warning is logged and the file is left unchanged.
+func writeFileIfNotModified(path string, content []byte) error {
+	existing, err := os.ReadFile(path)
+	if err == nil {
+		if bytes.Equal(existing, content) {
+			return nil // already up to date
+		}
+		// File exists with different content — treat as user-modified, skip.
+		slog.Warn("daemon profile resync: skipping user-modified file", "path", path)
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("read %s: %w", path, err)
+	}
+	// File does not exist — create it.
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("create directory for %s: %w", path, err)
+	}
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		return fmt.Errorf("write %s: %w", path, err)
+	}
+	return nil
+}
+
+// resyncProfileAssets syncs profile workflows, prompts, and scripts using
+// resync-safe semantics: files that exist with user-modified content are
+// preserved and skipped with a warning, while missing files are created.
+// This is used by the daemon on startup to apply embedded profile updates
+// without clobbering user edits.
+func resyncProfileAssets(stateDir string, composed *profiles.ComposedProfile) error {
+	if composed == nil {
+		return fmt.Errorf("resync profile assets: composed profile is required")
+	}
+
+	for _, name := range sortedKeys(composed.Workflows) {
+		if err := writeFileIfNotModified(filepath.Join(stateDir, "workflows", name+".yaml"), composed.Workflows[name]); err != nil {
+			return fmt.Errorf("resync workflow %q: %w", name, err)
+		}
+	}
+
+	for _, name := range sortedKeys(composed.Prompts) {
+		if err := writeFileIfNotModified(filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md"), composed.Prompts[name]); err != nil {
+			return fmt.Errorf("resync prompt %q: %w", name, err)
+		}
+	}
+
+	for _, name := range sortedKeys(composed.Scripts) {
+		scriptPath := filepath.Join(stateDir, "scripts", filepath.FromSlash(name))
+		if err := writeFileIfNotModified(scriptPath, composed.Scripts[name]); err != nil {
+			return fmt.Errorf("resync script %q: %w", name, err)
 		}
 		if err := os.Chmod(scriptPath, 0o755); err != nil {
 			return fmt.Errorf("chmod script %q: %w", name, err)

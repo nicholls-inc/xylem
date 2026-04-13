@@ -1179,16 +1179,19 @@ func TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig(t *testing.T
 }
 
 // TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts verifies
-// that daemonStartup overwrites stale workflow files when the embedded digest
-// differs from the runtime digest.
+// that daemonStartup triggers a resync when the embedded digest differs from
+// the runtime digest: missing files are created and user-modified files are
+// preserved (not overwritten).
 func TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, ".xylem")
 	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "workflows"), 0o755))
-	// Write stale content to one workflow file so the runtime digest differs.
+
+	// Write user-modified content to one workflow file so the runtime digest differs.
+	userContent := []byte("stale: true")
 	require.NoError(t, os.WriteFile(
 		filepath.Join(stateDir, "workflows", "fix-bug.yaml"),
-		[]byte("stale: true"),
+		userContent,
 		0o644,
 	))
 
@@ -1202,17 +1205,28 @@ func TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts(t *testing.
 	err := daemonStartup(context.Background(), cfg, q, nil, &seedRunnerStub{}, false)
 	require.NoError(t, err)
 
-	// Embedded content should have replaced the stale file — assert the exact
-	// embedded bytes, not just that the stale value is gone.
-	composed, composeErr := profiles.Compose("core")
-	require.NoError(t, composeErr)
-	embeddedContent, ok := composed.Workflows["fix-bug"]
-	require.True(t, ok, "core profile must contain fix-bug workflow")
+	// The resync log message must appear — digest drift was detected.
+	assert.Contains(t, logs.String(), "daemon profile assets stale; re-syncing")
 
+	// User-modified content must be preserved — resync does not overwrite files
+	// whose on-disk content differs from the embedded version.
 	data, readErr := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
 	require.NoError(t, readErr)
-	assert.Equal(t, embeddedContent, data, "stale workflow should be replaced with the exact embedded content")
-	assert.Contains(t, logs.String(), "daemon profile assets stale; re-syncing")
+	assert.Equal(t, userContent, data, "user-modified workflow must not be overwritten by resync")
+
+	// A workflow that was absent before resync must be created.
+	composed, composeErr := profiles.Compose("core")
+	require.NoError(t, composeErr)
+	for name, embeddedBytes := range composed.Workflows {
+		if name == "fix-bug" {
+			continue // we intentionally left this one modified
+		}
+		wfPath := filepath.Join(stateDir, "workflows", name+".yaml")
+		wfData, wfErr := os.ReadFile(wfPath)
+		require.NoError(t, wfErr, "missing workflow %q should have been created by resync", name)
+		assert.Equal(t, embeddedBytes, wfData, "newly created workflow %q should match embedded content", name)
+		break // one is enough to confirm the create path works
+	}
 }
 
 // TestSmoke_S50_DaemonStartupSkipsResyncWhenDigestsMatch verifies that

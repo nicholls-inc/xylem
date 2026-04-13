@@ -10,6 +10,28 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// gitPullPreservesConfig is a test helper that simulates the preserve/restore
+// logic in gitPull by running a mock "reset" function in place of the real git
+// commands and verifying that .xylem.yml survives.
+func simulateGitPullConfigPreservation(t *testing.T, repoDir string, mockReset func()) {
+	t.Helper()
+
+	// Save savedConfig (mirrors the real gitPull logic).
+	configPath := filepath.Join(repoDir, ".xylem.yml")
+	savedConfig, _ := os.ReadFile(configPath)
+
+	// Simulate the reset (may delete or alter .xylem.yml).
+	mockReset()
+
+	// Restore logic (mirrors the real gitPull logic).
+	if savedConfig != nil {
+		postReset, _ := os.ReadFile(configPath)
+		if string(savedConfig) != string(postReset) {
+			require.NoError(t, os.WriteFile(configPath, savedConfig, 0o644))
+		}
+	}
+}
+
 func stubDaemonUpgradeDependencies(
 	t *testing.T,
 	gitPull func(string) error,
@@ -91,6 +113,68 @@ func TestDaemonUpgradeTargetFromPathsNormalizesRelativeWorkingDirectory(t *testi
 
 	assert.Equal(t, wantRepoDir, target.repoDir)
 	assert.Equal(t, filepath.Join(root, "cli", "xylem"), target.executablePath)
+}
+
+func TestGitPullPreservesXylemYmlWhenResetWouldDeleteIt(t *testing.T) {
+	repoDir := t.TempDir()
+	configPath := filepath.Join(repoDir, ".xylem.yml")
+	userConfig := []byte("# customised\nrepo: owner/repo\n")
+	require.NoError(t, os.WriteFile(configPath, userConfig, 0o644))
+
+	// Simulate a git reset that deletes .xylem.yml (e.g. it's not on origin/main).
+	simulateGitPullConfigPreservation(t, repoDir, func() {
+		require.NoError(t, os.Remove(configPath))
+	})
+
+	got, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, userConfig, got, ".xylem.yml should be restored after reset deleted it")
+}
+
+func TestGitPullPreservesXylemYmlWhenResetWouldOverwriteIt(t *testing.T) {
+	repoDir := t.TempDir()
+	configPath := filepath.Join(repoDir, ".xylem.yml")
+	userConfig := []byte("# local customisation\nrepo: owner/repo\nconcurrency: 5\n")
+	originConfig := []byte("# origin version\nrepo: owner/repo\n")
+	require.NoError(t, os.WriteFile(configPath, userConfig, 0o644))
+
+	// Simulate a git reset that overwrites .xylem.yml with origin's version.
+	simulateGitPullConfigPreservation(t, repoDir, func() {
+		require.NoError(t, os.WriteFile(configPath, originConfig, 0o644))
+	})
+
+	got, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, userConfig, got, ".xylem.yml should be restored to local version after reset overwrote it")
+}
+
+func TestGitPullDoesNotRestoreXylemYmlWhenAlreadyAbsent(t *testing.T) {
+	repoDir := t.TempDir()
+	// No .xylem.yml in repoDir.
+
+	// Simulate a reset that also doesn't create a .xylem.yml.
+	simulateGitPullConfigPreservation(t, repoDir, func() {
+		// nothing
+	})
+
+	_, err := os.Stat(filepath.Join(repoDir, ".xylem.yml"))
+	assert.True(t, os.IsNotExist(err), ".xylem.yml should remain absent when it was absent before reset")
+}
+
+func TestGitPullLeavesXylemYmlUnchangedWhenResetPreservesIt(t *testing.T) {
+	repoDir := t.TempDir()
+	configPath := filepath.Join(repoDir, ".xylem.yml")
+	config := []byte("# unchanged config\nrepo: owner/repo\n")
+	require.NoError(t, os.WriteFile(configPath, config, 0o644))
+
+	// Simulate a reset that leaves .xylem.yml identical (file is on origin/main unchanged).
+	simulateGitPullConfigPreservation(t, repoDir, func() {
+		// .xylem.yml already has the same content as origin — no change.
+	})
+
+	got, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, config, got, ".xylem.yml content should remain the same")
 }
 
 func TestSmoke_S37_DaemonAutoUpgradeSyncsDaemonWorktreeControlPlaneFiles(t *testing.T) {

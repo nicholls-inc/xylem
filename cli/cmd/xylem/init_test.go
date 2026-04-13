@@ -1324,3 +1324,119 @@ func TestInitAgentsMdForceOverwritesWhenFirstLineMatches(t *testing.T) {
 	lines := strings.Split(strings.TrimRight(content, "\n"), "\n")
 	assert.GreaterOrEqual(t, len(lines), 30, "overwritten AGENTS.md should still be the full template")
 }
+
+func TestWriteFileIfNotModified_CreatesWhenMissing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "subdir", "file.md")
+	content := []byte("hello world\n")
+
+	require.NoError(t, writeFileIfNotModified(path, content))
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+}
+
+func TestWriteFileIfNotModified_SkipsWhenUpToDate(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.md")
+	content := []byte("same content\n")
+	require.NoError(t, os.WriteFile(path, content, 0o644))
+
+	info1, err := os.Stat(path)
+	require.NoError(t, err)
+
+	require.NoError(t, writeFileIfNotModified(path, content))
+
+	info2, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, info1.ModTime(), info2.ModTime(), "file should not have been written")
+
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+}
+
+func TestWriteFileIfNotModified_SkipsUserModifiedFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "file.md")
+	userContent := []byte("user customisation\n")
+	embeddedContent := []byte("embedded version\n")
+	require.NoError(t, os.WriteFile(path, userContent, 0o644))
+
+	require.NoError(t, writeFileIfNotModified(path, embeddedContent))
+
+	// User content must be preserved.
+	got, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, userContent, got)
+}
+
+func TestResyncProfileAssets_CreatesMissingFiles(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"fix-bug": []byte("workflow: fix\n"),
+		},
+		Prompts: map[string][]byte{
+			"fix-bug/plan": []byte("plan prompt\n"),
+		},
+	}
+
+	require.NoError(t, resyncProfileAssets(stateDir, composed))
+
+	wf, err := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Workflows["fix-bug"], wf)
+
+	pr, err := os.ReadFile(filepath.Join(stateDir, "prompts", "fix-bug", "plan.md"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Prompts["fix-bug/plan"], pr)
+}
+
+func TestResyncProfileAssets_PreservesUserModifiedFiles(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+
+	// Pre-create a user-modified prompt.
+	promptPath := filepath.Join(stateDir, "prompts", "fix-bug", "plan.md")
+	require.NoError(t, os.MkdirAll(filepath.Dir(promptPath), 0o755))
+	userContent := []byte("# My custom plan prompt\nDo it my way.\n")
+	require.NoError(t, os.WriteFile(promptPath, userContent, 0o644))
+
+	embeddedPrompt := []byte("embedded plan prompt\n")
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"fix-bug": []byte("workflow: fix\n"),
+		},
+		Prompts: map[string][]byte{
+			"fix-bug/plan":      embeddedPrompt,
+			"fix-bug/implement": []byte("embedded implement prompt\n"),
+		},
+	}
+
+	require.NoError(t, resyncProfileAssets(stateDir, composed))
+
+	// User-modified prompt must not be overwritten.
+	got, err := os.ReadFile(promptPath)
+	require.NoError(t, err)
+	assert.Equal(t, userContent, got)
+
+	// Missing workflow must be created.
+	wf, err := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Workflows["fix-bug"], wf)
+
+	// Missing prompt must be created.
+	impl, err := os.ReadFile(filepath.Join(stateDir, "prompts", "fix-bug", "implement.md"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Prompts["fix-bug/implement"], impl)
+}
+
+func TestResyncProfileAssets_RejectsNilProfile(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+
+	err := resyncProfileAssets(stateDir, nil)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "composed profile is required")
+}
