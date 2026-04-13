@@ -334,7 +334,7 @@ func daemonSupervisorCommandArgs(configPath string) []string {
 }
 
 func daemonSupervisorEnvFilePath(workingDir string) string {
-	return filepath.Join(workingDir, ".daemon-root", ".env")
+	return filepath.Join(workingDir, ".env")
 }
 
 func loadDaemonSupervisorEnvFile(path string) ([]string, error) {
