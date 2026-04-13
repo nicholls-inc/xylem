@@ -54,6 +54,10 @@ phases:
         exit 0
       fi
 
+      ACTIONS_TMP=$(mktemp)
+      trap 'rm -f "$ACTIONS_TMP"' EXIT
+      jq -c '.actions[]' "$ACTIONS_FILE" > "$ACTIONS_TMP"
+
       LABEL_EDITS=0
       COMMENTS=0
       while IFS= read -r action; do
@@ -72,7 +76,7 @@ phases:
         fi
 
         sleep 1
-      done < <(jq -c '.actions[]' "$ACTIONS_FILE")
+      done < "$ACTIONS_TMP"
 
       echo "Applied ${ACTION_COUNT} backlog actions (${LABEL_EDITS} label edits, ${COMMENTS} comments)"
   - name: persist_summary
