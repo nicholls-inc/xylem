@@ -1,13 +1,53 @@
 # xylem
 
-Autonomous Claude Code and GitHub Copilot session scheduler. Scans pluggable sources, queues work, and launches multi-phase workflows in isolated git worktrees with quality gates.
+You have 40 GitHub issues labeled `ready-for-work`. They've been sitting there for two weeks. You'd fix them, but fixing one means opening Claude Code, writing the prompt, waiting, reviewing, pushing — and you have 39 more after that.
+
+**xylem turns labeled GitHub issues into merged pull requests while you sleep.**
+
+It runs Claude Code autonomously against your backlog: scanning issues, creating isolated worktrees, executing multi-phase workflows, running your test gates, and opening PRs — all without you watching. While you work on what matters, xylem drains the queue.
+
+## What you can achieve
+
+- **Backlog that actually shrinks** — label issues `ready-for-work`, start the daemon, come back to open PRs
+- **Overnight bug fixes** — bugs analyzed, implemented, and submitted as PRs before your morning standup
+- **Scheduled maintenance, unattended** — daily doc updates, dependency audits, changelog drafts, backlog refinement — run on cron without touching your keyboard
+- **Multi-phase quality gates** — each PR passes your own `make test` (or any command) before it surfaces; no merging on blind faith
+- **A self-improving codebase** — xylem can file its own issues and process them; the system gets better by running
+
+## Quick start
+
+```bash
+# Install
+go install github.com/nicholls-inc/xylem/cli/cmd/xylem@latest
+
+# Bootstrap config and state directory in your repo
+xylem init
+
+# Edit .xylem.yml with your repo and source config
+# Edit .xylem/HARNESS.md with your project-specific instructions
+
+# Preview what would be queued without doing anything
+xylem scan --dry-run
+
+# Start the continuous daemon
+xylem daemon
+```
+
+Label a GitHub issue `ready-for-work`. xylem picks it up within the next scan interval, creates a worktree, runs your configured workflow, and opens a PR. See the [Getting Started guide](docs/getting-started.md) for the full walkthrough.
+
+## What xylem is not
+
+- **Not a general agent framework** — xylem orchestrates Claude Code CLI sessions against a work queue; it is not a library for building agents
+- **Not a replacement for Claude Code** — if you have one issue to fix, open Claude Code directly; xylem is for when you have a backlog
+- **Not a chatbot or REPL** — there is no interactive session; xylem runs unattended
+- **Not a GitHub Actions replacement** — xylem runs locally or on a server you control, talking to GitHub via `gh`; it does not run inside Actions workflows
 
 ## How it works
 
 xylem is a two-layer system:
 
-- **Go CLI** (`xylem`) -- control plane that scans sources for actionable tasks, manages a persistent work queue, and launches isolated session runs in git worktrees
-- **Workflows** -- execution plane with multi-phase workflow definitions (e.g. `fix-bug`, `implement-feature`) that run inside each session with quality gates between phases
+- **Go CLI** (`xylem`) — control plane that scans sources for actionable tasks, manages a persistent work queue, and launches isolated session runs in git worktrees
+- **Workflows** — execution plane with multi-phase workflow definitions (e.g. `fix-bug`, `implement-feature`) that run inside each session with quality gates between phases
 
 ```
 Sources              xylem CLI              Execution
@@ -21,27 +61,6 @@ Sources              xylem CLI              Execution
 ```
 
 Sources are pluggable. Built-in source types cover GitHub issues (`github`), pull requests (`github-pr`), pull-request events (`github-pr-events`), merged pull requests (`github-merge`), recurring scheduled workflows (`schedule`), and manual tasks via `xylem enqueue`. xylem handles scheduling, deduplication, concurrency, and worktree isolation across all sources.
-
-## Quick start
-
-```bash
-# Install
-go install github.com/nicholls-inc/xylem/cli/cmd/xylem@latest
-
-# Bootstrap config and state directory
-xylem init
-
-# Edit .xylem.yml with your repo and task config
-# Edit .xylem/HARNESS.md with your project details
-
-# Preview what would be queued
-xylem scan --dry-run
-
-# Scan for work and process it
-xylem scan && xylem drain
-```
-
-See the [Getting Started guide](docs/getting-started.md) for a full walkthrough.
 
 ## Configuration
 
@@ -153,10 +172,10 @@ Use `noop.match` on a phase to let that phase complete the workflow early when i
 
 **Built-in workflows:**
 
-- **fix-bug** -- Analyze, Plan, Implement (with test gate), PR
-- **implement-feature** -- Analyze, Plan (with label gate for approval), Implement (with test gate), PR
-- **doc-garden** -- Daily documentation drift scan, targeted doc updates, verification, and PR drafting
-- **security-compliance** -- Daily scheduled secrets, static-analysis, dependency-audit, and synthesis pass with issue filing for actionable risk
+- **fix-bug** — Analyze, Plan, Implement (with test gate), PR
+- **implement-feature** — Analyze, Plan (with label gate for approval), Implement (with test gate), PR
+- **doc-garden** — Daily documentation drift scan, targeted doc updates, verification, and PR drafting
+- **security-compliance** — Daily scheduled secrets, static-analysis, dependency-audit, and synthesis pass with issue filing for actionable risk
 
 See the [Workflows Guide](docs/workflows.md) for template variables, custom workflows, and prompt authoring tips.
 
@@ -239,10 +258,10 @@ See the [Architecture](docs/architecture.md) document for details on the control
 
 ## Prerequisites
 
-- **Go 1.22+** -- to build the CLI
-- **git** -- must be on PATH
-- **[claude](https://docs.anthropic.com/en/docs/claude-code)** or **GitHub Copilot CLI** -- at least one supported LLM CLI
-- **[gh](https://cli.github.com/)** -- GitHub CLI, authenticated (`gh auth login`). Required for GitHub-based sources and PR creation.
+- **Go 1.22+** — to build the CLI
+- **git** — must be on PATH
+- **[claude](https://docs.anthropic.com/en/docs/claude-code)** or **GitHub Copilot CLI** — at least one supported LLM CLI
+- **[gh](https://cli.github.com/)** — GitHub CLI, authenticated (`gh auth login`). Required for GitHub-based sources and PR creation.
 
 ## Installation
 
@@ -266,18 +285,18 @@ The formatting and lint hooks use the system `goimports` and `golangci-lint` bin
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md) -- installation, first run, and setup walkthrough
-- [Configuration Reference](docs/configuration.md) -- all `.xylem.yml` fields, defaults, and validation
-- [Workflows Guide](docs/workflows.md) -- phases, gates, prompt templates, and custom workflows
-- [CLI Reference](docs/cli-reference.md) -- every command with flags, examples, and exit codes
-- [DTU Guide 4A: Fixture Regression Tests](docs/dtu-fixture-regression-tests.md) -- author deterministic DTU-backed Go regression tests and understand their trust boundary
-- [DTU Guide 4B: Manual Smoke Tests](docs/dtu-manual-smoke-tests.md) -- run the real xylem CLI under DTU shims and understand what those smoke tests do and do not prove
-- [Architecture](docs/architecture.md) -- system design, data flow, and package map
+- [Getting Started](docs/getting-started.md) — installation, first run, and setup walkthrough
+- [Configuration Reference](docs/configuration.md) — all `.xylem.yml` fields, defaults, and validation
+- [Workflows Guide](docs/workflows.md) — phases, gates, prompt templates, and custom workflows
+- [CLI Reference](docs/cli-reference.md) — every command with flags, examples, and exit codes
+- [DTU Guide 4A: Fixture Regression Tests](docs/dtu-fixture-regression-tests.md) — author deterministic DTU-backed Go regression tests and understand their trust boundary
+- [DTU Guide 4B: Manual Smoke Tests](docs/dtu-manual-smoke-tests.md) — run the real xylem CLI under DTU shims and understand what those smoke tests do and do not prove
+- [Architecture](docs/architecture.md) — system design, data flow, and package map
 
 ## Known limitations
 
-- **Sequential correctness only** -- no concurrency modeling in the workflows themselves
-- **GitHub only** -- built-in scanning sources target GitHub issues, PRs, PR events, and merged PRs; other integrations require manual enqueue
-- **Cancel does not kill sessions** -- only removes pending vessels; running sessions run to completion
-- **No priority queues** -- FIFO order only
-- **No webhooks** -- polling only (cron or daemon mode)
+- **Sequential correctness only** — no concurrency modeling in the workflows themselves
+- **GitHub only** — built-in scanning sources target GitHub issues, PRs, PR events, and merged PRs; other integrations require manual enqueue
+- **Cancel does not kill sessions** — only removes pending vessels; running sessions run to completion
+- **No priority queues** — FIFO order only
+- **No webhooks** — polling only (cron or daemon mode)
