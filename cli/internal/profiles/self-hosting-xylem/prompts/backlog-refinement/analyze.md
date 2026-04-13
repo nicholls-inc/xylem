@@ -118,7 +118,8 @@ Write valid JSON with this exact shape:
 Rules:
 
 - `add_labels` must contain only labels that already exist and are not already on the issue
-- `comment` may be empty, but never null
+- `comment` may be empty, but never null; use JSON escape sequences (`\n`, `\t`) for
+  newlines and tabs — never embed literal control characters in any string field
 - `confidence` must be between `0` and `1`
 - if there are no safe actions, still write a valid file with `"actions": []`
 
