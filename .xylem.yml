@@ -171,6 +171,16 @@ sources:
         workflow: backlog-refinement
         ref: backlog-refinement
 
+  doc-garden:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@daily"
+    timeout: "90m"
+    tasks:
+      doc-garden:
+        workflow: doc-garden
+        ref: doc-garden
+
   harness-gap-analysis:
     type: scheduled
     repo: nicholls-inc/xylem
