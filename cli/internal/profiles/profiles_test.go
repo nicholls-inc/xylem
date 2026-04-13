@@ -701,6 +701,25 @@ func TestSmoke_S8_SecurityCompliancePromptsDocumentReportingContract(t *testing.
 	assert.Contains(t, string(dependencyPrompt), "open `security`-labeled issues")
 }
 
+func TestAllEmbeddedWorkflowsValidate(t *testing.T) {
+	t.Parallel()
+
+	profileNames := []string{"core", "self-hosting-xylem"}
+	for _, profileName := range profileNames {
+		composed, err := Compose(profileName)
+		require.NoError(t, err, "Compose(%q)", profileName)
+
+		for name, data := range composed.Workflows {
+			name, data := name, data
+			t.Run(profileName+"/"+name, func(t *testing.T) {
+				t.Parallel()
+				_, err := workflowpkg.LoadFromBytes(name, data)
+				assert.NoError(t, err)
+			})
+		}
+	}
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {

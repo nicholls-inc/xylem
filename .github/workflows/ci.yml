@@ -3,10 +3,10 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: ["cli/**", ".golangci.yml"]
+    paths: ["cli/**", ".golangci.yml", ".xylem/workflows/**"]
   pull_request:
     branches: [main]
-    paths: ["cli/**", ".golangci.yml"]
+    paths: ["cli/**", ".golangci.yml", ".xylem/workflows/**"]
 
 jobs:
   go-checks:
@@ -37,4 +37,3 @@ jobs:
 
       - run: go build ./cmd/xylem
       - run: go test ./...
-
