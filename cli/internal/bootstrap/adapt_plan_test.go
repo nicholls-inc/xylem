@@ -508,6 +508,42 @@ func TestIsAllowedAdaptPlanPath(t *testing.T) {
 	}
 }
 
+func TestReadAdaptPlan_AcceptsOutOfAllowlistSkipped(t *testing.T) {
+	dir := t.TempDir()
+	body := `{
+  "schema_version": 1,
+  "detected": {"languages":[],"build_tools":[],"test_runners":[],"linters":[],"has_frontend":false,"has_database":false,"entry_points":[]},
+  "planned_changes": [],
+  "skipped": [
+    {"path": "CHANGELOG.md", "reason": "not in scope"},
+    {"path": "Makefile", "reason": "out of scope"}
+  ]
+}`
+	path := writeAdaptPlanJSON(t, dir, body)
+
+	plan, err := ReadAdaptPlan(path)
+	if err != nil {
+		t.Fatalf("ReadAdaptPlan() unexpected error for out-of-allowlist skipped paths: %v", err)
+	}
+	if len(plan.Skipped) != 2 {
+		t.Errorf("len(Skipped) = %d, want 2", len(plan.Skipped))
+	}
+}
+
+func TestValidate_AcceptsOutOfAllowlistSkipped(t *testing.T) {
+	plan := AdaptPlan{
+		SchemaVersion:  1,
+		Detected:       AdaptPlanDetected{},
+		PlannedChanges: []AdaptPlanChange{},
+		Skipped: []AdaptPlanSkipped{
+			{Path: "Makefile", Reason: "out of scope"},
+		},
+	}
+	if err := plan.Validate(); err != nil {
+		t.Errorf("Validate() unexpected error for out-of-allowlist skipped path: %v", err)
+	}
+}
+
 func TestAdaptPlanSchema_IsEmbedded(t *testing.T) {
 	if len(AdaptPlanSchema) == 0 {
 		t.Fatal("AdaptPlanSchema is empty; embed may have failed")
@@ -541,7 +577,7 @@ func TestWriteReadRoundTrip(t *testing.T) {
 			{Path: "docs/setup.md", Op: "create", Rationale: "add docs"},
 		},
 		Skipped: []AdaptPlanSkipped{
-			{Path: "AGENTS.md", Reason: "already configured"},
+			{Path: "CHANGELOG.md", Reason: "already configured"},
 		},
 	}
 

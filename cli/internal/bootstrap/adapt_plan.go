@@ -109,7 +109,7 @@ func WriteAdaptPlan(path string, plan *AdaptPlan) error {
 //   - schema_version must equal 1
 //   - each planned change: path relative and in allowlist, valid op, non-empty rationale
 //   - delete op only allowed for workflow YAML files under .xylem/workflows/
-//   - each skipped entry: path relative and in allowlist, non-empty reason
+//   - each skipped entry: path relative (no traversal), non-empty reason
 func (p *AdaptPlan) Validate() error {
 	if p.SchemaVersion != 1 {
 		return fmt.Errorf(`"schema_version" must equal 1`)
@@ -124,15 +124,11 @@ func (p *AdaptPlan) Validate() error {
 		}
 	}
 	for i, skipped := range p.Skipped {
-		path, err := normalizeAdaptPlanPath(skipped.Path)
-		if err != nil {
+		if _, err := normalizeAdaptPlanPath(skipped.Path); err != nil {
 			return fmt.Errorf(`"skipped[%d].path" %w`, i, err)
 		}
 		if strings.TrimSpace(skipped.Reason) == "" {
 			return fmt.Errorf(`"skipped[%d].reason" must not be empty`, i)
-		}
-		if !IsAllowedAdaptPlanPath(path) {
-			return fmt.Errorf(`"skipped[%d].path" %q is outside the adapt-plan allowlist`, i, path)
 		}
 	}
 	return nil
@@ -181,9 +177,6 @@ func normalizeRawAdaptPlan(raw rawAdaptPlan) (AdaptPlan, error) {
 		}
 		if strings.TrimSpace(skipped[i].Reason) == "" {
 			return AdaptPlan{}, fmt.Errorf(`"skipped[%d].reason" must not be empty`, i)
-		}
-		if !IsAllowedAdaptPlanPath(path) {
-			return AdaptPlan{}, fmt.Errorf(`"skipped[%d].path" %q is outside the adapt-plan allowlist`, i, path)
 		}
 		skipped[i].Path = path
 	}
