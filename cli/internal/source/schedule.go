@@ -19,12 +19,13 @@ import (
 const legacyScheduleStateFileName = "schedule-state.json"
 
 type Schedule struct {
-	ConfigName string
-	Cadence    string
-	Workflow   string
-	StateDir   string
-	Queue      *queue.Queue
-	Now        func() time.Time
+	ConfigName   string
+	Cadence      string
+	Workflow     string
+	StateDir     string
+	Queue        *queue.Queue
+	Now          func() time.Time
+	SkipFirstRun bool
 }
 
 type scheduleStateRecord struct {
@@ -53,6 +54,10 @@ func (s *Schedule) Scan(_ context.Context) ([]queue.Vessel, error) {
 	lastFiredAt, err := s.loadLastFiredAt()
 	if err != nil {
 		return nil, fmt.Errorf("schedule source %q: load last fired state: %w", s.ConfigName, err)
+	}
+
+	if lastFiredAt == nil && s.SkipFirstRun {
+		return nil, nil
 	}
 
 	firedAt, due := spec.FireTime(lastFiredAt, s.now())

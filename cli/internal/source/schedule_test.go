@@ -463,3 +463,77 @@ func TestSmoke_S3_ScheduleFallsBackToLegacyStateAndWritesRuntimeState(t *testing
 	require.NoError(t, err)
 	assert.JSONEq(t, `{"lessons":{"cadence":"@daily","last_fired_at":"2026-04-09T06:00:00Z","next_due_at":"2026-04-10T00:00:00Z","last_vessel":"schedule-lessons-20260409t060000z"}}`, string(legacyBytes))
 }
+
+func TestScheduleScanSkipFirstRunSuppressesOnFirstScan(t *testing.T) {
+	now := time.Date(2026, time.April, 9, 6, 45, 12, 0, time.UTC)
+	s := &Schedule{
+		ConfigName:   "field-report",
+		Cadence:      "1h",
+		Workflow:     "field-report",
+		StateDir:     t.TempDir(),
+		Queue:        queue.New(filepath.Join(t.TempDir(), "queue.jsonl")),
+		SkipFirstRun: true,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	vessels, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels, "expected no vessel on first scan when skip_first_run=true")
+}
+
+func TestScheduleScanSkipFirstRunFiresAfterOnEnqueue(t *testing.T) {
+	stateDir := t.TempDir()
+	q := queue.New(filepath.Join(t.TempDir(), "queue.jsonl"))
+	now := time.Date(2026, time.April, 9, 6, 0, 0, 0, time.UTC)
+	s := &Schedule{
+		ConfigName:   "field-report",
+		Cadence:      "1h",
+		Workflow:     "field-report",
+		StateDir:     stateDir,
+		Queue:        q,
+		SkipFirstRun: true,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	// First scan: skipped because no prior state.
+	vessels, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, vessels, "expected no vessel on first scan when skip_first_run=true")
+
+	// Simulate OnEnqueue by writing state directly via a non-skip-first-run instance.
+	bootstrapper := &Schedule{
+		ConfigName: "field-report",
+		StateDir:   stateDir,
+	}
+	require.NoError(t, bootstrapper.storeLastFiredAt(now))
+
+	// After state exists, advance time by cadence — should fire normally.
+	now = now.Add(time.Hour)
+	second, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, second, 1, "expected one vessel after cadence elapsed")
+	assert.Equal(t, "field-report", second[0].Meta["schedule.source_name"])
+}
+
+func TestScheduleScanSkipFirstRunFalseDefaultBehavior(t *testing.T) {
+	now := time.Date(2026, time.April, 9, 6, 45, 12, 0, time.UTC)
+	s := &Schedule{
+		ConfigName:   "field-report",
+		Cadence:      "1h",
+		Workflow:     "field-report",
+		StateDir:     t.TempDir(),
+		Queue:        queue.New(filepath.Join(t.TempDir(), "queue.jsonl")),
+		SkipFirstRun: false,
+		Now: func() time.Time {
+			return now
+		},
+	}
+
+	vessels, err := s.Scan(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, vessels, 1, "expected one vessel on first scan when skip_first_run=false")
+}
