@@ -30,3 +30,4 @@ field-reports/
 .daemon-root/
 .claude/worktrees/
 .copilot-worktrees/
+.claude/scheduled_tasks.lock
