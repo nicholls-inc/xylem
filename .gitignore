@@ -6,7 +6,7 @@ cli/xylem
 
 # Ignore everything under .xylem/ except tracked control-plane definitions and
 # the checked-in SoTA snapshot state. Fresh worktrees — including
-# .claude/worktrees/.daemon-root where the daemon runs — must load these files,
+# .xylem/worktrees/.daemon-root where the daemon runs — must load these files,
 # while operational state (phases/, queue files, daemon.pid, dtu/) stays
 # ignored.
 .xylem/*
@@ -28,6 +28,6 @@ cli/xylem
 !cli/internal/dtu/testdata/**/.xylem/**
 field-reports/
 .daemon-root/
-.claude/worktrees/
+.xylem/worktrees/
 .copilot-worktrees/
 .claude/scheduled_tasks.lock

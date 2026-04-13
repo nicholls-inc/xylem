@@ -44,7 +44,7 @@ func ensureDaemonNotInMainWorktree() error {
 	return fmt.Errorf("daemon must run in an isolated worktree, not the main repo at %s; "+
 		"vessel subprocesses may switch branches or modify the working tree, which would corrupt "+
 		"your primary checkout. Create a dedicated daemon worktree and start the daemon from there: "+
-		"`git worktree add .claude/worktrees/.daemon-root main && cd .claude/worktrees/.daemon-root && xylem daemon`. "+
+		"`git worktree add .xylem/worktrees/.daemon-root main && cd .xylem/worktrees/.daemon-root && xylem daemon`. "+
 		"Or set XYLEM_DAEMON_ALLOW_MAIN_WORKTREE=1 to bypass this check (not recommended)", absMain)
 }
 

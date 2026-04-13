@@ -19,7 +19,7 @@ type pruningWorktree struct {
 }
 
 func (w *pruningWorktree) Create(_ context.Context, branchName string) (string, error) {
-	return filepath.Join(".claude", "worktrees", branchName), nil
+	return filepath.Join(".xylem", "worktrees", branchName), nil
 }
 
 func (w *pruningWorktree) Remove(_ context.Context, worktreePath string) error {
@@ -56,7 +56,7 @@ func TestFindStaleWorktreesNormalizesRelativeActivePaths(t *testing.T) {
 		Workflow:     "fix-bug",
 		State:        queue.StatePending,
 		CreatedAt:    now,
-		WorktreePath: filepath.Join(".claude", "worktrees", "fix", "issue-1"),
+		WorktreePath: filepath.Join(".xylem", "worktrees", "fix", "issue-1"),
 	}); err != nil {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
@@ -64,8 +64,8 @@ func TestFindStaleWorktreesNormalizesRelativeActivePaths(t *testing.T) {
 	wt := &pruningWorktree{
 		repoRoot: repoRoot,
 		list: []worktree.WorktreeInfo{
-			{Path: filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-1"), Branch: "fix/issue-1"},
-			{Path: filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-2"), Branch: "fix/issue-2"},
+			{Path: filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-1"), Branch: "fix/issue-1"},
+			{Path: filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-2"), Branch: "fix/issue-2"},
 		},
 	}
 	r := New(nil, q, wt, nil)
@@ -77,7 +77,7 @@ func TestFindStaleWorktreesNormalizesRelativeActivePaths(t *testing.T) {
 	if len(stale) != 1 {
 		t.Fatalf("len(stale) = %d, want 1", len(stale))
 	}
-	if got := stale[0].Path; got != filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-2") {
+	if got := stale[0].Path; got != filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-2") {
 		t.Fatalf("stale[0].Path = %q, want issue-2 worktree", got)
 	}
 }
@@ -92,16 +92,16 @@ func TestPruneStaleWorktreesRemovesOnlyDetectedStalePaths(t *testing.T) {
 		Workflow:     "fix-bug",
 		State:        queue.StatePending,
 		CreatedAt:    now,
-		WorktreePath: filepath.Join(".claude", "worktrees", "fix", "issue-1"),
+		WorktreePath: filepath.Join(".xylem", "worktrees", "fix", "issue-1"),
 	}); err != nil {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
 
-	stalePath := filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-2")
+	stalePath := filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-2")
 	wt := &pruningWorktree{
 		repoRoot: repoRoot,
 		list: []worktree.WorktreeInfo{
-			{Path: filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-1"), Branch: "fix/issue-1"},
+			{Path: filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-1"), Branch: "fix/issue-1"},
 			{Path: stalePath, Branch: "fix/issue-2"},
 		},
 		removeErrs: map[string]error{

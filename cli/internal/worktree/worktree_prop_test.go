@@ -49,8 +49,8 @@ func TestPropRemoveDeletesExactBranchName(t *testing.T) {
 
 		branch := rapid.StringMatching(`[a-z0-9-]{1,8}(?:/[a-z0-9-]{1,8}){1,3}`).Draw(rt, "branch")
 		segments := strings.Split(branch, "/")
-		worktreeRel := filepath.Join(append([]string{".claude", "worktrees"}, segments...)...)
-		worktreeAbs := filepath.Join(append([]string{repoRoot, ".claude", "worktrees"}, segments...)...)
+		worktreeRel := filepath.Join(append([]string{".xylem", "worktrees"}, segments...)...)
+		worktreeAbs := filepath.Join(append([]string{repoRoot, ".xylem", "worktrees"}, segments...)...)
 
 		r := newMock()
 		r.setOutput("git worktree list --porcelain", []byte(fmt.Sprintf("worktree %s\nHEAD abc123\nbranch refs/heads/%s\n\n", worktreeAbs, branch)))

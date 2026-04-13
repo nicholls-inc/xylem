@@ -32,7 +32,7 @@ func stubDaemonUpgradeDependencies(
 }
 
 func TestResolveDaemonUpgradeTargetUsesWorkingDirectory(t *testing.T) {
-	worktreeDir := filepath.Join(t.TempDir(), ".claude", "worktrees", ".daemon-root")
+	worktreeDir := filepath.Join(t.TempDir(), ".xylem", "worktrees", ".daemon-root")
 	executablePath := filepath.Join(t.TempDir(), "cli", "xylem")
 
 	target, err := resolveDaemonUpgradeTarget(
@@ -80,13 +80,13 @@ func TestDaemonUpgradeTargetFromPathsNormalizesRelativeWorkingDirectory(t *testi
 	}()
 
 	target, err := daemonUpgradeTargetFromPaths(
-		filepath.Join(".claude", "worktrees", ".daemon-root"),
+		filepath.Join(".xylem", "worktrees", ".daemon-root"),
 		filepath.Join(root, "cli", "xylem"),
 	)
 	require.NoError(t, err)
 	resolvedRoot, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
-	wantRepoDir, err := filepath.Abs(filepath.Join(resolvedRoot, ".claude", "worktrees", ".daemon-root"))
+	wantRepoDir, err := filepath.Abs(filepath.Join(resolvedRoot, ".xylem", "worktrees", ".daemon-root"))
 	require.NoError(t, err)
 
 	assert.Equal(t, wantRepoDir, target.repoDir)
