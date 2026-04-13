@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -31,7 +33,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			commandPath := cmd.CommandPath()
-			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || commandPath == "xylem dtu" || strings.HasPrefix(commandPath, "xylem dtu ") || commandPath == "xylem bootstrap" || strings.HasPrefix(commandPath, "xylem bootstrap ") || commandPath == "xylem config" || strings.HasPrefix(commandPath, "xylem config ") || strings.HasPrefix(commandPath, "xylem continuous-simplicity") {
+			if cmd.Name() == "init" || cmd.Name() == "shim-dispatch" || cmd.Name() == "version" || commandPath == "xylem dtu" || strings.HasPrefix(commandPath, "xylem dtu ") || commandPath == "xylem bootstrap" || strings.HasPrefix(commandPath, "xylem bootstrap ") || commandPath == "xylem config" || strings.HasPrefix(commandPath, "xylem config ") {
 				return nil
 			}
 
@@ -65,7 +67,7 @@ func newRootCmd() *cobra.Command {
 				}
 			}
 
-			configPath := viper.GetString("config")
+			configPath := findConfigPath(viper.GetString("config"))
 			cfg, err := config.Load(configPath)
 			if err != nil {
 				return fmt.Errorf("error loading config %s: %w", configPath, err)
@@ -134,6 +136,38 @@ func newRootCmd() *cobra.Command {
 	)
 
 	return cmd
+}
+
+// findConfigPath resolves a config file path by walking up from CWD.
+// Only walks up for bare filenames (no directory component) that don't exist
+// at the current working directory. Absolute paths and explicit relative paths
+// (e.g. "../foo.yml") are returned unchanged. Returns the original path if
+// no ancestor contains the file, preserving the error message from config.Load.
+func findConfigPath(path string) string {
+	if _, err := os.Stat(path); err == nil {
+		return path // already accessible at CWD
+	}
+	// Only walk up for bare filenames — explicit relative paths like
+	// "../custom.yml" are left unchanged so the caller gets a clear error.
+	if filepath.Base(path) != path {
+		return path
+	}
+	dir, err := os.Getwd()
+	if err != nil {
+		return path // CWD unavailable; surface error at config.Load
+	}
+	for {
+		candidate := filepath.Join(dir, path)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return path // not found; return original so error message is useful
 }
 
 func hasGitHubSource(cfg *config.Config) bool {
