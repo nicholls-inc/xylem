@@ -249,12 +249,12 @@ func TestDoctorStaleWorktreesTreatsRelativeQueuePathAsActive(t *testing.T) {
 		Workflow:     "fix-bug",
 		State:        queue.StatePending,
 		CreatedAt:    time.Now().UTC(),
-		WorktreePath: filepath.Join(".claude", "worktrees", "fix", "issue-1"),
+		WorktreePath: filepath.Join(".xylem", "worktrees", "fix", "issue-1"),
 	}); err != nil {
 		t.Fatalf("Enqueue() error = %v", err)
 	}
 
-	porcelain := "worktree " + filepath.Join(dir, ".claude", "worktrees", "fix", "issue-1") + "\nHEAD abc123\nbranch refs/heads/fix/issue-1\n\n"
+	porcelain := "worktree " + filepath.Join(dir, ".xylem", "worktrees", "fix", "issue-1") + "\nHEAD abc123\nbranch refs/heads/fix/issue-1\n\n"
 	runner := &mockCleanupRunner{porcelain: porcelain}
 	wt := worktree.New(dir, runner)
 	report := &doctorReport{}

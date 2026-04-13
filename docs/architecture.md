@@ -73,7 +73,7 @@ Sources                     xylem scan            Queue
 
 3. **Dequeue** -- The runner atomically reads the queue, finds the first `pending` vessel that fits both the global and per-workflow concurrency limits, transitions it to `running`, sets `StartedAt`, and returns it. The runner enforces the global limit with a buffered-channel semaphore and tracks optional per-workflow caps in-memory.
 
-4. **Worktree creation** -- The runner asks the source for a branch name (e.g. `fix/issue-42-login-crash`), then creates an isolated git worktree at `.claude/worktrees/<branch>` branched from `origin/<default-branch>`. Provider config files (`.claude/settings.json`, rules) are copied into the worktree.
+4. **Worktree creation** -- The runner asks the source for a branch name (e.g. `fix/issue-42-login-crash`), then creates an isolated git worktree at `.xylem/worktrees/<branch>` branched from `origin/<default-branch>`. Provider config files (`.claude/settings.json`, rules) are copied into the worktree.
 
 5. **Phase execution** -- The runner loads the workflow YAML, reads `.xylem/HARNESS.md`, then iterates through phases. Prompt phases render a Go template with issue data and previous phase outputs, then invoke the resolved provider (`claude` or `copilot`). Command phases render and run a shell command directly in the worktree. Phase outputs are persisted to `.xylem/state/phases/<vessel-id>/<phase>.output`.
 
@@ -387,7 +387,7 @@ Every vessel runs in its own git worktree. This provides filesystem isolation be
 
 **Worktree lifecycle:**
 
-1. **Create** -- `git fetch origin <default-branch>` then `git worktree add .claude/worktrees/<branch> -B <branch> origin/<default-branch>`. The worktree starts from a clean copy of the default branch.
+1. **Create** -- `git fetch origin <default-branch>` then `git worktree add .xylem/worktrees/<branch> -B <branch> origin/<default-branch>`. The worktree starts from a clean copy of the default branch.
 
 2. **Config copy** -- `.claude/settings.json`, `.claude/settings.local.json`, and `.claude/rules/` are copied from the main repo into the worktree so provider-backed prompt phases have the correct tool permissions and rules.
 

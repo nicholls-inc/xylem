@@ -121,7 +121,7 @@ func (m *Manager) DetectDefaultBranch(ctx context.Context) (string, error) {
 	return "", fmt.Errorf("could not detect default branch from remote")
 }
 
-// Create creates a git worktree at .claude/worktrees/<branchName> branched from origin/<defaultBranch>.
+// Create creates a git worktree at .xylem/worktrees/<branchName> branched from origin/<defaultBranch>.
 // It also copies .claude/ config files (settings.json, settings.local.json, rules/) into the worktree.
 func (m *Manager) Create(ctx context.Context, branchName string) (string, error) {
 	span := observability.StartGlobalSpan(ctx, "worktree:create", observability.WorktreeSpanAttributes(observability.WorktreeSpanData{
@@ -148,7 +148,7 @@ func (m *Manager) Create(ctx context.Context, branchName string) (string, error)
 	}
 
 	// Create the worktree
-	worktreePath := filepath.Join(".claude", "worktrees", branchName)
+	worktreePath := filepath.Join(".xylem", "worktrees", branchName)
 	startPoint := defaultBranch
 	if hasOrigin {
 		startPoint = "origin/" + defaultBranch
@@ -346,7 +346,7 @@ func protectXylemSurfaces(worktreePath string, patterns []string) error {
 // to correctly handle branch names containing path separators (e.g., "fix/issue-42").
 func (m *Manager) Remove(ctx context.Context, worktreePath string) error {
 	// Safety: never remove the daemon root worktree itself, but allow
-	// removal of vessel worktrees under .daemon-root/.claude/worktrees/.
+	// removal of vessel worktrees under .daemon-root/.xylem/worktrees/.
 	normalized := filepath.ToSlash(worktreePath)
 	if strings.HasSuffix(normalized, ".daemon-root") {
 		return fmt.Errorf("refusing to remove daemon root worktree: %s", worktreePath)
@@ -442,7 +442,7 @@ func (m *Manager) List(ctx context.Context) ([]WorktreeInfo, error) {
 	return parsePorcelain(string(out)), nil
 }
 
-// ListXylem returns only worktrees under .claude/worktrees/.
+// ListXylem returns only worktrees under .xylem/worktrees/.
 func (m *Manager) ListXylem(ctx context.Context) ([]WorktreeInfo, error) {
 	all, err := m.List(ctx)
 	if err != nil {
@@ -450,7 +450,7 @@ func (m *Manager) ListXylem(ctx context.Context) ([]WorktreeInfo, error) {
 	}
 	var out []WorktreeInfo
 	for _, wt := range all {
-		if strings.Contains(filepath.ToSlash(wt.Path), ".claude/worktrees/") {
+		if strings.Contains(filepath.ToSlash(wt.Path), ".xylem/worktrees/") {
 			out = append(out, wt)
 		}
 	}

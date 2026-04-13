@@ -493,8 +493,7 @@ func TestExecuteClaudeHangHonorsContextCancellation(t *testing.T) {
 }
 
 func TestExecuteGitWorktreeCommandsMaterializeDirectories(t *testing.T) {
-	t.Parallel()
-
+	// Cannot run in parallel: uses os.Chdir which mutates global CWD state.
 	state := sampleState()
 	state.Repositories[0].Branches = []dtu.Branch{{Name: "main", SHA: "abc12345deadbeef"}}
 	store, stateDir := testStore(t, state)
@@ -512,7 +511,7 @@ func TestExecuteGitWorktreeCommandsMaterializeDirectories(t *testing.T) {
 		_ = os.Chdir(originalWD)
 	})
 
-	target := filepath.Join(".claude", "worktrees", "fix-issue-1")
+	target := filepath.Join(".xylem", "worktrees", "fix-issue-1")
 
 	var addOut, addErr bytes.Buffer
 	code := Execute(context.Background(), "git", []string{"worktree", "add", target, "-B", "fix/issue-1-bug-one", "origin/main"}, nil, &addOut, &addErr, env)

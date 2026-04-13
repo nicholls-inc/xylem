@@ -12,10 +12,10 @@ Concurrent vessels must not interfere with each other on the filesystem. Each ve
 
 ## Decision
 
-Each vessel is assigned a dedicated git worktree at `.claude/worktrees/<branchName>` relative to the repository root. The worktree is created by:
+Each vessel is assigned a dedicated git worktree at `.xylem/worktrees/<branchName>` relative to the repository root. The worktree is created by:
 
 1. `git fetch origin <default-branch>` — ensures the branch point is current
-2. `git worktree add .claude/worktrees/<branch> -B <branch> origin/<defaultBranch>` — creates the worktree on a new branch
+2. `git worktree add .xylem/worktrees/<branch> -B <branch> origin/<defaultBranch>` — creates the worktree on a new branch
 
 Branch names follow the pattern `fix/issue-<N>-<slug>` or `feat/issue-<N>-<slug>` for GitHub sources, and `task/<id>-<slug>` for Manual sources.
 
@@ -41,4 +41,4 @@ The directories `worktrees/`, `conversations/`, and `projects/` are skipped to a
 - **Positive:** Config copy at creation time gives each vessel a stable, independent snapshot of tool permissions.
 - **Negative:** Isolation is **filesystem-only**. There is no process isolation, no network isolation, and no resource limits. Concurrent vessels share the same OS process environment, CPU, memory, and network.
 - **Negative:** Worktree cleanup requires explicit action: `git worktree remove --force` followed by branch deletion. Stale worktrees accumulate if cleanup is skipped. Cleanup is governed by the `cleanup_after` setting (default: 7 days).
-- **Negative:** The `.claude/worktrees/` path is baked into the worktree location convention; moving or renaming the parent repository requires recreating worktrees.
+- **Negative:** The `.xylem/worktrees/` path is baked into the worktree location convention; moving or renaming the parent repository requires recreating worktrees.

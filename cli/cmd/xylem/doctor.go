@@ -242,9 +242,9 @@ func checkZombieVessels(cfg *config.Config, q *queue.Queue, wt *worktree.Manager
 		reaped++
 
 		// Best-effort worktree cleanup — only remove vessel worktrees
-		// under .claude/worktrees/ to avoid destroying the daemon root
+		// under .xylem/worktrees/ to avoid destroying the daemon root
 		// or other important worktrees.
-		if v.WorktreePath != "" && wt != nil && strings.Contains(v.WorktreePath, ".claude/worktrees/") {
+		if v.WorktreePath != "" && wt != nil && strings.Contains(v.WorktreePath, ".xylem/worktrees/") {
 			_ = wt.Remove(context.Background(), v.WorktreePath)
 		}
 	}

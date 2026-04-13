@@ -871,12 +871,12 @@ func TestSmoke_S48_DaemonHealthTickPrunesOnlyStaleXylemWorktrees(t *testing.T) {
 		Workflow:     "fix-bug",
 		State:        queue.StatePending,
 		CreatedAt:    time.Now().UTC(),
-		WorktreePath: filepath.Join(".claude", "worktrees", "fix", "issue-1"),
+		WorktreePath: filepath.Join(".xylem", "worktrees", "fix", "issue-1"),
 	})
 	require.NoError(t, err)
 
-	activePath := filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-1")
-	stalePath := filepath.Join(repoRoot, ".claude", "worktrees", "fix", "issue-2")
+	activePath := filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-1")
+	stalePath := filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-2")
 	daemonRootPath := filepath.Join(repoRoot, ".daemon-root", "issue-3")
 	porcelain := strings.Join([]string{
 		"worktree " + repoRoot,
@@ -921,7 +921,7 @@ func TestSmoke_S48_DaemonHealthTickPrunesOnlyStaleXylemWorktrees(t *testing.T) {
 	vessel, err := q.FindByID("issue-1")
 	require.NoError(t, err)
 	assert.Equal(t, queue.StatePending, vessel.State)
-	assert.Equal(t, filepath.Join(".claude", "worktrees", "fix", "issue-1"), vessel.WorktreePath)
+	assert.Equal(t, filepath.Join(".xylem", "worktrees", "fix", "issue-1"), vessel.WorktreePath)
 }
 
 // TestDaemonLoopUpgradeOverduePausesDrainToCreateIdleWindow verifies the
@@ -1549,7 +1549,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 			{"remote", "get-url", "origin"},
 			{"fetch", "origin", "main"},
 			{"worktree", "list", "--porcelain"},
-			{"worktree", "add", ".claude/worktrees/" + wantBranch, "-B", wantBranch, "origin/main"},
+			{"worktree", "add", ".xylem/worktrees/" + wantBranch, "-B", wantBranch, "origin/main"},
 			{"worktree", "remove", worktreePath, "--force"},
 		}
 		for _, want := range wantCommands {
@@ -1571,7 +1571,7 @@ func TestReconcileStaleVessels(t *testing.T) {
 			if reflect.DeepEqual(event.Shim.Args, []string{"fetch", "origin", "main"}) && event.Shim.Attempt != 1 {
 				t.Fatalf("fetch attempt = %d, want 1", event.Shim.Attempt)
 			}
-			if reflect.DeepEqual(event.Shim.Args, []string{"worktree", "add", ".claude/worktrees/" + wantBranch, "-B", wantBranch, "origin/main"}) && event.Shim.Attempt != 1 {
+			if reflect.DeepEqual(event.Shim.Args, []string{"worktree", "add", ".xylem/worktrees/" + wantBranch, "-B", wantBranch, "origin/main"}) && event.Shim.Attempt != 1 {
 				t.Fatalf("worktree add attempt = %d, want 1", event.Shim.Attempt)
 			}
 		}

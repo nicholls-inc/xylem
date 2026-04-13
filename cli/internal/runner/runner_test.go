@@ -407,7 +407,7 @@ func (m *mockWorktree) Create(_ context.Context, branchName string) (string, err
 	if m.path != "" {
 		return m.path, nil
 	}
-	return ".claude/worktrees/" + branchName, nil
+	return ".xylem/worktrees/" + branchName, nil
 }
 
 func (m *mockWorktree) Remove(_ context.Context, worktreePath string) error {
@@ -430,7 +430,7 @@ func (tw *trackingWorktree) Create(_ context.Context, branchName string) (string
 	if tw.path != "" {
 		return tw.path, nil
 	}
-	return ".claude/worktrees/" + branchName, nil
+	return ".xylem/worktrees/" + branchName, nil
 }
 
 func (tw *trackingWorktree) Remove(_ context.Context, _ string) error {
@@ -7389,7 +7389,7 @@ func TestVerifyProtectedSurfacesDetectsLegitimateDeletionWhenWorktreeExists(t *t
 
 func TestTakeProtectedSurfaceSnapshotRestoresMissingProtectedFilesFromSourceRoot(t *testing.T) {
 	repoRoot := t.TempDir()
-	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-1")
+	worktreeDir := filepath.Join(repoRoot, ".xylem", "worktrees", "review", "pr-1")
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git) = %v", err)
 	}
@@ -7526,7 +7526,7 @@ func TestVerifyProtectedSurfacesSelfHealsDeletedFileFromDefaultBranch(t *testing
 // still caught because restore only fires on absent files.
 func TestVerifyProtectedSurfacesSuppressesTransientDeletionsViaPreVerifyRestore(t *testing.T) {
 	repoRoot := t.TempDir()
-	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-test")
+	worktreeDir := filepath.Join(repoRoot, ".xylem", "worktrees", "review", "pr-test")
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git) = %v", err)
 	}
@@ -7638,7 +7638,7 @@ func TestVerifyProtectedSurfacesSuppressesTransientDeletionsViaPreVerifyRestore(
 // only touches absent files.
 func TestVerifyProtectedSurfacesStillCatchesModificationsAfterPreVerifyRestore(t *testing.T) {
 	repoRoot := t.TempDir()
-	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-mod")
+	worktreeDir := filepath.Join(repoRoot, ".xylem", "worktrees", "review", "pr-mod")
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git) = %v", err)
 	}
@@ -8017,7 +8017,7 @@ func TestResolveWorktreeGitdirHandlesLinkedWorktree(t *testing.T) {
 // over-reach and mask legitimate removal from the canonical source.
 func TestVerifyProtectedSurfacesStillCatchesMutualDeletion(t *testing.T) {
 	repoRoot := t.TempDir()
-	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-mutual")
+	worktreeDir := filepath.Join(repoRoot, ".xylem", "worktrees", "review", "pr-mutual")
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git) = %v", err)
 	}
@@ -8090,7 +8090,7 @@ func TestVerifyProtectedSurfacesStillCatchesMutualDeletion(t *testing.T) {
 // violations when the after-hash matches the source root's current hash.
 func TestVerifyProtectedSurfacesSuppressesAlignmentModifications(t *testing.T) {
 	repoRoot := t.TempDir()
-	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-align")
+	worktreeDir := filepath.Join(repoRoot, ".xylem", "worktrees", "review", "pr-align")
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git) = %v", err)
 	}
@@ -8154,7 +8154,7 @@ func TestVerifyProtectedSurfacesSuppressesAlignmentModifications(t *testing.T) {
 // raise violations.
 func TestVerifyProtectedSurfacesStillCatchesRogueModifications(t *testing.T) {
 	repoRoot := t.TempDir()
-	worktreeDir := filepath.Join(repoRoot, ".claude", "worktrees", "review", "pr-rogue")
+	worktreeDir := filepath.Join(repoRoot, ".xylem", "worktrees", "review", "pr-rogue")
 	if err := os.MkdirAll(filepath.Join(repoRoot, ".git"), 0o755); err != nil {
 		t.Fatalf("MkdirAll(.git) = %v", err)
 	}
@@ -9269,7 +9269,7 @@ func TestCheckHungVesselsDoesNotRemoveWorktreeMidFlight(t *testing.T) {
 		Source:       "manual",
 		State:        queue.StatePending,
 		CreatedAt:    now,
-		WorktreePath: filepath.Join(dir, ".claude", "worktrees", "hung-1"),
+		WorktreePath: filepath.Join(dir, ".xylem", "worktrees", "hung-1"),
 	})
 	vessel, _ := q.Dequeue()
 	require.NotNil(t, vessel)
@@ -9306,7 +9306,7 @@ func TestRunVesselPromptOnlyTimeoutKeepsTimedOutStateAndCleansWorktreeAfterExit(
 	require.NoError(t, err)
 	require.NotNil(t, vessel)
 
-	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", "prompt-timeout-1")}
+	wt := &mockWorktree{path: filepath.Join(dir, ".xylem", "worktrees", "prompt-timeout-1")}
 	cmdRunner := &mockCmdRunner{
 		runPhaseHook: func(_ string, _ string, _ string, _ ...string) ([]byte, error, bool) {
 			updateErr := q.Update(vessel.ID, queue.StateTimedOut, "phase stalled: no output for 11m0s")
@@ -9346,7 +9346,7 @@ func TestRunVesselOrchestratedTimeoutKeepsTimedOutStateAndCleansWorktreeAfterExi
 	require.NoError(t, err)
 	require.NotNil(t, vessel)
 
-	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	wt := &mockWorktree{path: filepath.Join(dir, ".xylem", "worktrees", vessel.ID)}
 	cmdRunner := &mockCmdRunner{
 		runPhaseHook: func(_ string, prompt string, _ string, _ ...string) ([]byte, error, bool) {
 			if !strings.Contains(prompt, "Root phase") {
@@ -9398,7 +9398,7 @@ func TestRunVesselGateTimeoutSkipsCompletionHooks(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, vessel)
 
-	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	wt := &mockWorktree{path: filepath.Join(dir, ".xylem", "worktrees", vessel.ID)}
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
 			"Implement change": []byte("implemented"),
@@ -9461,7 +9461,7 @@ func TestRunVesselOrchestratedGateTimeoutStopsDependentPhases(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, vessel)
 
-	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	wt := &mockWorktree{path: filepath.Join(dir, ".xylem", "worktrees", vessel.ID)}
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
 			"Root phase": []byte("root output"),
@@ -9529,7 +9529,7 @@ func TestSmoke_S41_OrchestratedGateRetryFailurePostsOnlyFinalFailedComment(t *te
 		gateOutput: []byte("FAIL: TestFoo"),
 		gateErr:    &mockExitError{code: 1},
 	}
-	wt := &mockWorktree{path: filepath.Join(dir, ".claude", "worktrees", vessel.ID)}
+	wt := &mockWorktree{path: filepath.Join(dir, ".xylem", "worktrees", vessel.ID)}
 	r := New(cfg, q, wt, cmdRunner)
 	r.Sources = map[string]source.Source{
 		"github-issue": makeGitHubSource(),

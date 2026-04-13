@@ -140,7 +140,7 @@ func TestCreateIssuesCorrectCommands(t *testing.T) {
 	if !r.called("git", "fetch", "origin", "main") {
 		t.Error("expected 'git fetch origin main' to be called")
 	}
-	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/issue-42-null-response", "-B", "fix/issue-42-null-response", "origin/main") {
+	if !r.called("git", "worktree", "add", ".xylem/worktrees/fix/issue-42-null-response", "-B", "fix/issue-42-null-response", "origin/main") {
 		t.Errorf("expected 'git worktree add' to be called, calls were: %v", r.calls)
 	}
 }
@@ -166,7 +166,7 @@ func TestCreateEmitsWorktreeSpan(t *testing.T) {
 		}
 		assert.Equal(t, "create", attrs["xylem.worktree.action"])
 		assert.Equal(t, "fix/issue-42-null-response", attrs["xylem.worktree.branch"])
-		assert.Equal(t, ".claude/worktrees/fix/issue-42-null-response", attrs["xylem.worktree.path"])
+		assert.Equal(t, ".xylem/worktrees/fix/issue-42-null-response", attrs["xylem.worktree.path"])
 	}
 	require.True(t, found, "expected worktree:create span")
 }
@@ -190,14 +190,14 @@ func TestCreateFetchFailure(t *testing.T) {
 
 func TestRemoveIssuesCorrectCommand(t *testing.T) {
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/fix/issue-42-test\nHEAD abc123\nbranch refs/heads/fix/issue-42-test\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/fix/issue-42-test\nHEAD abc123\nbranch refs/heads/fix/issue-42-test\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 	m := New("/repo", r)
-	err := m.Remove(context.Background(), ".claude/worktrees/fix/issue-42-test")
+	err := m.Remove(context.Background(), ".xylem/worktrees/fix/issue-42-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !r.called("git", "worktree", "remove", ".claude/worktrees/fix/issue-42-test", "--force") {
+	if !r.called("git", "worktree", "remove", ".xylem/worktrees/fix/issue-42-test", "--force") {
 		t.Error("expected 'git worktree remove ... --force' to be called")
 	}
 }
@@ -207,11 +207,11 @@ func TestRemoveIssuesCorrectCommand(t *testing.T) {
 // component ("issue-42"), which was the bug caused by filepath.Base().
 func TestRemoveDeletesCorrectBranchWithSlash(t *testing.T) {
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/fix/issue-42-slug\nHEAD abc123\nbranch refs/heads/fix/issue-42-slug\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/fix/issue-42-slug\nHEAD abc123\nbranch refs/heads/fix/issue-42-slug\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 	m := New("/repo", r)
 
-	err := m.Remove(context.Background(), ".claude/worktrees/fix/issue-42-slug")
+	err := m.Remove(context.Background(), ".xylem/worktrees/fix/issue-42-slug")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -230,11 +230,11 @@ func TestRemoveDeletesCorrectBranchWithSlash(t *testing.T) {
 // absolute worktree path (as returned by ListXylem with absolute paths).
 func TestRemoveWithAbsoluteWorktreePath(t *testing.T) {
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/feat/add-logging\nHEAD def456\nbranch refs/heads/feat/add-logging\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/feat/add-logging\nHEAD def456\nbranch refs/heads/feat/add-logging\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 	m := New("/repo", r)
 
-	err := m.Remove(context.Background(), "/repo/.claude/worktrees/feat/add-logging")
+	err := m.Remove(context.Background(), "/repo/.xylem/worktrees/feat/add-logging")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestRemoveSkipsBranchDeleteWhenNotFound(t *testing.T) {
 	r.setOutput("git worktree list --porcelain", []byte(""))
 	m := New("/repo", r)
 
-	err := m.Remove(context.Background(), ".claude/worktrees/orphan-branch")
+	err := m.Remove(context.Background(), ".xylem/worktrees/orphan-branch")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -267,14 +267,14 @@ func TestSmoke_S1_RemoveDeletesPersistedBranchRefAfterWorktreeCleanup(t *testing
 	t.Parallel()
 
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/feat/issue-235-235\nHEAD abc123\nbranch refs/heads/feat/issue-235-235\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/feat/issue-235-235\nHEAD abc123\nbranch refs/heads/feat/issue-235-235\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 
 	m := New("/repo", r)
-	err := m.Remove(context.Background(), ".claude/worktrees/feat/issue-235-235")
+	err := m.Remove(context.Background(), ".xylem/worktrees/feat/issue-235-235")
 	require.NoError(t, err)
 
-	removeIdx := r.callIndex("git", "worktree", "remove", ".claude/worktrees/feat/issue-235-235", "--force")
+	removeIdx := r.callIndex("git", "worktree", "remove", ".xylem/worktrees/feat/issue-235-235", "--force")
 	deleteIdx := r.callIndex("git", "branch", "-D", "feat/issue-235-235")
 	require.NotEqual(t, -1, removeIdx, "expected worktree removal command")
 	require.NotEqual(t, -1, deleteIdx, "expected stale branch ref deletion command")
@@ -284,7 +284,7 @@ func TestSmoke_S1_RemoveDeletesPersistedBranchRefAfterWorktreeCleanup(t *testing
 }
 
 func TestListParsesPorcelain(t *testing.T) {
-	porcelain := "worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /home/user/repo/.claude/worktrees/fix/issue-42\nHEAD def456\nbranch refs/heads/fix/issue-42\n\n"
+	porcelain := "worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /home/user/repo/.xylem/worktrees/fix/issue-42\nHEAD def456\nbranch refs/heads/fix/issue-42\n\n"
 	r := newMock()
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 	m := New("/home/user/repo", r)
@@ -308,7 +308,7 @@ func TestListParsesPorcelain(t *testing.T) {
 }
 
 func TestListXylemFilters(t *testing.T) {
-	porcelain := "worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /home/user/repo/.claude/worktrees/fix/issue-42\nHEAD def456\nbranch refs/heads/fix/issue-42\n\n"
+	porcelain := "worktree /home/user/repo\nHEAD abc123\nbranch refs/heads/main\n\nworktree /home/user/repo/.xylem/worktrees/fix/issue-42\nHEAD def456\nbranch refs/heads/fix/issue-42\n\n"
 	r := newMock()
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 	m := New("/home/user/repo", r)
@@ -320,8 +320,8 @@ func TestListXylemFilters(t *testing.T) {
 	if len(list) != 1 {
 		t.Fatalf("expected 1 xylem worktree, got %d: %v", len(list), list)
 	}
-	if !strings.Contains(list[0].Path, ".claude/worktrees/") {
-		t.Errorf("expected path under .claude/worktrees/, got %q", list[0].Path)
+	if !strings.Contains(list[0].Path, ".xylem/worktrees/") {
+		t.Errorf("expected path under .xylem/worktrees/, got %q", list[0].Path)
 	}
 }
 
@@ -504,7 +504,7 @@ func TestDefaultBranchGHReturnsEmptyName(t *testing.T) {
 func TestCreateWorktreeAddFails(t *testing.T) {
 	r := newMock()
 	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
-	r.setErr("git worktree add .claude/worktrees/fix/issue-1-test -B fix/issue-1-test origin/main",
+	r.setErr("git worktree add .xylem/worktrees/fix/issue-1-test -B fix/issue-1-test origin/main",
 		errors.New("fatal: 'fix/issue-1-test' is already checked out"))
 
 	m := New("/repo", r)
@@ -531,11 +531,11 @@ func TestCreateExistingBranchResets(t *testing.T) {
 	}
 
 	// Must use -B (force-create/reset) not -b (create-only) to handle retries
-	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/retry-branch", "-B", "fix/retry-branch", "origin/main") {
+	if !r.called("git", "worktree", "add", ".xylem/worktrees/fix/retry-branch", "-B", "fix/retry-branch", "origin/main") {
 		t.Errorf("expected 'git worktree add' with -B flag for retry safety, got calls: %v", r.calls)
 	}
 	// Verify -b is NOT used (guards against regression)
-	if r.called("git", "worktree", "add", ".claude/worktrees/fix/retry-branch", "-b", "fix/retry-branch", "origin/main") {
+	if r.called("git", "worktree", "add", ".xylem/worktrees/fix/retry-branch", "-b", "fix/retry-branch", "origin/main") {
 		t.Error("must use -B (not -b) so retries work when branch already exists")
 	}
 }
@@ -724,12 +724,12 @@ func TestParsePorcelainBareWorktree(t *testing.T) {
 
 func TestRemoveWorktreeRemoveFails(t *testing.T) {
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/fix/issue-1\nHEAD abc\nbranch refs/heads/fix/issue-1\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/fix/issue-1\nHEAD abc\nbranch refs/heads/fix/issue-1\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
-	r.setErr("git worktree remove .claude/worktrees/fix/issue-1 --force", errors.New("lock file exists"))
+	r.setErr("git worktree remove .xylem/worktrees/fix/issue-1 --force", errors.New("lock file exists"))
 
 	m := New("/repo", r)
-	err := m.Remove(context.Background(), ".claude/worktrees/fix/issue-1")
+	err := m.Remove(context.Background(), ".xylem/worktrees/fix/issue-1")
 	if err == nil {
 		t.Fatal("expected error when worktree remove fails")
 	}
@@ -744,12 +744,12 @@ func TestRemoveWorktreeRemoveFails(t *testing.T) {
 
 func TestRemoveBranchDeleteFails(t *testing.T) {
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/fix/issue-2\nHEAD abc\nbranch refs/heads/fix/issue-2\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/fix/issue-2\nHEAD abc\nbranch refs/heads/fix/issue-2\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 	r.setErr("git branch -D fix/issue-2", errors.New("branch is checked out elsewhere"))
 
 	m := New("/repo", r)
-	err := m.Remove(context.Background(), ".claude/worktrees/fix/issue-2")
+	err := m.Remove(context.Background(), ".xylem/worktrees/fix/issue-2")
 	if err == nil {
 		t.Fatal("expected error when branch delete fails")
 	}
@@ -835,7 +835,7 @@ func TestCreateNoOriginRemote(t *testing.T) {
 		t.Error("should not call git fetch when no origin remote")
 	}
 	// Should use local branch as start point (not origin/main)
-	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/local-only", "-B", "fix/local-only", "main") {
+	if !r.called("git", "worktree", "add", ".xylem/worktrees/fix/local-only", "-B", "fix/local-only", "main") {
 		t.Errorf("expected worktree add with local start point 'main', got calls: %v", r.calls)
 	}
 }
@@ -856,7 +856,7 @@ func TestCreateWithOriginRemote(t *testing.T) {
 		t.Error("expected git fetch origin main when origin exists")
 	}
 	// Should use origin/main as start point
-	if !r.called("git", "worktree", "add", ".claude/worktrees/fix/has-origin", "-B", "fix/has-origin", "origin/main") {
+	if !r.called("git", "worktree", "add", ".xylem/worktrees/fix/has-origin", "-B", "fix/has-origin", "origin/main") {
 		t.Errorf("expected worktree add with 'origin/main' start point, got calls: %v", r.calls)
 	}
 }
@@ -870,7 +870,7 @@ func TestCreateRemovesStaleWorktree(t *testing.T) {
 	r := newMock()
 	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
 	// Porcelain output shows existing worktree at the target path
-	porcelain := "worktree /repo/.claude/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 
 	m := New("/repo", r)
@@ -899,7 +899,7 @@ func TestCreateRemovesStaleWorktree(t *testing.T) {
 	if removeIdx >= addIdx {
 		t.Errorf("git worktree remove (index %d) must be called BEFORE git worktree add (index %d)", removeIdx, addIdx)
 	}
-	if !r.called("git", "worktree", "remove", ".claude/worktrees/feat/issue-6-6", "--force") {
+	if !r.called("git", "worktree", "remove", ".xylem/worktrees/feat/issue-6-6", "--force") {
 		t.Errorf("expected 'git worktree remove ... --force', got calls: %v", r.calls)
 	}
 }
@@ -926,7 +926,7 @@ func TestCreateNoStaleWorktree(t *testing.T) {
 		}
 	}
 	// Should still call worktree add
-	if !r.called("git", "worktree", "add", ".claude/worktrees/feat/issue-7-7", "-B", "feat/issue-7-7", "origin/main") {
+	if !r.called("git", "worktree", "add", ".xylem/worktrees/feat/issue-7-7", "-B", "feat/issue-7-7", "origin/main") {
 		t.Errorf("expected 'git worktree add', got calls: %v", r.calls)
 	}
 }
@@ -940,7 +940,7 @@ func TestBranchForWorktreeRelativeRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Getwd: %v", err)
 	}
-	absWorktreePath := filepath.Join(cwd, ".claude", "worktrees", "feat", "issue-6-6")
+	absWorktreePath := filepath.Join(cwd, ".xylem", "worktrees", "feat", "issue-6-6")
 
 	r := newMock()
 	porcelain := "worktree " + absWorktreePath + "\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
@@ -948,7 +948,7 @@ func TestBranchForWorktreeRelativeRoot(t *testing.T) {
 
 	// Use relative RepoRoot "." — this is the bug scenario
 	m := New(".", r)
-	branch := m.branchForWorktree(context.Background(), ".claude/worktrees/feat/issue-6-6")
+	branch := m.branchForWorktree(context.Background(), ".xylem/worktrees/feat/issue-6-6")
 	if branch != "feat/issue-6-6" {
 		t.Errorf("expected branch 'feat/issue-6-6' with relative RepoRoot, got %q", branch)
 	}
@@ -958,11 +958,11 @@ func TestBranchForWorktreeRelativeRoot(t *testing.T) {
 // still works when RepoRoot is already absolute.
 func TestBranchForWorktreeAbsoluteRoot(t *testing.T) {
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 
 	m := New("/repo", r)
-	branch := m.branchForWorktree(context.Background(), ".claude/worktrees/feat/issue-6-6")
+	branch := m.branchForWorktree(context.Background(), ".xylem/worktrees/feat/issue-6-6")
 	if branch != "feat/issue-6-6" {
 		t.Errorf("expected branch 'feat/issue-6-6' with absolute RepoRoot, got %q", branch)
 	}
@@ -972,12 +972,12 @@ func TestBranchForWorktreeAbsoluteRoot(t *testing.T) {
 // when a branch is registered at any path.
 func TestPathForBranchFound(t *testing.T) {
 	r := newMock()
-	porcelain := "worktree /repo/.claude/worktrees/merge/pr-42-slug\nHEAD abc123\nbranch refs/heads/merge/pr-42-slug\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/merge/pr-42-slug\nHEAD abc123\nbranch refs/heads/merge/pr-42-slug\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 
 	m := New("/repo", r)
 	path := m.pathForBranch(context.Background(), "merge/pr-42-slug")
-	if path != "/repo/.claude/worktrees/merge/pr-42-slug" {
+	if path != "/repo/.xylem/worktrees/merge/pr-42-slug" {
 		t.Errorf("expected path for branch, got %q", path)
 	}
 }
@@ -1002,7 +1002,7 @@ func TestCreateRemovesStaleWorktreeRelativeRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Getwd: %v", err)
 	}
-	absWorktreePath := filepath.Join(cwd, ".claude", "worktrees", "feat", "issue-6-6")
+	absWorktreePath := filepath.Join(cwd, ".xylem", "worktrees", "feat", "issue-6-6")
 
 	r := newMock()
 	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
@@ -1016,7 +1016,7 @@ func TestCreateRemovesStaleWorktreeRelativeRoot(t *testing.T) {
 	}
 
 	// Must call remove for the stale worktree
-	if !r.called("git", "worktree", "remove", ".claude/worktrees/feat/issue-6-6", "--force") {
+	if !r.called("git", "worktree", "remove", ".xylem/worktrees/feat/issue-6-6", "--force") {
 		t.Errorf("expected stale worktree removal with relative root, got calls: %v", r.calls)
 	}
 }
@@ -1028,14 +1028,14 @@ func TestRemoveResolvesRelativeRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("os.Getwd: %v", err)
 	}
-	absWorktreePath := filepath.Join(cwd, ".claude", "worktrees", "fix", "issue-42-test")
+	absWorktreePath := filepath.Join(cwd, ".xylem", "worktrees", "fix", "issue-42-test")
 
 	r := newMock()
 	porcelain := "worktree " + absWorktreePath + "\nHEAD abc123\nbranch refs/heads/fix/issue-42-test\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 
 	m := New(".", r)
-	err = m.Remove(context.Background(), ".claude/worktrees/fix/issue-42-test")
+	err = m.Remove(context.Background(), ".xylem/worktrees/fix/issue-42-test")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -1050,10 +1050,10 @@ func TestCreateStaleRemoveFails(t *testing.T) {
 	r := newMock()
 	r.setOutput("gh repo view --json defaultBranchRef", []byte(`{"defaultBranchRef":{"name":"main"}}`))
 	// Porcelain output shows existing worktree at the target path
-	porcelain := "worktree /repo/.claude/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
+	porcelain := "worktree /repo/.xylem/worktrees/feat/issue-6-6\nHEAD abc123\nbranch refs/heads/feat/issue-6-6\n\n"
 	r.setOutput("git worktree list --porcelain", []byte(porcelain))
 	// Remove fails
-	r.setErr("git worktree remove .claude/worktrees/feat/issue-6-6 --force", errors.New("worktree is locked"))
+	r.setErr("git worktree remove .xylem/worktrees/feat/issue-6-6 --force", errors.New("worktree is locked"))
 
 	m := New("/repo", r)
 	_, err := m.Create(context.Background(), "feat/issue-6-6")
