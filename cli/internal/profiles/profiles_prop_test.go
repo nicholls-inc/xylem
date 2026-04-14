@@ -163,7 +163,6 @@ var docGardenExpectedFragments = map[string]string{
 var implementHarnessPRCreateContract = []string{
 	`gh pr create`,
 	`--repo nicholls-inc/xylem`,
-	`--label "harness-impl"`,
 	`--label "ready-to-merge"`,
 }
 

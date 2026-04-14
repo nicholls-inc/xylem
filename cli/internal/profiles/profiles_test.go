@@ -202,8 +202,7 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Prompts), "hardening-audit/rank")
 	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/analyze")
 	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/report")
-	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
-	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
+	assert.Contains(t, sortedKeys(composed.Sources), "post-merge")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")
 	assert.Contains(t, sortedKeys(composed.Sources), "hardening-audit")
@@ -223,7 +222,6 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 
 	implementHarnessWorkflow := string(composed.Workflows["implement-harness"])
 	assert.Contains(t, implementHarnessWorkflow, `--repo nicholls-inc/xylem`)
-	assert.Contains(t, implementHarnessWorkflow, `--label "harness-impl"`)
 	assert.Contains(t, implementHarnessWorkflow, `--label "ready-to-merge"`)
 }
 

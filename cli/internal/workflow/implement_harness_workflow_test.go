@@ -22,7 +22,6 @@ const (
 	implementHarnessGoTest     = "go test ./..."
 	implementHarnessPRCreate   = "gh pr create"
 	implementHarnessRepoFlag   = "--repo nicholls-inc/xylem"
-	implementHarnessPRLabel    = `--label "harness-impl"`
 	implementHarnessMergeLabel = `--label "ready-to-merge"`
 )
 
@@ -114,7 +113,6 @@ func TestSmoke_S3_ImplementHarnessWorkflowChecksMainFreshnessBeforePRCreate(t *t
 	assert.Contains(t, prCreate.Run, implementHarnessFetchMain)
 	assert.Contains(t, prCreate.Run, implementHarnessMergeBase)
 	assert.Contains(t, prCreate.Run, implementHarnessRepoFlag)
-	assert.Contains(t, prCreate.Run, implementHarnessPRLabel)
 	assert.Contains(t, prCreate.Run, implementHarnessMergeLabel)
 	assert.Contains(t, prCreate.Run, `ERROR: branch is behind origin/main; rebase before creating the PR`)
 	assert.True(t, commandContainsInOrder(
@@ -122,7 +120,6 @@ func TestSmoke_S3_ImplementHarnessWorkflowChecksMainFreshnessBeforePRCreate(t *t
 		implementHarnessFetchMain,
 		implementHarnessMergeBase,
 		implementHarnessPRCreate,
-		implementHarnessPRLabel,
 		implementHarnessMergeLabel,
 	))
 }

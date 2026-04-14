@@ -1,42 +1,4 @@
 sources:
-  pr-lifecycle:
-    type: github-pr-events
-    repo: "{{ .Repo }}"
-    exclude: [no-bot, pr-vessel-active]
-    tasks:
-      respond-reviews:
-        workflow: respond-to-pr-review
-        on:
-          review_submitted: true
-          author_allow:
-            - "copilot-pull-request-reviewer[bot]"
-      fix-checks:
-        workflow: fix-pr-checks
-        on:
-          checks_failed: true
-  merge:
-    type: github-pr
-    repo: "{{ .Repo }}"
-    exclude: [no-bot, pr-vessel-active]
-    tasks:
-      merge-ready:
-        labels: [ready-to-merge]
-        workflow: merge-pr
-        status_labels:
-          running: pr-vessel-active
-          completed: pr-vessel-merged
-          failed: xylem-failed
-  conflict-resolution:
-    type: github-pr
-    repo: "{{ .Repo }}"
-    exclude: [no-bot, pr-vessel-active]
-    tasks:
-      resolve-conflicts:
-        labels: [needs-conflict-resolution]
-        workflow: resolve-conflicts
-        status_labels:
-          running: pr-vessel-active
-          failed: xylem-failed
   sota-gap:
     type: scheduled
     repo: "{{ .Repo }}"
