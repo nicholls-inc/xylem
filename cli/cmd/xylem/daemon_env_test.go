@@ -12,14 +12,14 @@ import (
 
 func TestLoadDaemonStartupEnvAppliesDaemonRootEnv(t *testing.T) {
 	repoDir := t.TempDir()
-	envPath := daemonSupervisorEnvFilePath(repoDir)
+	envPath := daemonSupervisorEnvFilePath(repoDir, ".env")
 	require.NoError(t, os.MkdirAll(filepath.Dir(envPath), 0o755))
 	require.NoError(t, os.WriteFile(envPath, []byte("API_TOKEN=from-file\nEMPTY=\n"), 0o644))
 
 	t.Setenv("API_TOKEN", "from-process")
 	t.Setenv("EMPTY", "non-empty")
 
-	require.NoError(t, loadDaemonStartupEnv(repoDir))
+	require.NoError(t, loadDaemonStartupEnv(repoDir, ".env"))
 	assert.Equal(t, "from-file", os.Getenv("API_TOKEN"))
 	assert.Equal(t, "", os.Getenv("EMPTY"))
 }
@@ -28,20 +28,32 @@ func TestLoadDaemonStartupEnvMissingFileIsNoop(t *testing.T) {
 	repoDir := t.TempDir()
 	t.Setenv("API_TOKEN", "from-process")
 
-	require.NoError(t, loadDaemonStartupEnv(repoDir))
+	require.NoError(t, loadDaemonStartupEnv(repoDir, ".env"))
 	assert.Equal(t, "from-process", os.Getenv("API_TOKEN"))
 }
 
 func TestLoadDaemonStartupEnvReturnsParseError(t *testing.T) {
 	repoDir := t.TempDir()
-	envPath := daemonSupervisorEnvFilePath(repoDir)
+	envPath := daemonSupervisorEnvFilePath(repoDir, ".env")
 	require.NoError(t, os.MkdirAll(filepath.Dir(envPath), 0o755))
 	require.NoError(t, os.WriteFile(envPath, []byte("not-an-assignment\n"), 0o644))
 
-	err := loadDaemonStartupEnv(repoDir)
+	err := loadDaemonStartupEnv(repoDir, ".env")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "load daemon startup env")
 	assert.Contains(t, err.Error(), ".env")
+}
+
+func TestLoadDaemonStartupEnvUsesConfiguredEnvFile(t *testing.T) {
+	repoDir := t.TempDir()
+	envPath := daemonSupervisorEnvFilePath(repoDir, "secrets.env")
+	require.NoError(t, os.MkdirAll(filepath.Dir(envPath), 0o755))
+	require.NoError(t, os.WriteFile(envPath, []byte("CONFIGURED_KEY=configured-value\n"), 0o644))
+
+	t.Setenv("CONFIGURED_KEY", "original")
+
+	require.NoError(t, loadDaemonStartupEnv(repoDir, "secrets.env"))
+	assert.Equal(t, "configured-value", os.Getenv("CONFIGURED_KEY"))
 }
 
 func TestApplyDaemonEnvEntriesRejectsInvalidEntry(t *testing.T) {

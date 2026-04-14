@@ -152,7 +152,7 @@ func runDaemonSupervisor(ctx context.Context, opts daemonSupervisorOptions) erro
 			return clearDaemonSupervisorStopRequest(opts.Cfg)
 		}
 
-		env, err := daemonSupervisorProcessEnv(opts.WorkingDir)
+		env, err := daemonSupervisorProcessEnv(opts.WorkingDir, opts.Cfg.Daemon.EffectiveEnvFile())
 		if err != nil {
 			return err
 		}
@@ -316,8 +316,8 @@ func startDaemonSupervisorProcess(launch daemonSupervisorLaunch) (daemonSupervis
 	return &execDaemonSupervisorProcess{cmd: cmd}, nil
 }
 
-func daemonSupervisorProcessEnv(workingDir string) ([]string, error) {
-	envFile, err := loadDaemonSupervisorEnvFile(daemonSupervisorEnvFilePath(workingDir))
+func daemonSupervisorProcessEnv(workingDir, envFileName string) ([]string, error) {
+	envFile, err := loadDaemonSupervisorEnvFile(daemonSupervisorEnvFilePath(workingDir, envFileName))
 	if err != nil {
 		return nil, err
 	}
@@ -333,8 +333,8 @@ func daemonSupervisorCommandArgs(configPath string) []string {
 	return args
 }
 
-func daemonSupervisorEnvFilePath(workingDir string) string {
-	return filepath.Join(workingDir, ".env")
+func daemonSupervisorEnvFilePath(workingDir, envFileName string) string {
+	return filepath.Join(workingDir, envFileName)
 }
 
 func loadDaemonSupervisorEnvFile(path string) ([]string, error) {
