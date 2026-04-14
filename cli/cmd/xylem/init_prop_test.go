@@ -216,6 +216,78 @@ func TestPropSyncProfileAssetsMaterializesComposedAssetsWhenForceTrue(t *testing
 	})
 }
 
+// TestPropResyncProfileAssetsMaterializesAllComposedAssets verifies that
+// resyncProfileAssets always writes every composed asset to disk, regardless
+// of whether the file already exists with different content.
+func TestPropResyncProfileAssetsMaterializesAllComposedAssets(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		stateDir, err := os.MkdirTemp("", "xylem-resync-assets-*")
+		if err != nil {
+			rt.Fatalf("MkdirTemp() error = %v", err)
+		}
+		defer os.RemoveAll(stateDir)
+
+		composed := &profiles.ComposedProfile{
+			Workflows: rapidWorkflowMap(rt, "workflow"),
+			Prompts:   rapidPromptMap(rt, "prompt"),
+		}
+
+		// Pre-populate some files with arbitrary (stale) content.
+		for _, name := range sortedKeys(composed.Workflows) {
+			if !rapid.Bool().Draw(rt, "pre-exist-workflow-"+name) {
+				continue
+			}
+			path := filepath.Join(stateDir, "workflows", name+".yaml")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				rt.Fatalf("MkdirAll(%q) error = %v", path, err)
+			}
+			stale := []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, "stale-wf-"+name))
+			if err := os.WriteFile(path, stale, 0o644); err != nil {
+				rt.Fatalf("WriteFile(%q) error = %v", path, err)
+			}
+		}
+		for _, name := range sortedKeys(composed.Prompts) {
+			if !rapid.Bool().Draw(rt, "pre-exist-prompt-"+name) {
+				continue
+			}
+			path := filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md")
+			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+				rt.Fatalf("MkdirAll(%q) error = %v", path, err)
+			}
+			stale := []byte(rapid.StringMatching(`[a-z0-9 -]{0,24}`).Draw(rt, "stale-pr-"+name))
+			if err := os.WriteFile(path, stale, 0o644); err != nil {
+				rt.Fatalf("WriteFile(%q) error = %v", path, err)
+			}
+		}
+
+		if err := resyncProfileAssets(stateDir, composed); err != nil {
+			rt.Fatalf("resyncProfileAssets() error = %v", err)
+		}
+
+		// Every composed workflow must match the embedded content exactly.
+		for name, want := range composed.Workflows {
+			got, err := os.ReadFile(filepath.Join(stateDir, "workflows", name+".yaml"))
+			if err != nil {
+				rt.Fatalf("ReadFile(workflow %q) error = %v", name, err)
+			}
+			if string(got) != string(want) {
+				rt.Fatalf("workflow %q = %q, want %q", name, string(got), string(want))
+			}
+		}
+
+		// Every composed prompt must match the embedded content exactly.
+		for name, want := range composed.Prompts {
+			got, err := os.ReadFile(filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md"))
+			if err != nil {
+				rt.Fatalf("ReadFile(prompt %q) error = %v", name, err)
+			}
+			if string(got) != string(want) {
+				rt.Fatalf("prompt %q = %q, want %q", name, string(got), string(want))
+			}
+		}
+	})
+}
+
 func rapidWorkflowMap(rt *rapid.T, label string) map[string][]byte {
 	count := rapid.IntRange(0, 4).Draw(rt, label+"-count")
 	assets := make(map[string][]byte, count)
