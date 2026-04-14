@@ -86,7 +86,7 @@ phases:
       sanitized = sanitize_json(raw)
       data = json.loads(sanitized)
       with open(filepath, "w") as f:
-          json.dump(data, f, ensure_ascii=False)
+          json.dump(data, f, ensure_ascii=True)
       ' "$ACTIONS_FILE"
 
       ACTION_COUNT=$(jq '.actions | length' "$ACTIONS_FILE")
