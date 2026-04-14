@@ -6,6 +6,8 @@ You have 40 GitHub issues labeled `ready-for-work`. They've been sitting there f
 
 It runs Claude Code autonomously against your backlog: scanning issues, creating isolated worktrees, executing multi-phase workflows, running your test gates, and opening PRs — all without you watching. While you work on what matters, xylem drains the queue.
 
+xylem wrote this README while i was lying in bed eating a popsicle. All I did was draft [this issue](https://github.com/nicholls-inc/xylem/issues/477), and add labels. xylem had a brand new readme before I finished my popsicle. 
+
 ## What you can achieve
 
 - **Backlog that actually shrinks** — label issues `ready-for-work`, start the daemon, come back to open PRs
