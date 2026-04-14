@@ -101,7 +101,7 @@ func TestScenarioIssueDedupBranchExistsSkipsScan(t *testing.T) {
 	}
 
 	delta := eventDelta(t, env.store, before)
-	if got := len(filterShimEvents(delta, dtu.EventKindShimInvocation, "gh", []string{"search", "issues"})); got != 1 {
+	if got := len(filterShimEvents(delta, dtu.EventKindShimInvocation, "gh", []string{"issue", "list"})); got != 1 {
 		t.Fatalf("len(search invocations) = %d, want 1", got)
 	}
 	if got := len(filterShimEvents(delta, dtu.EventKindShimInvocation, "git", []string{"ls-remote", "--heads", "origin", "fix/issue-11-*"})); got != 1 {
@@ -234,7 +234,7 @@ func TestScenarioIssueDedupFailedFingerprintSkipsUnchangedFailure(t *testing.T) 
 	}
 
 	delta := eventDelta(t, env.store, before)
-	if got := len(filterShimEvents(delta, dtu.EventKindShimInvocation, "gh", []string{"search", "issues"})); got != 1 {
+	if got := len(filterShimEvents(delta, dtu.EventKindShimInvocation, "gh", []string{"issue", "list"})); got != 1 {
 		t.Fatalf("len(search invocations) = %d, want 1", got)
 	}
 	if got := len(filterShimEvents(delta, dtu.EventKindShimInvocation, "git", []string{"ls-remote"})); got != 0 {
