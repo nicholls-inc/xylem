@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/nicholls-inc/xylem/compare/xylem-v1.2.0...xylem-v1.2.1) (2026-04-14)
+
+
+### Bug Fixes
+
+* switch scanner from gh search issues to gh issue list API ([#490](https://github.com/nicholls-inc/xylem/issues/490)) ([17cf2a5](https://github.com/nicholls-inc/xylem/commit/17cf2a59e5683d22d84b1ba31c20ae43a77ad4c7))
+
 ## [1.2.0](https://github.com/nicholls-inc/xylem/compare/xylem-v1.1.0...xylem-v1.2.0) (2026-04-14)
 
 
