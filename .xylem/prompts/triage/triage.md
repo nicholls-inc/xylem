@@ -10,20 +10,39 @@ Labels: {{.Issue.Labels}}
 
 ## Instructions
 
+Write a JSON decision file to `.xylem/state/triage/{{.Issue.Number}}-decision.json`.
+
+Create the state directory first:
+```
+mkdir -p .xylem/state/triage
+```
+
 **If the analysis says DO NOT split:**
 
-1. Add the type label and "needs-refinement":
-   `gh issue edit {{.Issue.Number}} --add-label "<type>,needs-refinement"`
-2. Remove "needs-triage":
-   `gh issue edit {{.Issue.Number}} --remove-label "needs-triage"`
+Write this schema:
+```json
+{
+  "action": "label",
+  "type_label": "<type>"
+}
+```
+
+Where `<type>` is the appropriate type label (e.g. `bug`, `enhancement`, `chore`, `documentation`).
 
 **If the analysis says SPLIT:**
 
-1. For each sub-issue identified in the analysis, create it with:
-   `gh issue create --title "<title>" --label "<type>,needs-triage" --body "<relevant section of the original issue body>"`
-   Keep the body minimal — the refinement workflow will flesh it out.
-2. Update the original issue body to reference the created sub-issues with a "Split into:" prefix
-3. Close the original:
-   `gh issue close {{.Issue.Number}} --reason "not planned" --comment "Split into focused sub-issues."`
+Write this schema:
+```json
+{
+  "action": "split",
+  "type_label": "<type>",
+  "sub_issues": [
+    {"title": "<sub-issue title>", "body": "<minimal body — refinement will flesh it out>"},
+    {"title": "<sub-issue title>", "body": "<minimal body>"}
+  ]
+}
+```
 
-Do not ask for user input. If the type is ambiguous, pick the best fit and note the reasoning in a comment.
+Each sub-issue body should be a single line or short paragraph. Do not use literal newlines inside the `body` values — use `\n` if you need a line break.
+
+Do not call `gh`. Write the decision file only. If the type label is ambiguous, pick the best fit.

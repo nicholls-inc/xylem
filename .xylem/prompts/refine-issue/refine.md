@@ -38,8 +38,12 @@ Steps the implementing agent must follow to verify each acceptance criterion:
 
 ## Instructions
 
-1. Rewrite the issue description using the template above, filling in all sections from the analysis
-2. Update the issue: `gh issue edit {{.Issue.Number}} --body "<new body>"`
-3. Swap labels: `gh issue edit {{.Issue.Number}} --remove-label "needs-refinement" --add-label "ready-for-work"`
+1. Rewrite the issue description using the template above, filling in all sections from the analysis.
+2. Create the state directory and write the refined body to a file:
+   ```
+   mkdir -p .xylem/state/refine-issue
+   ```
+   Write the complete rewritten issue body (plain Markdown, all sections filled in) to:
+   `.xylem/state/refine-issue/{{.Issue.Number}}-body.md`
 
-Do not ask for user input. If information is missing, make reasonable inferences from the codebase and note assumptions in Technical Notes.
+Do not call `gh`. Write the body file only. If information is missing, make reasonable inferences from the codebase and note assumptions in Technical Notes.
