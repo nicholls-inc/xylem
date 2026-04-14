@@ -130,6 +130,20 @@ func TestCmdLessonsCreatesPullRequestsForGeneratedProposals(t *testing.T) {
 	if len(runner.processCalls) != 3 {
 		t.Fatalf("len(processCalls) = %d, want 3", len(runner.processCalls))
 	}
+	// Verify the commit call carries inline identity flags so it works in
+	// environments where git global user.name/user.email are not configured.
+	commitFound := false
+	for _, call := range runner.processCalls {
+		if strings.Contains(call, "commit") {
+			if !strings.Contains(call, "user.name=xylem") || !strings.Contains(call, "user.email=xylem@localhost") {
+				t.Fatalf("git commit call missing identity flags: %q", call)
+			}
+			commitFound = true
+		}
+	}
+	if !commitFound {
+		t.Fatal("no git commit call found in processCalls")
+	}
 	if len(runner.phaseCalls) != 2 {
 		t.Fatalf("len(phaseCalls) = %d, want 2", len(runner.phaseCalls))
 	}

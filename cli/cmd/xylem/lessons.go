@@ -174,7 +174,7 @@ func createLessonsPullRequest(ctx context.Context, wt lessonsWorktree, runner le
 	if err := runner.RunProcess(ctx, worktreePath, "git", "add", proposal.HarnessPath); err != nil {
 		return fmt.Errorf("create lessons pull request %q: git add: %w", proposal.Branch, err)
 	}
-	if err := runner.RunProcess(ctx, worktreePath, "git", "commit", "-m", proposal.Title); err != nil {
+	if err := runner.RunProcess(ctx, worktreePath, "git", "-c", "user.name=xylem", "-c", "user.email=xylem@localhost", "commit", "-m", proposal.Title); err != nil {
 		return fmt.Errorf("create lessons pull request %q: git commit: %w", proposal.Branch, err)
 	}
 	if err := runner.RunProcess(ctx, worktreePath, "git", "push", "--set-upstream", "origin", proposal.Branch); err != nil {
