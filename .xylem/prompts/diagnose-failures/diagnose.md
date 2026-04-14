@@ -2,6 +2,15 @@ Diagnose xylem vessel failures in this repository.
 
 ## Your Task
 
+## Scope Constraints
+
+To keep this analysis focused and completable within the turn budget:
+
+- Analyze at most the **3 most recent** failed vessels within the cutoff window
+- **Exclude** vessels from the `diagnose-failures` and `backlog-refinement` workflows — these have known recurring issues tracked separately and analyzing them creates a self-referential loop
+- For each qualifying vessel, read only the **last phase output** (the phase where execution stopped), not all phase outputs. The last phase output contains the failure information.
+- If no qualifying failures exist after applying these filters, output `XYLEM_NOOP`
+
 <!-- CONFIGURE: Change the number below to control how far back to look for failures -->
 Only consider vessels that failed within the last **24 hours**. Check each vessel's `created_at`
 field in `.xylem/queue.jsonl` against today's date and skip vessels older than the cutoff.
