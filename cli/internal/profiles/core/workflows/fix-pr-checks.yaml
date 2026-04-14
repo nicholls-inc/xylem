@@ -8,7 +8,7 @@ phases:
       match: XYLEM_NOOP
   - name: fix
     prompt_file: .xylem/prompts/fix-pr-checks/fix.md
-    max_turns: 60
+    max_turns: 30
     gate:
       type: command
       run: "true"

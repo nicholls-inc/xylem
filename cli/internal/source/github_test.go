@@ -152,7 +152,7 @@ func TestScanSkipsMergedPR(t *testing.T) {
 		},
 	}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -205,7 +205,7 @@ func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailure(t *testing.T) {
 		}{{Name: "bug"}, {Name: "xylem-failed"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -278,7 +278,7 @@ func TestSmoke_S2b_GitHubScanRetriesAfterRecoveryRefreshChangesDecisionDigest(t 
 		}{{Name: "bug"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -448,7 +448,7 @@ func TestSmoke_S2_GitHubScanAutoRetriesEligibleTransientFailureIgnoresStaleBranc
 			r := newMock()
 
 			issueBytes, _ := json.Marshal([]ghIssue{issue})
-			r.set(issueBytes, "gh", "search", "issues",
+			r.set(issueBytes, "gh", "issue", "list",
 				"--repo", "owner/repo",
 				"--state", "open",
 				"--json", "number,title,body,url,labels",
@@ -570,7 +570,7 @@ func TestSmoke_S3_GitHubScanBlocksNonTransientRecoveryClasses(t *testing.T) {
 		}{{Name: "bug"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -635,7 +635,7 @@ func TestSmoke_S4_GitHubScanRetriesAfterCooldownWhenRecoveryArtifactMissing(t *t
 		}{{Name: "bug"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -697,7 +697,7 @@ func TestGitHubScanRetriesAfterCooldownWithoutArtifactFallsBackToStartedAt(t *te
 		}{{Name: "bug"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -759,7 +759,7 @@ func TestGitHubScanLegacyRunningLabelDoesNotChangeRetryFingerprint(t *testing.T)
 		}{{Name: "bug"}, {Name: "in-progress"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -820,7 +820,7 @@ func TestGitHubScanRetriesWhenOnlySourceFingerprintChanges(t *testing.T) {
 		}{{Name: "bug"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -903,7 +903,7 @@ func TestGitHubScanRetriesWhenOnlyHarnessDigestChanges(t *testing.T) {
 		}{{Name: "bug"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -977,7 +977,7 @@ func TestGitHubScanRetriesWhenOnlyDecisionDigestChanges(t *testing.T) {
 		}{{Name: "bug"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -1192,7 +1192,7 @@ func TestScanSkipsFailedStatusLabelWithoutEligibleRetry(t *testing.T) {
 		},
 	}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -1235,7 +1235,7 @@ func TestBacklogCountIncludesEligibleRetryableFailedIssue(t *testing.T) {
 		}{{Name: "bug"}, {Name: "xylem-failed"}},
 	}}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",
@@ -1310,7 +1310,7 @@ func TestScanPersistsTriggerLabelInMeta(t *testing.T) {
 		},
 	}
 	issueBytes, _ := json.Marshal(issues)
-	r.set(issueBytes, "gh", "search", "issues",
+	r.set(issueBytes, "gh", "issue", "list",
 		"--repo", "owner/repo",
 		"--state", "open",
 		"--json", "number,title,body,url,labels",

@@ -1,0 +1,24 @@
+name: ci-watchdog
+class: ops
+description: "Monitor CI status on main and file issues when CI fails"
+phases:
+  - name: check
+    type: command
+    run: |
+      set -euo pipefail
+      RESULT=$(gh run list --branch main --limit 1 --json databaseId,headSha,conclusion,event,url,name)
+      CONCLUSION=$(echo "$RESULT" | jq -r '.[0].conclusion')
+      if [ "$CONCLUSION" = "success" ] || [ "$CONCLUSION" = "" ] || [ "$CONCLUSION" = "null" ]; then
+        echo "XYLEM_NOOP: CI is green on main (conclusion=$CONCLUSION)"
+        exit 0
+      fi
+      echo "CI failure detected on main"
+      echo "$RESULT" | jq '.[0]'
+    noop:
+      match: XYLEM_NOOP
+  - name: diagnose
+    prompt_file: .xylem/prompts/ci-watchdog/diagnose.md
+    max_turns: 20
+  - name: file_issue
+    prompt_file: .xylem/prompts/ci-watchdog/file_issue.md
+    max_turns: 15

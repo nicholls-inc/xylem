@@ -15,17 +15,21 @@ import (
 // prRefPattern matches GitHub PR URLs and extracts the PR number.
 var prRefPattern = regexp.MustCompile(`/pull/(\d+)`)
 
-// prSources are the vessel source types that reference pull requests.
+// prSources are the vessel source types that reference pull requests and should
+// be cancelled when their PR is already merged or closed. github-merge is
+// intentionally excluded: those vessels are triggered *by* a PR merge, so a
+// merged PR is their entry condition, not an obsolescence signal.
 var prSources = map[string]bool{
 	"github-pr":        true,
 	"github-pr-events": true,
-	"github-merge":     true,
 }
 
 // CancelStalePRVessels checks pending vessels that reference pull requests and
 // cancels those whose PRs are already merged or closed. This prevents wasting
 // concurrency slots on work that can never succeed (e.g., merging an already-
-// merged PR, resolving conflicts on a closed PR).
+// merged PR, resolving conflicts on a closed PR). Vessels from the
+// github-merge source are excluded because a merged PR is their trigger, not
+// an obsolescence signal.
 //
 // Returns the number of vessels cancelled.
 func (r *Runner) CancelStalePRVessels(ctx context.Context) int {

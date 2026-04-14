@@ -121,6 +121,18 @@ sources:
           running: pr-vessel-active
           failed: xylem-failed
 
+  pr-self-review:
+    type: github-pr
+    repo: nicholls-inc/xylem
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      self-review:
+        labels: [ready-to-merge]
+        workflow: pr-self-review
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+
   sota-gap:
     type: scheduled
     repo: nicholls-inc/xylem
@@ -171,16 +183,6 @@ sources:
         workflow: backlog-refinement
         ref: backlog-refinement
 
-  doc-garden:
-    type: scheduled
-    repo: nicholls-inc/xylem
-    schedule: "@daily"
-    timeout: "90m"
-    tasks:
-      doc-garden:
-        workflow: doc-garden
-        ref: doc-garden
-
   harness-gap-analysis:
     type: scheduled
     repo: nicholls-inc/xylem
@@ -200,6 +202,36 @@ sources:
     tasks:
       unblock-deps:
         workflow: unblock-wave
+
+  diagnose-failures:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "2h"
+    timeout: "45m"
+    tasks:
+      hourly-diagnose-failures:
+        workflow: diagnose-failures
+        ref: diagnose-failures
+
+  autonomy-review:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-autonomy-review:
+        workflow: autonomy-review
+        ref: autonomy-review
+
+  ci-watchdog:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "30m"
+    timeout: "30m"
+    tasks:
+      monitor-main-ci:
+        workflow: ci-watchdog
+        ref: ci-watchdog
 
 notifications:
   github_discussion:

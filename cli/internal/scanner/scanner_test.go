@@ -124,7 +124,7 @@ func TestScanFindsIssues(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -183,8 +183,8 @@ func TestBacklogCountDeduplicatesAndSkipsExcludedIssues(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "incident"}}},
 	}
-	r.set(issueJSON(bugIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
-	r.set(issueJSON(incidentIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "incident")
+	r.set(issueJSON(bugIssues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(incidentIssues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "incident")
 
 	s := New(cfg, q, r)
 	count, err := s.BacklogCount(context.Background())
@@ -203,7 +203,7 @@ func TestScanExcludedLabel(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}, {Name: "wontfix"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -235,7 +235,7 @@ func TestScanAlreadyQueued(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -258,7 +258,7 @@ func TestScanExistingBranch(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte("abc123\trefs/heads/fix/issue-42-something"), "git", "ls-remote", "--heads", "origin", "fix/issue-42-*")
 
 	s := New(cfg, q, r)
@@ -337,7 +337,7 @@ func TestSmoke_S4_ScannerSetsVesselTierFromTaskOrDefault(t *testing.T) {
 					Name string `json:"name"`
 				}{{Name: "bug"}}},
 			}
-			r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+			r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 			s := New(cfg, q, r)
 			result, err := s.Scan(context.Background())
@@ -363,7 +363,7 @@ func TestScanExistingPR(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(`[{"number":99,"headRefName":"fix/issue-55-null-fix"}]`),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-55-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 
@@ -470,7 +470,7 @@ func TestScanSkipsUnchangedFailedIssue(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	for _, prefix := range []string{"fix", "feat"} {
 		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
 		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
@@ -520,7 +520,7 @@ func TestScanReenqueuesChangedFailedIssue(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	for _, prefix := range []string{"fix", "feat"} {
 		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
 		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
@@ -580,7 +580,7 @@ func TestScanRetriesUnchangedFailedIssueAfterCooldownWithoutRecoveryArtifact(t *
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	for _, prefix := range []string{"fix", "feat"} {
 		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
 		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
@@ -633,7 +633,7 @@ func TestScanPRFalsePositiveIgnored(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(`[{"number":200,"headRefName":"chore/priority-1-ci-fix"}]`),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-1-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 	r.set([]byte(`[]`),
@@ -671,8 +671,8 @@ func TestScanCrossTaskDedupDeterministic(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}, {Name: "urgent"}}},
 	}
-	r.set(issueJSON(sharedIssue), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
-	r.set(issueJSON(sharedIssue), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "urgent")
+	r.set(issueJSON(sharedIssue), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(sharedIssue), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "urgent")
 
 	for i := 0; i < 5; i++ {
 		qFile := filepath.Join(dir, fmt.Sprintf("queue-%d.jsonl", i))
@@ -719,7 +719,7 @@ func TestScanGHFailure(t *testing.T) {
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	r := newMock()
 
-	r.setErr(errors.New("network error"), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.setErr(errors.New("network error"), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	_, err := s.Scan(context.Background())
@@ -757,8 +757,8 @@ func TestScanMultipleTasks(t *testing.T) {
 		}{{Name: "low-effort"}}},
 	}
 
-	r.set(issueJSON(bugIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
-	r.set(issueJSON(featureIssues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "low-effort")
+	r.set(issueJSON(bugIssues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(featureIssues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "low-effort")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -784,7 +784,7 @@ func TestScanGHReturnsMalformedJSON(t *testing.T) {
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	r := newMock()
 
-	r.set([]byte(`{not valid json`), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set([]byte(`{not valid json`), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	_, err := s.Scan(context.Background())
@@ -804,7 +804,7 @@ func TestHasOpenPRMalformedJSONIgnored(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(`not json at all`),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-77-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 	r.set([]byte(`not json`),
@@ -831,7 +831,7 @@ func TestHasOpenPRGHErrorIgnored(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.setErr(errors.New("gh auth error"),
 		"gh", "pr", "list", "--repo", "owner/repo", "--search", "head:fix/issue-88-", "--state", "open", "--json", "number,headRefName", "--limit", "5")
 	r.setErr(errors.New("gh auth error"),
@@ -858,7 +858,7 @@ func TestScanExistingBranchFeatPrefix(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 	r.set([]byte(""), "git", "ls-remote", "--heads", "origin", "fix/issue-99-*")
 	r.set([]byte("abc123\trefs/heads/feat/issue-99-add-feature"), "git", "ls-remote", "--heads", "origin", "feat/issue-99-*")
 
@@ -899,7 +899,7 @@ func TestScanAppliesQueuedLabel(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -935,7 +935,7 @@ func TestScanNoQueuedLabelWhenNotConfigured(t *testing.T) {
 			Name string `json:"name"`
 		}{{Name: "bug"}}},
 	}
-	r.set(issueJSON(issues), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())
@@ -1114,7 +1114,7 @@ func TestScanBudgetGateSkipDoesNotEnqueueOrRunHooks(t *testing.T) {
 		Labels: []struct {
 			Name string `json:"name"`
 		}{{Name: "bug"}},
-	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	}}), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	gate := &stubBudgetGate{decision: cost.Decision{Allowed: false, Reason: "stub exhausted", RemainingUSD: 0}}
 	s := New(cfg, q, r)
@@ -1172,7 +1172,7 @@ func TestSmoke_S47_BudgetGateSkipLeavesSourceUnchanged(t *testing.T) {
 		Labels: []struct {
 			Name string `json:"name"`
 		}{{Name: "bug"}},
-	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	}}), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	gate := &stubBudgetGate{decision: cost.Decision{Allowed: false, Reason: "stub exhausted", RemainingUSD: 0}}
 	s := New(cfg, q, r)
@@ -1266,7 +1266,7 @@ func TestSmoke_S49_RealBudgetGateTrackerDeniesOnDailyBudgetExceeded(t *testing.T
 		Labels: []struct {
 			Name string `json:"name"`
 		}{{Name: "bug"}},
-	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	}}), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	// No BudgetGate override — scanner uses the real gate backed by the state dir.
 	s := New(cfg, q, r)
@@ -1316,7 +1316,7 @@ func TestSmoke_S49_RealBudgetGateTrackerDeniesOnDailyBudgetExceeded(t *testing.T
 		Labels: []struct {
 			Name string `json:"name"`
 		}{{Name: "bug"}},
-	}}), "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	}}), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
 
 	s2 := New(cfg2, q2, r2)
 	result2, err := s2.Scan(context.Background())

@@ -3796,3 +3796,23 @@ func TestValidateGitHubActionsEmptyConclusionRejected(t *testing.T) {
 	err := cfg.Validate()
 	requireErrorContains(t, err, "conclusions must not contain empty strings")
 }
+
+func TestEffectiveEnvFileDefaultsToEnv(t *testing.T) {
+	d := DaemonConfig{}
+	assert.Equal(t, ".env", d.EffectiveEnvFile())
+}
+
+func TestEffectiveEnvFileReturnsConfiguredValue(t *testing.T) {
+	d := DaemonConfig{EnvFile: "secrets.env"}
+	assert.Equal(t, "secrets.env", d.EffectiveEnvFile())
+}
+
+func TestEffectiveEnvFileTrimsWhitespace(t *testing.T) {
+	d := DaemonConfig{EnvFile: "  .env.local  "}
+	assert.Equal(t, ".env.local", d.EffectiveEnvFile())
+}
+
+func TestEffectiveEnvFileWhitespaceOnlyFallsBackToDefault(t *testing.T) {
+	d := DaemonConfig{EnvFile: "   "}
+	assert.Equal(t, ".env", d.EffectiveEnvFile())
+}

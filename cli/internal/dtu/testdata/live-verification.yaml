@@ -1,10 +1,10 @@
 version: v1
 differential:
-  - name: gh-search-issues-open-bug
+  - name: gh-issue-list-open-bug
     boundary: gh
     enabled_env: XYLEM_DTU_LIVE_GH_DIFFERENTIAL
     command: gh
-    args: [search, issues, --repo, owner/repo, --state, open, --json, number,title,body,url,labels, --limit, "20", --label, bug]
+    args: [issue, list, --repo, owner/repo, --state, open, --json, number,title,body,url,labels, --limit, "20", --label, bug]
     normalizer: issue_list
     fixture: issue-label-gate.yaml
   - name: gh-pr-list-open

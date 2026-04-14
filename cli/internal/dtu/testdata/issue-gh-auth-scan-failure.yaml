@@ -16,6 +16,6 @@ shim_faults:
   - name: gh-search-auth-failure
     command: gh
     match:
-      args_prefix: [search, issues]
+      args_prefix: [issue, list]
     stderr: "gh: authentication required"
     exit_code: 1

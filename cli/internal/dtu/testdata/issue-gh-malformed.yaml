@@ -16,6 +16,6 @@ shim_faults:
   - name: malformed-search
     command: gh
     match:
-      args_prefix: [search, issues]
+      args_prefix: [issue, list]
     stdout: '{"number":'
     exit_code: 0

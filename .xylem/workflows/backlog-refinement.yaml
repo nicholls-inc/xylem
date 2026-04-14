@@ -74,6 +74,8 @@ phases:
                   result.append("\\r")
               elif in_string and ch == "\t":
                   result.append("\\t")
+              elif in_string and ord(ch) < 0x20:
+                  pass
               else:
                   result.append(ch)
           return "".join(result)
@@ -84,7 +86,7 @@ phases:
       sanitized = sanitize_json(raw)
       data = json.loads(sanitized)
       with open(filepath, "w") as f:
-          json.dump(data, f, ensure_ascii=False)
+          json.dump(data, f, ensure_ascii=True)
       ' "$ACTIONS_FILE"
 
       ACTION_COUNT=$(jq '.actions | length' "$ACTIONS_FILE")
