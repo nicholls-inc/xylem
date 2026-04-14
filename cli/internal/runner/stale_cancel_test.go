@@ -228,6 +228,65 @@ func TestCancelStalePRVessels_CancelsClosed(t *testing.T) {
 	}
 }
 
+func TestCancelStalePRVessels_SkipsGithubMergeSource(t *testing.T) {
+	dir := t.TempDir()
+	qPath := filepath.Join(dir, "queue.jsonl")
+	q := queue.New(qPath)
+
+	v := queue.Vessel{
+		ID:        "unblock-wave-pr-77",
+		Source:    "github-merge",
+		Ref:       "https://github.com/owner/repo/pull/77",
+		Workflow:  "unblock-wave",
+		State:     queue.StatePending,
+		CreatedAt: time.Now(),
+		Meta:      map[string]string{"pr_num": "77", "config_source": "merges"},
+	}
+	if _, err := q.Enqueue(v); err != nil {
+		t.Fatal(err)
+	}
+
+	// PR is MERGED — this is the vessel's trigger, not a stale signal.
+	resp, _ := json.Marshal(map[string]string{"state": "MERGED"})
+	ghCalled := false
+	mock := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "gh" {
+				ghCalled = true
+				return resp, nil, true
+			}
+			return nil, nil, false
+		},
+	}
+
+	cfg := &config.Config{
+		Timeout:  "45m",
+		StateDir: dir,
+	}
+
+	r := &Runner{
+		Config: cfg,
+		Queue:  q,
+		Runner: mock,
+	}
+
+	cancelled := r.CancelStalePRVessels(context.Background())
+	if cancelled != 0 {
+		t.Errorf("expected 0 cancelled, got %d", cancelled)
+	}
+	if ghCalled {
+		t.Error("gh should not be called for github-merge source vessels")
+	}
+
+	vessel, err := q.FindByID("unblock-wave-pr-77")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vessel.State != queue.StatePending {
+		t.Errorf("expected pending, got %s", vessel.State)
+	}
+}
+
 func TestExtractPRNumber(t *testing.T) {
 	tests := []struct {
 		name     string
