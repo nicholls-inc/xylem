@@ -101,5 +101,4 @@ phases:
         --repo nicholls-inc/xylem \
         --title "$TITLE" \
         --body "$BODY" \
-        --label "harness-impl" \
         --label "ready-to-merge"

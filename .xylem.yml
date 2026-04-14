@@ -5,8 +5,7 @@ sources:
   bugs:
     type: github
     repo: nicholls-inc/xylem
-    exclude:
-      [wontfix, duplicate, in-progress, no-bot, harness-impl]
+    exclude: [wontfix, duplicate, in-progress, no-bot]
     tasks:
       fix-bugs:
         labels: [bug, ready-for-work]
@@ -18,8 +17,7 @@ sources:
   features:
     type: github
     repo: nicholls-inc/xylem
-    exclude:
-      [wontfix, duplicate, in-progress, no-bot, harness-impl]
+    exclude: [wontfix, duplicate, in-progress, no-bot]
     tasks:
       implement-features:
         labels: [enhancement, ready-for-work]
@@ -53,26 +51,8 @@ sources:
           failed: xylem-failed
           timed_out: xylem-failed
 
-  # Harness implementation issues
-  harness-impl:
-    type: github
-    repo: nicholls-inc/xylem
-    timeout: "90m"
-    exclude: [wontfix, duplicate, in-progress, no-bot, blocked]
-    tasks:
-      implement-harness-steps:
-        labels: [harness-impl, ready-for-work]
-        workflow: implement-harness
-        status_labels:
-          running: in-progress
-          failed: xylem-failed
-          timed_out: xylem-failed
-
-  # PR review + CI failure monitoring for harness PRs
-  # NOTE: review_submitted and checks_failed fire for ALL open PRs.
-  # Each workflow's analyze phase checks for harness-impl label and
-  # exits via XYLEM_NOOP if absent.
-  harness-pr-lifecycle:
+  # PR review + CI failure monitoring for open PRs
+  pr-lifecycle:
     type: github-pr-events
     repo: nicholls-inc/xylem
     exclude: [no-bot, pr-vessel-active]
@@ -94,28 +74,28 @@ sources:
         on:
           checks_failed: true
 
-  # Merge-ready harness PRs
-  harness-merge:
+  # Merge-ready PRs
+  merge:
     type: github-pr
     repo: nicholls-inc/xylem
     exclude: [no-bot, pr-vessel-active]
     tasks:
       merge-ready:
-        labels: [ready-to-merge, harness-impl]
+        labels: [ready-to-merge]
         workflow: merge-pr
         status_labels:
           running: pr-vessel-active
           completed: pr-vessel-merged
           failed: xylem-failed
 
-  # Conflict resolution for harness PRs
+  # Conflict resolution for PRs
   conflict-resolution:
     type: github-pr
     repo: nicholls-inc/xylem
     exclude: [no-bot, pr-vessel-active]
     tasks:
       resolve-conflicts:
-        labels: [needs-conflict-resolution, harness-impl]
+        labels: [needs-conflict-resolution]
         workflow: resolve-conflicts
         status_labels:
           running: pr-vessel-active
@@ -191,10 +171,8 @@ sources:
         workflow: harness-gap-analysis
         ref: harness-gap-analysis
 
-  # Post-merge wave dependency unblocking
-  # NOTE: github-merge has no label filtering. The unblock-wave prompt
-  # guards with XYLEM_NOOP for non-harness merges.
-  harness-post-merge:
+  # Post-merge dependency unblocking
+  post-merge:
     type: github-merge
     repo: nicholls-inc/xylem
     tasks:

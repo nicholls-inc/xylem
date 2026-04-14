@@ -11,7 +11,7 @@ phases:
       mkdir -p .xylem/state/initiative
 
       # Collect issues by key labels.
-      for LABEL in harness-impl enhancement bug ready-for-work; do
+      for LABEL in enhancement bug ready-for-work; do
         gh issue list --repo nicholls-inc/xylem \
           --label "$LABEL" --state open \
           --json number,title,labels,updatedAt,assignees \

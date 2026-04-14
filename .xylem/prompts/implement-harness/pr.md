@@ -25,8 +25,8 @@ The PR body must include:
 - Changes summary (files added/modified, key types and functions)
 - Test plan
 
-After creating the PR, add the `harness-impl` label:
+After creating the PR, add the `ready-to-merge` label:
 
 ```
-gh pr edit --add-label harness-impl
+gh pr edit --add-label ready-to-merge
 ```

@@ -1,4 +1,4 @@
-Check whether a merged PR unblocks any dependent harness issues.
+Check whether a merged PR unblocks any dependent issues.
 
 Issue: {{.Issue.Title}}
 URL: {{.Issue.URL}}
@@ -6,26 +6,12 @@ PR Number: {{.Issue.Number}}
 
 {{.Issue.Body}}
 
-## Guard
-
-First, check if this PR carries the `harness-impl` label:
-
-```
-gh pr view {{.Issue.Number}} --json labels --jq '.labels[].name'
-```
-
-If `harness-impl` is NOT among the labels, this PR is not part of the harness implementation wave. Output the exact standalone line:
-
-XYLEM_NOOP
-
-And stop. No further work is needed.
-
 ## Find blocked issues
 
-List all open harness issues that are currently blocked:
+List all open issues that are currently blocked:
 
 ```
-gh issue list --repo nicholls-inc/xylem --label harness-impl --label blocked --state open --json number,title,body --limit 100
+gh issue list --repo nicholls-inc/xylem --label blocked --state open --json number,title,body --limit 100
 ```
 
 ## Check dependencies

@@ -9,17 +9,7 @@ URL: {{.Issue.URL}}
 
 Run `gh pr checkout {{.Issue.Number}}` to switch to the PR branch.
 
-## Step 2: Guard — verify this is a harness implementation PR
-
-Check whether the PR has the `harness-impl` label:
-
-```
-gh pr view {{.Issue.Number}} --json labels --jq '.labels[].name' | grep -q harness-impl
-```
-
-If the `harness-impl` label is absent, output `XYLEM_NOOP` on its own line and stop. This workflow only applies to harness implementation PRs.
-
-## Step 3: Mutex — prevent concurrent vessels
+## Step 2: Mutex — prevent concurrent vessels
 
 Check whether the PR already has the `pr-vessel-active` label:
 
@@ -35,13 +25,13 @@ Otherwise, apply the mutex label immediately:
 gh pr edit {{.Issue.Number}} --add-label pr-vessel-active
 ```
 
-## Step 4: Read CI check results
+## Step 3: Read CI check results
 
 Run `gh pr checks {{.Issue.Number}}` to list all CI checks and their statuses.
 
 For each failing check, read its full log output to identify the root cause. Use `gh run view <run-id> --log-failed` or download logs as needed.
 
-## Step 5: Write diagnosis
+## Step 4: Write diagnosis
 
 Produce a structured diagnosis listing each failure:
 

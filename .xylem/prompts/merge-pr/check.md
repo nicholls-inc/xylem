@@ -12,7 +12,6 @@ Run all of the following checks and report each result:
 
 1. **Eligibility** -- Run `gh pr view {{.Issue.Number}} --json state,labels --jq '{state: .state, labels: [.labels[].name]}'` and confirm:
    - the PR is still `OPEN`
-   - it still has the `harness-impl` label
    - it does **not** have the `no-auto-admin-merge` label
 
 2. **CI status** -- Run `gh pr checks {{.Issue.Number}}` and confirm every required check has passed. If any check is failing or pending, record which ones.

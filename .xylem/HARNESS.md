@@ -89,12 +89,10 @@ when they carry the required merge labels:
 - `ready-to-merge` is the daemon's merge-readiness signal for vessel PRs and promoted `release-please` PRs.
 - The `no-auto-admin-merge` label is an immediate opt-out and leaves the PR for manual handling.
 - Auto-admin-merge only fires when the PR is `MERGEABLE`, CI is fully green, and there is no active `CHANGES_REQUESTED` review state.
-- The scheduled `release-cadence` workflow is the only path that promotes a `release-please` PR into this merge loop; those PRs do not require `harness-impl`.
+- The scheduled `release-cadence` workflow is the only path that promotes a `release-please` PR into this merge loop; those PRs carry `ready-to-merge` like any other vessel PR.
 - Human-authored PRs that do not match the xylem issue-branch or promoted `release-please` contract remain outside this path and still require normal manual merge decisions.
 
-Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
-`harness-impl` pull requests, so self-hosted harness PRs carry both
-`harness-impl` and `ready-to-merge`.
+The `merge-pr` workflow applies to all PRs labelled `ready-to-merge`.
 
 ### Do not finish `merge-pr` work with phase `merge` still failing due to `exit status`. <!-- xylem-lesson:lesson-c1f590566a94 -->
 - Rationale: This failure pattern recurred in 7 failed vessels for `merge-pr` and should be encoded as institutional memory instead of rediscovered in later runs.

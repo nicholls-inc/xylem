@@ -9,17 +9,7 @@ URL: {{.Issue.URL}}
 
 Run `gh pr checkout {{.Issue.Number}}` to switch to the PR branch.
 
-## Step 2: Guard — verify this is a harness implementation PR
-
-Check whether the PR has the `harness-impl` label:
-
-```
-gh pr view {{.Issue.Number}} --json labels --jq '.labels[].name' | grep -q harness-impl
-```
-
-If the `harness-impl` label is absent, output `XYLEM_NOOP` on its own line and stop. This workflow only applies to harness implementation PRs.
-
-## Step 3: Mutex — prevent concurrent vessels
+## Step 2: Mutex — prevent concurrent vessels
 
 Check whether the PR already has the `pr-vessel-active` label:
 
@@ -35,7 +25,7 @@ Otherwise, apply the mutex label immediately:
 gh pr edit {{.Issue.Number}} --add-label pr-vessel-active
 ```
 
-## Step 4: Fetch all review comments
+## Step 3: Fetch all review comments
 
 Retrieve all review comments on the PR:
 
@@ -49,7 +39,7 @@ Also retrieve top-level PR reviews for any body text:
 gh api repos/{owner}/{repo}/pulls/{{.Issue.Number}}/reviews
 ```
 
-## Step 5: Categorize each comment
+## Step 4: Categorize each comment
 
 For each review comment, classify it into one of three categories:
 
@@ -57,11 +47,11 @@ For each review comment, classify it into one of three categories:
 2. **Explanation needed** — the reviewer asked a question or expressed confusion that can be resolved with a reply. Draft the reply text.
 3. **Already resolved / outdated** — the comment refers to code that has already been changed or a thread that was resolved. Note why it can be skipped.
 
-## Step 6: Read affected files
+## Step 5: Read affected files
 
 For each comment requiring a code fix, read the file at the referenced path. Understand the surrounding context so fixes are correct.
 
-## Step 7: Produce the response plan
+## Step 6: Produce the response plan
 
 Output a structured plan listing each comment with:
 
