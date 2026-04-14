@@ -55,7 +55,7 @@ phases:
       sanitized = sanitize_json(raw)
       data = json.loads(sanitized)
       with open(filepath, "w") as f:
-          json.dump(data, f, ensure_ascii=False)
+          json.dump(data, f, ensure_ascii=True)
       ' "$ACTIONS_FILE"
 
       ISSUE_NUMBER=$(jq -r '.issue_number' "$ACTIONS_FILE")
