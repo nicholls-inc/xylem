@@ -537,7 +537,10 @@ func (q *Queue) CompactOlderThanDryRun(cutoff time.Time) (int, error) {
 func (q *Queue) HasRef(ref string) bool {
 	vessels, err := q.List()
 	if err != nil {
-		return false
+		// Treat unreadable queue as "ref present" to avoid duplicate enqueues
+		// from transient errors. The scanner will retry on the next cycle.
+		log.Printf("warn: HasRef(%q) queue read failed, assuming present: %v", ref, err)
+		return true
 	}
 
 	for _, vessel := range vessels {
@@ -555,7 +558,10 @@ func (q *Queue) HasRef(ref string) bool {
 func (q *Queue) HasRefAny(ref string) bool {
 	vessels, err := q.List()
 	if err != nil {
-		return false
+		// Treat unreadable queue as "ref present" to avoid duplicate enqueues
+		// from transient errors. The scanner will retry on the next cycle.
+		log.Printf("warn: HasRefAny(%q) queue read failed, assuming present: %v", ref, err)
+		return true
 	}
 	for _, vessel := range vessels {
 		if vessel.Ref == ref {
