@@ -1,0 +1,29 @@
+name: autonomy-review
+class: harness-maintenance
+description: "Weekly autonomy & velocity review of xylem's self-building capabilities"
+phases:
+  - name: review
+    prompt_file: .xylem/prompts/autonomy-review/review.md
+    max_turns: 50
+    noop:
+      match: XYLEM_NOOP
+  - name: report
+    prompt_file: .xylem/prompts/autonomy-review/report.md
+    max_turns: 30
+  - name: post
+    type: command
+    noop:
+      match: XYLEM_NOOP
+    output: discussion
+    discussion:
+      category: "Status Reports"
+      title_template: "[autonomy-review] Weekly Report — {{.Date}}"
+      title_search_template: "[autonomy-review] Weekly Report"
+    run: |
+      set -euo pipefail
+      REPORT=".xylem/state/autonomy-review/report.md"
+      if [ ! -f "$REPORT" ]; then
+        echo "XYLEM_NOOP: no report to post"
+        exit 0
+      fi
+      cat "$REPORT"

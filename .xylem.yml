@@ -201,6 +201,16 @@ sources:
         workflow: diagnose-failures
         ref: diagnose-failures
 
+  autonomy-review:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-autonomy-review:
+        workflow: autonomy-review
+        ref: autonomy-review
+
 notifications:
   github_discussion:
     enabled: true
