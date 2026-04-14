@@ -223,6 +223,16 @@ sources:
         workflow: autonomy-review
         ref: autonomy-review
 
+  ci-watchdog:
+    type: scheduled
+    repo: nicholls-inc/xylem
+    schedule: "30m"
+    timeout: "30m"
+    tasks:
+      monitor-main-ci:
+        workflow: ci-watchdog
+        ref: ci-watchdog
+
 notifications:
   github_discussion:
     enabled: true
