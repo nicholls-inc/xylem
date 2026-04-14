@@ -526,6 +526,9 @@ func shouldRecordObservation(command dtu.ShimCommand, args []string) bool {
 		if len(args) >= 2 && args[0] == "search" && args[1] == "issues" {
 			return true
 		}
+		if len(args) >= 2 && args[0] == "issue" && args[1] == "list" {
+			return true
+		}
 		if len(args) >= 2 && args[0] == "issue" && args[1] == "view" {
 			return true
 		}
@@ -628,6 +631,8 @@ func runGH(ctx context.Context, store *dtu.Store, state *dtu.State, args []strin
 		}
 	case "issue":
 		switch args[1] {
+		case "list":
+			return runGHSearchIssues(ctx, store, state, args[2:], stdout, stderr)
 		case "create":
 			return runGHIssueCreate(ctx, store, args[2:], stdout, stderr)
 		case "edit":

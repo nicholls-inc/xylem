@@ -64,7 +64,7 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	for _, task := range g.Tasks {
 		for _, label := range task.Labels {
 			args := []string{
-				"search", "issues",
+				"issue", "list",
 				"--repo", g.Repo,
 				"--state", "open",
 				"--json", "number,title,body,url,labels",
@@ -74,12 +74,12 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 
 			out, err := g.CmdRunner.Run(ctx, "gh", args...)
 			if err != nil {
-				return vessels, fmt.Errorf("gh search issues: %w", err)
+				return vessels, fmt.Errorf("gh issue list: %w", err)
 			}
 
 			var issues []ghIssue
 			if err := json.Unmarshal(out, &issues); err != nil {
-				return vessels, fmt.Errorf("parse gh search output: %w", err)
+				return vessels, fmt.Errorf("parse gh issue list output: %w", err)
 			}
 
 			for _, issue := range issues {
@@ -127,7 +127,7 @@ func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
 	for _, task := range g.Tasks {
 		for _, label := range task.Labels {
 			args := []string{
-				"search", "issues",
+				"issue", "list",
 				"--repo", g.Repo,
 				"--state", "open",
 				"--json", "number,title,body,url,labels",
@@ -137,12 +137,12 @@ func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
 
 			out, err := g.CmdRunner.Run(ctx, "gh", args...)
 			if err != nil {
-				return 0, fmt.Errorf("gh search issues: %w", err)
+				return 0, fmt.Errorf("gh issue list: %w", err)
 			}
 
 			var issues []ghIssue
 			if err := json.Unmarshal(out, &issues); err != nil {
-				return 0, fmt.Errorf("parse gh search output: %w", err)
+				return 0, fmt.Errorf("parse gh issue list output: %w", err)
 			}
 
 			for _, issue := range issues {

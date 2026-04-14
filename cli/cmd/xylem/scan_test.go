@@ -92,7 +92,7 @@ func issuesJSON(issues []ghIssueJSON) []byte {
 func stubScanCommands(r *mockScanRunner, cfg *config.Config, issues []ghIssueJSON) {
 	ghSrc := cfg.Sources["github"]
 	for _, task := range ghSrc.Tasks {
-		r.set(issuesJSON(issues), "gh", "search", "issues", "--repo", ghSrc.Repo,
+		r.set(issuesJSON(issues), "gh", "issue", "list", "--repo", ghSrc.Repo,
 			"--state", "open", "--json", "number,title,body,url,labels",
 			"--limit", "20", "--label", task.Labels[0])
 	}
@@ -308,7 +308,7 @@ func TestScanPausedOutput(t *testing.T) {
 
 	// Stub the gh search command (paused scan short-circuits before this,
 	// but the mock would error on unstubbed commands)
-	r.set([]byte("[]"), "gh", "search", "issues", "--repo", "owner/repo",
+	r.set([]byte("[]"), "gh", "issue", "list", "--repo", "owner/repo",
 		"--state", "open", "--json", "number,title,body,url,labels",
 		"--limit", "20", "--label", "bug")
 
@@ -331,7 +331,7 @@ func TestScanDryRunEmpty(t *testing.T) {
 	r := newScanMock()
 
 	// Stub the gh search to return empty array
-	r.set([]byte("[]"), "gh", "search", "issues", "--repo", "owner/repo",
+	r.set([]byte("[]"), "gh", "issue", "list", "--repo", "owner/repo",
 		"--state", "open", "--json", "number,title,body,url,labels",
 		"--limit", "20", "--label", "bug")
 
@@ -364,7 +364,7 @@ func TestScanError(t *testing.T) {
 
 	// Stub gh search to return an error
 	r.setErr(errors.New("gh: not authenticated"),
-		"gh", "search", "issues", "--repo", "owner/repo",
+		"gh", "issue", "list", "--repo", "owner/repo",
 		"--state", "open", "--json", "number,title,body,url,labels",
 		"--limit", "20", "--label", "bug")
 

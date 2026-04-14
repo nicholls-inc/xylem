@@ -106,7 +106,7 @@ func TestExecuteGHSearchIssuesFiltersOpenLabelledIssues(t *testing.T) {
 	store, stateDir := testStore(t, state)
 
 	var stdout, stderr bytes.Buffer
-	code := Execute(context.Background(), "gh", []string{"search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug"}, nil, &stdout, &stderr, envForStore(store, stateDir, state.UniverseID))
+	code := Execute(context.Background(), "gh", []string{"issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug"}, nil, &stdout, &stderr, envForStore(store, stateDir, state.UniverseID))
 	if code != 0 {
 		t.Fatalf("Execute() code = %d, stderr = %q", code, stderr.String())
 	}
