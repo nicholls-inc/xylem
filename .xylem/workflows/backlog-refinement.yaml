@@ -74,6 +74,8 @@ phases:
                   result.append("\\r")
               elif in_string and ch == "\t":
                   result.append("\\t")
+              elif in_string and ord(ch) < 0x20:
+                  pass
               else:
                   result.append(ch)
           return "".join(result)
