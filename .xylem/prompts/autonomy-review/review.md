@@ -63,8 +63,8 @@ Identify bottlenecks:
 For each workflow's prompt files, check:
 
 - Specificity: are instructions concrete enough for autonomous execution?
-- Phase handoff: do later phases reference `{{.PreviousOutputs.*}}` to receive earlier results?
-- Gate retry feedback: do prompts use `{{.GateResult}}` where gates exist?
+- Phase handoff: do later phases reference `.PreviousOutputs.<key>` to receive earlier results?
+- Gate retry feedback: do prompts use `.GateResult` where gates exist?
 - Scope creep protection: do prompts define clear boundaries on what to change?
 - Output contracts: do prompts specify exact file paths and formats for outputs?
 
