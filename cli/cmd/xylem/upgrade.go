@@ -19,6 +19,7 @@ var (
 	daemonExec     = func(path string, args []string, env []string) error {
 		return syscall.Exec(path, args, env)
 	}
+	daemonResyncProfileAssets = maybeResyncProfileAssets
 )
 
 type daemonUpgradeTarget struct {

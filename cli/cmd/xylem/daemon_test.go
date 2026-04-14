@@ -1180,18 +1180,17 @@ func TestSmoke_S28_CLIWiringInDaemonGoCreatesIntermediaryFromConfig(t *testing.T
 
 // TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts verifies
 // that daemonStartup triggers a resync when the embedded digest differs from
-// the runtime digest: missing files are created and user-modified files are
-// preserved (not overwritten).
+// the runtime digest: stale files are overwritten and missing files are created.
 func TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts(t *testing.T) {
 	dir := t.TempDir()
 	stateDir := filepath.Join(dir, ".xylem")
 	require.NoError(t, os.MkdirAll(filepath.Join(stateDir, "workflows"), 0o755))
 
-	// Write user-modified content to one workflow file so the runtime digest differs.
-	userContent := []byte("stale: true")
+	// Write stale content to one workflow file so the runtime digest differs.
+	staleContent := []byte("stale: true")
 	require.NoError(t, os.WriteFile(
 		filepath.Join(stateDir, "workflows", "fix-bug.yaml"),
-		userContent,
+		staleContent,
 		0o644,
 	))
 
@@ -1208,18 +1207,17 @@ func TestSmoke_S49_DaemonStartupResyncsProfileAssetsWhenDigestDrifts(t *testing.
 	// The resync log message must appear — digest drift was detected.
 	assert.Contains(t, logs.String(), "daemon profile assets stale; re-syncing")
 
-	// User-modified content must be preserved — resync does not overwrite files
-	// whose on-disk content differs from the embedded version.
-	data, readErr := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
-	require.NoError(t, readErr)
-	assert.Equal(t, userContent, data, "user-modified workflow must not be overwritten by resync")
-
-	// A workflow that was absent before resync must be created.
+	// The stale workflow must be overwritten with the embedded version.
 	composed, composeErr := profiles.Compose("core")
 	require.NoError(t, composeErr)
+	data, readErr := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, readErr)
+	assert.Equal(t, composed.Workflows["fix-bug"], data, "stale workflow must be overwritten by resync")
+
+	// A workflow that was absent before resync must be created.
 	for name, embeddedBytes := range composed.Workflows {
 		if name == "fix-bug" {
-			continue // we intentionally left this one modified
+			continue // already verified above
 		}
 		wfPath := filepath.Join(stateDir, "workflows", name+".yaml")
 		wfData, wfErr := os.ReadFile(wfPath)
@@ -1316,6 +1314,131 @@ func TestSmoke_S53_DaemonStartupSkipsResyncWhenProfilesEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, logs.String(), "re-sync")
 	assert.NotContains(t, logs.String(), "compose profiles")
+}
+
+// TestSmoke_S54_ResyncOverwritesStaleProfileWorkflow verifies that resyncProfileAssets
+// overwrites a profile-owned workflow file that exists on disk with stale content.
+func TestSmoke_S54_ResyncOverwritesStaleProfileWorkflow(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	wfPath := filepath.Join(stateDir, "workflows", "fix-bug.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(wfPath), 0o755))
+	require.NoError(t, os.WriteFile(wfPath, []byte("stale: content\n"), 0o644))
+
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"fix-bug": []byte("version: 2\n"),
+		},
+	}
+	logs := withBufferedDefaultLogger(t)
+	require.NoError(t, resyncProfileAssets(stateDir, composed))
+
+	got, err := os.ReadFile(wfPath)
+	require.NoError(t, err)
+	assert.Equal(t, composed.Workflows["fix-bug"], got, "stale workflow must be overwritten")
+	assert.Contains(t, logs.String(), "updated file")
+}
+
+// TestSmoke_S55_ResyncCreatesMissingProfileWorkflow verifies that resyncProfileAssets
+// creates a profile-owned workflow file that does not yet exist on disk.
+func TestSmoke_S55_ResyncCreatesMissingProfileWorkflow(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"fix-bug": []byte("workflow: fix\n"),
+		},
+	}
+	logs := withBufferedDefaultLogger(t)
+	require.NoError(t, resyncProfileAssets(stateDir, composed))
+
+	got, err := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))
+	require.NoError(t, err)
+	assert.Equal(t, composed.Workflows["fix-bug"], got)
+	assert.Contains(t, logs.String(), "added file")
+}
+
+// TestSmoke_S56_ResyncPreservesDaemonOnlyWorkflow verifies that resyncProfileAssets
+// does not touch workflow files that are not part of the composed profile.
+func TestSmoke_S56_ResyncPreservesDaemonOnlyWorkflow(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+	daemonOnlyPath := filepath.Join(stateDir, "workflows", "custom-daemon.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(daemonOnlyPath), 0o755))
+	daemonContent := []byte("daemon: only\n")
+	require.NoError(t, os.WriteFile(daemonOnlyPath, daemonContent, 0o644))
+
+	// Profile only contains "fix-bug", not "custom-daemon".
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"fix-bug": []byte("workflow: fix\n"),
+		},
+	}
+	require.NoError(t, resyncProfileAssets(stateDir, composed))
+
+	got, err := os.ReadFile(daemonOnlyPath)
+	require.NoError(t, err)
+	assert.Equal(t, daemonContent, got, "daemon-only workflow must not be touched")
+}
+
+// TestSmoke_S57_UpgradeTickCallsResyncWhenBinaryUnchanged verifies that
+// runUpgradeTick calls maybeResyncProfileAssets (via the injectable
+// daemonResyncProfileAssets) even when selfUpgrade returns without exec()-ing
+// (binary hash unchanged path). If someone removes the resync call from
+// runUpgradeTick, this test fails.
+func TestSmoke_S57_UpgradeTickCallsResyncWhenBinaryUnchanged(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := filepath.Join(dir, ".xylem")
+
+	cfg := &config.Config{
+		Profiles: []string{"core"},
+		StateDir: stateDir,
+	}
+
+	// Stub selfUpgrade so exec() is not called (binary unchanged path).
+	stubDaemonUpgradeDependencies(t,
+		func(string) error { return nil },
+		func(string, string) error { return nil },
+		func(string, []string, []string) error { return nil },
+	)
+
+	// Stub daemonResyncProfileAssets and record whether it was called with the
+	// correct config. This is the only assertion that matters: the real production
+	// function runUpgradeTick must invoke it.
+	resyncCalled := false
+	prev := daemonResyncProfileAssets
+	daemonResyncProfileAssets = func(c *config.Config) error {
+		assert.Equal(t, cfg, c, "resync must receive the daemon cfg")
+		resyncCalled = true
+		return nil
+	}
+	t.Cleanup(func() { daemonResyncProfileAssets = prev })
+
+	runUpgradeTick(dir, filepath.Join(dir, "xylem"), cfg)
+
+	assert.True(t, resyncCalled, "runUpgradeTick must call maybeResyncProfileAssets when profiles are configured")
+}
+
+// TestSmoke_S58_ResyncLogsAddedAndUpdatedFiles verifies that resyncProfileAssets
+// emits slog.Info messages for both added (new) and updated (stale) files.
+func TestSmoke_S58_ResyncLogsAddedAndUpdatedFiles(t *testing.T) {
+	stateDir := filepath.Join(t.TempDir(), ".xylem")
+
+	// Pre-create one file with stale content (will be updated).
+	wfPath := filepath.Join(stateDir, "workflows", "fix-bug.yaml")
+	require.NoError(t, os.MkdirAll(filepath.Dir(wfPath), 0o755))
+	require.NoError(t, os.WriteFile(wfPath, []byte("old: content\n"), 0o644))
+
+	composed := &profiles.ComposedProfile{
+		Workflows: map[string][]byte{
+			"fix-bug":           []byte("new: content\n"),
+			"implement-feature": []byte("new workflow\n"),
+		},
+	}
+	logs := withBufferedDefaultLogger(t)
+	require.NoError(t, resyncProfileAssets(stateDir, composed))
+
+	logStr := logs.String()
+	assert.Contains(t, logStr, "updated file", "updated file must be logged")
+	assert.Contains(t, logStr, "added file", "added file must be logged")
 }
 
 func TestReconcileStaleVessels(t *testing.T) {

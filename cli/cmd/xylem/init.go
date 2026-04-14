@@ -278,18 +278,25 @@ func syncProfileAssets(stateDir string, composed *profiles.ComposedProfile, forc
 	return nil
 }
 
-// writeFileIfNotModified writes content to path with resync-safe semantics:
-// - If the file does not exist, it is created.
-// - If the file exists and its content matches the incoming content, it is a no-op.
-// - If the file exists with different content (user-modified), a warning is logged and the file is left unchanged.
-func writeFileIfNotModified(path string, content []byte) error {
+// writeFileForResync writes content to path with profile-authoritative semantics:
+//   - If the file does not exist, it is created and "added" is logged.
+//   - If the file exists with identical content, it is a no-op.
+//   - If the file exists with different content, it is overwritten and "updated" is logged.
+//
+// This is intentionally authoritative: profile-owned files are always brought
+// in sync with the embedded binary. Files not iterated by the caller (daemon-only
+// files not present in the composed profile) are never touched.
+func writeFileForResync(path string, content []byte) error {
 	existing, err := os.ReadFile(path)
 	if err == nil {
 		if bytes.Equal(existing, content) {
 			return nil // already up to date
 		}
-		// File exists with different content — treat as user-modified, skip.
-		slog.Warn("daemon profile resync: skipping user-modified file", "path", path)
+		// File exists with stale content — overwrite with the embedded version.
+		if err := os.WriteFile(path, content, 0o644); err != nil {
+			return fmt.Errorf("write %s: %w", path, err)
+		}
+		slog.Info("daemon profile resync: updated file", "path", path)
 		return nil
 	}
 	if !os.IsNotExist(err) {
@@ -302,34 +309,36 @@ func writeFileIfNotModified(path string, content []byte) error {
 	if err := os.WriteFile(path, content, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
+	slog.Info("daemon profile resync: added file", "path", path)
 	return nil
 }
 
 // resyncProfileAssets syncs profile workflows, prompts, and scripts using
-// resync-safe semantics: files that exist with user-modified content are
-// preserved and skipped with a warning, while missing files are created.
-// This is used by the daemon on startup to apply embedded profile updates
-// without clobbering user edits.
+// profile-authoritative semantics: existing files with stale content are
+// overwritten with the embedded version, and missing files are created.
+// Files not iterated (daemon-only files absent from the composed profile)
+// are left untouched.
+// This is used by the daemon on startup and after each upgrade tick.
 func resyncProfileAssets(stateDir string, composed *profiles.ComposedProfile) error {
 	if composed == nil {
 		return fmt.Errorf("resync profile assets: composed profile is required")
 	}
 
 	for _, name := range sortedKeys(composed.Workflows) {
-		if err := writeFileIfNotModified(filepath.Join(stateDir, "workflows", name+".yaml"), composed.Workflows[name]); err != nil {
+		if err := writeFileForResync(filepath.Join(stateDir, "workflows", name+".yaml"), composed.Workflows[name]); err != nil {
 			return fmt.Errorf("resync workflow %q: %w", name, err)
 		}
 	}
 
 	for _, name := range sortedKeys(composed.Prompts) {
-		if err := writeFileIfNotModified(filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md"), composed.Prompts[name]); err != nil {
+		if err := writeFileForResync(filepath.Join(stateDir, "prompts", filepath.FromSlash(name)+".md"), composed.Prompts[name]); err != nil {
 			return fmt.Errorf("resync prompt %q: %w", name, err)
 		}
 	}
 
 	for _, name := range sortedKeys(composed.Scripts) {
 		scriptPath := filepath.Join(stateDir, "scripts", filepath.FromSlash(name))
-		if err := writeFileIfNotModified(scriptPath, composed.Scripts[name]); err != nil {
+		if err := writeFileForResync(scriptPath, composed.Scripts[name]); err != nil {
 			return fmt.Errorf("resync script %q: %w", name, err)
 		}
 		if err := os.Chmod(scriptPath, 0o755); err != nil {
