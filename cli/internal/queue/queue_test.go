@@ -554,6 +554,49 @@ func TestHasRefAnyCancelled(t *testing.T) {
 	}
 }
 
+func TestHasRefUnreadableQueueReturnsSafeDefault(t *testing.T) {
+	// When the queue file is unreadable, HasRef must return true (safe default)
+	// to avoid a false "not present" that could trigger a duplicate enqueue.
+	q, path := newTestQueue(t)
+	if _, err := q.Enqueue(testVessel(42)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	// Make the queue file unreadable so List() returns an error.
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	if !q.HasRef("https://github.com/example/repo/issues/42") {
+		t.Fatal("expected HasRef to return true (safe default) when queue is unreadable")
+	}
+	if !q.HasRef("https://github.com/example/repo/issues/99") {
+		t.Fatal("expected HasRef to return true (safe default) for unknown ref when queue is unreadable")
+	}
+}
+
+func TestHasRefAnyUnreadableQueueReturnsSafeDefault(t *testing.T) {
+	// When the queue file is unreadable, HasRefAny must return true (safe default)
+	// to avoid a false "not present" that could trigger a duplicate enqueue.
+	q, path := newTestQueue(t)
+	if _, err := q.Enqueue(testVessel(42)); err != nil {
+		t.Fatalf("enqueue: %v", err)
+	}
+
+	if err := os.Chmod(path, 0o000); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(path, 0o644) })
+
+	if !q.HasRefAny("https://github.com/example/repo/issues/42") {
+		t.Fatal("expected HasRefAny to return true (safe default) when queue is unreadable")
+	}
+	if !q.HasRefAny("https://github.com/example/repo/issues/99") {
+		t.Fatal("expected HasRefAny to return true (safe default) for unknown ref when queue is unreadable")
+	}
+}
+
 func TestEnqueueIdempotentDuplicateRef(t *testing.T) {
 	q, _ := newTestQueue(t)
 	vessel := testVessel(42)
