@@ -58,7 +58,7 @@ func cmdDaemon(cmd *cobra.Command, cfg *config.Config, q *queue.Queue, wt *workt
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
-	if err := loadDaemonStartupEnv(rootDir); err != nil {
+	if err := loadDaemonStartupEnv(rootDir, cfg.Daemon.EffectiveEnvFile()); err != nil {
 		return err
 	}
 	if err := config.MigrateFlatStateToRuntime(cfg.StateDir); err != nil {

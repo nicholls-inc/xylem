@@ -42,7 +42,7 @@ func (p *fakeDaemonSupervisorProcess) Wait() error {
 func TestRunDaemonSupervisorRestartsAfterUnexpectedExitAndReloadsEnv(t *testing.T) {
 	repoDir := t.TempDir()
 	cfg := &config.Config{StateDir: filepath.Join(repoDir, ".xylem")}
-	envPath := daemonSupervisorEnvFilePath(repoDir)
+	envPath := daemonSupervisorEnvFilePath(repoDir, ".env")
 	if err := os.MkdirAll(filepath.Dir(envPath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(%q): %v", filepath.Dir(envPath), err)
 	}
@@ -395,6 +395,44 @@ func TestSmoke_S4_ManualDaemonStopDoesNotTriggerRestart(t *testing.T) {
 	assert.False(t, daemonSupervisorStopRequested(cfg))
 }
 
+func TestRunDaemonSupervisorUsesConfiguredEnvFileName(t *testing.T) {
+	repoDir := t.TempDir()
+	cfg := &config.Config{
+		StateDir: filepath.Join(repoDir, ".xylem"),
+		Daemon:   config.DaemonConfig{EnvFile: "secrets.env"},
+	}
+	envPath := daemonSupervisorEnvFilePath(repoDir, "secrets.env")
+	require.NoError(t, os.MkdirAll(filepath.Dir(envPath), 0o755))
+	require.NoError(t, os.WriteFile(envPath, []byte("SECRET_KEY=loaded-from-secrets\n"), 0o644))
+
+	var launches []daemonSupervisorLaunch
+
+	err := runDaemonSupervisor(context.Background(), daemonSupervisorOptions{
+		Cfg:            cfg,
+		ConfigPath:     ".xylem.yml",
+		ExecutablePath: "/tmp/xylem",
+		WorkingDir:     repoDir,
+		Start: func(launch daemonSupervisorLaunch) (daemonSupervisorProcess, error) {
+			launches = append(launches, launch)
+			return &fakeDaemonSupervisorProcess{
+				pid: 301,
+				waitFn: func() error {
+					return requestDaemonSupervisorStop(cfg)
+				},
+			}, nil
+		},
+		Sleep: func(_ context.Context, delay time.Duration) error {
+			t.Fatalf("unexpected sleep call with %s", delay)
+			return nil
+		},
+	})
+	require.NoError(t, err)
+	require.Len(t, launches, 1)
+	if got := daemonEnvValue(launches[0].Env, "SECRET_KEY"); got != "loaded-from-secrets" {
+		t.Fatalf("SECRET_KEY = %q, want %q", got, "loaded-from-secrets")
+	}
+}
+
 func daemonEnvValue(env []string, key string) string {
 	prefix := key + "="
 	value := ""
@@ -411,7 +449,7 @@ func runDaemonSupervisorUnexpectedExitSmoke(t *testing.T) daemonSupervisorSmokeR
 
 	repoDir := t.TempDir()
 	cfg := &config.Config{StateDir: filepath.Join(repoDir, ".xylem")}
-	envPath := daemonSupervisorEnvFilePath(repoDir)
+	envPath := daemonSupervisorEnvFilePath(repoDir, ".env")
 	require.NoError(t, os.MkdirAll(filepath.Dir(envPath), 0o755))
 	require.NoError(t, os.WriteFile(envPath, []byte("API_TOKEN=first\n"), 0o644))
 

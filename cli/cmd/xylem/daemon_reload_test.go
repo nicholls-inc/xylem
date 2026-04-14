@@ -129,7 +129,7 @@ func TestDaemonRuntimeRetainsBusyRunnerAcrossReload(t *testing.T) {
 
 func TestDaemonRuntimeReloadReappliesDaemonRootEnv(t *testing.T) {
 	rootDir, configPath, _ := writeDaemonReloadRepo(t, "# Harness A\n")
-	envPath := daemonSupervisorEnvFilePath(rootDir)
+	envPath := daemonSupervisorEnvFilePath(rootDir, ".env")
 	require.NoError(t, os.MkdirAll(filepath.Dir(envPath), 0o755))
 	require.NoError(t, os.WriteFile(envPath, []byte("XYLEM_TEST_DAEMON_TOKEN=first\n"), 0o644))
 
@@ -154,7 +154,7 @@ func TestDaemonRuntimeReloadReappliesDaemonRootEnv(t *testing.T) {
 
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
-	require.NoError(t, loadDaemonStartupEnv(rootDir))
+	require.NoError(t, loadDaemonStartupEnv(rootDir, ".env"))
 
 	q := queue.New(filepath.Join(cfg.StateDir, "queue.jsonl"))
 	rt, err := newDaemonRuntime(rootDir, configPath, q, worktree.New(rootDir, newCmdRunner(cfg)), cfg)
