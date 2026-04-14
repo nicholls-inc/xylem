@@ -10,20 +10,53 @@ Labels: {{.Issue.Labels}}
 
 ## Instructions
 
-**If the analysis says DO NOT split:**
+Based on the analysis above, write a JSON actions file to `.xylem/state/triage/actions.json` describing what should be done. Do NOT run any `gh` commands — the next phase will execute them deterministically.
 
-1. Add the type label and "needs-refinement":
-   `gh issue edit {{.Issue.Number}} --add-label "<type>,needs-refinement"`
-2. Remove "needs-triage":
-   `gh issue edit {{.Issue.Number}} --remove-label "needs-triage"`
+First, create the directory:
+```
+mkdir -p .xylem/state/triage
+```
 
-**If the analysis says SPLIT:**
+Then write the JSON file with this exact schema:
 
-1. For each sub-issue identified in the analysis, create it with:
-   `gh issue create --title "<title>" --label "<type>,needs-triage" --body "<relevant section of the original issue body>"`
-   Keep the body minimal — the refinement workflow will flesh it out.
-2. Update the original issue body to reference the created sub-issues with a "Split into:" prefix
-3. Close the original:
-   `gh issue close {{.Issue.Number}} --reason "not planned" --comment "Split into focused sub-issues."`
+```json
+{
+  "issue_number": {{.Issue.Number}},
+  "decision": "no_split",
+  "add_labels": ["bug", "needs-refinement"],
+  "remove_labels": ["needs-triage"],
+  "close_original": false,
+  "close_reason": "",
+  "close_comment": "",
+  "sub_issues": []
+}
+```
 
-Do not ask for user input. If the type is ambiguous, pick the best fit and note the reasoning in a comment.
+**Schema rules:**
+
+- `issue_number` — must be `{{.Issue.Number}}` (integer)
+- `decision` — either `"no_split"` or `"split"`
+- `add_labels` — labels to add to the original issue (always include the type label; include `"needs-refinement"` when not splitting)
+- `remove_labels` — labels to remove from the original issue (always include `"needs-triage"`)
+- `close_original` — `true` only when `decision` is `"split"`
+- `close_reason` — `"not planned"` when closing, otherwise `""`
+- `close_comment` — brief comment when closing (e.g. `"Split into focused sub-issues."`), otherwise `""`
+- `sub_issues` — array of sub-issues to create; empty when `decision` is `"no_split"`
+
+**Sub-issue object schema:**
+```json
+{
+  "title": "Short descriptive title",
+  "labels": ["bug", "needs-triage"],
+  "body": "Relevant section of the original issue body. Keep it minimal — the refinement workflow will flesh it out."
+}
+```
+
+**Decision guidance:**
+
+- **DO NOT split** — Add the type label and `needs-refinement` to the original issue. Remove `needs-triage`. Leave `close_original` false and `sub_issues` empty.
+- **SPLIT** — Create sub-issues for each focused piece identified in the analysis. Set `close_original` to `true`. Add the type label and remove `needs-triage` from the original. Each sub-issue gets `needs-triage` so it enters the triage queue.
+
+If the type is ambiguous, pick the best fit. Do not ask for user input.
+
+Write only the JSON file. Do not execute any GitHub CLI commands.
