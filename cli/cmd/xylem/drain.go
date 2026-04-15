@@ -18,6 +18,7 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/reporter"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
+	"github.com/nicholls-inc/xylem/cli/internal/sandbox"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
@@ -29,7 +30,20 @@ type drainCommandRunner interface {
 
 var newTracer = observability.NewTracer
 var newCommandRunner = func(cfg *config.Config) drainCommandRunner {
-	return newCmdRunner(cfg)
+	return newCmdRunnerWithPolicy(cfg, sandbox.NewPolicy(sandboxConfigFromCfg(cfg)))
+}
+
+// sandboxConfigFromCfg converts the config's SandboxConfig to the sandbox
+// package's Config type.
+func sandboxConfigFromCfg(cfg *config.Config) *sandbox.Config {
+	if cfg == nil {
+		return nil
+	}
+	return &sandbox.Config{
+		Mode:        sandbox.IsolationMode(cfg.Sandbox.Mode),
+		EgressAllow: cfg.Sandbox.EgressAllow,
+		EnvPasslist: cfg.Sandbox.EnvPasslist,
+	}
 }
 
 func newDrainCmd() *cobra.Command {
