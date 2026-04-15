@@ -57,6 +57,7 @@ func TestGenerateHarnessGapAnalysisDetectsObservedSignals(t *testing.T) {
 			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--label", "needs-conflict-resolution", "--limit", "100", "--json", "number,title,url,mergeable,headRefName"): mustJSON(t, []map[string]any{
 				{"number": 11, "title": "conflict", "url": "https://example/pr/11", "mergeable": "MERGEABLE", "headRefName": "feat/issue-211-211"},
 			}),
+			commandKey("gh", "pr", "edit", "11", "--repo", "owner/repo", "--remove-label", "needs-conflict-resolution"): []byte(""),
 			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,createdAt"): mustJSON(t, []map[string]any{
 				{"number": 21, "title": "Release Please", "url": "https://example/pr/21", "headRefName": "release-please--branches--main", "createdAt": now.Add(-10 * 24 * time.Hour)},
 			}),
@@ -409,4 +410,141 @@ func valueAfterFlag(args []string, flag string) string {
 		}
 	}
 	return ""
+}
+
+func TestSmoke_S3_StaleConflictLabelStrippedAndFindingPublished(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, time.April, 10, 1, 0, 0, 0, time.UTC)
+	runner := &harnessGapTestRunner{
+		responses: map[string][]byte{
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "merged", "--limit", "100", "--json", "number,title,url,headRefName,mergedAt,mergedBy,labels"):                        []byte("[]"),
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--label", "needs-conflict-resolution", "--limit", "100", "--json", "number,title,url,mergeable,headRefName"): mustJSON(t, []map[string]any{{"number": 42, "title": "old conflict", "url": "https://example/pr/42", "mergeable": "MERGEABLE", "headRefName": "feat/issue-442-442"}}),
+			commandKey("gh", "pr", "edit", "42", "--repo", "owner/repo", "--remove-label", "needs-conflict-resolution"):                                                                             []byte(""),
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,createdAt"):                                         []byte("[]"),
+			commandKey("git", "rev-list", "--left-right", "--count", "origin/main...HEAD"):                                                                                                          []byte("0\t0\n"),
+			commandKey("gh", "--repo", "owner/repo", "issue", "list", "--state", "open", "--label", "xylem-failed", "--limit", "100", "--json", "number,title,url,labels"):                          []byte("[]"),
+			commandKey("gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--limit", "100", "--json", "number,title,body"):                                                           []byte("[]"),
+		},
+	}
+
+	result, err := RunHarnessGapAnalysis(context.Background(), stateDir, "owner/repo", runner, HarnessGapOptions{
+		OutputDir: "reviews",
+		Now:       now,
+	})
+	require.NoError(t, err)
+
+	// A stale-label-patterns finding must be present.
+	var staleFinding *HarnessGapFinding
+	for i := range result.Report.Findings {
+		if result.Report.Findings[i].Category == "stale-label-patterns" {
+			staleFinding = &result.Report.Findings[i]
+			break
+		}
+	}
+	require.NotNil(t, staleFinding, "expected stale-label-patterns finding, categories: %v", func() []string {
+		cats := make([]string, len(result.Report.Findings))
+		for i, f := range result.Report.Findings {
+			cats[i] = f.Category
+		}
+		return cats
+	}())
+	assert.Equal(t, 1, staleFinding.Observed)
+	assert.Contains(t, staleFinding.Evidence[0], "#42")
+
+	// Label removal must have been called for PR 42.
+	assert.Contains(t, runner.calls,
+		[]string{"gh", "pr", "edit", "42", "--repo", "owner/repo", "--remove-label", "needs-conflict-resolution"},
+	)
+
+	// Finding must be published as a new GitHub issue.
+	var published *PublishedIssue
+	for i := range result.Published {
+		if result.Published[i].Title == staleFinding.Title {
+			published = &result.Published[i]
+			break
+		}
+	}
+	require.NotNil(t, published, "expected published issue for stale-label-patterns finding")
+	assert.True(t, published.Created)
+	assert.Equal(t, 91, published.IssueNumber)
+}
+
+func TestSmoke_S4_ConflictingPRLabelPreservedNoFinding(t *testing.T) {
+	stateDir := t.TempDir()
+	now := time.Date(2026, time.April, 10, 1, 0, 0, 0, time.UTC)
+	runner := &harnessGapTestRunner{
+		responses: map[string][]byte{
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "merged", "--limit", "100", "--json", "number,title,url,headRefName,mergedAt,mergedBy,labels"):                        []byte("[]"),
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--label", "needs-conflict-resolution", "--limit", "100", "--json", "number,title,url,mergeable,headRefName"): mustJSON(t, []map[string]any{{"number": 99, "title": "still conflicting", "url": "https://example/pr/99", "mergeable": "CONFLICTING", "headRefName": "feat/issue-499-499"}}),
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--limit", "100", "--json", "number,title,url,headRefName,createdAt"):                                         []byte("[]"),
+			commandKey("git", "rev-list", "--left-right", "--count", "origin/main...HEAD"):                                                                                                          []byte("0\t0\n"),
+			commandKey("gh", "--repo", "owner/repo", "issue", "list", "--state", "open", "--label", "xylem-failed", "--limit", "100", "--json", "number,title,url,labels"):                          []byte("[]"),
+		},
+	}
+
+	result, err := RunHarnessGapAnalysis(context.Background(), stateDir, "owner/repo", runner, HarnessGapOptions{
+		OutputDir: "reviews",
+		Now:       now,
+	})
+	require.NoError(t, err)
+
+	// No stale-label-patterns finding — the PR is genuinely CONFLICTING.
+	for _, f := range result.Report.Findings {
+		assert.NotEqual(t, "stale-label-patterns", f.Category,
+			"unexpected stale-label-patterns finding for a genuinely conflicting PR")
+	}
+
+	// No label removal command must have been issued.
+	for _, call := range runner.calls {
+		if len(call) >= 3 && call[0] == "gh" && call[1] == "pr" && call[2] == "edit" {
+			t.Fatalf("unexpected gh pr edit call for CONFLICTING PR: %v", call)
+		}
+	}
+
+	// No issues published.
+	assert.Empty(t, result.Published)
+	assert.Equal(t, 0, runner.createCount)
+}
+
+func TestDetectStaleConflictLabelGapRemovesLabelFromMergeablePRs(t *testing.T) {
+	runner := &harnessGapTestRunner{
+		responses: map[string][]byte{
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--label", "needs-conflict-resolution", "--limit", "100", "--json", "number,title,url,mergeable,headRefName"): mustJSON(t, []map[string]any{
+				{"number": 11, "title": "conflict", "url": "https://example/pr/11", "mergeable": "MERGEABLE", "headRefName": "feat/issue-211-211"},
+			}),
+			commandKey("gh", "pr", "edit", "11", "--repo", "owner/repo", "--remove-label", "needs-conflict-resolution"): []byte(""),
+		},
+	}
+
+	finding, err := detectStaleConflictLabelGap(context.Background(), "owner/repo", runner)
+	require.NoError(t, err)
+	require.NotNil(t, finding)
+
+	assert.Equal(t, "stale-label-patterns", finding.Category)
+	assert.Equal(t, 1, finding.Observed)
+
+	// Label removal was called for the stale PR.
+	assert.Contains(t, runner.calls,
+		[]string{"gh", "pr", "edit", "11", "--repo", "owner/repo", "--remove-label", "needs-conflict-resolution"},
+	)
+}
+
+func TestDetectStaleConflictLabelGapSkipsConflictingPRs(t *testing.T) {
+	runner := &harnessGapTestRunner{
+		responses: map[string][]byte{
+			commandKey("gh", "--repo", "owner/repo", "pr", "list", "--state", "open", "--label", "needs-conflict-resolution", "--limit", "100", "--json", "number,title,url,mergeable,headRefName"): mustJSON(t, []map[string]any{
+				{"number": 11, "title": "still conflicting", "url": "https://example/pr/11", "mergeable": "CONFLICTING", "headRefName": "feat/issue-211-211"},
+			}),
+		},
+	}
+
+	finding, err := detectStaleConflictLabelGap(context.Background(), "owner/repo", runner)
+	require.NoError(t, err)
+	assert.Nil(t, finding) // Below threshold — only CONFLICTING PRs, none are stale.
+
+	// Exactly one call: the gh pr list. No label removal attempted.
+	require.Len(t, runner.calls, 1, "expected only the pr list call, got: %v", runner.calls)
+	assert.Equal(t, "gh", runner.calls[0][0])
+	assert.Contains(t, runner.calls[0], "pr")
+	assert.Contains(t, runner.calls[0], "list")
 }
