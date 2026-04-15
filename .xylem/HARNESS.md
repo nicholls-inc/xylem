@@ -119,3 +119,11 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `pr-366-resolve-conflicts-retry-1-retry-1-retry-1` (2026-04-11T16:38:02Z) — `phases/pr-366-resolve-conflicts-retry-1-retry-1-retry-1/resolve.output`
   - `pr-372-resolve-conflicts-retry-1-retry-1-retry-1` (2026-04-11T19:32:25Z) — `phases/pr-372-resolve-conflicts-retry-1-retry-1-retry-1/resolve.output`
   - `pr-366-resolve-conflicts-retry-1-retry-1-retry-1-retry-1-retry-1` (2026-04-11T19:35:05Z) — `phases/pr-366-resolve-conflicts-retry-1-retry-1-retry-1-retry-1-retry-1/resolve.output`
+
+### Do not finish `release-cadence` work with phase `label_ready` still failing due to `exit status`. <!-- xylem-lesson:lesson-f81c9465d81b -->
+- Rationale: This failure pattern recurred in 3 failed vessels for `release-cadence` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 127
+- Evidence:
+  - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
+  - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
+  - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
