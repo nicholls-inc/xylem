@@ -145,6 +145,8 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	require.NoError(t, yaml.Unmarshal(composed.Workflows["merge-pr"], &mergePR))
 	assert.Equal(t, policy.Ops, mergePR.Class)
 	assert.Equal(t, 2, fixBug.Phases[2].Evaluator.MaxIterations)
+	assert.Equal(t, 40, fixBug.Phases[0].MaxTurns, "fix-bug analyze max_turns")
+	assert.Equal(t, 40, fixBug.Phases[1].MaxTurns, "fix-bug plan max_turns")
 
 	var implementFeature workflowpkg.Workflow
 	require.NoError(t, yaml.Unmarshal(composed.Workflows["implement-feature"], &implementFeature))
