@@ -3,12 +3,12 @@ description: "Diagnose and fix a bug from a GitHub issue"
 phases:
   - name: analyze
     prompt_file: .xylem/prompts/fix-bug/analyze.md
-    max_turns: 20
+    max_turns: 40
     noop:
       match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/fix-bug/plan.md
-    max_turns: 20
+    max_turns: 40
   - name: implement
     prompt_file: .xylem/prompts/fix-bug/implement.md
     max_turns: 60
