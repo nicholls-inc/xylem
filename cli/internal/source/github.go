@@ -18,6 +18,10 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/recovery"
 )
 
+// ghCallTimeout is the maximum time allowed for a single gh CLI call in the
+// daemon's hot paths. Overridable in tests.
+var ghCallTimeout = 60 * time.Second
+
 // GitHubTask defines a label-based task for the GitHub source.
 type GitHubTask struct {
 	Labels          []string
@@ -73,7 +77,9 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 			args = append(args, "--label", label)
 		}
 
-		out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		ghCtx, ghCancel := context.WithTimeout(ctx, ghCallTimeout)
+		out, err := g.CmdRunner.Run(ghCtx, "gh", args...)
+		ghCancel()
 		if err != nil {
 			return vessels, fmt.Errorf("gh issue list: %w", err)
 		}
@@ -141,7 +147,9 @@ func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
 			args = append(args, "--label", label)
 		}
 
-		out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		ghCtx, ghCancel := context.WithTimeout(ctx, ghCallTimeout)
+		out, err := g.CmdRunner.Run(ghCtx, "gh", args...)
+		ghCancel()
 		if err != nil {
 			return 0, fmt.Errorf("gh issue list: %w", err)
 		}
@@ -552,12 +560,14 @@ func (g *GitHub) hasBranch(ctx context.Context, issueNum int) bool {
 func (g *GitHub) hasOpenPR(ctx context.Context, issueNum int) bool {
 	for _, prefix := range branchPrefixes {
 		search := fmt.Sprintf("head:%s/issue-%d-", prefix, issueNum)
-		out, err := g.CmdRunner.Run(ctx, "gh", "pr", "list",
+		ghCtx, ghCancel := context.WithTimeout(ctx, ghCallTimeout)
+		out, err := g.CmdRunner.Run(ghCtx, "gh", "pr", "list",
 			"--repo", g.Repo,
 			"--search", search,
 			"--state", "open",
 			"--json", "number,headRefName",
 			"--limit", "5")
+		ghCancel()
 		if err != nil {
 			continue
 		}
@@ -581,12 +591,14 @@ func (g *GitHub) hasOpenPR(ctx context.Context, issueNum int) bool {
 func (g *GitHub) hasMergedPR(ctx context.Context, issueNum int) bool {
 	for _, prefix := range branchPrefixes {
 		search := fmt.Sprintf("head:%s/issue-%d-", prefix, issueNum)
-		out, err := g.CmdRunner.Run(ctx, "gh", "pr", "list",
+		ghCtx, ghCancel := context.WithTimeout(ctx, ghCallTimeout)
+		out, err := g.CmdRunner.Run(ghCtx, "gh", "pr", "list",
 			"--repo", g.Repo,
 			"--search", search,
 			"--state", "merged",
 			"--json", "number,headRefName",
 			"--limit", "5")
+		ghCancel()
 		if err != nil {
 			continue
 		}

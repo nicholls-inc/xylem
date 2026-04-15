@@ -287,6 +287,61 @@ func TestCancelStalePRVessels_SkipsGithubMergeSource(t *testing.T) {
 	}
 }
 
+func TestCheckPRState_RespectsTimeout(t *testing.T) {
+	orig := ghCallTimeout
+	ghCallTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { ghCallTimeout = orig })
+
+	dir := t.TempDir()
+	qPath := filepath.Join(dir, "queue.jsonl")
+	q := queue.New(qPath)
+
+	// The mock blocks until the context it receives is cancelled. This simulates a
+	// hung gh process. If checkPRState does not apply context.WithTimeout, the
+	// goroutine below will never unblock and the time.After fires.
+	mock := &mockCmdRunner{
+		runOutputCtxHook: func(ctx context.Context, name string, args ...string) ([]byte, error, bool) {
+			if name == "gh" {
+				<-ctx.Done()
+				return nil, ctx.Err(), true
+			}
+			return nil, nil, false
+		},
+	}
+
+	cfg := &config.Config{
+		Timeout:  "45m",
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"prs": {Type: "github-pr", Repo: "owner/repo"},
+		},
+	}
+
+	r := &Runner{
+		Config: cfg,
+		Queue:  q,
+		Runner: mock,
+		Sources: map[string]source.Source{
+			"github-pr": &source.GitHubPR{Repo: "owner/repo"},
+		},
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := r.checkPRState(context.Background(), "owner/repo", 1)
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected error from timed-out gh call, got nil")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("checkPRState did not return within 2s — gh timeout not applied")
+	}
+}
+
 func TestExtractPRNumber(t *testing.T) {
 	tests := []struct {
 		name     string
