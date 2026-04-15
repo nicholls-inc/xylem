@@ -558,7 +558,9 @@ func (r *Runner) CheckWaitingVessels(ctx context.Context) {
 			continue
 		}
 
-		found, err := gate.CheckLabel(ctx, r.Runner, repo, issueNum, vessel.WaitingFor)
+		ghCtx, ghCancel := context.WithTimeout(ctx, ghCallTimeout)
+		found, err := gate.CheckLabel(ghCtx, r.Runner, repo, issueNum, vessel.WaitingFor)
+		ghCancel()
 		if err != nil {
 			log.Printf("warn: check label for vessel %s: %v", vessel.ID, err)
 			continue

@@ -59,10 +59,11 @@ type mockCmdRunner struct {
 	gateOutput       []byte
 	gateErr          error
 	// Per-call gate results; when non-nil, overrides gateOutput/gateErr by call index
-	gateCallResults []gateCallResult
-	gateCallCount   int32
-	runOutputHook   func(name string, args ...string) ([]byte, error, bool)
-	runPhaseHook    func(dir, prompt, name string, args ...string) ([]byte, error, bool)
+	gateCallResults  []gateCallResult
+	gateCallCount    int32
+	runOutputHook    func(name string, args ...string) ([]byte, error, bool)
+	runOutputCtxHook func(ctx context.Context, name string, args ...string) ([]byte, error, bool)
+	runPhaseHook     func(dir, prompt, name string, args ...string) ([]byte, error, bool)
 	// Track calls for assertion
 	phaseCalls    []phaseCall
 	outputArgs    [][]string
@@ -82,7 +83,7 @@ type phaseCall struct {
 	args   []string
 }
 
-func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string) ([]byte, error) {
+func (m *mockCmdRunner) RunOutput(ctx context.Context, name string, args ...string) ([]byte, error) {
 	m.mu.Lock()
 	m.outputArgs = append(m.outputArgs, append([]string{name}, args...))
 	isIssueComment := name == "gh" && len(args) >= 3 && args[0] == "issue" && args[1] == "comment"
@@ -96,6 +97,11 @@ func (m *mockCmdRunner) RunOutput(_ context.Context, name string, args ...string
 		}
 	}
 	m.mu.Unlock()
+	if m.runOutputCtxHook != nil {
+		if out, err, handled := m.runOutputCtxHook(ctx, name, args...); handled {
+			return out, err
+		}
+	}
 	if m.runOutputHook != nil {
 		if out, err, handled := m.runOutputHook(name, args...); handled {
 			return out, err
@@ -4810,6 +4816,76 @@ func TestCheckWaitingVesselsTimeoutWritesTraceableSummary(t *testing.T) {
 	timeoutSpan := endedSpanByName(t, rec, "wait_transition:timed_out")
 	assert.Equal(t, timeoutSpan.SpanContext().TraceID().String(), summary.Trace.TraceID)
 	assert.Equal(t, timeoutSpan.SpanContext().SpanID().String(), summary.Trace.SpanID)
+}
+
+func TestCheckWaitingVessels_RespectsTimeout(t *testing.T) {
+	orig := ghCallTimeout
+	ghCallTimeout = 5 * time.Millisecond
+	t.Cleanup(func() { ghCallTimeout = orig })
+
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	waitingSince := time.Now().UTC().Add(-time.Minute)
+	_, err := q.Enqueue(queue.Vessel{
+		ID:           "issue-10",
+		Source:       "github-issue",
+		Ref:          "https://github.com/owner/repo/issues/10",
+		Workflow:     "fix-bug",
+		Meta:         map[string]string{"issue_num": "10"},
+		State:        queue.StateWaiting,
+		CreatedAt:    time.Now().UTC(),
+		FailedPhase:  "plan",
+		WaitingFor:   "plan-approved",
+		WaitingSince: &waitingSince,
+		CurrentPhase: 1,
+	})
+	require.NoError(t, err)
+
+	withTestWorkingDir(t, dir)
+	writeWorkflowFile(t, dir, "fix-bug", []testPhase{
+		{
+			name: "plan", promptContent: "Create plan", maxTurns: 5,
+			gate: "      type: label\n      wait_for: \"plan-approved\"\n      timeout: \"24h\"",
+		},
+		{name: "implement", promptContent: "Implement after approval", maxTurns: 10},
+	})
+
+	// The mock blocks until the context it receives is cancelled. This simulates a
+	// hung gh process. If CheckWaitingVessels does not wrap the call with a timeout
+	// context, the goroutine below will never unblock and the time.After fires.
+	mock := &mockCmdRunner{
+		runOutputCtxHook: func(ctx context.Context, name string, args ...string) ([]byte, error, bool) {
+			if name == "gh" {
+				<-ctx.Done()
+				return nil, ctx.Err(), true
+			}
+			return nil, nil, false
+		},
+	}
+
+	r := New(cfg, q, &mockWorktree{}, mock)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r.CheckWaitingVessels(context.Background())
+	}()
+
+	select {
+	case <-done:
+		// Returned promptly — timeout fired correctly.
+	case <-time.After(2 * time.Second):
+		t.Fatal("CheckWaitingVessels did not return within 2s — gh timeout not applied")
+	}
+
+	// Vessel must remain in waiting — a timed-out call is a warn-and-skip, not a state change.
+	v, err := q.FindByID("issue-10")
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateWaiting, v.State)
 }
 
 func TestDrainVesselFails(t *testing.T) {

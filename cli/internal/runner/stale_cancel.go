@@ -8,9 +8,15 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 )
+
+// ghCallTimeout is the maximum time allowed for a single gh CLI call in the
+// daemon's hot paths (scan tick, check tick, stale-cancel tick). Overridable
+// in tests. A hung gh process can no longer freeze the daemon indefinitely.
+var ghCallTimeout = 60 * time.Second
 
 // prRefPattern matches GitHub PR URLs and extracts the PR number.
 var prRefPattern = regexp.MustCompile(`/pull/(\d+)`)
@@ -99,7 +105,9 @@ func extractPRNumber(v queue.Vessel) int {
 // checkPRState queries the GitHub API for a PR's state.
 // Returns "OPEN", "MERGED", or "CLOSED".
 func (r *Runner) checkPRState(ctx context.Context, repo string, prNum int) (string, error) {
-	out, err := r.Runner.RunOutput(ctx, "gh", "pr", "view",
+	ghCtx, cancel := context.WithTimeout(ctx, ghCallTimeout)
+	defer cancel()
+	out, err := r.Runner.RunOutput(ghCtx, "gh", "pr", "view",
 		strconv.Itoa(prNum),
 		"--repo", repo,
 		"--json", "state",
