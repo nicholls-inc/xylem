@@ -253,9 +253,9 @@ observability:
 
 validation:
   format: "goimports -l ."
-  lint: "cd cli && go vet ./..."
-  build: "cd cli && go build ./cmd/xylem"
-  test: "cd cli && go test ./..."
+  lint: "(cd cli && go vet ./...)"
+  build: "(cd cli && go build ./cmd/xylem)"
+  test: "(cd cli && go test ./...)"
 
 daemon:
   auto_upgrade: true
