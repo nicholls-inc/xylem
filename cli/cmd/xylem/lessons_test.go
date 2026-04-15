@@ -147,6 +147,21 @@ func TestCmdLessonsCreatesPullRequestsForGeneratedProposals(t *testing.T) {
 	if len(runner.phaseCalls) != 2 {
 		t.Fatalf("len(phaseCalls) = %d, want 2", len(runner.phaseCalls))
 	}
+	// Verify lessons PRs are created with harness-impl label so the
+	// conflict-resolution scanner task (AND-match on needs-conflict-resolution +
+	// harness-impl) can pick them up after a rebase conflict.
+	prCreateFound := false
+	for _, call := range runner.phaseCalls {
+		if strings.Contains(call, "pr create") {
+			if !strings.Contains(call, "--label harness-impl") {
+				t.Fatalf("gh pr create call missing --label harness-impl: %q", call)
+			}
+			prCreateFound = true
+		}
+	}
+	if !prCreateFound {
+		t.Fatal("no gh pr create call found in phaseCalls")
+	}
 	data, err := os.ReadFile(filepath.Join(stateDir, "reviews", "lessons.json"))
 	if err != nil {
 		t.Fatalf("ReadFile(lessons.json) error = %v", err)
