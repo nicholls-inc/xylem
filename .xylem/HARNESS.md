@@ -107,3 +107,15 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `pr-366-merge-pr-retry-1-retry-1-retry-1` (2026-04-11T16:30:48Z) — `phases/pr-366-merge-pr-retry-1-retry-1-retry-1/merge.output`
   - `pr-372-merge-pr-retry-1-retry-1` (2026-04-11T18:26:00Z) — `phases/pr-372-merge-pr-retry-1-retry-1/merge.output`
   - `pr-366-merge-pr-retry-1-retry-1-retry-1-retry-1` (2026-04-11T18:26:03Z) — `phases/pr-366-merge-pr-retry-1-retry-1-retry-1-retry-1/merge.output`
+
+### Do not finish `resolve-conflicts` work with phase `resolve` still failing due to `gate failed, retries exhausted`. <!-- xylem-lesson:lesson-04533fca3d37 -->
+- Rationale: This failure pattern recurred in 9 failed vessels for `resolve-conflicts` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: gate failed, retries exhausted
+- Evidence:
+  - `pr-366-resolve-conflicts` (2026-04-11T12:44:35Z) — `phases/pr-366-resolve-conflicts/resolve.output`
+  - `pr-372-resolve-conflicts` (2026-04-11T15:18:25Z) — `phases/pr-372-resolve-conflicts/resolve.output`
+  - `pr-366-resolve-conflicts-retry-1-retry-1` (2026-04-11T15:35:28Z) — `phases/pr-366-resolve-conflicts-retry-1-retry-1/resolve.output`
+  - `pr-372-resolve-conflicts-retry-1` (2026-04-11T16:35:08Z) — `phases/pr-372-resolve-conflicts-retry-1/resolve.output`
+  - `pr-366-resolve-conflicts-retry-1-retry-1-retry-1` (2026-04-11T16:38:02Z) — `phases/pr-366-resolve-conflicts-retry-1-retry-1-retry-1/resolve.output`
+  - `pr-372-resolve-conflicts-retry-1-retry-1-retry-1` (2026-04-11T19:32:25Z) — `phases/pr-372-resolve-conflicts-retry-1-retry-1-retry-1/resolve.output`
+  - `pr-366-resolve-conflicts-retry-1-retry-1-retry-1-retry-1-retry-1` (2026-04-11T19:35:05Z) — `phases/pr-366-resolve-conflicts-retry-1-retry-1-retry-1-retry-1-retry-1/resolve.output`
