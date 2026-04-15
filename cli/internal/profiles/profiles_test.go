@@ -202,7 +202,6 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Prompts), "hardening-audit/rank")
 	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/analyze")
 	assert.Contains(t, sortedKeys(composed.Prompts), "backlog-refinement/report")
-	assert.Contains(t, sortedKeys(composed.Sources), "harness-impl")
 	assert.Contains(t, sortedKeys(composed.Sources), "harness-pr-lifecycle")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-improvement")
 	assert.Contains(t, sortedKeys(composed.Sources), "continuous-simplicity")

@@ -1,17 +1,4 @@
 sources:
-  harness-impl:
-    type: github
-    repo: "{{ .Repo }}"
-    timeout: "90m"
-    exclude: [wontfix, duplicate, in-progress, no-bot, blocked]
-    tasks:
-      implement-harness-steps:
-        labels: [harness-impl, ready-for-work]
-        workflow: implement-harness
-        status_labels:
-          running: in-progress
-          failed: xylem-failed
-          timed_out: xylem-failed
   harness-pr-lifecycle:
     type: github-pr-events
     repo: "{{ .Repo }}"
@@ -33,7 +20,7 @@ sources:
     exclude: [no-bot, pr-vessel-active]
     tasks:
       merge-ready:
-        labels: [ready-to-merge, harness-impl]
+        labels: [ready-to-merge]
         workflow: merge-pr
         status_labels:
           running: pr-vessel-active
@@ -45,7 +32,7 @@ sources:
     exclude: [no-bot, pr-vessel-active]
     tasks:
       resolve-conflicts:
-        labels: [needs-conflict-resolution, harness-impl]
+        labels: [needs-conflict-resolution]
         workflow: resolve-conflicts
         status_labels:
           running: pr-vessel-active
