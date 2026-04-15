@@ -1,3 +1,5 @@
+<img width="1934" height="951" alt="xylem" src="https://github.com/user-attachments/assets/89649675-2514-4569-89ed-44d061dc64f9" />
+
 # xylem
 
 You have 40 GitHub issues labeled `ready-for-work`. They've been sitting there for two weeks. You'd fix them, but fixing one means opening Claude Code, writing the prompt, waiting, reviewing, pushing — and you have 39 more after that.
