@@ -1031,6 +1031,7 @@ func (r *Runner) ensureWorktree(ctx context.Context, vessel *queue.Vessel, src s
 			vessel.WorktreePath = worktreePath
 			if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
 				if r.cancelledTransition(vessel.ID, updateErr) {
+					r.removeWorktree(ctx, recreated, vessel.ID)
 					return "", false
 				}
 				log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
@@ -1051,6 +1052,7 @@ func (r *Runner) ensureWorktree(ctx context.Context, vessel *queue.Vessel, src s
 	vessel.WorktreePath = created
 	if updateErr := r.Queue.UpdateVessel(*vessel); updateErr != nil {
 		if r.cancelledTransition(vessel.ID, updateErr) {
+			r.removeWorktree(ctx, created, vessel.ID)
 			return "", false
 		}
 		log.Printf("warn: failed to persist worktree path for %s: %v", vessel.ID, updateErr)
