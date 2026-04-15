@@ -1,0 +1,19 @@
+name: pr-self-review
+class: ops
+description: "Review PRs with ready-to-merge label for scope creep, weak tests, and debug leftovers"
+phases:
+  - name: review
+    prompt_file: .xylem/prompts/pr-self-review/review.md
+    max_turns: 30
+    noop:
+      match: XYLEM_NOOP
+  - name: apply_feedback
+    prompt_file: .xylem/prompts/pr-self-review/apply_feedback.md
+    max_turns: 40
+    gate:
+      type: command
+      run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
+      retries: 1
+  - name: push
+    prompt_file: .xylem/prompts/pr-self-review/push.md
+    max_turns: 20

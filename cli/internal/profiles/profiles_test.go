@@ -20,6 +20,7 @@ type profileSourceConfig struct {
 	Type     string                       `yaml:"type"`
 	Repo     string                       `yaml:"repo,omitempty"`
 	Schedule string                       `yaml:"schedule,omitempty"`
+	Timeout  string                       `yaml:"timeout,omitempty"`
 	Tasks    map[string]profileTaskConfig `yaml:"tasks,omitempty"`
 }
 
@@ -211,6 +212,10 @@ func TestComposeCoreAndSelfHostingXylemIncludesOverlayAssets(t *testing.T) {
 	assert.Contains(t, sortedKeys(composed.Sources), "backlog-refinement")
 	assert.Contains(t, sortedKeys(composed.Sources), "ingest-field-reports")
 	assert.Contains(t, sortedKeys(composed.Sources), "release-cadence")
+	assert.Contains(t, sortedKeys(composed.Sources), "pr-self-review")
+	assert.Contains(t, sortedKeys(composed.Sources), "diagnose-failures")
+	assert.Contains(t, sortedKeys(composed.Sources), "autonomy-review")
+	assert.Contains(t, sortedKeys(composed.Sources), "ci-watchdog")
 	require.Len(t, composed.ConfigOverlays, 2)
 
 	assert.Contains(t, sortedKeys(composed.Scripts), "post-discussion.sh")
@@ -799,6 +804,185 @@ func TestResolveConflictsGateRetainsGitChecks(t *testing.T) {
 	assert.Contains(t, run, "git fetch origin")
 	assert.Contains(t, run, "git merge-base --is-ancestor")
 	assert.Equal(t, 2, resolvePhase.Gate.Retries)
+}
+
+func TestSmoke_S7_ComposedSelfHostingIncludesCoreGithubSources(t *testing.T) {
+	t.Parallel()
+
+	// bugs, features, triage, refinement are provided by the core profile's
+	// xylem.yml.tmpl — the self-hosting-xylem overlay must not re-declare them.
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	for _, name := range []string{"bugs", "features", "triage", "refinement"} {
+		assert.Contains(t, sortedKeys(composed.Sources), name, "expected source %q from core profile", name)
+	}
+
+	var bugsSource profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["bugs"], &bugsSource))
+	assert.Equal(t, "github", bugsSource.Type)
+	assert.Equal(t, "{{ .Repo }}", bugsSource.Repo)
+
+	var featuresSource profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["features"], &featuresSource))
+	assert.Equal(t, "github", featuresSource.Type)
+	assert.Equal(t, "{{ .Repo }}", featuresSource.Repo)
+
+	var triageSource profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["triage"], &triageSource))
+	assert.Equal(t, "github", triageSource.Type)
+
+	var refinementSource profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["refinement"], &refinementSource))
+	assert.Equal(t, "github", refinementSource.Type)
+}
+
+func TestSmoke_S8_SelfHostingOverlayContainsPRSelfReviewSource(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	assert.Contains(t, sortedKeys(composed.Sources), "pr-self-review")
+	var src profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["pr-self-review"], &src))
+	assert.Equal(t, "github-pr", src.Type)
+	assert.Equal(t, "{{ .Repo }}", src.Repo)
+	require.Contains(t, src.Tasks, "self-review")
+	assert.Equal(t, "pr-self-review", src.Tasks["self-review"].Workflow)
+}
+
+func TestSmoke_S9_SelfHostingOverlayContainsDiagnoseFailuresSource(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	assert.Contains(t, sortedKeys(composed.Sources), "diagnose-failures")
+	var src profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["diagnose-failures"], &src))
+	assert.Equal(t, "scheduled", src.Type)
+	assert.Equal(t, "2h", src.Schedule)
+	assert.Equal(t, "45m", src.Timeout)
+	require.Contains(t, src.Tasks, "hourly-diagnose-failures")
+	assert.Equal(t, "diagnose-failures", src.Tasks["hourly-diagnose-failures"].Workflow)
+	assert.Equal(t, "diagnose-failures", src.Tasks["hourly-diagnose-failures"].Ref)
+}
+
+func TestSmoke_S10_SelfHostingOverlayContainsAutonomyReviewSourceAndWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	assert.Contains(t, sortedKeys(composed.Sources), "autonomy-review")
+	var src profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["autonomy-review"], &src))
+	assert.Equal(t, "scheduled", src.Type)
+	assert.Equal(t, "@weekly", src.Schedule)
+	assert.Equal(t, "90m", src.Timeout)
+	require.Contains(t, src.Tasks, "weekly-autonomy-review")
+	assert.Equal(t, "autonomy-review", src.Tasks["weekly-autonomy-review"].Workflow)
+	assert.Equal(t, "autonomy-review", src.Tasks["weekly-autonomy-review"].Ref)
+
+	assert.Contains(t, sortedKeys(composed.Workflows), "autonomy-review")
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["autonomy-review"], &wf))
+	assert.Equal(t, "autonomy-review", wf.Name)
+	assert.Equal(t, workflowpkg.ClassHarnessMaintenance, wf.Class)
+	require.Len(t, wf.Phases, 3)
+	assert.Equal(t, "review", wf.Phases[0].Name)
+	assert.Equal(t, "report", wf.Phases[1].Name)
+	assert.Equal(t, "post", wf.Phases[2].Name)
+	assert.Equal(t, "command", wf.Phases[2].Type)
+
+	assert.Contains(t, sortedKeys(composed.Prompts), "autonomy-review/review")
+	assert.Contains(t, sortedKeys(composed.Prompts), "autonomy-review/report")
+	assert.NotEmpty(t, composed.Prompts["autonomy-review/review"])
+	assert.NotEmpty(t, composed.Prompts["autonomy-review/report"])
+}
+
+func TestSmoke_S11_SelfHostingOverlayContainsCIWatchdogSourceAndWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	assert.Contains(t, sortedKeys(composed.Sources), "ci-watchdog")
+	var src profileSourceConfig
+	require.NoError(t, yaml.Unmarshal(composed.Sources["ci-watchdog"], &src))
+	assert.Equal(t, "scheduled", src.Type)
+	assert.Equal(t, "30m", src.Schedule)
+	assert.Equal(t, "30m", src.Timeout)
+	require.Contains(t, src.Tasks, "monitor-main-ci")
+	assert.Equal(t, "ci-watchdog", src.Tasks["monitor-main-ci"].Workflow)
+	assert.Equal(t, "ci-watchdog", src.Tasks["monitor-main-ci"].Ref)
+
+	assert.Contains(t, sortedKeys(composed.Workflows), "ci-watchdog")
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["ci-watchdog"], &wf))
+	assert.Equal(t, "ci-watchdog", wf.Name)
+	assert.Equal(t, workflowpkg.ClassOps, wf.Class)
+	require.Len(t, wf.Phases, 3)
+	assert.Equal(t, "check", wf.Phases[0].Name)
+	assert.Equal(t, "command", wf.Phases[0].Type)
+	assert.Equal(t, "diagnose", wf.Phases[1].Name)
+	assert.Equal(t, "file_issue", wf.Phases[2].Name)
+
+	assert.Contains(t, sortedKeys(composed.Prompts), "ci-watchdog/diagnose")
+	assert.Contains(t, sortedKeys(composed.Prompts), "ci-watchdog/file_issue")
+	assert.NotEmpty(t, composed.Prompts["ci-watchdog/diagnose"])
+	assert.NotEmpty(t, composed.Prompts["ci-watchdog/file_issue"])
+}
+
+func TestSmoke_S12_SelfHostingOverlayContainsPRSelfReviewWorkflow(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	assert.Contains(t, sortedKeys(composed.Workflows), "pr-self-review")
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["pr-self-review"], &wf))
+	assert.Equal(t, "pr-self-review", wf.Name)
+	assert.Equal(t, workflowpkg.ClassOps, wf.Class)
+	require.Len(t, wf.Phases, 3)
+	assert.Equal(t, "review", wf.Phases[0].Name)
+	assert.Equal(t, "apply_feedback", wf.Phases[1].Name)
+	assert.NotNil(t, wf.Phases[1].Gate)
+	assert.Equal(t, "push", wf.Phases[2].Name)
+
+	assert.Contains(t, sortedKeys(composed.Prompts), "pr-self-review/review")
+	assert.Contains(t, sortedKeys(composed.Prompts), "pr-self-review/apply_feedback")
+	assert.Contains(t, sortedKeys(composed.Prompts), "pr-self-review/push")
+	assert.NotEmpty(t, composed.Prompts["pr-self-review/review"])
+	assert.NotEmpty(t, composed.Prompts["pr-self-review/apply_feedback"])
+	assert.NotEmpty(t, composed.Prompts["pr-self-review/push"])
+}
+
+func TestSmoke_S13_SelfHostingComposedSourcesCoversLiveConfig(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core", "self-hosting-xylem")
+	require.NoError(t, err)
+
+	// Sources from the core profile (xylem.yml.tmpl)
+	coreExpectedSources := []string{
+		"bugs", "features", "triage", "refinement",
+	}
+	// Sources from the self-hosting-xylem overlay
+	overlayExpectedSources := []string{
+		"pr-self-review",
+		"harness-pr-lifecycle", "harness-merge", "conflict-resolution",
+		"sota-gap", "hardening-audit", "continuous-simplicity",
+		"continuous-improvement", "release-cadence", "metrics-collector",
+		"portfolio-analyst", "audit", "initiative-tracker",
+		"backlog-refinement", "ingest-field-reports", "harness-post-merge",
+		"diagnose-failures", "autonomy-review", "ci-watchdog",
+	}
+	for _, name := range append(coreExpectedSources, overlayExpectedSources...) {
+		assert.Contains(t, sortedKeys(composed.Sources), name, "missing source %q", name)
+	}
 }
 
 func sortedKeys[V any](m map[string]V) []string {
