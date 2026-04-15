@@ -82,6 +82,110 @@ func TestFindStaleWorktreesNormalizesRelativeActivePaths(t *testing.T) {
 	}
 }
 
+func TestFindStaleWorktrees_SkipsWhenRunningVesselHasEmptyWorktreePath(t *testing.T) {
+	repoRoot := t.TempDir()
+	q := queue.New(filepath.Join(repoRoot, "queue.jsonl"))
+	now := time.Now().UTC()
+	// Enqueue a vessel then advance it to StateRunning with no WorktreePath set.
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:        "issue-99",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	// Advance to running with an empty WorktreePath to simulate the race window.
+	if err := q.UpdateVessel(queue.Vessel{
+		ID:           "issue-99",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		State:        queue.StateRunning,
+		WorktreePath: "",
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpdateVessel() error = %v", err)
+	}
+
+	// Register a worktree on disk for this vessel's branch.
+	registeredPath := filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "issue-99")
+	wt := &pruningWorktree{
+		repoRoot: repoRoot,
+		list: []worktree.WorktreeInfo{
+			{Path: registeredPath, Branch: "fix/issue-99"},
+		},
+	}
+	r := New(nil, q, wt, nil)
+
+	// FindStaleWorktrees should return nil, nil — prune deferred.
+	stale, err := r.FindStaleWorktrees(context.Background())
+	if err != nil {
+		t.Fatalf("FindStaleWorktrees() error = %v", err)
+	}
+	if len(stale) != 0 {
+		t.Fatalf("len(stale) = %d, want 0 (prune should be deferred)", len(stale))
+	}
+
+	// PruneStaleWorktrees is the call that actually removes worktrees; verify
+	// that no remove is attempted even through the full prune path.
+	removed := r.PruneStaleWorktrees(context.Background())
+	if removed != 0 {
+		t.Fatalf("PruneStaleWorktrees() removed %d, want 0", removed)
+	}
+	if len(wt.removed) != 0 {
+		t.Fatalf("removed = %v, want empty (no worktrees should be removed)", wt.removed)
+	}
+}
+
+func TestFindStaleWorktrees_ProceedsWhenRunningVesselHasPath(t *testing.T) {
+	repoRoot := t.TempDir()
+	q := queue.New(filepath.Join(repoRoot, "queue.jsonl"))
+	now := time.Now().UTC()
+	vesselPath := filepath.Join(".xylem", "worktrees", "fix", "issue-100")
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:        "issue-100",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	}); err != nil {
+		t.Fatalf("Enqueue() error = %v", err)
+	}
+	// Advance to running WITH a WorktreePath already persisted.
+	if err := q.UpdateVessel(queue.Vessel{
+		ID:           "issue-100",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		State:        queue.StateRunning,
+		WorktreePath: vesselPath,
+		CreatedAt:    now,
+	}); err != nil {
+		t.Fatalf("UpdateVessel() error = %v", err)
+	}
+
+	orphanPath := filepath.Join(repoRoot, ".xylem", "worktrees", "fix", "orphan")
+	wt := &pruningWorktree{
+		repoRoot: repoRoot,
+		list: []worktree.WorktreeInfo{
+			{Path: filepath.Join(repoRoot, vesselPath), Branch: "fix/issue-100"},
+			{Path: orphanPath, Branch: "fix/orphan"},
+		},
+	}
+	r := New(nil, q, wt, nil)
+
+	stale, err := r.FindStaleWorktrees(context.Background())
+	if err != nil {
+		t.Fatalf("FindStaleWorktrees() error = %v", err)
+	}
+	if len(stale) != 1 {
+		t.Fatalf("len(stale) = %d, want 1", len(stale))
+	}
+	if got := stale[0].Path; got != orphanPath {
+		t.Fatalf("stale[0].Path = %q, want %q", got, orphanPath)
+	}
+}
+
 func TestPruneStaleWorktreesRemovesOnlyDetectedStalePaths(t *testing.T) {
 	repoRoot := t.TempDir()
 	q := queue.New(filepath.Join(repoRoot, "queue.jsonl"))
