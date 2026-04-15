@@ -62,55 +62,60 @@ func (g *GitHub) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	seen := make(map[int]bool)
 
 	for _, task := range g.Tasks {
+		args := []string{
+			"issue", "list",
+			"--repo", g.Repo,
+			"--state", "open",
+			"--json", "number,title,body,url,labels",
+			"--limit", "20",
+		}
 		for _, label := range task.Labels {
-			args := []string{
-				"issue", "list",
-				"--repo", g.Repo,
-				"--state", "open",
-				"--json", "number,title,body,url,labels",
-				"--limit", "20",
-				"--label", label,
+			args = append(args, "--label", label)
+		}
+
+		out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		if err != nil {
+			return vessels, fmt.Errorf("gh issue list: %w", err)
+		}
+
+		var issues []ghIssue
+		if err := json.Unmarshal(out, &issues); err != nil {
+			return vessels, fmt.Errorf("parse gh issue list output: %w", err)
+		}
+
+		triggerLabel := ""
+		if len(task.Labels) > 0 {
+			triggerLabel = task.Labels[0]
+		}
+
+		for _, issue := range issues {
+			if seen[issue.Number] {
+				continue
+			}
+			baseVessel := g.newIssueCandidate(issue, triggerLabel, task)
+			if g.hasHardExcludedLabel(issue, excludeSet, task) {
+				continue
 			}
 
-			out, err := g.CmdRunner.Run(ctx, "gh", args...)
+			retryVessel, blocked, err := g.retryCandidate(baseVessel)
 			if err != nil {
-				return vessels, fmt.Errorf("gh issue list: %w", err)
+				return vessels, err
 			}
-
-			var issues []ghIssue
-			if err := json.Unmarshal(out, &issues); err != nil {
-				return vessels, fmt.Errorf("parse gh issue list output: %w", err)
+			if retryVessel == nil && g.hasFailureStatusLabel(issue, task) {
+				continue
 			}
-
-			for _, issue := range issues {
-				if seen[issue.Number] {
-					continue
-				}
-				baseVessel := g.newIssueCandidate(issue, label, task)
-				if g.hasHardExcludedLabel(issue, excludeSet, task) {
-					continue
-				}
-
-				retryVessel, blocked, err := g.retryCandidate(baseVessel)
-				if err != nil {
-					return vessels, err
-				}
-				if retryVessel == nil && g.hasFailureStatusLabel(issue, task) {
-					continue
-				}
-				if blocked {
-					continue
-				}
-				if g.scanBlockedByRepoState(ctx, issue.Number, retryVessel != nil) {
-					continue
-				}
-				seen[issue.Number] = true
-				if retryVessel != nil {
-					vessels = append(vessels, *retryVessel)
-					continue
-				}
-				vessels = append(vessels, baseVessel)
+			if blocked {
+				continue
 			}
+			if g.scanBlockedByRepoState(ctx, issue.Number, retryVessel != nil) {
+				continue
+			}
+			seen[issue.Number] = true
+			if retryVessel != nil {
+				vessels = append(vessels, *retryVessel)
+				continue
+			}
+			vessels = append(vessels, baseVessel)
 		}
 	}
 	return vessels, nil
@@ -125,47 +130,52 @@ func (g *GitHub) BacklogCount(ctx context.Context) (int, error) {
 	seen := make(map[int]struct{})
 	count := 0
 	for _, task := range g.Tasks {
+		args := []string{
+			"issue", "list",
+			"--repo", g.Repo,
+			"--state", "open",
+			"--json", "number,title,body,url,labels",
+			"--limit", "20",
+		}
 		for _, label := range task.Labels {
-			args := []string{
-				"issue", "list",
-				"--repo", g.Repo,
-				"--state", "open",
-				"--json", "number,title,body,url,labels",
-				"--limit", "20",
-				"--label", label,
-			}
+			args = append(args, "--label", label)
+		}
 
-			out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		if err != nil {
+			return 0, fmt.Errorf("gh issue list: %w", err)
+		}
+
+		var issues []ghIssue
+		if err := json.Unmarshal(out, &issues); err != nil {
+			return 0, fmt.Errorf("parse gh issue list output: %w", err)
+		}
+
+		triggerLabel := ""
+		if len(task.Labels) > 0 {
+			triggerLabel = task.Labels[0]
+		}
+
+		for _, issue := range issues {
+			if _, ok := seen[issue.Number]; ok {
+				continue
+			}
+			baseVessel := g.newIssueCandidate(issue, triggerLabel, task)
+			if g.hasHardExcludedLabel(issue, excludeSet, task) {
+				continue
+			}
+			retryVessel, blocked, err := g.retryCandidate(baseVessel)
 			if err != nil {
-				return 0, fmt.Errorf("gh issue list: %w", err)
+				return 0, err
 			}
-
-			var issues []ghIssue
-			if err := json.Unmarshal(out, &issues); err != nil {
-				return 0, fmt.Errorf("parse gh issue list output: %w", err)
+			if retryVessel == nil && g.hasFailureStatusLabel(issue, task) {
+				continue
 			}
-
-			for _, issue := range issues {
-				if _, ok := seen[issue.Number]; ok {
-					continue
-				}
-				baseVessel := g.newIssueCandidate(issue, label, task)
-				if g.hasHardExcludedLabel(issue, excludeSet, task) {
-					continue
-				}
-				retryVessel, blocked, err := g.retryCandidate(baseVessel)
-				if err != nil {
-					return 0, err
-				}
-				if retryVessel == nil && g.hasFailureStatusLabel(issue, task) {
-					continue
-				}
-				if blocked || g.scanBlockedByRepoState(ctx, issue.Number, retryVessel != nil) {
-					continue
-				}
-				seen[issue.Number] = struct{}{}
-				count++
+			if blocked || g.scanBlockedByRepoState(ctx, issue.Number, retryVessel != nil) {
+				continue
 			}
+			seen[issue.Number] = struct{}{}
+			count++
 		}
 	}
 	return count, nil
