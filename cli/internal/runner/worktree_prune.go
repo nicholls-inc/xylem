@@ -2,13 +2,19 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 
+	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/worktree"
 )
+
+// errWorktreeSetupInProgress is returned by activeWorktreePaths when a running
+// vessel has not yet persisted its WorktreePath. Callers should defer the prune.
+var errWorktreeSetupInProgress = errors.New("worktree setup in progress, skipping prune")
 
 type xylemWorktreeLister interface {
 	ListXylem(ctx context.Context) ([]worktree.WorktreeInfo, error)
@@ -33,6 +39,10 @@ func (r *Runner) FindStaleWorktrees(ctx context.Context) ([]worktree.WorktreeInf
 
 	active, err := r.activeWorktreePaths()
 	if err != nil {
+		if errors.Is(err, errWorktreeSetupInProgress) {
+			log.Printf("warn: skipping stale worktree prune: %v", err)
+			return nil, nil
+		}
 		return nil, fmt.Errorf("list active worktrees: %w", err)
 	}
 
@@ -79,7 +89,15 @@ func (r *Runner) activeWorktreePaths() (map[string]struct{}, error) {
 
 	active := make(map[string]struct{}, len(vessels))
 	for _, vessel := range vessels {
-		if vessel.State.IsTerminal() || vessel.WorktreePath == "" {
+		if vessel.State.IsTerminal() {
+			continue
+		}
+		// A running vessel with no WorktreePath is mid-creation: the worktree
+		// exists on disk but the path has not been persisted yet. Abort prune.
+		if vessel.State == queue.StateRunning && vessel.WorktreePath == "" {
+			return nil, errWorktreeSetupInProgress
+		}
+		if vessel.WorktreePath == "" {
 			continue
 		}
 		active[r.normalizeWorktreePath(vessel.WorktreePath)] = struct{}{}
