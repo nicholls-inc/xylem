@@ -9667,6 +9667,114 @@ func TestCheckStalledVesselsDoesNotTimeoutUntrackedRecentPhase(t *testing.T) {
 	assert.Equal(t, queue.StateRunning, updated.State)
 }
 
+// TestSmoke_S5_NeverRegisteredRunningVesselTimesOut verifies that a running vessel
+// with no entry in the process table and no phase output files is timed out after
+// the stall threshold has elapsed.
+func TestSmoke_S5_NeverRegisteredRunningVesselTimesOut(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "never-registered-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	// Backdate StartedAt past the stall threshold.
+	old := now.Add(-11 * time.Minute)
+	vessel.StartedAt = &old
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	// No markProcessStarted call — process table is empty.
+	// No phase output files written — phases dir does not exist.
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	findings := r.CheckStalledVessels(context.Background())
+
+	require.Len(t, findings, 1)
+	assert.Equal(t, "orphaned_subprocess", findings[0].Code)
+	assert.Equal(t, "never-registered-1", findings[0].VesselID)
+
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateTimedOut, updated.State)
+	assert.Contains(t, updated.Error, "no subprocess registered")
+}
+
+// TestSmoke_S5_NeverRegisteredRunningVesselWithinGracePeriodIsSkipped verifies
+// that a never-registered vessel started recently (within the stall threshold) is
+// not timed out.
+func TestSmoke_S5_NeverRegisteredRunningVesselWithinGracePeriodIsSkipped(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = true
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "grace-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+	// StartedAt set by Dequeue to approximately now — within the 10m grace period.
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	findings := r.CheckStalledVessels(context.Background())
+
+	require.Empty(t, findings)
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateRunning, updated.State)
+}
+
+// TestCheckStalledVesselsSkipsNeverRegisteredWhenOrphanCheckDisabled verifies
+// that when OrphanCheckEnabled is false, a never-registered vessel past the stall
+// threshold is not timed out. This preserves existing behavior for deployments
+// that have orphan check disabled.
+func TestCheckStalledVesselsSkipsNeverRegisteredWhenOrphanCheckDisabled(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 2)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	cfg.Daemon.StallMonitor.PhaseStallThreshold = "10m"
+	cfg.Daemon.StallMonitor.OrphanCheckEnabled = false
+
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	now := time.Now().UTC()
+	_, _ = q.Enqueue(queue.Vessel{
+		ID:        "no-orphan-check-1",
+		Source:    "manual",
+		State:     queue.StatePending,
+		CreatedAt: now,
+	})
+	vessel, _ := q.Dequeue()
+	require.NotNil(t, vessel)
+
+	old := now.Add(-11 * time.Minute)
+	vessel.StartedAt = &old
+	require.NoError(t, q.UpdateVessel(*vessel))
+
+	r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+	findings := r.CheckStalledVessels(context.Background())
+
+	require.Empty(t, findings)
+	updated, err := q.FindByID(vessel.ID)
+	require.NoError(t, err)
+	assert.Equal(t, queue.StateRunning, updated.State)
+}
+
 func TestSmoke_S9_NilTracerSkipsAllSpanCreationWithoutPanicking(t *testing.T) {
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{

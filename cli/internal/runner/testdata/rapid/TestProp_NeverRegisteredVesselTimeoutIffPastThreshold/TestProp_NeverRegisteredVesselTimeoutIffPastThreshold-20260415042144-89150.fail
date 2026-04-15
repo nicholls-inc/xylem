@@ -1,0 +1,13 @@
+# 2026/04/15 04:21:44.799558 [TestProp_NeverRegisteredVesselTimeoutIffPastThreshold] [rapid] draw threshold_min: 8
+# 2026/04/15 04:21:44.799561 [TestProp_NeverRegisteredVesselTimeoutIffPastThreshold] [rapid] draw elapsed_min: 8
+# 2026/04/15 04:21:44.799561 [TestProp_NeverRegisteredVesselTimeoutIffPastThreshold] [rapid] draw orphan_enabled: true
+# 2026/04/15 04:21:44.801159 [TestProp_NeverRegisteredVesselTimeoutIffPastThreshold] expected 0 findings, got 1 (orphanEnabled=true elapsed=8m threshold=8m)
+#
+v0.4.8#9841860034701767820
+0x0
+0x6b74f03291620
+0x7
+0x0
+0x9867f1f40f739
+0x8
+0x1

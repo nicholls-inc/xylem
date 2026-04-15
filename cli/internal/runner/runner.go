@@ -4381,6 +4381,25 @@ func (r *Runner) CheckStalledVessels(ctx context.Context) []StallFinding {
 		if err != nil {
 			if !errors.Is(err, os.ErrNotExist) {
 				log.Printf("warn: inspect phase activity for vessel %s: %v", vessel.ID, err)
+				continue
+			}
+			// No phase output files and no tracked process.
+			// If OrphanCheckEnabled and the vessel has been running longer than
+			// the stall threshold, time it out: the worker goroutine either
+			// panicked before markProcessStarted or was never dispatched.
+			if r.Config.Daemon.StallMonitor.OrphanCheckEnabled &&
+				vessel.StartedAt != nil &&
+				r.runtimeSince(*vessel.StartedAt) > stallThreshold {
+				msg := "vessel orphaned (no subprocess registered and no phase output)"
+				log.Printf("warn: %s for vessel %s", msg, vessel.ID)
+				if r.timeoutRunningVessel(ctx, vessel, msg) {
+					findings = append(findings, StallFinding{
+						Code:     "orphaned_subprocess",
+						Level:    "critical",
+						VesselID: vessel.ID,
+						Message:  msg,
+					})
+				}
 			}
 			continue
 		}
