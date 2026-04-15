@@ -793,7 +793,7 @@ func classify(input Input) (Class, Action, float64, string) {
 	switch {
 	case input.State == queue.StateTimedOut ||
 		containsAny(combined, "timeout", "timed out", "deadline exceeded", "connection reset", "connection refused",
-			"temporarily unavailable", "temporary failure", "rate limit", "429", "502", "503", "504"):
+			"temporarily unavailable", "temporary failure", "rate limit", "signal: killed", "429", "502", "503", "504"):
 		return ClassTransient, ActionRetry, 0.92, "The failure looks transient, so retry remains the preferred recovery path."
 	case containsAny(combined, "harness", "agents.md", "protected surface", "policy blocked", "instruction", "prompt template"):
 		return ClassHarnessGap, ActionLessons, 0.9, "The failure points at missing or incorrect harness guidance and should feed institutional memory instead of repeating the same run."
@@ -804,6 +804,9 @@ func classify(input Input) (Class, Action, float64, string) {
 		"larger than one change", "separate issue"):
 		return ClassScopeGap, ActionSplitTask, 0.86, "The task exceeds the current execution scope and should be refined or split before another attempt."
 	default:
+		if input.RepeatedFailureCount == 0 {
+			return ClassUnknown, ActionRetry, 0.55, "The failure has no diagnostic signal on first attempt; attempting one retry before escalation."
+		}
 		return ClassUnknown, ActionDiagnose, 0.25, "The failure needs diagnosis before xylem can safely decide whether to retry or route follow-up work."
 	}
 }
