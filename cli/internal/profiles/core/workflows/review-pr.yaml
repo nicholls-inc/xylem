@@ -3,7 +3,7 @@ description: "Review pull requests with crosscheck verification, test criticism,
 phases:
   - name: analyze
     prompt_file: .xylem/prompts/review-pr/analyze.md
-    max_turns: 20
+    max_turns: 40
   - name: verify
     prompt_file: .xylem/prompts/review-pr/verify.md
     max_turns: 60
