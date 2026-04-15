@@ -6783,7 +6783,7 @@ func TestDrainOrchestratedNoOp(t *testing.T) {
 
 	cmdRunner := &mockCmdRunner{
 		phaseOutputs: map[string][]byte{
-			"Analyze": []byte("Nothing to do XYLEM_NOOP"),
+			"Analyze": []byte("Nothing to do.\nXYLEM_NOOP\n"),
 		},
 	}
 	wt := &mockWorktree{}
@@ -10803,4 +10803,80 @@ func TestBuildTemplateData_DaemonBinaryRendersInCommand(t *testing.T) {
 	assert.NotContains(t, rendered, "{{")
 	// Verify the substitution: rendered command must begin with the actual binary path.
 	assert.True(t, strings.HasPrefix(rendered, td.DaemonBinary), "rendered command %q should start with DaemonBinary %q", rendered, td.DaemonBinary)
+}
+
+// TestPhaseMatchedNoOp_Semantics documents the line-boundary semantics of
+// the no-op sentinel match, fixed by issue #522. The sentinel must appear as
+// the start of a trimmed line, followed by either end-of-line or a colon
+// (the `SENTINEL: reason` form). Any in-prose mention — including in code
+// examples or docstrings — must NOT trigger a false no-op.
+func TestPhaseMatchedNoOp_Semantics(t *testing.T) {
+	phase := &workflow.Phase{
+		Name: "analyze",
+		NoOp: &workflow.NoOp{Match: "XYLEM_NOOP"},
+	}
+
+	cases := []struct {
+		name   string
+		output string
+		want   bool
+	}{
+		{
+			name:   "standalone line matches",
+			output: "Already fixed in main.\n\nXYLEM_NOOP\n",
+			want:   true,
+		},
+		{
+			name:   "sentinel-colon-reason form matches",
+			output: "XYLEM_NOOP: no weekly report available yet\n",
+			want:   true,
+		},
+		{
+			name:   "sentinel with leading whitespace matches",
+			output: "  XYLEM_NOOP\n",
+			want:   true,
+		},
+		// Regression for issue #522: the sentinel mentioned in prose or
+		// quoted as an example must NOT match.
+		{
+			name:   "prose mention does not match (issue #522)",
+			output: "The runner treats XYLEM_NOOP as a sentinel; we should never match it here.",
+			want:   false,
+		},
+		{
+			name:   "code-comment mention does not match",
+			output: "// Never mention XYLEM_NOOP in explanatory text.\n",
+			want:   false,
+		},
+		{
+			name:   "substring with trailing text on same line does not match",
+			output: "Nothing to do XYLEM_NOOP extra words\n",
+			want:   false,
+		},
+		{
+			name:   "empty output does not match",
+			output: "",
+			want:   false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := phaseMatchedNoOp(phase, tc.output)
+			if got != tc.want {
+				t.Errorf("phaseMatchedNoOp(%q) = %v, want %v", tc.output, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPhaseMatchedNoOp_NilGuards(t *testing.T) {
+	if phaseMatchedNoOp(nil, "XYLEM_NOOP") {
+		t.Error("nil phase must not match")
+	}
+	if phaseMatchedNoOp(&workflow.Phase{Name: "p"}, "XYLEM_NOOP") {
+		t.Error("phase with nil NoOp must not match")
+	}
+	if phaseMatchedNoOp(&workflow.Phase{Name: "p", NoOp: &workflow.NoOp{Match: ""}}, "XYLEM_NOOP") {
+		t.Error("empty match string must not match anything")
+	}
 }

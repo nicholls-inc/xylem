@@ -2593,8 +2593,31 @@ func sandboxModeFromFlags(cfg *config.Config) string {
 	return "default"
 }
 
+// phaseMatchedNoOp reports whether the phase output contains the no-op
+// sentinel. To avoid false positives when the sentinel is merely mentioned
+// inside prose or code examples (see issue #522), the sentinel must appear at
+// the start of a line (after trimming surrounding whitespace) and must be
+// followed by either end-of-line or a colon (the `SENTINEL: reason` form).
+// Any other occurrence — e.g. `the XYLEM_NOOP sentinel is used for…` — is
+// treated as prose and does not trigger the no-op.
 func phaseMatchedNoOp(p *workflow.Phase, output string) bool {
-	return p != nil && p.NoOp != nil && strings.Contains(output, p.NoOp.Match)
+	if p == nil || p.NoOp == nil {
+		return false
+	}
+	match := p.NoOp.Match
+	if match == "" {
+		return false
+	}
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == match {
+			return true
+		}
+		if strings.HasPrefix(trimmed, match) && len(trimmed) > len(match) && trimmed[len(match)] == ':' {
+			return true
+		}
+	}
+	return false
 }
 
 func buildGateClaim(p workflow.Phase, passed bool, artifactPath string, recordedAt time.Time) evidence.Claim {
