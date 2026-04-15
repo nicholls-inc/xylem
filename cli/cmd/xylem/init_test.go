@@ -40,7 +40,9 @@ var expectedCoreWorkflows = []string{
 
 var expectedSelfHostingWorkflows = []string{
 	"audit",
+	"autonomy-review",
 	"backlog-refinement",
+	"ci-watchdog",
 	"continuous-improvement",
 	"continuous-simplicity",
 	"diagnose-failures",
@@ -50,6 +52,7 @@ var expectedSelfHostingWorkflows = []string{
 	"initiative-tracker",
 	"metrics-collector",
 	"portfolio-analyst",
+	"pr-self-review",
 	"release-cadence",
 	"sota-gap-analysis",
 	"unblock-wave",
