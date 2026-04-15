@@ -6,8 +6,8 @@ import (
 	"strings"
 )
 
-func loadDaemonStartupEnv(workingDir string) error {
-	envFile, err := loadDaemonSupervisorEnvFile(daemonSupervisorEnvFilePath(workingDir))
+func loadDaemonStartupEnv(workingDir, envFileName string) error {
+	envFile, err := loadDaemonSupervisorEnvFile(daemonSupervisorEnvFilePath(workingDir, envFileName))
 	if err != nil {
 		return fmt.Errorf("load daemon startup env: %w", err)
 	}

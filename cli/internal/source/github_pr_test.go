@@ -1646,7 +1646,8 @@ func TestGitHubPRScanResolveConflictsSkipsMergeablePRAndStripsLabel(t *testing.T
 				Name string `json:"name"`
 			}{{Name: "harness-impl"}, {Name: "needs-conflict-resolution"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+	// Task has two labels; Scan() issues a single AND call with both.
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--label", "harness-impl", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo: "owner/repo",
@@ -1711,7 +1712,8 @@ func TestGitHubPRScanResolveConflictsSkipsUnknownMergeablePreservingLabel(t *tes
 				Name string `json:"name"`
 			}{{Name: "harness-impl"}, {Name: "needs-conflict-resolution"}}},
 	}
-	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
+	// Task has two labels; Scan() issues a single AND call with both.
+	r.set(prJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--label", "needs-conflict-resolution", "--label", "harness-impl", "--json", "number,title,body,url,labels,headRefName,mergeable", "--limit", "20")
 
 	src := &GitHubPR{
 		Repo: "owner/repo",
@@ -1741,6 +1743,191 @@ func TestGitHubPRScanResolveConflictsSkipsUnknownMergeablePreservingLabel(t *tes
 			t.Errorf("expected NO label removal for UNKNOWN mergeable state, got call: %q", joined)
 		}
 	}
+}
+
+func countGHPRListCalls(calls [][]string) int {
+	n := 0
+	for _, c := range calls {
+		if len(c) >= 3 && c[0] == "gh" && c[1] == "pr" && c[2] == "list" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestGitHubPRScanMultiLabelTaskRequiresAllLabels verifies AND semantics: a
+// task with multiple labels issues a single gh pr list call with all --label
+// flags, so GitHub's server-side AND matching applies.
+func TestGitHubPRScanMultiLabelTaskRequiresAllLabels(t *testing.T) {
+	t.Run("both labels present returns vessel", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(dir + "/queue.jsonl")
+		r := newMock()
+
+		// PR carries both labels — gh would return it on a combined AND query.
+		prs := []ghPR{
+			{
+				Number: 42, Title: "merge me", URL: "https://github.com/owner/repo/pull/42", HeadRefName: "merge",
+				Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "ready-to-merge"}, {Name: "harness-impl"}},
+			},
+		}
+		// Mock key uses the combined --label flags in task.Labels order.
+		r.set(prJSON(prs), "gh", "pr", "list",
+			"--repo", "owner/repo",
+			"--state", "open",
+			"--label", "ready-to-merge",
+			"--label", "harness-impl",
+			"--json", "number,title,body,url,labels,headRefName,mergeable",
+			"--limit", "20",
+		)
+
+		src := &GitHubPR{
+			Repo: "owner/repo",
+			Tasks: map[string]GitHubTask{
+				"harness-merge": {Labels: []string{"ready-to-merge", "harness-impl"}, Workflow: "merge-pr"},
+			},
+			Queue:     q,
+			CmdRunner: r,
+		}
+
+		vessels, err := src.Scan(context.Background())
+		require.NoError(t, err)
+		require.Len(t, vessels, 1)
+		assert.Equal(t, "pr-42-merge-pr", vessels[0].ID)
+
+		// Exactly one gh pr list call, not two.
+		assert.Equal(t, 1, countGHPRListCalls(r.calls))
+	})
+
+	t.Run("only one label present returns no vessel", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(dir + "/queue.jsonl")
+		r := newMock()
+
+		// PR has only harness-impl, not ready-to-merge. Pre-seed the per-label
+		// mock so that old OR-loop code (--label harness-impl alone) would find
+		// this PR and produce a vessel. The combined AND call is not seeded, so
+		// the mock default returns [] — simulating gh's server-side AND filter.
+		// This means assert.Empty is meaningful: old code produces 1 vessel, new code 0.
+		prWithOneLabel := []ghPR{
+			{
+				Number: 99, Title: "partial", URL: "https://github.com/owner/repo/pull/99", HeadRefName: "partial",
+				Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "harness-impl"}},
+			},
+		}
+		r.set(prJSON(prWithOneLabel), "gh", "pr", "list",
+			"--repo", "owner/repo",
+			"--state", "open",
+			"--label", "harness-impl",
+			"--json", "number,title,body,url,labels,headRefName,mergeable",
+			"--limit", "20",
+		)
+
+		src := &GitHubPR{
+			Repo: "owner/repo",
+			Tasks: map[string]GitHubTask{
+				"harness-merge": {Labels: []string{"ready-to-merge", "harness-impl"}, Workflow: "merge-pr"},
+			},
+			Queue:     q,
+			CmdRunner: r,
+		}
+
+		vessels, err := src.Scan(context.Background())
+		require.NoError(t, err)
+		// New AND code issues one combined call that returns [] → 0 vessels.
+		// Old per-label code would issue --label harness-impl and find pr-99 → 1 vessel.
+		assert.Empty(t, vessels)
+
+		// Exactly one call (with both labels), not two separate single-label calls.
+		assert.Equal(t, 1, countGHPRListCalls(r.calls))
+	})
+}
+
+// TestGitHubPRBacklogCountMultiLabelAndSemantics verifies that BacklogCount
+// uses the same AND-semantics fix: one call per task with all --label flags.
+func TestGitHubPRBacklogCountMultiLabelAndSemantics(t *testing.T) {
+	t.Run("both labels present counts the PR", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(dir + "/queue.jsonl")
+		r := newMock()
+
+		prs := []ghPR{
+			{
+				Number: 42, Title: "merge me", URL: "https://github.com/owner/repo/pull/42", HeadRefName: "merge",
+				Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "ready-to-merge"}, {Name: "harness-impl"}},
+			},
+		}
+		r.set(prJSON(prs), "gh", "pr", "list",
+			"--repo", "owner/repo",
+			"--state", "open",
+			"--label", "ready-to-merge",
+			"--label", "harness-impl",
+			"--json", "number,title,body,url,labels,headRefName,mergeable",
+			"--limit", "20",
+		)
+
+		src := &GitHubPR{
+			Repo: "owner/repo",
+			Tasks: map[string]GitHubTask{
+				"harness-merge": {Labels: []string{"ready-to-merge", "harness-impl"}, Workflow: "merge-pr"},
+			},
+			Queue:     q,
+			CmdRunner: r,
+		}
+
+		count, err := src.BacklogCount(context.Background())
+		require.NoError(t, err)
+		assert.Equal(t, 1, count)
+
+		assert.Equal(t, 1, countGHPRListCalls(r.calls))
+	})
+
+	t.Run("PR with only one label is not counted", func(t *testing.T) {
+		dir := t.TempDir()
+		q := queue.New(dir + "/queue.jsonl")
+		r := newMock()
+
+		// PR has only harness-impl. Pre-seed single-label response so old
+		// OR-loop code would count it. Combined AND call not seeded → default [].
+		prWithOneLabel := []ghPR{
+			{
+				Number: 99, Title: "partial", URL: "https://github.com/owner/repo/pull/99", HeadRefName: "partial",
+				Labels: []struct {
+					Name string `json:"name"`
+				}{{Name: "harness-impl"}},
+			},
+		}
+		r.set(prJSON(prWithOneLabel), "gh", "pr", "list",
+			"--repo", "owner/repo",
+			"--state", "open",
+			"--label", "harness-impl",
+			"--json", "number,title,body,url,labels,headRefName,mergeable",
+			"--limit", "20",
+		)
+
+		src := &GitHubPR{
+			Repo: "owner/repo",
+			Tasks: map[string]GitHubTask{
+				"harness-merge": {Labels: []string{"ready-to-merge", "harness-impl"}, Workflow: "merge-pr"},
+			},
+			Queue:     q,
+			CmdRunner: r,
+		}
+
+		count, err := src.BacklogCount(context.Background())
+		require.NoError(t, err)
+		// New AND code: combined call returns [] → count 0.
+		// Old OR-loop: --label harness-impl returns pr-99 → count 1.
+		assert.Equal(t, 0, count)
+
+		assert.Equal(t, 1, countGHPRListCalls(r.calls))
+	})
 }
 
 var errTest = &testError{"test error"}

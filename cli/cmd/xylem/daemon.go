@@ -58,7 +58,7 @@ func cmdDaemon(cmd *cobra.Command, cfg *config.Config, q *queue.Queue, wt *workt
 	if err != nil {
 		return fmt.Errorf("resolve working directory: %w", err)
 	}
-	if err := loadDaemonStartupEnv(rootDir); err != nil {
+	if err := loadDaemonStartupEnv(rootDir, cfg.Daemon.EffectiveEnvFile()); err != nil {
 		return err
 	}
 	if err := config.MigrateFlatStateToRuntime(cfg.StateDir); err != nil {
@@ -90,7 +90,9 @@ func cmdDaemon(cmd *cobra.Command, cfg *config.Config, q *queue.Queue, wt *workt
 		} else {
 			selfUpgrade(target.repoDir, target.executablePath)
 
-			upgrade = func() { selfUpgrade(target.repoDir, target.executablePath) }
+			upgrade = func() {
+				runUpgradeTick(target.repoDir, target.executablePath, cfg)
+			}
 			upgradeInterval = parseUpgradeInterval(cfg.Daemon)
 		}
 	}
@@ -262,6 +264,21 @@ func maybeResyncProfileAssets(cfg *config.Config) error {
 // parseUpgradeInterval returns the effective periodic upgrade interval. If
 // the config provides an explicit value, it is parsed; otherwise the default
 // is returned.
+// runUpgradeTick performs one upgrade cycle: it pulls and rebuilds the binary
+// via selfUpgrade, and if exec() did not fire (binary unchanged), it re-syncs
+// profile assets so any drift since the last startup is corrected.
+func runUpgradeTick(repoDir, executablePath string, cfg *config.Config) {
+	selfUpgrade(repoDir, executablePath)
+	// If exec() fired, the new process handles profile sync at daemonStartup.
+	// If exec() did not fire (binary unchanged), resync here to catch any
+	// profile drift since the last startup (e.g., manual file deletion).
+	if len(cfg.Profiles) > 0 {
+		if err := daemonResyncProfileAssets(cfg); err != nil {
+			slog.Warn("daemon upgrade profile re-sync failed", "error", err)
+		}
+	}
+}
+
 func parseUpgradeInterval(dc config.DaemonConfig) time.Duration {
 	if dc.UpgradeInterval == "" {
 		return defaultUpgradeInterval

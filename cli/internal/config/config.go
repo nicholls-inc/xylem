@@ -241,6 +241,9 @@ type DaemonConfig struct {
 	// AutoMergeReviewer is the GitHub login to request before enabling
 	// auto-merge. Defaults to empty, which skips reviewer requests.
 	AutoMergeReviewer string `yaml:"auto_merge_reviewer,omitempty"`
+	// EnvFile is the path (relative to the working directory) of the env file
+	// the daemon loads at startup. Defaults to ".env" when empty.
+	EnvFile string `yaml:"env_file,omitempty"`
 }
 
 type PhaseConfig struct {
@@ -808,6 +811,15 @@ func (d DaemonConfig) EffectiveAutoMergeReviewer() string {
 
 func (d DaemonConfig) EffectiveAutoAdminMergeOptOutLabel() string {
 	return DefaultAutoAdminMergeOptOutLabel
+}
+
+// EffectiveEnvFile returns the env file path to load at daemon startup.
+// Returns ".env" when EnvFile is empty, preserving backward compatibility.
+func (d DaemonConfig) EffectiveEnvFile() string {
+	if trimmed := strings.TrimSpace(d.EnvFile); trimmed != "" {
+		return trimmed
+	}
+	return ".env"
 }
 
 // CleanupAfterDuration returns the parsed cleanup_after duration, defaulting to
@@ -1404,16 +1416,16 @@ func (c *Config) validationRequiredWorkflows() []string {
 
 func (c *Config) validateValidationCommands() error {
 	if target, ok := invalidGoimportsPackagePatternTarget(c.Validation.Format); ok {
-		return fmt.Errorf(`validation.format uses goimports package pattern %q; goimports expects directories or files, use "goimports -l ." or "cd cli && goimports -l ."`, target)
+		return fmt.Errorf(`validation.format uses goimports package pattern %q; goimports expects directories or files, use "goimports -l ." or "(cd cli && goimports -l .)"`, target)
 	}
 	for _, check := range []struct {
 		name    string
 		command string
 		example string
 	}{
-		{name: "lint", command: c.Validation.Lint, example: `cd cli && go vet ./...`},
-		{name: "build", command: c.Validation.Build, example: `cd cli && go build ./cmd/xylem`},
-		{name: "test", command: c.Validation.Test, example: `cd cli && go test ./...`},
+		{name: "lint", command: c.Validation.Lint, example: `(cd cli && go vet ./...)`},
+		{name: "build", command: c.Validation.Build, example: `(cd cli && go build ./cmd/xylem)`},
+		{name: "test", command: c.Validation.Test, example: `(cd cli && go test ./...)`},
 	} {
 		if target, ok := invalidRepoRootGoCLITarget(check.command); ok {
 			return fmt.Errorf(`validation.%s runs go from repo root against %q; xylem executes validation from the worktree root, use %q`, check.name, target, check.example)

@@ -31,3 +31,5 @@ field-reports/
 .xylem/worktrees/
 .copilot-worktrees/
 .claude/scheduled_tasks.lock
+.worktrees/
+.claude/worktrees/

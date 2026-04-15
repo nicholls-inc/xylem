@@ -86,10 +86,10 @@ func TestRunLiveVerificationDifferentialMismatchUsesRegistryAndPolicy(t *testing
 			}
 		},
 		Runner: stubVerificationRunner{results: map[string]stubVerificationResult{
-			key("gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number", "title", "body", "url", "labels", "--limit", "20", "--label", "bug"): {
+			key("gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number", "title", "body", "url", "labels", "--limit", "20", "--label", "bug"): {
 				result: VerificationCommandResult{Stdout: `[{"number":1,"title":"flaky gate","body":"wait for plan approval","url":"https://example.test/issues/1","labels":[{"name":"bug"}]}]`},
 			},
-			key(verificationBinaryPath(t), "shim-dispatch", "gh", "search", "issues", "--repo", "owner/repo", "--state", "open", "--json", "number", "title", "body", "url", "labels", "--limit", "20", "--label", "bug"): {
+			key(verificationBinaryPath(t), "shim-dispatch", "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number", "title", "body", "url", "labels", "--limit", "20", "--label", "bug"): {
 				result: VerificationCommandResult{Stdout: `[{"number":2,"title":"flaky gate","body":"wait for plan approval","url":"https://example.test/issues/1","labels":[{"name":"bug"}]}]`},
 			},
 			key("gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number", "title", "body", "url", "labels", "headRefName", "--limit", "20"): {
@@ -118,7 +118,7 @@ func TestRunLiveVerificationDifferentialMismatchUsesRegistryAndPolicy(t *testing
 	if report.Summary.Mismatches != 1 {
 		t.Fatalf("Mismatches = %d, want 1", report.Summary.Mismatches)
 	}
-	first := reportByName(t, report.Differential, "gh-search-issues-open-bug")
+	first := reportByName(t, report.Differential, "gh-issue-list-open-bug")
 	if first.Status != VerificationStatusMismatch {
 		t.Fatalf("Status = %q, want %q", first.Status, VerificationStatusMismatch)
 	}

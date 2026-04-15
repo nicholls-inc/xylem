@@ -7,17 +7,19 @@ phases:
   - name: triage
     prompt_file: .xylem/prompts/triage/triage.md
     max_turns: 20
-  - name: apply
+  - name: apply_actions
     type: command
     run: |
       set -euo pipefail
-      DECISION_FILE=".xylem/state/triage/{{.Issue.Number}}-decision.json"
-      if [ ! -f "$DECISION_FILE" ]; then
-        echo "ERROR: triage phase did not produce $DECISION_FILE"
+      ACTIONS_FILE=".xylem/state/triage/actions.json"
+      if [ ! -f "$ACTIONS_FILE" ]; then
+        echo "ERROR: triage phase did not produce $ACTIONS_FILE"
         exit 1
       fi
 
       # Sanitize literal control chars from LLM-generated JSON string values.
+      # LLMs sometimes embed raw newlines inside string fields; jq rejects
+      # those per RFC 8259. This rewrites the file with properly escaped strings.
       python3 -c '
       import sys, json
 
@@ -41,6 +43,8 @@ phases:
                   result.append("\\r")
               elif in_string and ch == "\t":
                   result.append("\\t")
+              elif in_string and ord(ch) < 0x20:
+                  pass
               else:
                   result.append(ch)
           return "".join(result)
@@ -51,54 +55,52 @@ phases:
       sanitized = sanitize_json(raw)
       data = json.loads(sanitized)
       with open(filepath, "w") as f:
-          json.dump(data, f, ensure_ascii=False)
-      ' "$DECISION_FILE"
+          json.dump(data, f, ensure_ascii=True)
+      ' "$ACTIONS_FILE"
 
-      ACTION=$(jq -r '.action' "$DECISION_FILE")
-      TYPE_LABEL=$(jq -r '.type_label' "$DECISION_FILE")
+      ISSUE_NUMBER=$(jq -r '.issue_number' "$ACTIONS_FILE")
+      EXPECTED="{{.Issue.Number}}"
+      if [ "$ISSUE_NUMBER" != "$EXPECTED" ]; then
+        echo "ERROR: actions.json issue_number ($ISSUE_NUMBER) does not match vessel issue ($EXPECTED)"
+        exit 1
+      fi
 
-      if [ "$ACTION" = "label" ]; then
-        echo "Applying label action: type=$TYPE_LABEL"
-        gh issue edit {{.Issue.Number}} --repo {{.Repo.Slug}} --add-label "${TYPE_LABEL},needs-refinement"
-        sleep 1
-        gh issue edit {{.Issue.Number}} --repo {{.Repo.Slug}} --remove-label "needs-triage"
-        echo "Done: labeled issue #{{.Issue.Number}} with ${TYPE_LABEL} and needs-refinement"
+      DECISION=$(jq -r '.decision' "$ACTIONS_FILE")
 
-      elif [ "$ACTION" = "split" ]; then
-        echo "Applying split action: type=$TYPE_LABEL"
-        SUB_COUNT=$(jq '.sub_issues | length' "$DECISION_FILE")
-        echo "Creating ${SUB_COUNT} sub-issues..."
+      # Apply label edits to original issue
+      ADD_LABELS=$(jq -r '.add_labels // [] | map(select(length > 0)) | join(",")' "$ACTIONS_FILE")
+      REMOVE_LABELS=$(jq -r '.remove_labels // [] | map(select(length > 0)) | join(",")' "$ACTIONS_FILE")
+      if [ -n "$ADD_LABELS" ]; then
+        gh issue edit "$ISSUE_NUMBER" --repo {{.Repo.Slug}} --add-label "$ADD_LABELS"
+      fi
+      if [ -n "$REMOVE_LABELS" ]; then
+        gh issue edit "$ISSUE_NUMBER" --repo {{.Repo.Slug}} --remove-label "$REMOVE_LABELS"
+      fi
 
-        CREATED_NUMBERS=""
-        BODY_TMP=$(mktemp)
-        trap 'rm -f "$BODY_TMP"' EXIT
-
+      # Create sub-issues and close original only when splitting
+      if [ "$DECISION" = "split" ]; then
+        BODY_DIR=$(mktemp -d)
+        trap 'rm -rf "$BODY_DIR"' EXIT
+        SUB_COUNT=$(jq '.sub_issues // [] | length' "$ACTIONS_FILE")
         for i in $(seq 0 $((SUB_COUNT - 1))); do
-          TITLE=$(jq -r ".sub_issues[$i].title" "$DECISION_FILE")
-          BODY=$(jq -r ".sub_issues[$i].body" "$DECISION_FILE")
-          printf '%s' "$BODY" > "$BODY_TMP"
-          NEW_NUMBER=$(gh issue create \
-            --repo {{.Repo.Slug}} \
-            --title "$TITLE" \
-            --body-file "$BODY_TMP" \
-            --label "${TYPE_LABEL},needs-triage" \
-            | grep -oE '[0-9]+$')
-          echo "Created sub-issue #${NEW_NUMBER}: ${TITLE}"
-          if [ -n "$CREATED_NUMBERS" ]; then
-            CREATED_NUMBERS="${CREATED_NUMBERS}, #${NEW_NUMBER}"
+          TITLE=$(jq -r ".sub_issues[$i].title" "$ACTIONS_FILE")
+          LABELS=$(jq -r ".sub_issues[$i].labels // [] | join(\",\")" "$ACTIONS_FILE")
+          BODY_FILE="$BODY_DIR/body_$i.txt"
+          jq -r ".sub_issues[$i].body" "$ACTIONS_FILE" > "$BODY_FILE"
+          if [ -n "$LABELS" ]; then
+            gh issue create --repo {{.Repo.Slug}} --title "$TITLE" --label "$LABELS" --body-file "$BODY_FILE"
           else
-            CREATED_NUMBERS="#${NEW_NUMBER}"
+            gh issue create --repo {{.Repo.Slug}} --title "$TITLE" --body-file "$BODY_FILE"
           fi
           sleep 1
         done
 
-        echo "Split into: ${CREATED_NUMBERS}" > "$BODY_TMP"
-        gh issue edit {{.Issue.Number}} --repo {{.Repo.Slug}} --body-file "$BODY_TMP"
-        sleep 1
-        gh issue close {{.Issue.Number}} --repo {{.Repo.Slug}} --reason "not planned" --comment "Split into focused sub-issues: ${CREATED_NUMBERS}"
-        echo "Done: closed #{{.Issue.Number}}, created sub-issues ${CREATED_NUMBERS}"
-
-      else
-        echo "ERROR: unknown action '${ACTION}' in $DECISION_FILE"
-        exit 1
+        CLOSE=$(jq -r '.close_original // false' "$ACTIONS_FILE")
+        if [ "$CLOSE" = "true" ]; then
+          REASON=$(jq -r 'if (.close_reason // "") == "" then "not planned" else .close_reason end' "$ACTIONS_FILE")
+          COMMENT=$(jq -r '.close_comment // "Split into focused sub-issues."' "$ACTIONS_FILE")
+          gh issue close "$ISSUE_NUMBER" --repo {{.Repo.Slug}} --reason "$REASON" --comment "$COMMENT"
+        fi
       fi
+
+      echo "Triage actions applied: decision=$DECISION"

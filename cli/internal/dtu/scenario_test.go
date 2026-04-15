@@ -1388,8 +1388,8 @@ func TestScenarioIssueMalformedGHOutputFailsScan(t *testing.T) {
 	if err == nil {
 		t.Fatal("Scan() error = nil, want malformed gh parse error")
 	}
-	if !strings.Contains(err.Error(), "parse gh search output") {
-		t.Fatalf("Scan() error = %v, want parse gh search output", err)
+	if !strings.Contains(err.Error(), "parse gh issue list output") {
+		t.Fatalf("Scan() error = %v, want parse gh issue list output", err)
 	}
 
 	vessels, listErr := env.queue.List()
@@ -1401,7 +1401,7 @@ func TestScenarioIssueMalformedGHOutputFailsScan(t *testing.T) {
 	}
 
 	events := readEvents(t, env.store)
-	searchResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"search", "issues"})
+	searchResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"issue", "list"})
 	if len(searchResults) != 1 {
 		t.Fatalf("len(search results) = %d, want 1", len(searchResults))
 	}
@@ -1433,8 +1433,8 @@ func TestScenarioIssueGHAuthFailureFailsScan(t *testing.T) {
 	if err == nil {
 		t.Fatal("Scan() error = nil, want gh auth failure")
 	}
-	if !strings.Contains(err.Error(), "gh search issues") {
-		t.Fatalf("Scan() error = %v, want gh search issues", err)
+	if !strings.Contains(err.Error(), "gh issue list") {
+		t.Fatalf("Scan() error = %v, want gh issue list", err)
 	}
 	if !strings.Contains(err.Error(), "authentication required") {
 		t.Fatalf("Scan() error = %v, want authentication required", err)
@@ -1450,7 +1450,7 @@ func TestScenarioIssueGHAuthFailureFailsScan(t *testing.T) {
 	assertStringSliceEqual(t, readIssueLabels(t, env.store, "owner/repo", 5), []string{"bug"})
 
 	events := readEvents(t, env.store)
-	searchResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"search", "issues"})
+	searchResults := filterShimEvents(events, dtu.EventKindShimResult, "gh", []string{"issue", "list"})
 	if len(searchResults) != 1 {
 		t.Fatalf("len(search results) = %d, want 1", len(searchResults))
 	}

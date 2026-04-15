@@ -1,17 +1,16 @@
 sources:
-  harness-impl:
-    type: github
+  pr-self-review:
+    type: github-pr
     repo: "{{ .Repo }}"
-    timeout: "90m"
-    exclude: [wontfix, duplicate, in-progress, no-bot, blocked]
+    exclude: [no-bot, pr-vessel-active]
     tasks:
-      implement-harness-steps:
-        labels: [harness-impl, ready-for-work]
-        workflow: implement-harness
+      self-review:
+        labels: [ready-to-merge]
+        workflow: pr-self-review
         status_labels:
-          running: in-progress
+          running: pr-vessel-active
           failed: xylem-failed
-          timed_out: xylem-failed
+
   harness-pr-lifecycle:
     type: github-pr-events
     repo: "{{ .Repo }}"
@@ -33,7 +32,7 @@ sources:
     exclude: [no-bot, pr-vessel-active]
     tasks:
       merge-ready:
-        labels: [ready-to-merge, harness-impl]
+        labels: [ready-to-merge]
         workflow: merge-pr
         status_labels:
           running: pr-vessel-active
@@ -45,7 +44,7 @@ sources:
     exclude: [no-bot, pr-vessel-active]
     tasks:
       resolve-conflicts:
-        labels: [needs-conflict-resolution, harness-impl]
+        labels: [needs-conflict-resolution]
         workflow: resolve-conflicts
         status_labels:
           running: pr-vessel-active
@@ -161,6 +160,36 @@ sources:
     tasks:
       unblock-deps:
         workflow: unblock-wave
+
+  diagnose-failures:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "2h"
+    timeout: "45m"
+    tasks:
+      hourly-diagnose-failures:
+        workflow: diagnose-failures
+        ref: diagnose-failures
+
+  autonomy-review:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-autonomy-review:
+        workflow: autonomy-review
+        ref: autonomy-review
+
+  ci-watchdog:
+    type: scheduled
+    repo: "{{ .Repo }}"
+    schedule: "30m"
+    timeout: "30m"
+    tasks:
+      monitor-main-ci:
+        workflow: ci-watchdog
+        ref: ci-watchdog
 
 daemon:
   auto_upgrade: true

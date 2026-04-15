@@ -40,7 +40,9 @@ var expectedCoreWorkflows = []string{
 
 var expectedSelfHostingWorkflows = []string{
 	"audit",
+	"autonomy-review",
 	"backlog-refinement",
+	"ci-watchdog",
 	"continuous-improvement",
 	"continuous-simplicity",
 	"diagnose-failures",
@@ -50,6 +52,7 @@ var expectedSelfHostingWorkflows = []string{
 	"initiative-tracker",
 	"metrics-collector",
 	"portfolio-analyst",
+	"pr-self-review",
 	"release-cadence",
 	"sota-gap-analysis",
 	"unblock-wave",
@@ -607,9 +610,7 @@ func TestInitProfileCoreAndSelfHostingXylem(t *testing.T) {
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
-	if _, ok := cfg.Sources["harness-impl"]; !ok {
-		t.Fatal("expected harness-impl source from self-hosting overlay")
-	}
+	assert.NotContains(t, cfg.Sources, "harness-impl")
 }
 
 func TestInitRejectsUnknownProfile(t *testing.T) {
@@ -700,7 +701,7 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
-	assert.Contains(t, cfg.Sources, "harness-impl")
+	assert.NotContains(t, cfg.Sources, "harness-impl")
 	assert.Contains(t, cfg.Sources, "harness-pr-lifecycle")
 	assert.Contains(t, cfg.Sources, "release-cadence")
 	assert.Equal(t, []string{"ready-to-merge"}, cfg.Daemon.EffectiveAutoMergeLabels())
@@ -1325,18 +1326,18 @@ func TestInitAgentsMdForceOverwritesWhenFirstLineMatches(t *testing.T) {
 	assert.GreaterOrEqual(t, len(lines), 30, "overwritten AGENTS.md should still be the full template")
 }
 
-func TestWriteFileIfNotModified_CreatesWhenMissing(t *testing.T) {
+func TestWriteFileForResync_CreatesWhenMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "subdir", "file.md")
 	content := []byte("hello world\n")
 
-	require.NoError(t, writeFileIfNotModified(path, content))
+	require.NoError(t, writeFileForResync(path, content))
 
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, content, got)
 }
 
-func TestWriteFileIfNotModified_SkipsWhenUpToDate(t *testing.T) {
+func TestWriteFileForResync_SkipsWhenUpToDate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "file.md")
 	content := []byte("same content\n")
@@ -1345,7 +1346,7 @@ func TestWriteFileIfNotModified_SkipsWhenUpToDate(t *testing.T) {
 	info1, err := os.Stat(path)
 	require.NoError(t, err)
 
-	require.NoError(t, writeFileIfNotModified(path, content))
+	require.NoError(t, writeFileForResync(path, content))
 
 	info2, err := os.Stat(path)
 	require.NoError(t, err)
@@ -1356,19 +1357,19 @@ func TestWriteFileIfNotModified_SkipsWhenUpToDate(t *testing.T) {
 	assert.Equal(t, content, got)
 }
 
-func TestWriteFileIfNotModified_SkipsUserModifiedFile(t *testing.T) {
+func TestWriteFileForResync_OverwritesWhenDifferent(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "file.md")
-	userContent := []byte("user customisation\n")
+	staleContent := []byte("stale version\n")
 	embeddedContent := []byte("embedded version\n")
-	require.NoError(t, os.WriteFile(path, userContent, 0o644))
+	require.NoError(t, os.WriteFile(path, staleContent, 0o644))
 
-	require.NoError(t, writeFileIfNotModified(path, embeddedContent))
+	require.NoError(t, writeFileForResync(path, embeddedContent))
 
-	// User content must be preserved.
+	// Embedded content must overwrite the stale file.
 	got, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Equal(t, userContent, got)
+	assert.Equal(t, embeddedContent, got)
 }
 
 func TestResyncProfileAssets_CreatesMissingFiles(t *testing.T) {
@@ -1394,14 +1395,14 @@ func TestResyncProfileAssets_CreatesMissingFiles(t *testing.T) {
 	assert.Equal(t, composed.Prompts["fix-bug/plan"], pr)
 }
 
-func TestResyncProfileAssets_PreservesUserModifiedFiles(t *testing.T) {
+func TestResyncProfileAssets_OverwritesStaleProfileFiles(t *testing.T) {
 	stateDir := filepath.Join(t.TempDir(), ".xylem")
 
-	// Pre-create a user-modified prompt.
+	// Pre-create a stale prompt (e.g., from a previous binary version).
 	promptPath := filepath.Join(stateDir, "prompts", "fix-bug", "plan.md")
 	require.NoError(t, os.MkdirAll(filepath.Dir(promptPath), 0o755))
-	userContent := []byte("# My custom plan prompt\nDo it my way.\n")
-	require.NoError(t, os.WriteFile(promptPath, userContent, 0o644))
+	staleContent := []byte("# Old plan prompt from v1\n")
+	require.NoError(t, os.WriteFile(promptPath, staleContent, 0o644))
 
 	embeddedPrompt := []byte("embedded plan prompt\n")
 	composed := &profiles.ComposedProfile{
@@ -1416,10 +1417,10 @@ func TestResyncProfileAssets_PreservesUserModifiedFiles(t *testing.T) {
 
 	require.NoError(t, resyncProfileAssets(stateDir, composed))
 
-	// User-modified prompt must not be overwritten.
+	// Stale profile file must be overwritten with embedded content.
 	got, err := os.ReadFile(promptPath)
 	require.NoError(t, err)
-	assert.Equal(t, userContent, got)
+	assert.Equal(t, embeddedPrompt, got)
 
 	// Missing workflow must be created.
 	wf, err := os.ReadFile(filepath.Join(stateDir, "workflows", "fix-bug.yaml"))

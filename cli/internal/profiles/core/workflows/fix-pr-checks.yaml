@@ -8,10 +8,15 @@ phases:
       match: XYLEM_NOOP
   - name: fix
     prompt_file: .xylem/prompts/fix-pr-checks/fix.md
-    max_turns: 60
+    max_turns: 30
     gate:
       type: command
-      run: "true"
+      run: |
+        set -e
+        {{ if .Validation.Format }}( {{ .Validation.Format }} ){{ end }}
+        {{ if .Validation.Lint }}( {{ .Validation.Lint }} ){{ end }}
+        {{ if .Validation.Build }}( {{ .Validation.Build }} ){{ end }}
+        {{ if .Validation.Test }}( {{ .Validation.Test }} ){{ end }}
       retries: 3
   - name: push
     prompt_file: .xylem/prompts/fix-pr-checks/push.md
