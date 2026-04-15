@@ -7,3 +7,19 @@ phases:
   - name: refine
     prompt_file: .xylem/prompts/refine-issue/refine.md
     max_turns: 20
+  - name: apply
+    type: command
+    run: |
+      set -euo pipefail
+      BODY_FILE=".xylem/state/refine-issue/{{.Issue.Number}}-body.md"
+      if [ ! -f "$BODY_FILE" ]; then
+        echo "ERROR: refine phase did not produce $BODY_FILE"
+        exit 1
+      fi
+
+      echo "Updating issue #{{.Issue.Number}} body..."
+      gh issue edit {{.Issue.Number}} --repo {{.Repo.Slug}} --body-file "$BODY_FILE"
+      sleep 1
+      echo "Swapping labels: needs-refinement → ready-for-work"
+      gh issue edit {{.Issue.Number}} --repo {{.Repo.Slug}} --remove-label "needs-refinement" --add-label "ready-for-work"
+      echo "Done: issue #{{.Issue.Number}} refined and labeled ready-for-work"

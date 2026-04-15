@@ -71,10 +71,10 @@ phases:
       ADD_LABELS=$(jq -r '.add_labels // [] | map(select(length > 0)) | join(",")' "$ACTIONS_FILE")
       REMOVE_LABELS=$(jq -r '.remove_labels // [] | map(select(length > 0)) | join(",")' "$ACTIONS_FILE")
       if [ -n "$ADD_LABELS" ]; then
-        gh issue edit "$ISSUE_NUMBER" --repo nicholls-inc/xylem --add-label "$ADD_LABELS"
+        gh issue edit "$ISSUE_NUMBER" --repo {{.Repo.Slug}} --add-label "$ADD_LABELS"
       fi
       if [ -n "$REMOVE_LABELS" ]; then
-        gh issue edit "$ISSUE_NUMBER" --repo nicholls-inc/xylem --remove-label "$REMOVE_LABELS"
+        gh issue edit "$ISSUE_NUMBER" --repo {{.Repo.Slug}} --remove-label "$REMOVE_LABELS"
       fi
 
       # Create sub-issues and close original only when splitting
@@ -88,9 +88,9 @@ phases:
           BODY_FILE="$BODY_DIR/body_$i.txt"
           jq -r ".sub_issues[$i].body" "$ACTIONS_FILE" > "$BODY_FILE"
           if [ -n "$LABELS" ]; then
-            gh issue create --repo nicholls-inc/xylem --title "$TITLE" --label "$LABELS" --body-file "$BODY_FILE"
+            gh issue create --repo {{.Repo.Slug}} --title "$TITLE" --label "$LABELS" --body-file "$BODY_FILE"
           else
-            gh issue create --repo nicholls-inc/xylem --title "$TITLE" --body-file "$BODY_FILE"
+            gh issue create --repo {{.Repo.Slug}} --title "$TITLE" --body-file "$BODY_FILE"
           fi
           sleep 1
         done
@@ -99,7 +99,7 @@ phases:
         if [ "$CLOSE" = "true" ]; then
           REASON=$(jq -r 'if (.close_reason // "") == "" then "not planned" else .close_reason end' "$ACTIONS_FILE")
           COMMENT=$(jq -r '.close_comment // "Split into focused sub-issues."' "$ACTIONS_FILE")
-          gh issue close "$ISSUE_NUMBER" --repo nicholls-inc/xylem --reason "$REASON" --comment "$COMMENT"
+          gh issue close "$ISSUE_NUMBER" --repo {{.Repo.Slug}} --reason "$REASON" --comment "$COMMENT"
         fi
       fi
 
