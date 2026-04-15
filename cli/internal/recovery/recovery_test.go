@@ -134,6 +134,53 @@ func TestSmoke_S5_AmbiguousFailureTriggersDiagnosisWorkflow(t *testing.T) {
 	assert.Contains(t, diagnosed.Rationale, "phases/issue-214-ambiguous/summary.json")
 }
 
+func TestClassify_FirstUnknownFailureReturnsRetry(t *testing.T) {
+	artifact := Build(Input{
+		VesselID:             "issue-508-first-failure",
+		Workflow:             "fix-bug",
+		State:                queue.StateFailed,
+		Error:                "exit status 1",
+		RepeatedFailureCount: 0,
+	})
+
+	require.NotNil(t, artifact)
+	assert.Equal(t, ClassUnknown, artifact.RecoveryClass)
+	assert.Equal(t, ActionRetry, artifact.RecoveryAction)
+	assert.GreaterOrEqual(t, artifact.Confidence, diagnosisConfidenceThreshold)
+	assert.False(t, ShouldDiagnose(artifact))
+}
+
+func TestClassify_SecondUnknownFailureReturnsDiagnose(t *testing.T) {
+	artifact := Build(Input{
+		VesselID:             "issue-508-second-failure",
+		Workflow:             "fix-bug",
+		State:                queue.StateFailed,
+		Error:                "exit status 1",
+		RepeatedFailureCount: 1,
+	})
+
+	require.NotNil(t, artifact)
+	assert.Equal(t, ClassUnknown, artifact.RecoveryClass)
+	assert.Equal(t, ActionDiagnose, artifact.RecoveryAction)
+	assert.Equal(t, 0.25, artifact.Confidence)
+	assert.True(t, ShouldDiagnose(artifact))
+}
+
+func TestClassify_SignalKilledIsTransient(t *testing.T) {
+	artifact := Build(Input{
+		VesselID:             "issue-508-killed",
+		Workflow:             "fix-bug",
+		State:                queue.StateFailed,
+		Error:                "signal: killed",
+		RepeatedFailureCount: 0,
+	})
+
+	require.NotNil(t, artifact)
+	assert.Equal(t, ClassTransient, artifact.RecoveryClass)
+	assert.Equal(t, ActionRetry, artifact.RecoveryAction)
+	assert.Equal(t, 0.92, artifact.Confidence)
+}
+
 func TestShouldDiagnoseTriggersForLowConfidenceSingleFailure(t *testing.T) {
 	artifact := &Artifact{
 		SchemaVersion:        schemaVersion,
