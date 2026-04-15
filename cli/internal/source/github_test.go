@@ -1532,3 +1532,168 @@ func TestGitHubOnTimedOutRemovesWaitingLabel(t *testing.T) {
 		t.Errorf("expected --remove-label blocked, got %q", joined)
 	}
 }
+
+// TestScanANDMatchesLabels verifies that Scan uses a single gh issue list call
+// with all labels as AND-matched --label flags, not one call per label (OR-match).
+// Regression test for issue #541.
+func TestScanANDMatchesLabels(t *testing.T) {
+	r := newMock()
+
+	// Issue #522 has both "bug" and "ready-for-work"
+	issues522 := []ghIssue{{
+		Number: 522,
+		Title:  "scanner dispatches wrong workflow",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/522",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "ready-for-work"}},
+	}}
+	issueBytes, _ := json.Marshal(issues522)
+
+	// Only the AND-match key (both --label flags) should match.
+	// The unregistered enhancement+ready-for-work key returns "[]" by default.
+	r.set(issueBytes, "gh", "issue", "list",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug",
+		"--label", "ready-for-work")
+
+	g := &GitHub{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"fix": {
+				Labels:   []string{"bug", "ready-for-work"},
+				Workflow: "fix-bug",
+			},
+		},
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "fix-bug", vessels[0].Workflow)
+	assert.Equal(t, "issue-522", vessels[0].ID)
+}
+
+// TestScanTwoTasksANDMatchDispatchesCorrectWorkflow verifies that two tasks with
+// overlapping labels (e.g. both require "ready-for-work") dispatch correctly: an
+// issue matching only one task's full label set produces exactly one vessel for
+// that task's workflow and none for the other.
+func TestScanTwoTasksANDMatchDispatchesCorrectWorkflow(t *testing.T) {
+	r := newMock()
+
+	// Issue #522 has "bug" and "ready-for-work" — matches fix task, not feat task
+	bugIssues := []ghIssue{{
+		Number: 522,
+		Title:  "scanner bug",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/522",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "ready-for-work"}},
+	}}
+	bugBytes, _ := json.Marshal(bugIssues)
+	r.set(bugBytes, "gh", "issue", "list",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug",
+		"--label", "ready-for-work")
+	// enhancement+ready-for-work returns empty (unregistered → default "[]")
+
+	g := &GitHub{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"fix": {
+				Labels:   []string{"bug", "ready-for-work"},
+				Workflow: "fix-bug",
+			},
+			"feat": {
+				Labels:   []string{"enhancement", "ready-for-work"},
+				Workflow: "implement-feature",
+			},
+		},
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "fix-bug", vessels[0].Workflow)
+}
+
+// TestScanSingleLabelTaskUnchanged ensures that tasks with a single label still
+// work correctly after the AND-match fix.
+func TestScanSingleLabelTaskUnchanged(t *testing.T) {
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 10,
+		Title:  "single label issue",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/10",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "issue", "list",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug")
+
+	g := &GitHub{
+		Repo:      "owner/repo",
+		Tasks:     map[string]GitHubTask{"fix": {Labels: []string{"bug"}, Workflow: "fix-bug"}},
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	require.NoError(t, err)
+	require.Len(t, vessels, 1)
+	assert.Equal(t, "fix-bug", vessels[0].Workflow)
+	assert.Equal(t, "issue-10", vessels[0].ID)
+}
+
+// TestBacklogCountANDMatchesLabels verifies that BacklogCount uses the same
+// single multi-label call as Scan. Regression test for issue #541.
+func TestBacklogCountANDMatchesLabels(t *testing.T) {
+	r := newMock()
+
+	issues := []ghIssue{{
+		Number: 522,
+		Title:  "scanner bug",
+		Body:   "body",
+		URL:    "https://github.com/owner/repo/issues/522",
+		Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}, {Name: "ready-for-work"}},
+	}}
+	issueBytes, _ := json.Marshal(issues)
+	r.set(issueBytes, "gh", "issue", "list",
+		"--repo", "owner/repo",
+		"--state", "open",
+		"--json", "number,title,body,url,labels",
+		"--limit", "20",
+		"--label", "bug",
+		"--label", "ready-for-work")
+
+	g := &GitHub{
+		Repo: "owner/repo",
+		Tasks: map[string]GitHubTask{
+			"fix": {Labels: []string{"bug", "ready-for-work"}, Workflow: "fix-bug"},
+		},
+		CmdRunner: r,
+	}
+
+	count, err := g.BacklogCount(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
