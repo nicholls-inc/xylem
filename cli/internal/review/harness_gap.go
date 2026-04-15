@@ -454,14 +454,27 @@ func detectStaleConflictLabelGap(ctx context.Context, repo string, runner issueR
 	}
 
 	evidence := make([]string, 0, len(prs))
-	count := 0
+	var stalePRs []harnessGapPullRequest
 	for _, pr := range prs {
 		if strings.EqualFold(strings.TrimSpace(pr.Mergeable), "CONFLICTING") {
 			continue
 		}
-		count++
+		stalePRs = append(stalePRs, pr)
 		evidence = append(evidence, fmt.Sprintf("#%d is `%s` but still labeled `needs-conflict-resolution`", pr.Number, strings.TrimSpace(pr.Mergeable)))
 	}
+	count := len(stalePRs)
+
+	// Strip stale labels from PRs that are no longer conflicting.
+	for _, pr := range stalePRs {
+		if _, err := runner.RunOutput(ctx, "gh", "pr", "edit",
+			strconv.Itoa(pr.Number),
+			"--repo", repo,
+			"--remove-label", "needs-conflict-resolution",
+		); err != nil {
+			return nil, fmt.Errorf("detect stale conflict-label gap: remove label from #%d: %w", pr.Number, err)
+		}
+	}
+
 	if count < harnessGapStaleConflictThreshold {
 		return nil, nil
 	}
