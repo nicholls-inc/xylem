@@ -607,9 +607,7 @@ func TestInitProfileCoreAndSelfHostingXylem(t *testing.T) {
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
-	if _, ok := cfg.Sources["harness-impl"]; !ok {
-		t.Fatal("expected harness-impl source from self-hosting overlay")
-	}
+	assert.NotContains(t, cfg.Sources, "harness-impl")
 }
 
 func TestInitRejectsUnknownProfile(t *testing.T) {
@@ -700,7 +698,7 @@ func TestSmoke_S5_CorePlusSelfHostingOverlayScaffoldsOverlayWorkflows(t *testing
 	cfg, err := config.Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"core", "self-hosting-xylem"}, cfg.Profiles)
-	assert.Contains(t, cfg.Sources, "harness-impl")
+	assert.NotContains(t, cfg.Sources, "harness-impl")
 	assert.Contains(t, cfg.Sources, "harness-pr-lifecycle")
 	assert.Contains(t, cfg.Sources, "release-cadence")
 	assert.Equal(t, []string{"ready-to-merge"}, cfg.Daemon.EffectiveAutoMergeLabels())
