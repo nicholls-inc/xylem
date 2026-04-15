@@ -180,7 +180,7 @@ func createLessonsPullRequest(ctx context.Context, wt lessonsWorktree, runner le
 	if err := runner.RunProcess(ctx, worktreePath, "git", "push", "--set-upstream", "origin", proposal.Branch); err != nil {
 		return fmt.Errorf("create lessons pull request %q: git push: %w", proposal.Branch, err)
 	}
-	createArgs := append(repoArgs(repo), "pr", "create", "--title", proposal.Title, "--body", proposal.Body, "--head", proposal.Branch)
+	createArgs := append(repoArgs(repo), "pr", "create", "--title", proposal.Title, "--body", proposal.Body, "--head", proposal.Branch, "--label", "harness-impl")
 	out, err := runner.RunPhase(ctx, worktreePath, nil, "gh", createArgs...)
 	if err != nil {
 		return fmt.Errorf("create lessons pull request %q: gh pr create: %w", proposal.Branch, err)
