@@ -68,6 +68,22 @@ const runtimeStateDirName = "state"
 // See issue #366 for the class matrix design and migration notes.
 var DefaultProtectedSurfaces = []string{}
 
+// SandboxConfig controls execution isolation for vessel phase subprocesses.
+// Implements WS2 of the harness plan (docs/plans/sota-harness-plan.md §WS2).
+type SandboxConfig struct {
+	// Mode selects the isolation level: "none" (default), "env", or "full".
+	// Unrecognised values fall back to "none".
+	Mode string `yaml:"mode,omitempty"`
+	// EgressAllow lists hostnames/CIDRs for outbound connections in "full"
+	// mode. Empty means deny-all (loopback only). Not supported on Linux;
+	// configure iptables/nftables rules externally instead.
+	EgressAllow []string `yaml:"egress_allow,omitempty"`
+	// EnvPasslist lists additional KEY names to include in the filtered
+	// environment when mode is "env" or "full". Supplements the built-in
+	// safe passlist; does not replace it.
+	EnvPasslist []string `yaml:"env_passlist,omitempty"`
+}
+
 type Config struct {
 	Profiles            []string                  `yaml:"profiles,omitempty"`
 	Repo                string                    `yaml:"repo,omitempty"`
@@ -95,6 +111,7 @@ type Config struct {
 	Cost                CostConfig                `yaml:"cost,omitempty"`
 	Telemetry           TelemetryConfig           `yaml:"telemetry,omitempty"`
 	Notifications       NotificationsConfig       `yaml:"notifications,omitempty"`
+	Sandbox             SandboxConfig             `yaml:"sandbox,omitempty"`
 	configPath          string
 }
 

@@ -12,6 +12,7 @@ import (
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/nicholls-inc/xylem/cli/internal/runner"
+	"github.com/nicholls-inc/xylem/cli/internal/sandbox"
 )
 
 // maxStderrBytes is the maximum amount of stderr captured from a phase subprocess.
@@ -79,6 +80,9 @@ type realCmdRunner struct {
 	// providerEnv holds provider-scoped env vars for phase subprocesses so each
 	// LLM only receives its own credentials.
 	providerEnv map[string][]string
+	// isolation is the sandbox policy applied to phase subprocesses.
+	// Nil is treated as NoopPolicy (no isolation).
+	isolation sandbox.Policy
 }
 
 // newCmdRunner creates a realCmdRunner with extra env vars merged from
@@ -150,6 +154,24 @@ func newCmdRunner(cfg *config.Config) *realCmdRunner {
 	return &realCmdRunner{extraEnv: env, providerEnv: providerEnv}
 }
 
+// newCmdRunnerWithPolicy is like newCmdRunner but accepts a pre-built sandbox
+// Policy. Used by the drain path to inject execution isolation for phase
+// subprocesses.
+func newCmdRunnerWithPolicy(cfg *config.Config, p sandbox.Policy) *realCmdRunner {
+	r := newCmdRunner(cfg)
+	r.isolation = p
+	return r
+}
+
+// policy returns the effective sandbox Policy, defaulting to NoopPolicy when
+// no isolation has been configured.
+func (r *realCmdRunner) policy() sandbox.Policy {
+	if r.isolation != nil {
+		return r.isolation
+	}
+	return sandbox.NoopPolicy{}
+}
+
 // cmdEnv returns the environment to use for a subprocess: the daemon's
 // own env with extraEnv appended (extraEnv values take precedence
 // because Go's exec package uses the last occurrence of a given key).
@@ -203,7 +225,13 @@ func (r *realCmdRunner) RunPhase(ctx context.Context, dir string, stdin io.Reade
 }
 
 func (r *realCmdRunner) RunPhaseWithEnv(ctx context.Context, dir string, extraEnv []string, stdin io.Reader, name string, args ...string) ([]byte, error) {
-	return r.runPhaseInternal(ctx, dir, append(os.Environ(), extraEnv...), stdin, nil, name, args...)
+	pol := r.policy()
+	env := pol.PhaseEnv(extraEnv)
+	wrappedCmd, wrappedArgs, err := pol.WrapCommand(ctx, dir, name, args)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox wrap: %w", err)
+	}
+	return r.runPhaseInternal(ctx, dir, env, stdin, nil, wrappedCmd, wrappedArgs...)
 }
 
 func (r *realCmdRunner) RunPhaseObserved(ctx context.Context, dir string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
@@ -211,7 +239,13 @@ func (r *realCmdRunner) RunPhaseObserved(ctx context.Context, dir string, stdin 
 }
 
 func (r *realCmdRunner) RunPhaseObservedWithEnv(ctx context.Context, dir string, extraEnv []string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {
-	return r.runPhaseInternal(ctx, dir, append(os.Environ(), extraEnv...), stdin, observer, name, args...)
+	pol := r.policy()
+	env := pol.PhaseEnv(extraEnv)
+	wrappedCmd, wrappedArgs, err := pol.WrapCommand(ctx, dir, name, args)
+	if err != nil {
+		return nil, fmt.Errorf("sandbox wrap: %w", err)
+	}
+	return r.runPhaseInternal(ctx, dir, env, stdin, observer, wrappedCmd, wrappedArgs...)
 }
 
 func (r *realCmdRunner) runPhaseInternal(ctx context.Context, dir string, env []string, stdin io.Reader, observer runner.PhaseProcessObserver, name string, args ...string) ([]byte, error) {

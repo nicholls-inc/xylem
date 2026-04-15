@@ -3816,3 +3816,51 @@ func TestEffectiveEnvFileWhitespaceOnlyFallsBackToDefault(t *testing.T) {
 	d := DaemonConfig{EnvFile: "   "}
 	assert.Equal(t, ".env", d.EffectiveEnvFile())
 }
+
+// --- Sandbox config tests ---
+
+const sandboxBaseConfig = `
+repo: owner/repo
+tasks:
+  default:
+    labels: [ready-for-work]
+    workflow: fix-bug
+claude:
+  command: claude
+  default_model: claude-sonnet-4-6
+  env:
+    ANTHROPIC_API_KEY: test-key
+`
+
+func TestConfig_ParsesSandboxBlock(t *testing.T) {
+	path := writeConfigFile(t, sandboxBaseConfig+`
+sandbox:
+  mode: env
+  egress_allow:
+    - api.anthropic.com
+  env_passlist:
+    - MY_CUSTOM_VAR
+`)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, "env", cfg.Sandbox.Mode)
+	assert.Equal(t, []string{"api.anthropic.com"}, cfg.Sandbox.EgressAllow)
+	assert.Equal(t, []string{"MY_CUSTOM_VAR"}, cfg.Sandbox.EnvPasslist)
+}
+
+func TestConfig_SandboxBlockAbsentIsZeroValue(t *testing.T) {
+	path := writeConfigFile(t, sandboxBaseConfig)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, SandboxConfig{}, cfg.Sandbox)
+}
+
+// TestConfig_SandboxModeNoValidation verifies that config accepts an
+// unrecognised sandbox mode without error. The config layer is a passive
+// loader; mode validation is the sandbox package's responsibility.
+func TestConfig_SandboxModeNoValidation(t *testing.T) {
+	path := writeConfigFile(t, sandboxBaseConfig+"\nsandbox:\n  mode: unknown-mode\n")
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, "unknown-mode", cfg.Sandbox.Mode)
+}
