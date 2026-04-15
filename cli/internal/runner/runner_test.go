@@ -2395,6 +2395,84 @@ func TestEnsureWorktreeRecreatesMissingInheritedPath(t *testing.T) {
 	require.Equal(t, vessel.PhaseOutputs, stored.PhaseOutputs)
 }
 
+// TestEnsureWorktreeRemovesWorktreeOnCancelledTransition verifies that when a
+// new worktree is created but the vessel was externally cancelled before the
+// WorktreePath can be persisted, ensureWorktree removes the newly created
+// worktree rather than stranding it on disk.
+func TestEnsureWorktreeRemovesWorktreeOnCancelledTransition(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := queue.Vessel{
+		ID:        "issue-42",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		Ref:       "spec",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	}
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	// Dequeue moves the vessel to running state.
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+
+	// Externally cancel the vessel while it is "running" (simulates an
+	// operator cancel racing the worktree setup path).
+	require.NoError(t, q.Update(dequeued.ID, queue.StateCancelled, "cancelled by operator"))
+
+	createdPath := filepath.Join(dir, "new-worktree")
+	wt := &mockWorktree{path: createdPath}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+
+	// ensureWorktree must return (_, false) and must remove the created worktree.
+	worktreePath, ok := r.ensureWorktree(context.Background(), dequeued, &source.Manual{})
+	require.False(t, ok, "expected ensureWorktree to fail on cancelled vessel")
+	require.Empty(t, worktreePath)
+	require.True(t, wt.removeCalled, "expected Remove to be called for the stranded worktree")
+	require.Equal(t, createdPath, wt.removePath)
+}
+
+// TestEnsureWorktreeRemovesRecreatedWorktreeOnCancelledTransition verifies the
+// same cleanup guarantee for the "recreate missing worktree" path.
+func TestEnsureWorktreeRemovesRecreatedWorktreeOnCancelledTransition(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	missingPath := filepath.Join(dir, "missing-worktree") // does not exist on disk
+	vessel := queue.Vessel{
+		ID:           "issue-43",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		Ref:          "spec",
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+		WorktreePath: missingPath,
+	}
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+
+	require.NoError(t, q.Update(dequeued.ID, queue.StateCancelled, "cancelled by operator"))
+
+	recreatedPath := filepath.Join(dir, "recreated-worktree")
+	wt := &mockWorktree{path: recreatedPath}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+
+	worktreePath, ok := r.ensureWorktree(context.Background(), dequeued, &source.Manual{})
+	require.False(t, ok, "expected ensureWorktree to fail on cancelled vessel")
+	require.Empty(t, worktreePath)
+	require.True(t, wt.removeCalled, "expected Remove to be called for the stranded recreated worktree")
+	require.Equal(t, recreatedPath, wt.removePath)
+}
+
 // TestWS6S29NilHarnessFieldsRunsNormally verifies that a runner without
 // intermediary, audit log, or tracer behaves like the pre-harness runner.
 //
