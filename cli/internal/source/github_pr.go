@@ -86,88 +86,93 @@ func (g *GitHubPR) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	seen := make(map[prWorkflowSeenKey]bool)
 
 	for _, task := range g.Tasks {
+		if len(task.Labels) == 0 {
+			continue
+		}
+		args := []string{
+			"pr", "list",
+			"--repo", g.Repo,
+			"--state", "open",
+		}
 		for _, label := range task.Labels {
-			args := []string{
-				"pr", "list",
-				"--repo", g.Repo,
-				"--state", "open",
-				"--label", label,
-				"--json", "number,title,body,url,labels,headRefName,mergeable",
-				"--limit", "20",
-			}
+			args = append(args, "--label", label)
+		}
+		args = append(args,
+			"--json", "number,title,body,url,labels,headRefName,mergeable",
+			"--limit", "20",
+		)
 
-			out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		if err != nil {
+			return vessels, fmt.Errorf("gh pr list: %w", err)
+		}
+
+		var prs []ghPR
+		if err := json.Unmarshal(out, &prs); err != nil {
+			return vessels, fmt.Errorf("parse gh pr list output: %w", err)
+		}
+
+		for _, pr := range prs {
+			key := prWorkflowSeenKey{prNum: pr.Number, workflow: task.Workflow}
+			if seen[key] {
+				continue
+			}
+			fingerprint := githubSourceFingerprint(pr.Title, pr.Body, issueLabelNames(pr.Labels))
+			baseVessel := queue.Vessel{
+				ID:       fmt.Sprintf("pr-%d-%s", pr.Number, task.Workflow),
+				Source:   "github-pr",
+				Ref:      prWorkflowRef(pr.URL, task.Workflow),
+				Workflow: task.Workflow,
+				Tier:     ResolveTaskTier(task.Tier, g.DefaultTier),
+				Meta: map[string]string{
+					"pr_num":                   strconv.Itoa(pr.Number),
+					"pr_title":                 pr.Title,
+					"pr_body":                  pr.Body,
+					"pr_labels":                strings.Join(issueLabelNames(pr.Labels), ","),
+					"source_input_fingerprint": fingerprint,
+				},
+				State:     queue.StatePending,
+				CreatedAt: sourceNow(),
+			}
+			baseVessel.Meta = applyCurrentRemediationMeta(baseVessel.Meta, nil, g.currentHarnessDigest(), g.currentWorkflowDigest(task.Workflow))
+			sl := task.StatusLabels
+			if sl != nil {
+				baseVessel.Meta["status_label_queued"] = sl.Queued
+				baseVessel.Meta["status_label_running"] = sl.Running
+				baseVessel.Meta["status_label_completed"] = sl.Completed
+				baseVessel.Meta["status_label_failed"] = sl.Failed
+				baseVessel.Meta["status_label_timed_out"] = sl.TimedOut
+			}
+			lgl := task.LabelGateLabels
+			if lgl != nil {
+				baseVessel.Meta["label_gate_label_waiting"] = lgl.Waiting
+				baseVessel.Meta["label_gate_label_ready"] = lgl.Ready
+			}
+			if g.hasExcludedLabel(pr, excludeSet) {
+				continue
+			}
+			if task.Workflow == resolveConflictsWorkflow && pr.Mergeable != ghMergeableConflicting {
+				if pr.Mergeable == ghMergeableMergeable {
+					g.stripTaskLabels(ctx, pr.Number, task.Labels)
+				}
+				continue
+			}
+			retryVessel, blocked, err := g.retryCandidate(baseVessel, pr.URL, fingerprint, task.Workflow)
 			if err != nil {
-				return vessels, fmt.Errorf("gh pr list: %w", err)
+				return vessels, err
 			}
-
-			var prs []ghPR
-			if err := json.Unmarshal(out, &prs); err != nil {
-				return vessels, fmt.Errorf("parse gh pr list output: %w", err)
+			if blocked {
+				continue
 			}
-
-			for _, pr := range prs {
-				key := prWorkflowSeenKey{prNum: pr.Number, workflow: task.Workflow}
-				if seen[key] {
-					continue
-				}
-				fingerprint := githubSourceFingerprint(pr.Title, pr.Body, issueLabelNames(pr.Labels))
-				baseVessel := queue.Vessel{
-					ID:       fmt.Sprintf("pr-%d-%s", pr.Number, task.Workflow),
-					Source:   "github-pr",
-					Ref:      prWorkflowRef(pr.URL, task.Workflow),
-					Workflow: task.Workflow,
-					Tier:     ResolveTaskTier(task.Tier, g.DefaultTier),
-					Meta: map[string]string{
-						"pr_num":                   strconv.Itoa(pr.Number),
-						"pr_title":                 pr.Title,
-						"pr_body":                  pr.Body,
-						"pr_labels":                strings.Join(issueLabelNames(pr.Labels), ","),
-						"source_input_fingerprint": fingerprint,
-					},
-					State:     queue.StatePending,
-					CreatedAt: sourceNow(),
-				}
-				baseVessel.Meta = applyCurrentRemediationMeta(baseVessel.Meta, nil, g.currentHarnessDigest(), g.currentWorkflowDigest(task.Workflow))
-				sl := task.StatusLabels
-				if sl != nil {
-					baseVessel.Meta["status_label_queued"] = sl.Queued
-					baseVessel.Meta["status_label_running"] = sl.Running
-					baseVessel.Meta["status_label_completed"] = sl.Completed
-					baseVessel.Meta["status_label_failed"] = sl.Failed
-					baseVessel.Meta["status_label_timed_out"] = sl.TimedOut
-				}
-				lgl := task.LabelGateLabels
-				if lgl != nil {
-					baseVessel.Meta["label_gate_label_waiting"] = lgl.Waiting
-					baseVessel.Meta["label_gate_label_ready"] = lgl.Ready
-				}
-				if g.hasExcludedLabel(pr, excludeSet) {
-					continue
-				}
-				if task.Workflow == resolveConflictsWorkflow && pr.Mergeable != ghMergeableConflicting {
-					if pr.Mergeable == ghMergeableMergeable {
-						g.stripTaskLabels(ctx, pr.Number, task.Labels)
-					}
-					continue
-				}
-				retryVessel, blocked, err := g.retryCandidate(baseVessel, pr.URL, fingerprint, task.Workflow)
-				if err != nil {
-					return vessels, err
-				}
-				if blocked {
-					continue
-				}
-				if g.hasBranch(ctx, pr.Number) {
-					continue
-				}
-				seen[key] = true
-				if retryVessel != nil {
-					vessels = append(vessels, *retryVessel)
-					continue
-				}
-				vessels = append(vessels, baseVessel)
+			if g.hasBranch(ctx, pr.Number) {
+				continue
 			}
+			seen[key] = true
+			if retryVessel != nil {
+				vessels = append(vessels, *retryVessel)
+				continue
+			}
+			vessels = append(vessels, baseVessel)
 		}
 	}
 	return vessels, nil
@@ -182,37 +187,42 @@ func (g *GitHubPR) BacklogCount(ctx context.Context) (int, error) {
 	seen := make(map[prWorkflowSeenKey]struct{})
 	count := 0
 	for _, task := range g.Tasks {
+		if len(task.Labels) == 0 {
+			continue
+		}
+		args := []string{
+			"pr", "list",
+			"--repo", g.Repo,
+			"--state", "open",
+		}
 		for _, label := range task.Labels {
-			args := []string{
-				"pr", "list",
-				"--repo", g.Repo,
-				"--state", "open",
-				"--label", label,
-				"--json", "number,title,body,url,labels,headRefName,mergeable",
-				"--limit", "20",
-			}
+			args = append(args, "--label", label)
+		}
+		args = append(args,
+			"--json", "number,title,body,url,labels,headRefName,mergeable",
+			"--limit", "20",
+		)
 
-			out, err := g.CmdRunner.Run(ctx, "gh", args...)
-			if err != nil {
-				return 0, fmt.Errorf("gh pr list: %w", err)
-			}
+		out, err := g.CmdRunner.Run(ctx, "gh", args...)
+		if err != nil {
+			return 0, fmt.Errorf("gh pr list: %w", err)
+		}
 
-			var prs []ghPR
-			if err := json.Unmarshal(out, &prs); err != nil {
-				return 0, fmt.Errorf("parse gh pr list output: %w", err)
-			}
+		var prs []ghPR
+		if err := json.Unmarshal(out, &prs); err != nil {
+			return 0, fmt.Errorf("parse gh pr list output: %w", err)
+		}
 
-			for _, pr := range prs {
-				key := prWorkflowSeenKey{prNum: pr.Number, workflow: task.Workflow}
-				if _, ok := seen[key]; ok || g.hasExcludedLabel(pr, excludeSet) {
-					continue
-				}
-				if task.Workflow == resolveConflictsWorkflow && pr.Mergeable != ghMergeableConflicting {
-					continue
-				}
-				seen[key] = struct{}{}
-				count++
+		for _, pr := range prs {
+			key := prWorkflowSeenKey{prNum: pr.Number, workflow: task.Workflow}
+			if _, ok := seen[key]; ok || g.hasExcludedLabel(pr, excludeSet) {
+				continue
 			}
+			if task.Workflow == resolveConflictsWorkflow && pr.Mergeable != ghMergeableConflicting {
+				continue
+			}
+			seen[key] = struct{}{}
+			count++
 		}
 	}
 	return count, nil
