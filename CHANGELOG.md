@@ -1,5 +1,46 @@
 # Changelog
 
+## [1.3.0](https://github.com/nicholls-inc/xylem/compare/xylem-v1.2.1...xylem-v1.3.0) (2026-04-15)
+
+
+### Features
+
+* add ci-watchdog scheduled workflow to monitor CI on main ([#500](https://github.com/nicholls-inc/xylem/issues/500)) ([0e68522](https://github.com/nicholls-inc/xylem/commit/0e6852205907b9b90b580e91c6565e810da1da4d))
+* add pr-self-review workflow for quality checks before merge ([#499](https://github.com/nicholls-inc/xylem/issues/499)) ([47f1b4b](https://github.com/nicholls-inc/xylem/commit/47f1b4b44d84642f93e4f60996773b2b6e662ba6))
+* add weekly autonomy-review workflow with discussion publishing ([#496](https://github.com/nicholls-inc/xylem/issues/496)) ([b383e87](https://github.com/nicholls-inc/xylem/commit/b383e87ee31fed02db0b348b7cf4b5da70ee3122))
+* auto-sync profile workflows into daemon worktree on upgrade ([#517](https://github.com/nicholls-inc/xylem/issues/517)) ([b563c93](https://github.com/nicholls-inc/xylem/commit/b563c93a630777c93969dc894580ef466ba7dabe))
+* feat: Add runtime containment, network policy, and scoped secret handling ([#535](https://github.com/nicholls-inc/xylem/issues/535)) ([15e46ec](https://github.com/nicholls-inc/xylem/commit/15e46ec121f6d43609a56413c52f69481c708383))
+* fix: .xylem.yml overlay — validation 'cd cli' accumulates in gate shell, breaking resolve-conflicts ([#525](https://github.com/nicholls-inc/xylem/issues/525)) ([a2cc895](https://github.com/nicholls-inc/xylem/commit/a2cc895e15b08372e345820d3359b96522fbfb42))
+* fix: daemon freeze [#5](https://github.com/nicholls-inc/xylem/issues/5) recurs with auto_merge disabled — broader gh-timeout coverage needed beyond automerge.go ([#545](https://github.com/nicholls-inc/xylem/issues/545)) ([f230a45](https://github.com/nicholls-inc/xylem/commit/f230a45c18cdff852b8fee2b52a3b0a469916425))
+* fix: daemon freezes after gh CLI calls in auto-merge path (3 freezes in 2.5h) ([#538](https://github.com/nicholls-inc/xylem/issues/538)) ([59c5acf](https://github.com/nicholls-inc/xylem/commit/59c5acf042b2c1765d8e084229395c3e9e59990c))
+* fix: daemon prune-stale-worktrees races drain, removes in-flight worktrees (regression of [#360](https://github.com/nicholls-inc/xylem/issues/360)) ([#548](https://github.com/nicholls-inc/xylem/issues/548)) ([aa431ad](https://github.com/nicholls-inc/xylem/commit/aa431ad73858022dab7853d95c788da1e45d7a1a))
+* fix: github-pr source matches labels as OR not AND, causing no-op re-enqueue loops ([#526](https://github.com/nicholls-inc/xylem/issues/526)) ([f7d3874](https://github.com/nicholls-inc/xylem/commit/f7d3874f946d88e67fa3cbbf108387130c633f9d))
+* fix: increase fix-bug analyze phase max_turns from 20 to 40 (unblock [#522](https://github.com/nicholls-inc/xylem/issues/522)) ([#537](https://github.com/nicholls-inc/xylem/issues/537)) ([c915e32](https://github.com/nicholls-inc/xylem/commit/c915e32aae73754b3a1b052b9295389d21868fb9))
+* fix: scanner label-list is OR-matched, dispatches wrong workflow for any issue sharing a single label ([#544](https://github.com/nicholls-inc/xylem/issues/544)) ([93e546a](https://github.com/nicholls-inc/xylem/commit/93e546a85cdd000cec6242149747c77e4918ecf1))
+* fix: worker-stall failure mode — vessels stuck running with no Claude subprocess, invisible to heartbeat monitor ([#543](https://github.com/nicholls-inc/xylem/issues/543)) ([fc19f84](https://github.com/nicholls-inc/xylem/commit/fc19f84f6e14ca2b54e337d4929145fe5f879ff4))
+* harness-gap-analysis: clean up stale conflict labels on mergeable PRs ([#539](https://github.com/nicholls-inc/xylem/issues/539)) ([ad0c028](https://github.com/nicholls-inc/xylem/commit/ad0c028447488c3899076a3773d38a62882bbb35))
+* self-hosting-xylem overlay migration + xylem repo flip to profiles: [core, self-hosting-xylem] ([#527](https://github.com/nicholls-inc/xylem/issues/527)) ([1a6c451](https://github.com/nicholls-inc/xylem/commit/1a6c451a368f82db353e978eadf17b5e219ae5f6))
+* support configurable env_file path for daemon ([#494](https://github.com/nicholls-inc/xylem/issues/494)) ([b009877](https://github.com/nicholls-inc/xylem/commit/b009877ca4aca45a41a9749b988e6edd18046f69))
+
+
+### Bug Fixes
+
+* add harness-impl label to lessons PRs so conflict-resolution scanner can pick them up ([#533](https://github.com/nicholls-inc/xylem/issues/533)) ([0043466](https://github.com/nicholls-inc/xylem/commit/004346696b1c1658fa38e6d3594c4add9b349a80))
+* escape all JSON control chars in backlog-refinement and triage sanitizers ([#497](https://github.com/nicholls-inc/xylem/issues/497)) ([9f0d4f0](https://github.com/nicholls-inc/xylem/commit/9f0d4f02f53b04d155c8ea523c1747606a2c5220))
+* escape template syntax in autonomy-review prompt to prevent parse error ([#505](https://github.com/nicholls-inc/xylem/issues/505)) ([fa42832](https://github.com/nicholls-inc/xylem/commit/fa42832deef663cb11a421cafba7db4cb884c578))
+* exclude github-merge source from stale PR cancellation ([#504](https://github.com/nicholls-inc/xylem/issues/504)) ([2d986f6](https://github.com/nicholls-inc/xylem/commit/2d986f693b1000edb375cce71869ba17ef5496d9))
+* HasRef/HasRefAny return true on queue read error to prevent duplicate enqueues ([#486](https://github.com/nicholls-inc/xylem/issues/486)) ([15338d2](https://github.com/nicholls-inc/xylem/commit/15338d213e8cd1d6bf6576e870dcbf675fdb520f))
+* increase review-pr analyze phase max_turns from 20 to 40 ([#529](https://github.com/nicholls-inc/xylem/issues/529)) ([c6b3640](https://github.com/nicholls-inc/xylem/commit/c6b36404c2f5d8d94b8a3845d5439cfa0754b4be))
+* inject git identity flags on lessons commit to avoid missing user config ([#516](https://github.com/nicholls-inc/xylem/issues/516)) ([87f1b9d](https://github.com/nicholls-inc/xylem/commit/87f1b9dca032b93c21fd3abbac70f5590cbf019c))
+* move gh write calls out of LLM phases into command phases ([#481](https://github.com/nicholls-inc/xylem/issues/481)) ([#485](https://github.com/nicholls-inc/xylem/issues/485)) ([2441e87](https://github.com/nicholls-inc/xylem/commit/2441e87063b5deff835b4d5a36262b0d962b23ca))
+* noop.match uses line-boundary semantics, not substring ([#522](https://github.com/nicholls-inc/xylem/issues/522)) ([#551](https://github.com/nicholls-inc/xylem/issues/551)) ([eabfde6](https://github.com/nicholls-inc/xylem/commit/eabfde6b95ee6a6b19071afcde763ede66b56219))
+* reduce fix-pr-checks fix phase max_turns from 60 to 30 ([#515](https://github.com/nicholls-inc/xylem/issues/515)) ([84787a6](https://github.com/nicholls-inc/xylem/commit/84787a6f3f1502a1d4c2397fb3366ee32a405aa0))
+* remove harness-impl source from self-hosting overlay and fix tests ([#523](https://github.com/nicholls-inc/xylem/issues/523)) ([168c76f](https://github.com/nicholls-inc/xylem/commit/168c76f950f2057127c26faa6929b62e277d3133))
+* removeWorktree after cancelledTransition in ensureWorktree to prevent leaks ([#531](https://github.com/nicholls-inc/xylem/issues/531)) ([f52b2f9](https://github.com/nicholls-inc/xylem/commit/f52b2f9cc5a1029f0b0e1240d7504e088fd50525))
+* retry unknown failures once before diagnosis to prevent premature human_escalation ([#530](https://github.com/nicholls-inc/xylem/issues/530)) ([d1a3161](https://github.com/nicholls-inc/xylem/commit/d1a316198341091db329e8e0283c32d32cc85049))
+* scope diagnose-failures to 3 recent vessels, remove doc-garden source ([#498](https://github.com/nicholls-inc/xylem/issues/498)) ([73cae09](https://github.com/nicholls-inc/xylem/commit/73cae09f3fd6680c1d42d2b1a246bcfd2fdd810c))
+* use ensure_ascii=True in JSON sanitizer to escape all non-ASCII ([#502](https://github.com/nicholls-inc/xylem/issues/502)) ([08612ee](https://github.com/nicholls-inc/xylem/commit/08612eea43ae7735886a1680cc6bf8185fb08825))
+
 ## [1.2.1](https://github.com/nicholls-inc/xylem/compare/xylem-v1.2.0...xylem-v1.2.1) (2026-04-14)
 
 
