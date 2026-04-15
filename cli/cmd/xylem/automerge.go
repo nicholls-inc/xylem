@@ -9,8 +9,14 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+)
+
+var (
+	ghReadTimeout  = 60 * time.Second  // pr list, pr view, api GET — overridden in tests
+	ghWriteTimeout = 120 * time.Second // pr merge --admin (heavier) — overridden in tests
 )
 
 type autoMergeSettings struct {
@@ -364,7 +370,9 @@ func listOpenPRs(ctx context.Context, repo string) ([]prSummary, error) {
 	if repo != "" {
 		args = append(args, "--repo", repo)
 	}
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	ghCtx, cancel := context.WithTimeout(ctx, ghReadTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ghCtx, "gh", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh pr list: %w", err)
@@ -384,7 +392,9 @@ func getPRSummary(ctx context.Context, repo string, number int) (prSummary, erro
 	if repo != "" {
 		args = append(args, "--repo", repo)
 	}
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	ghCtx, cancel := context.WithTimeout(ctx, ghReadTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ghCtx, "gh", args...)
 	out, err := cmd.Output()
 	if err != nil {
 		return prSummary{}, fmt.Errorf("gh pr view %d: %w", number, err)
@@ -417,7 +427,9 @@ func addPRLabels(ctx context.Context, repo string, number int, labels []string) 
 		fmt.Sprintf("repos/%s/issues/%d/labels", slug, number),
 		"--input", "-",
 	}
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	ghCtx, cancel := context.WithTimeout(ctx, ghReadTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ghCtx, "gh", args...)
 	cmd.Stdin = strings.NewReader(string(body))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -447,7 +459,9 @@ func requestCopilotReview(ctx context.Context, repo string, number int, reviewer
 		fmt.Sprintf("repos/%s/pulls/%d/requested_reviewers", repo, number),
 		"--input", "-",
 	}
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	ghCtx, cancel := context.WithTimeout(ctx, ghReadTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ghCtx, "gh", args...)
 	cmd.Stdin = strings.NewReader(string(body))
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -462,7 +476,9 @@ func adminMergePR(ctx context.Context, repo string, number int) error {
 		args = append(args, "--repo", repo)
 	}
 	args = append(args, strconv.Itoa(number))
-	cmd := exec.CommandContext(ctx, "gh", args...)
+	ghCtx, cancel := context.WithTimeout(ctx, ghWriteTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ghCtx, "gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%w: %s", err, out)

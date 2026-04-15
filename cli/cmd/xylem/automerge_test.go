@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -586,6 +587,11 @@ func TestSmoke_S9_AutoAdminMergeWithinOneDaemonTick(t *testing.T) {
 		}{{Conclusion: "SUCCESS", Status: "COMPLETED"}},
 	}
 
+	// The PR has no review requests or latest reviews from the configured reviewer,
+	// so decideAutoMergeAction returns actionRequestReview (not actionAdminMerge):
+	// requestCopilotReview is called first, then adminMergePR, within one tick.
+	require.Equal(t, actionRequestReview, decideAutoMergeAction(mergeReadyPR, settings))
+
 	listOpenPRsFn = func(context.Context, string) ([]prSummary, error) {
 		return []prSummary{{
 			Number:      mergeReadyPR.Number,
@@ -626,4 +632,44 @@ func TestSmoke_S9_AutoAdminMergeWithinOneDaemonTick(t *testing.T) {
 	assert.Equal(t, 1, adminMergeCalls)
 	assert.Equal(t, 1, reviewCalls)
 	assert.Equal(t, 0, labelCalls)
+}
+
+// TestGhCallTimeoutPropagated verifies that each gh-calling function returns an
+// error when the per-call timeout fires, even with a live parent context that
+// will never cancel on its own. Without the context.WithTimeout wrapping inside
+// each function, passing context.Background() would block indefinitely if gh
+// hangs; with it, the 1ns override fires immediately and returns an error.
+func TestGhCallTimeoutPropagated(t *testing.T) {
+	origRead := ghReadTimeout
+	origWrite := ghWriteTimeout
+	t.Cleanup(func() {
+		ghReadTimeout = origRead
+		ghWriteTimeout = origWrite
+	})
+	ghReadTimeout = 1 * time.Nanosecond
+	ghWriteTimeout = 1 * time.Nanosecond
+
+	// Background context never cancels — only the per-call timeout can fail these calls.
+	ctx := context.Background()
+
+	t.Run("listOpenPRs", func(t *testing.T) {
+		_, err := listOpenPRs(ctx, "")
+		assert.Error(t, err)
+	})
+	t.Run("getPRSummary", func(t *testing.T) {
+		_, err := getPRSummary(ctx, "nicholls-inc/xylem", 1)
+		assert.Error(t, err)
+	})
+	t.Run("addPRLabels", func(t *testing.T) {
+		err := addPRLabels(ctx, "nicholls-inc/xylem", 1, []string{"ready-to-merge"})
+		assert.Error(t, err)
+	})
+	t.Run("requestCopilotReview", func(t *testing.T) {
+		err := requestCopilotReview(ctx, "nicholls-inc/xylem", 1, "copilot-pull-request-reviewer")
+		assert.Error(t, err)
+	})
+	t.Run("adminMergePR", func(t *testing.T) {
+		err := adminMergePR(ctx, "nicholls-inc/xylem", 1)
+		assert.Error(t, err)
+	})
 }
