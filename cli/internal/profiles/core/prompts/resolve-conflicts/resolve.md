@@ -34,4 +34,4 @@ For every conflicting file:
 
 After resolving all conflicts, stage the resolved files and complete the in-progress merge before validation. Because the workflow already ran `git merge ... --no-commit --no-ff`, finish that merge in place (for example, `git add <resolved-files> && git commit --no-edit` while `MERGE_HEAD` exists).
 
-Once the merge commit exists, run `cd cli && go vet ./... && go build ./cmd/xylem && go test ./...` to confirm the build and tests pass.
+Once the merge commit exists, run `(cd cli && go vet ./... && go build ./cmd/xylem && go test ./...)` to confirm the build and tests pass.

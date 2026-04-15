@@ -719,6 +719,88 @@ func TestAllEmbeddedWorkflowsValidate(t *testing.T) {
 	}
 }
 
+func TestResolveConflictsGateUsesSubshellWrappedValidation(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["resolve-conflicts"], &wf))
+
+	var resolvePhase *workflowpkg.Phase
+	for i := range wf.Phases {
+		if wf.Phases[i].Name == "resolve" {
+			resolvePhase = &wf.Phases[i]
+		}
+	}
+	require.NotNil(t, resolvePhase, "resolve phase not found")
+	require.NotNil(t, resolvePhase.Gate, "resolve phase has no gate")
+
+	run := resolvePhase.Gate.Run
+	assert.Contains(t, run, "{{ if .Validation.Format }}")
+	assert.Contains(t, run, "{{ if .Validation.Lint }}")
+	assert.Contains(t, run, "{{ if .Validation.Build }}")
+	assert.Contains(t, run, "{{ if .Validation.Test }}")
+	assert.Contains(t, run, "( {{ .Validation.Format }} )")
+	assert.Contains(t, run, "( {{ .Validation.Lint }} )")
+	assert.Contains(t, run, "( {{ .Validation.Build }} )")
+	assert.Contains(t, run, "( {{ .Validation.Test }} )")
+}
+
+func TestFixPRChecksGateUsesSubshellWrappedValidation(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["fix-pr-checks"], &wf))
+
+	var fixPhase *workflowpkg.Phase
+	for i := range wf.Phases {
+		if wf.Phases[i].Name == "fix" {
+			fixPhase = &wf.Phases[i]
+		}
+	}
+	require.NotNil(t, fixPhase, "fix phase not found")
+	require.NotNil(t, fixPhase.Gate, "fix phase has no gate")
+
+	run := fixPhase.Gate.Run
+	assert.Contains(t, run, "{{ if .Validation.Format }}")
+	assert.Contains(t, run, "{{ if .Validation.Lint }}")
+	assert.Contains(t, run, "{{ if .Validation.Build }}")
+	assert.Contains(t, run, "{{ if .Validation.Test }}")
+	assert.Contains(t, run, "( {{ .Validation.Format }} )")
+	assert.Contains(t, run, "( {{ .Validation.Lint }} )")
+	assert.Contains(t, run, "( {{ .Validation.Build }} )")
+	assert.Contains(t, run, "( {{ .Validation.Test }} )")
+}
+
+func TestResolveConflictsGateRetainsGitChecks(t *testing.T) {
+	t.Parallel()
+
+	composed, err := Compose("core")
+	require.NoError(t, err)
+
+	var wf workflowpkg.Workflow
+	require.NoError(t, yaml.Unmarshal(composed.Workflows["resolve-conflicts"], &wf))
+
+	var resolvePhase *workflowpkg.Phase
+	for i := range wf.Phases {
+		if wf.Phases[i].Name == "resolve" {
+			resolvePhase = &wf.Phases[i]
+		}
+	}
+	require.NotNil(t, resolvePhase, "resolve phase not found")
+	require.NotNil(t, resolvePhase.Gate, "resolve phase has no gate")
+
+	run := resolvePhase.Gate.Run
+	assert.Contains(t, run, "git fetch origin")
+	assert.Contains(t, run, "git merge-base --is-ancestor")
+	assert.Equal(t, 2, resolvePhase.Gate.Retries)
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	keys := make([]string, 0, len(m))
 	for key := range m {

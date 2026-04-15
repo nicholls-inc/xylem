@@ -1416,16 +1416,16 @@ func (c *Config) validationRequiredWorkflows() []string {
 
 func (c *Config) validateValidationCommands() error {
 	if target, ok := invalidGoimportsPackagePatternTarget(c.Validation.Format); ok {
-		return fmt.Errorf(`validation.format uses goimports package pattern %q; goimports expects directories or files, use "goimports -l ." or "cd cli && goimports -l ."`, target)
+		return fmt.Errorf(`validation.format uses goimports package pattern %q; goimports expects directories or files, use "goimports -l ." or "(cd cli && goimports -l .)"`, target)
 	}
 	for _, check := range []struct {
 		name    string
 		command string
 		example string
 	}{
-		{name: "lint", command: c.Validation.Lint, example: `cd cli && go vet ./...`},
-		{name: "build", command: c.Validation.Build, example: `cd cli && go build ./cmd/xylem`},
-		{name: "test", command: c.Validation.Test, example: `cd cli && go test ./...`},
+		{name: "lint", command: c.Validation.Lint, example: `(cd cli && go vet ./...)`},
+		{name: "build", command: c.Validation.Build, example: `(cd cli && go build ./cmd/xylem)`},
+		{name: "test", command: c.Validation.Test, example: `(cd cli && go test ./...)`},
 	} {
 		if target, ok := invalidRepoRootGoCLITarget(check.command); ok {
 			return fmt.Errorf(`validation.%s runs go from repo root against %q; xylem executes validation from the worktree root, use %q`, check.name, target, check.example)

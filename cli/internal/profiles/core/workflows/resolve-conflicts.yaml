@@ -42,7 +42,15 @@ phases:
     max_turns: 40
     gate:
       type: command
-      run: "git fetch origin main && test \"$(git branch --show-current)\" = \"$(gh pr view {{.Issue.Number}} --json headRefName --jq '.headRefName')\" && git merge-base --is-ancestor origin/main HEAD"
+      run: |
+        set -e
+        git fetch origin {{ .Repo.DefaultBranch }}
+        test "$(git branch --show-current)" = "$(gh pr view {{ .Issue.Number }} --json headRefName --jq '.headRefName')"
+        git merge-base --is-ancestor origin/{{ .Repo.DefaultBranch }} HEAD
+        {{ if .Validation.Format }}( {{ .Validation.Format }} ){{ end }}
+        {{ if .Validation.Lint }}( {{ .Validation.Lint }} ){{ end }}
+        {{ if .Validation.Build }}( {{ .Validation.Build }} ){{ end }}
+        {{ if .Validation.Test }}( {{ .Validation.Test }} ){{ end }}
       retries: 2
   - name: push
     prompt_file: .xylem/prompts/resolve-conflicts/push.md
