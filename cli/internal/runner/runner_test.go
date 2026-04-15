@@ -422,6 +422,8 @@ type trackingWorktree struct {
 	lastBranch  string
 	path        string
 	createCalls int
+	removeCalls int
+	lastRemoved string
 }
 
 func (tw *trackingWorktree) Create(_ context.Context, branchName string) (string, error) {
@@ -433,7 +435,9 @@ func (tw *trackingWorktree) Create(_ context.Context, branchName string) (string
 	return ".xylem/worktrees/" + branchName, nil
 }
 
-func (tw *trackingWorktree) Remove(_ context.Context, _ string) error {
+func (tw *trackingWorktree) Remove(_ context.Context, path string) error {
+	tw.removeCalls++
+	tw.lastRemoved = path
 	return nil
 }
 
@@ -2393,6 +2397,92 @@ func TestEnsureWorktreeRecreatesMissingInheritedPath(t *testing.T) {
 	require.Equal(t, recreatedPath, stored.WorktreePath)
 	require.Equal(t, 2, stored.CurrentPhase)
 	require.Equal(t, vessel.PhaseOutputs, stored.PhaseOutputs)
+}
+
+// TestEnsureWorktree_CancelDuringRecreate_CleansUpWorktree verifies that when
+// a vessel is cancelled externally while ensureWorktree is recreating a missing
+// worktree (Path 1), the newly created worktree is removed before returning.
+func TestEnsureWorktree_CancelDuringRecreate_CleansUpWorktree(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := queue.Vessel{
+		ID:           "issue-101-recreate-cancel",
+		Source:       "manual",
+		Workflow:     "fix-bug",
+		Ref:          "spec",
+		State:        queue.StatePending,
+		CreatedAt:    time.Now().UTC(),
+		WorktreePath: filepath.Join(dir, "missing-worktree"), // path does not exist on disk
+	}
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	// Transition: pending → running → cancelled
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+	require.NoError(t, q.Cancel(dequeued.ID))
+
+	// Use the dequeued vessel (StateRunning) — queue now has it as StateCancelled.
+	runningVessel := *dequeued
+	runningVessel.WorktreePath = filepath.Join(dir, "missing-worktree") // restore missing path
+
+	recreatedPath := filepath.Join(dir, "recreated-worktree")
+	wt := &trackingWorktree{path: recreatedPath}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+
+	path, ok := r.ensureWorktree(context.Background(), &runningVessel, &source.Manual{})
+
+	require.False(t, ok, "expected ensureWorktree to return false on cancel")
+	require.Empty(t, path, "expected ensureWorktree to return empty path on cancel")
+	require.Equal(t, 1, wt.createCalls, "expected worktree to be created once")
+	require.Equal(t, 1, wt.removeCalls, "expected leaked worktree to be removed")
+	require.Equal(t, recreatedPath, wt.lastRemoved, "expected recreated path to be the one removed")
+}
+
+// TestEnsureWorktree_CancelDuringCreate_CleansUpWorktree verifies that when a
+// vessel is cancelled externally while ensureWorktree is creating a new worktree
+// (Path 2), the newly created worktree is removed before returning.
+func TestEnsureWorktree_CancelDuringCreate_CleansUpWorktree(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	vessel := queue.Vessel{
+		ID:        "issue-102-create-cancel",
+		Source:    "manual",
+		Workflow:  "fix-bug",
+		Ref:       "spec",
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+		// WorktreePath intentionally empty — triggers the "create new" path
+	}
+	_, err := q.Enqueue(vessel)
+	require.NoError(t, err)
+
+	// Transition: pending → running → cancelled
+	dequeued, err := q.Dequeue()
+	require.NoError(t, err)
+	require.NotNil(t, dequeued)
+	require.NoError(t, q.Cancel(dequeued.ID))
+
+	// Use the dequeued vessel (StateRunning) — queue now has it as StateCancelled.
+	runningVessel := *dequeued
+	runningVessel.WorktreePath = "" // ensure we're in the "create new" path
+
+	createdPath := filepath.Join(dir, "created-worktree")
+	wt := &trackingWorktree{path: createdPath}
+	r := New(cfg, q, wt, &mockCmdRunner{})
+
+	path, ok := r.ensureWorktree(context.Background(), &runningVessel, &source.Manual{})
+
+	require.False(t, ok, "expected ensureWorktree to return false on cancel")
+	require.Empty(t, path, "expected ensureWorktree to return empty path on cancel")
+	require.Equal(t, 1, wt.createCalls, "expected worktree to be created once")
+	require.Equal(t, 1, wt.removeCalls, "expected leaked worktree to be removed")
+	require.Equal(t, createdPath, wt.lastRemoved, "expected created path to be the one removed")
 }
 
 // TestWS6S29NilHarnessFieldsRunsNormally verifies that a runner without
