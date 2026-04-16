@@ -1,0 +1,46 @@
+name: lean-squad-bootstrap
+description: "One-shot idempotent bootstrap of the formal-verification/ Lean Squad scaffolding (elan + lakefile + stub + repo-memory)"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-bootstrap/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-bootstrap/implement.md
+    max_turns: 50
+  - name: verify
+    prompt_file: .xylem/prompts/lean-squad-bootstrap/verify.md
+    max_turns: 30
+    gate:
+      type: command
+      run: |
+        set -eu
+        if [ -f "$HOME/.elan/env" ]; then
+          # shellcheck disable=SC1091
+          . "$HOME/.elan/env"
+        fi
+        if [ ! -d formal-verification ]; then
+          echo "ERROR: formal-verification/ directory missing after implement"
+          exit 1
+        fi
+        cd formal-verification
+        # Pull mathlib's prebuilt oleans if available; ignore failure so a cold
+        # environment without the cache still falls through to full build.
+        lake exe cache get 2>&1 || true
+        out=$(lake build 2>&1) || {
+          status=$?
+          echo "$out"
+          echo "ERROR: lake build exited with status ${status}"
+          exit 1
+        }
+        echo "$out"
+        if printf '%s\n' "$out" | grep -Eq '^error:|[[:space:]]error:'; then
+          echo "ERROR: lake build output contained an error: line"
+          exit 1
+        fi
+      retries: 1
+      retry_delay: "30s"
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-bootstrap/pr.md
+    max_turns: 20
