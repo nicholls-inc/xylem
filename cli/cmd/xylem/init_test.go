@@ -34,6 +34,7 @@ var expectedCoreWorkflows = []string{
 	"lean-squad-formal-spec",
 	"lean-squad-informal-spec",
 	"lean-squad-orient",
+	"lean-squad-prove",
 	"lean-squad-report",
 	"lessons",
 	"merge-pr",
