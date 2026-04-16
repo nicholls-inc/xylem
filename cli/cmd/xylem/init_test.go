@@ -31,6 +31,7 @@ var expectedCoreWorkflows = []string{
 	"lean-squad-bootstrap",
 	"lean-squad-ci",
 	"lean-squad-correspondence",
+	"lean-squad-critique",
 	"lean-squad-extract-impl",
 	"lean-squad-focus",
 	"lean-squad-formal-spec",
