@@ -144,6 +144,10 @@ sources:
     type: schedule
     cadence: "@weekly"
     workflow: field-report
+  lean-squad-tick:
+    type: schedule
+    cadence: "8h"
+    workflow: lean-squad
 
   # --- Sources from self-hosting-xylem overlay ---
   pr-self-review:
