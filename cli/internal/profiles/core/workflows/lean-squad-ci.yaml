@@ -1,0 +1,25 @@
+name: lean-squad-ci
+description: "Create or maintain the Lean 4 CI workflow that gates PRs touching formal-verification/lean/**"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-ci/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-ci/implement.md
+    max_turns: 40
+  - name: verify
+    type: command
+    retries: 1
+    retry_delay: "30s"
+    run: |
+      set -eu
+      WF=".github/workflows/lean-ci.yml"
+      test -f "$WF" || { echo "missing: $WF"; exit 1; }
+      if command -v actionlint >/dev/null 2>&1; then actionlint "$WF" 2>&1 || true; else echo "actionlint: not installed"; fi
+      if command -v yamllint  >/dev/null 2>&1; then yamllint  "$WF" 2>&1 || true; else echo "yamllint: not installed"; fi
+      python3 -c "import yaml; yaml.safe_load(open('$WF'))"
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-ci/pr.md
+    max_turns: 20
