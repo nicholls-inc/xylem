@@ -101,6 +101,7 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 		"fix-bug",
 		"fix-pr-checks",
 		"implement-feature",
+		"lean-squad",
 		"lean-squad-aeneas",
 		"lean-squad-bootstrap",
 		"lean-squad-ci",
