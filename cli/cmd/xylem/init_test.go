@@ -27,6 +27,7 @@ var expectedCoreWorkflows = []string{
 	"fix-bug",
 	"fix-pr-checks",
 	"implement-feature",
+	"lean-squad-informal-spec",
 	"lessons",
 	"merge-pr",
 	"refine-issue",

@@ -1,0 +1,14 @@
+name: lean-squad-informal-spec
+description: "Lean Squad Task 2: write a plain-prose informal specification for one target"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-informal-spec/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-informal-spec/implement.md
+    max_turns: 50
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-informal-spec/pr.md
+    max_turns: 20
