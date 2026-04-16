@@ -1,0 +1,14 @@
+name: lean-squad-orient
+description: "Survey the repo and propose 3-5 Lean-tractable formal-verification targets"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-orient/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-orient/implement.md
+    max_turns: 40
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-orient/pr.md
+    max_turns: 20
