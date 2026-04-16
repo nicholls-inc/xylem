@@ -3,26 +3,45 @@ description: "Diagnose and fix a bug from a GitHub issue"
 phases:
   - name: analyze
     prompt_file: .xylem/prompts/fix-bug/analyze.md
-    max_turns: 20
+    max_turns: 40
+    tier: high
     noop:
       match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/fix-bug/plan.md
-    max_turns: 20
+    max_turns: 40
+    tier: high
   - name: implement
     prompt_file: .xylem/prompts/fix-bug/implement.md
     max_turns: 60
+    tier: med
+    evaluator:
+      prompt_file: .xylem/prompts/fix-bug/implement_evaluator.md
+      max_turns: 20
+      max_iterations: 2
+      pass_threshold: 0.8
+      criteria:
+        - name: correctness
+          description: "The patch addresses the reported bug without obvious regressions."
+          weight: 0.7
+          threshold: 0.8
+        - name: verification
+          description: "The changes include or preserve validation needed to trust the fix."
+          weight: 0.3
+          threshold: 0.7
     gate:
       type: command
-      run: "cd cli && go test ./..."
+      run: "make test"
       retries: 2
   - name: verify
     prompt_file: .xylem/prompts/fix-bug/verify.md
     max_turns: 60
+    tier: med
     gate:
       type: command
-      run: "cd cli && go test ./..."
+      run: "make test"
       retries: 1
   - name: pr
     prompt_file: .xylem/prompts/fix-bug/pr.md
     max_turns: 25
+    tier: med
