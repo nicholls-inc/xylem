@@ -1,0 +1,133 @@
+name: lean-squad-status
+class: ops
+description: "Maintain the rolling [Lean Squad] Formal Verification Status dashboard issue"
+phases:
+  - name: analyze
+    type: command
+    allowed_tools: "Bash"
+    run: |
+      set -euo pipefail
+      TITLE="[Lean Squad] Formal Verification Status"
+      EXISTING=$(gh issue list \
+        --search "${TITLE} in:title" \
+        --state all \
+        --json number,state,title \
+        --limit 3 2>/dev/null || echo "[]")
+      NUM=$(printf '%s' "$EXISTING" | jq -r \
+        --arg t "$TITLE" \
+        'map(select(.title == $t)) | sort_by(if .state == "OPEN" then 0 else 1 end, -.number) | .[0].number // empty')
+      if [ -z "$NUM" ]; then
+        INITIAL_BODY=$(cat <<'EOF'
+      🔬 *Lean Squad status dashboard — this issue is maintained automatically by the `lean-squad-status` workflow. Do not edit by hand; changes will be overwritten on the next run.*
+
+      Initialising… the first run will replace this body with the current state of formal-verification targets, findings, and recent PRs.
+
+      ### Getting started
+      To opt in, add any one of:
+      - a `formal-verification/` directory at the repo root
+      - a `.github/lean-squad.yml` config file
+      - the `lean-squad-opt-in` label on any open issue
+      EOF
+      )
+        NUM=$(gh issue create \
+          --title "$TITLE" \
+          --label lean-squad \
+          --label lean-squad-status \
+          --body "$INITIAL_BODY" \
+          | awk -F/ '{print $NF}')
+      fi
+      echo "ISSUE: ${NUM}"
+  - name: update
+    type: command
+    allowed_tools: "Bash"
+    run: |
+      set -euo pipefail
+      TITLE="[Lean Squad] Formal Verification Status"
+      ANALYZE_OUT=".xylem/phases/{{.Vessel.ID}}/analyze.output"
+      NUM=$(grep -E '^ISSUE: ' "$ANALYZE_OUT" 2>/dev/null | tail -1 | awk '{print $2}')
+      if [ -z "${NUM:-}" ]; then
+        echo "dashboard issue number not found in analyze output" >&2
+        exit 1
+      fi
+
+      BODY="${TMPDIR:-/tmp}/lean-squad-status-body.md"
+      NOW=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+      PRS_JSON=$(gh pr list \
+        --label lean-squad \
+        --state open \
+        --limit 25 \
+        --json number,title,url,updatedAt 2>/dev/null || echo "[]")
+      FINDINGS_JSON=$(gh issue list \
+        --label lean-squad \
+        --label finding \
+        --state open \
+        --limit 25 \
+        --json number,title,url,updatedAt 2>/dev/null || echo "[]")
+      TARGETS_SECTION=""
+      if [ -f formal-verification/TARGETS.md ]; then
+        TARGETS_SECTION=$(awk '/^##/ {n++} n<3 {print}' formal-verification/TARGETS.md)
+      fi
+      REPORT_HEAD=""
+      if [ -f formal-verification/REPORT.md ]; then
+        REPORT_HEAD=$(awk 'NR<=40' formal-verification/REPORT.md)
+      fi
+
+      {
+        echo "🔬 *Lean Squad status dashboard — maintained automatically by the \`lean-squad-status\` workflow. Do not edit by hand; changes will be overwritten on the next run.*"
+        echo
+        echo "_Last updated: ${NOW}_"
+        echo
+        echo "### Targets"
+        if [ -n "$TARGETS_SECTION" ]; then
+          echo
+          printf '%s\n' "$TARGETS_SECTION"
+        else
+          echo
+          echo "_No \`formal-verification/TARGETS.md\` yet. Run \`lean-squad-orient\` to propose targets._"
+        fi
+        echo
+        echo "### Open [Lean Squad] PRs"
+        PR_COUNT=$(printf '%s' "$PRS_JSON" | jq 'length')
+        if [ "$PR_COUNT" -gt 0 ]; then
+          echo
+          echo "| # | Title | Updated |"
+          echo "|---|---|---|"
+          printf '%s' "$PRS_JSON" | jq -r '.[] | "| [#\(.number)](\(.url)) | \(.title) | \(.updatedAt) |"'
+        else
+          echo
+          echo "_None open._"
+        fi
+        echo
+        echo "### Open [finding] issues"
+        FINDING_COUNT=$(printf '%s' "$FINDINGS_JSON" | jq 'length')
+        if [ "$FINDING_COUNT" -gt 0 ]; then
+          echo
+          echo "| # | Title | Updated |"
+          echo "|---|---|---|"
+          printf '%s' "$FINDINGS_JSON" | jq -r '.[] | "| [#\(.number)](\(.url)) | \(.title) | \(.updatedAt) |"'
+        else
+          echo
+          echo "_None open._"
+        fi
+        if [ -n "$REPORT_HEAD" ]; then
+          echo
+          echo "### Latest report excerpt"
+          echo
+          printf '%s\n' "$REPORT_HEAD"
+        fi
+        echo
+        echo "### Next run"
+        echo
+        echo "The tick coordinator (\`lean-squad\`) re-enqueues this workflow every run. See \`docs/workflows/lean-squad.md\` for the schedule."
+        echo
+        echo "### Getting started"
+        echo
+        echo "To opt in, add any one of:"
+        echo "- a \`formal-verification/\` directory at the repo root"
+        echo "- a \`.github/lean-squad.yml\` config file"
+        echo "- the \`lean-squad-opt-in\` label on any open issue"
+      } > "$BODY"
+
+      gh issue edit "$NUM" --body-file "$BODY"
+      echo "DASHBOARD: https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/issues/${NUM}"

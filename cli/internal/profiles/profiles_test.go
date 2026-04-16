@@ -110,6 +110,7 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 		"lean-squad-orient",
 		"lean-squad-prove",
 		"lean-squad-report",
+		"lean-squad-status",
 		"lessons",
 		"merge-pr",
 		"refine-issue",
