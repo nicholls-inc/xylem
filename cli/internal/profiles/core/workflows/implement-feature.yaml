@@ -28,14 +28,18 @@ phases:
           threshold: 0.7
     gate:
       type: command
-      run: "make test"
+      run: |
+        set -e
+        {{ if .Validation.Test }}{{ .Validation.Test }}{{ else }}echo "ERROR: validation.test not configured in .xylem.yml" >&2 && exit 1{{ end }}
       retries: 2
   - name: verify
     prompt_file: .xylem/prompts/implement-feature/verify.md
     max_turns: 60
     gate:
       type: command
-      run: "make test"
+      run: |
+        set -e
+        {{ if .Validation.Test }}{{ .Validation.Test }}{{ else }}echo "ERROR: validation.test not configured in .xylem.yml" >&2 && exit 1{{ end }}
       retries: 1
   - name: pr
     prompt_file: .xylem/prompts/implement-feature/pr.md
