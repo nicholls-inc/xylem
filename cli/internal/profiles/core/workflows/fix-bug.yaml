@@ -28,14 +28,14 @@ phases:
           threshold: 0.7
     gate:
       type: command
-      run: "make test"
+      run: "{{if .Validation.Test}}{{.Validation.Test}}{{else}}make test{{end}}"
       retries: 2
   - name: verify
     prompt_file: .xylem/prompts/fix-bug/verify.md
     max_turns: 60
     gate:
       type: command
-      run: "make test"
+      run: "{{if .Validation.Test}}{{.Validation.Test}}{{else}}make test{{end}}"
       retries: 1
   - name: pr
     prompt_file: .xylem/prompts/fix-bug/pr.md
