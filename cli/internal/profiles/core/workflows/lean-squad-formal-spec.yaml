@@ -1,0 +1,26 @@
+name: lean-squad-formal-spec
+description: "Translate one informal spec into a Lean 4 file of types, signatures, and theorem declarations (all bodies `sorry`)."
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-formal-spec/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-formal-spec/implement.md
+    max_turns: 50
+  - name: verify
+    prompt_file: .xylem/prompts/lean-squad-formal-spec/verify.md
+    max_turns: 20
+    gate:
+      type: command
+      run: |
+        set -eu
+        cd formal-verification
+        lake build 2>&1 | tee /tmp/lean-build.log
+        ! grep -q "^error:" /tmp/lean-build.log
+      retries: 1
+      retry_delay: "30s"
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-formal-spec/pr.md
+    max_turns: 20
