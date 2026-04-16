@@ -1,0 +1,21 @@
+name: lean-squad-extract-impl
+description: "[Lean Squad] Task 4 — extract faithful Lean translations of source code into function bodies in formal-verification/lean/FVSquad/<Target>.lean (theorems remain sorry-stubbed for Unit 6)."
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-extract-impl/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-extract-impl/implement.md
+    max_turns: 50
+  - name: verify
+    type: command
+    run: |
+      set -euo pipefail
+      cd formal-verification
+      lake build 2>&1 | tee /tmp/lean-build.log
+      ! grep -q "error:" /tmp/lean-build.log
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-extract-impl/pr.md
+    max_turns: 20
