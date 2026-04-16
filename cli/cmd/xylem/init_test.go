@@ -32,6 +32,7 @@ var expectedCoreWorkflows = []string{
 	"lean-squad-ci",
 	"lean-squad-correspondence",
 	"lean-squad-extract-impl",
+	"lean-squad-focus",
 	"lean-squad-formal-spec",
 	"lean-squad-informal-spec",
 	"lean-squad-orient",
