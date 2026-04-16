@@ -3,8 +3,62 @@ class: ops
 description: "Merge a PR after verifying all merge criteria are met"
 phases:
   - name: check
-    prompt_file: .xylem/prompts/merge-pr/check.md
-    max_turns: 10
+    type: command
+    # Deterministic verification of merge eligibility. Runs in the daemon
+    # shell (not a Claude sandbox), so it has gh + token access. Any XYLEM_NOOP
+    # path exits 0 so the vessel completes cleanly without advancing to merge.
+    # Any other exit code is treated as a phase failure (retry-eligible).
+    run: |
+      set -euo pipefail
+      PR={{.Issue.Number}}
+      REPO={{.Repo.Slug}}
+
+      # 1. Eligibility: PR is OPEN, carries harness-impl, lacks no-auto-admin-merge.
+      ELIG=$(gh pr view "$PR" --repo "$REPO" --json state,labels)
+      STATE=$(echo "$ELIG" | jq -r '.state')
+      if [ "$STATE" != "OPEN" ]; then
+        echo "XYLEM_NOOP: PR state=$STATE (not OPEN)"
+        exit 0
+      fi
+      if ! echo "$ELIG" | jq -e '[.labels[].name] | index("harness-impl")' >/dev/null; then
+        echo "XYLEM_NOOP: missing harness-impl label"
+        exit 0
+      fi
+      if echo "$ELIG" | jq -e '[.labels[].name] | index("no-auto-admin-merge")' >/dev/null; then
+        echo "XYLEM_NOOP: no-auto-admin-merge label present"
+        exit 0
+      fi
+
+      # 2. CI: every check must be SUCCESS, NEUTRAL, or SKIPPED. PENDING/IN_PROGRESS/
+      # QUEUED/FAILURE all block so we re-dispatch on a later scan once CI settles.
+      BAD_CHECKS=$(gh pr checks "$PR" --repo "$REPO" --json state \
+        --jq '[.[] | select(.state != "SUCCESS" and .state != "NEUTRAL" and .state != "SKIPPED")] | length')
+      if [ "$BAD_CHECKS" -gt 0 ]; then
+        echo "XYLEM_NOOP: $BAD_CHECKS non-passing checks"
+        exit 0
+      fi
+
+      # 3. Review: no CHANGES_REQUESTED decision, all review threads resolved.
+      REVIEW=$(gh pr view "$PR" --repo "$REPO" --json reviewDecision,reviewThreads)
+      DECISION=$(echo "$REVIEW" | jq -r '.reviewDecision')
+      if [ "$DECISION" = "CHANGES_REQUESTED" ]; then
+        echo "XYLEM_NOOP: reviewDecision=CHANGES_REQUESTED"
+        exit 0
+      fi
+      UNRESOLVED=$(echo "$REVIEW" | jq '[.reviewThreads[] | select(.isResolved == false)] | length')
+      if [ "$UNRESOLVED" -gt 0 ]; then
+        echo "XYLEM_NOOP: $UNRESOLVED unresolved review thread(s)"
+        exit 0
+      fi
+
+      # 4. Mergeable: MERGEABLE (not CONFLICTING; UNKNOWN blocks for re-dispatch).
+      MERGEABLE=$(gh pr view "$PR" --repo "$REPO" --json mergeable --jq '.mergeable')
+      if [ "$MERGEABLE" != "MERGEABLE" ]; then
+        echo "XYLEM_NOOP: mergeable=$MERGEABLE"
+        exit 0
+      fi
+
+      echo "ready-to-admin-merge PR=$PR repo=$REPO"
     noop:
       match: XYLEM_NOOP
   - name: merge
