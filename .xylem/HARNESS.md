@@ -127,3 +127,10 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `sota-gap-analysis` work with phase `diff` still failing due to `exit status`. <!-- xylem-lesson:lesson-94c014efb790 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `sota-gap-analysis` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `scheduled-sota-gap-weekly-self-gap-analysis-20555` (2026-04-12T23:55:08Z) — `phases/scheduled-sota-gap-weekly-self-gap-analysis-20555/diff.output`
+  - `scheduled-sota-gap-weekly-self-gap-analysis-20556` (2026-04-13T00:10:19Z) — `phases/scheduled-sota-gap-weekly-self-gap-analysis-20556/diff.output`
