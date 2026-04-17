@@ -127,3 +127,10 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not rerun `implement-harness` without addressing the recurring failure `timed out` first. <!-- xylem-lesson:lesson-47d6e9e218aa -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: timed_out
+- Evidence:
+  - `issue-562` (2026-04-16T11:55:55Z) — `phases/issue-562/summary.json`
+  - `issue-575` (2026-04-17T00:39:44Z) — `phases/issue-575/summary.json`
