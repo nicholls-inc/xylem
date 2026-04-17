@@ -1,0 +1,7 @@
+# 2026/04/16 23:45:56.813047 [TestPropSourceErrorDoesNotBlockOthers] [rapid] draw error_idx: 0
+# 2026/04/16 23:45:56.813334 [TestPropSourceErrorDoesNotBlockOthers] S4 violation: healthy source's vessel ref "https://github.com/owner/src-b/issues/201" missing from queue (enqueued=[], error_spec=src-a); one source's failure blocked another's intake (scanner.go:75-77)
+#
+v0.4.8#13866222654272181875
+0x1
+0x2d29cbc60f619
+0x0

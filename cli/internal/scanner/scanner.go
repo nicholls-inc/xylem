@@ -68,12 +68,17 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 	}
 
 	var result ScanResult
+	var scanErrs []error
 	entries := s.buildSources()
 
 	for _, entry := range entries {
 		vessels, err := entry.src.Scan(ctx)
 		if err != nil {
-			return result, err
+			// S4: one source's failure must not block intake from others.
+			// Collect the error and continue iterating over remaining sources.
+			log.Printf("warn: scanner: source scan failed: %v", err)
+			scanErrs = append(scanErrs, err)
+			continue
 		}
 		for _, vessel := range vessels {
 			// Propagate source config name so the runner can look up
@@ -104,12 +109,25 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				continue
 			}
 			if err != nil {
-				return result, err
+				// S5: a non-dedup Enqueue error (e.g. disk I/O, malformed
+				// queue file) must not block later vessels from this source
+				// or any subsequent source. Log + accumulate + continue,
+				// matching the ErrDuplicateID-class tolerance above.
+				log.Printf("warn: scanner: enqueue failed for vessel %q: %v", vessel.ID, err)
+				scanErrs = append(scanErrs, err)
+				result.Skipped++
+				continue
 			}
 			if enqueued {
 				if vessel.RetryOf != "" {
 					if err := recovery.UpdateRetryOutcome(s.Config.StateDir, vessel.RetryOf, "enqueued"); err != nil {
-						return result, err
+						// S5 (extension): UpdateRetryOutcome is a
+						// recovery-side bookkeeping call; a failure here
+						// must not abort the tick mid-source. Log +
+						// accumulate and fall through to count the vessel
+						// as added (it IS in the queue).
+						log.Printf("warn: scanner: UpdateRetryOutcome failed for retry_of=%q: %v", vessel.RetryOf, err)
+						scanErrs = append(scanErrs, err)
 					}
 				}
 				result.Added++
@@ -123,7 +141,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 			}
 		}
 	}
-	return result, nil
+	return result, errors.Join(scanErrs...)
 }
 
 func (s *Scanner) budgetGate() budgetGate {
