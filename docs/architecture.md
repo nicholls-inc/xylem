@@ -67,7 +67,7 @@ Sources                     xylem scan            Queue
 
 **Step by step:**
 
-1. **Scan** -- The scanner queries each configured source (currently GitHub issues by label). The GitHub source calls `gh search issues`, filters out excluded labels, deduplicates against the existing queue and remote branches, and returns candidate vessels.
+1. **Scan** -- The scanner queries each configured source (GitHub issues/PRs by label, PR events, merged PRs, scheduled cadences, or manual enqueue). The GitHub source calls `gh search issues`, filters out excluded labels, deduplicates against the existing queue and remote branches, and returns candidate vessels.
 
 2. **Enqueue** -- The scanner writes each new vessel to `state/queue.jsonl` in `pending` state. The queue is a JSONL file protected by file-level locking (`gofrs/flock`). Deduplication uses `HasRef()` to prevent the same issue URL from being enqueued twice.
 
@@ -209,10 +209,20 @@ The workflow name must match the YAML filename. Phase names must be unique withi
 
 Prompt phases can also override the LLM provider and model at the workflow or phase level, and can set per-phase `allowed_tools` restrictions. The runner resolves those tool requests through the harness catalog's role permissions first, then forwards the effective list to the selected provider CLI. Provider resolution is `phase.llm` -> `workflow.llm` -> `.xylem.yml llm`, with support for both `claude` and `copilot`. `xylem init` also scaffolds `.xylem/HARNESS.md`; the runner reads that file and passes it as a system prompt for prompt phases.
 
-**Built-in workflows:**
+**Built-in workflows** (20 checked-in under `.xylem/workflows/`):
 
 - `fix-bug` -- Analyze, Plan, Implement (with test gate), PR
 - `implement-feature` -- Analyze, Plan (with label gate for human approval), Implement, PR
+- `implement-harness` -- Implement with test gate, PR (for harness-labeled work)
+- `merge-pr` -- Merge a ready PR via admin bypass
+- `resolve-conflicts` -- Resolve merge conflicts on an existing PR branch
+- `review-pr` / `pr-self-review` -- Review open PRs
+- `fix-pr-checks` / `ci-watchdog` -- Fix failing CI checks
+- `refine-issue` / `triage` -- Issue refinement and triage
+- `release-cadence` -- Label mature release-please PRs
+- `backlog-refinement` / `diagnose-failures` / `sota-gap-analysis` -- Scheduled maintenance workflows
+- `respond-to-pr-review` -- Address PR review feedback
+- `continuous-improvement` / `continuous-simplicity` / `autonomy-review` / `unblock-wave` -- Continuous improvement workflows
 
 ### Gate
 
@@ -222,8 +232,9 @@ Gates are inter-phase quality checks. They run after a phase completes and must 
 |------|----------|------------|
 | `command` | Runs a shell command in the worktree. Exit 0 = pass. Non-zero = fail, triggering a retry of the same phase with gate output as context. | `run`, `retries`, `retry_delay` |
 | `label` | Polls a GitHub issue for a specific label. Transitions the vessel to `waiting` state until the label appears or the gate times out. | `wait_for`, `timeout`, `poll_interval` |
+| `live` | Runs browser-based verification steps against a live environment. Executes HTTP checks or chromedp scripts and persists an evidence report. | `steps`, `retries` |
 
-Command gates enable automated quality enforcement (run tests, lint, type-check). Label gates enable human-in-the-loop approval between phases.
+Command gates enable automated quality enforcement (run tests, lint, type-check). Label gates enable human-in-the-loop approval between phases. Live gates enable automated browser-based verification against running services.
 
 ## Package map
 
@@ -240,12 +251,30 @@ These packages are used by the CLI commands (`scan`, `drain`, `daemon`, `enqueue
 | `queue` | JSONL-backed persistent work queue with file locking and vessel state machine |
 | `scanner` | Queries configured sources, deduplicates, enqueues vessels |
 | `runner` | Dequeues vessels, creates worktrees, executes workflow phases, handles gates |
-| `source` | `Source` interface + `GitHub`, `GitHubPR`, `GitHubPREvents`, `GitHubMerge`, and `Manual` implementations |
+| `source` | `Source` interface + `GitHub`, `GitHubPR`, `GitHubPREvents`, `GitHubMerge`, `Schedule`, `Scheduled`, and `Manual` implementations |
 | `workflow` | YAML workflow definition loader and validation |
 | `phase` | Go template rendering for prompt files with truncation limits |
-| `gate` | Command execution and GitHub label polling for inter-phase quality checks |
+| `gate` | Command, label, and live gate execution for inter-phase quality checks |
 | `worktree` | Git worktree create/remove/list lifecycle management |
 | `reporter` | Phase result collection and GitHub issue comment output |
+| `profiles` | YAML configuration profile loading and overlay composition |
+| `cadence` | Cron expression parsing for schedule sources |
+| `daemonhealth` | Daemon health status file management |
+| `recovery` | Vessel recovery and error remediation |
+| `lessons` | Lessons-learned collection from workflow failures |
+| `notify` | Alert and notification dispatch with severity levels |
+| `policy` | Policy class definitions for delivery, ops, maintenance routing |
+| `review` | Structured review report generation with cost analysis |
+| `sandbox` | Execution isolation for subprocess environments |
+| `skills` | Claude Code skill definitions and configuration management |
+| `visualize` | Workflow graph rendering to Mermaid, DOT, JSON formats |
+| `releasecadence` | Release-please PR promotion and auto-merge scheduling |
+| `fieldreport` | Field report generation with metrics and analysis |
+| `gapreport` | Gap status reports with wired/dormant workflow tracking |
+| `continuousimprovement` | Continuous improvement pipeline state and metrics |
+| `simplicity` | Simplicity metrics evaluation and complexity reporting |
+| `hardening` | Security hardening and dependency management |
+| `discussion` | GitHub Discussions API queries |
 
 ### Agent harness packages
 

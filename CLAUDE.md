@@ -44,15 +44,15 @@ xylem is a two-layer system: a Go CLI (control plane) and YAML workflow definiti
 
 The CLI schedules and runs autonomous Claude Code sessions. Core flow:
 
-1. **scan** — `scanner` queries each configured `source` (GitHub issues by label, or manual enqueue) and writes `Vessel` records to a JSONL queue
+1. **scan** — `scanner` queries each configured `source` (GitHub issues/PRs by label, scheduled cadences, or manual enqueue) and writes `Vessel` records to a JSONL queue
 2. **drain** — `runner` dequeues pending vessels, creates isolated git worktrees via `worktree`, then executes workflow phases sequentially in each worktree
 3. **daemon** — continuous scan-drain loop combining both
 
 Key types:
 - **Vessel** (`queue` package) — a unit of work with state machine: `pending → running → completed/failed/waiting/timed_out/cancelled`
-- **Source** (`source` package) — interface with `Scan()`, `OnStart()`, `BranchName()`. Implementations: `GitHub`, `Manual`
+- **Source** (`source` package) — interface with `Scan()`, `OnStart()`, `BranchName()`. Implementations: `GitHub`, `GitHubPR`, `GitHubPREvents`, `GitHubMerge`, `Schedule`, `Scheduled`, `Manual`
 - **Workflow** (`workflow` package) — YAML-defined multi-phase execution plan loaded from `.xylem/workflows/`
-- **Gate** (`gate` package) — inter-phase quality checks: `command` (run shell command) or `label` (poll GitHub for label, vessel enters `waiting` state)
+- **Gate** (`gate` package) — inter-phase quality checks: `command` (run shell command), `label` (poll GitHub for label), or `live` (browser-based verification)
 
 The `runner` drives phase execution: renders Go templates into prompts, pipes them to `claude -p` via stdin, persists outputs to `.xylem/phases/<id>/`, and handles gate retries and label-wait suspension.
 
@@ -147,7 +147,7 @@ See [docs/multi-repo.md](docs/multi-repo.md) for the full user-facing guide.
 - Tests use interfaces and stubs extensively (e.g., `CommandRunner`, `WorktreeManager`) — no real subprocesses or git operations in tests
 - Property-based tests use `pgregory.net/rapid` and follow the naming convention `TestProp*` in `*_prop_test.go` files
 - Queue tests use temp directories for JSONL files; worktree tests use temp directories for git repos
-- The `source` package has no tests (relies on integration testing via `scanner` and `runner`)
+- The `source` package has unit and property-based tests covering each source type
 
 ## Terminology
 

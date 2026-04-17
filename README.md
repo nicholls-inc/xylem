@@ -265,7 +265,7 @@ See the [Architecture](docs/architecture.md) document for details on the control
 
 ## Prerequisites
 
-- **Go 1.22+** — to build the CLI
+- **Go 1.25+** — to build the CLI
 - **git** — must be on PATH
 - **[claude](https://docs.anthropic.com/en/docs/claude-code)** or **GitHub Copilot CLI** — at least one supported LLM CLI
 - **[gh](https://cli.github.com/)** — GitHub CLI, authenticated (`gh auth login`). Required for GitHub-based sources and PR creation.

@@ -8,7 +8,7 @@ You need the following tools installed and available on your PATH:
 
 | Tool | Version | Purpose |
 |------|---------|---------|
-| [Go](https://go.dev/dl/) | 1.22+ | Build the xylem CLI |
+| [Go](https://go.dev/dl/) | 1.25+ | Build the xylem CLI |
 | [git](https://git-scm.com/) | any recent | Worktree creation and branch management |
 | [claude](https://docs.anthropic.com/en/docs/claude-code) or GitHub Copilot CLI | latest | Session runner for LLM phases |
 | [gh](https://cli.github.com/) | any recent | GitHub CLI, used by GitHub-based sources and PR creation |
@@ -152,7 +152,6 @@ In addition to issue scanning, xylem supports these GitHub source types:
 - `github-pr` — scans open pull requests by label
 - `github-pr-events` — scans open pull requests for event triggers
 - `github-merge` — scans merged pull requests
-- `schedule` — emits a recurring synthetic vessel on a configured cadence
 - `schedule` — emits a recurring synthetic vessel on a configured cadence such as `1h`, `24h`, `@daily`, or `0 6 * * 1`
 
 For `github-pr-events`, tasks use an `on` block instead of `labels`:

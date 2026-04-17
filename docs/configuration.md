@@ -751,7 +751,7 @@ sources:
     workflow: lessons
 ```
 
-`schedule` sources persist their last-fired state under `<state_dir>/schedule-state.json`. The generated vessel metadata includes:
+`schedule` sources persist their last-fired state under `<state_dir>/state/schedule.json`. The generated vessel metadata includes:
 
 - `schedule_name`
 - `schedule_cadence`
