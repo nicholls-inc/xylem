@@ -314,7 +314,6 @@ func TestPropQueueInvariant_I2_TerminalImmutability(t *testing.T) {
 
 // Invariant I3: Retry resets to indistinguishable-from-fresh.
 func TestPropQueueInvariant_I3_RetryResetsCleanly(t *testing.T) {
-	t.Skip("known violation: row I3 in docs/invariants/queue.md gap analysis; resetPendingState does not reset CurrentPhase or PhaseOutputs. Remove this Skip when the reset is extended.")
 	rapid.Check(t, func(t *rapid.T) {
 		q, _, cleanup := newPropQueueWithDir(t, "queue-i3-prop")
 		defer cleanup()

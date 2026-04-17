@@ -933,14 +933,15 @@ func TestUpdateValidTransitionFailedToPending(t *testing.T) {
 	if got.State != StatePending {
 		t.Fatalf("expected pending after retry, got %q", got.State)
 	}
-	if got.WorktreePath != "/tmp/wt-14" {
-		t.Fatalf("expected WorktreePath preserved, got %q", got.WorktreePath)
+	// Per I3: failed→pending resets to indistinguishable-from-fresh.
+	if got.WorktreePath != "" {
+		t.Fatalf("expected WorktreePath cleared, got %q", got.WorktreePath)
 	}
-	if got.CurrentPhase != 2 {
-		t.Fatalf("expected CurrentPhase preserved, got %d", got.CurrentPhase)
+	if got.CurrentPhase != 0 {
+		t.Fatalf("expected CurrentPhase reset, got %d", got.CurrentPhase)
 	}
-	if got.PhaseOutputs["plan"] != "done" {
-		t.Fatalf("expected PhaseOutputs[plan]=done, got %q", got.PhaseOutputs["plan"])
+	if got.PhaseOutputs != nil {
+		t.Fatalf("expected PhaseOutputs reset, got %v", got.PhaseOutputs)
 	}
 }
 
@@ -990,11 +991,13 @@ func TestUpdateValidTransitionRunningToPending(t *testing.T) {
 	if got.GateOutput != "" {
 		t.Fatalf("expected GateOutput cleared, got %q", got.GateOutput)
 	}
-	if got.CurrentPhase != 2 {
-		t.Fatalf("expected CurrentPhase preserved, got %d", got.CurrentPhase)
+	// Per I3 (policy extension): running→pending (orphan reconcile) must also
+	// reset phase pointer and outputs — partial resume caused loop-202 chdir cascade.
+	if got.CurrentPhase != 0 {
+		t.Fatalf("expected CurrentPhase reset, got %d", got.CurrentPhase)
 	}
-	if got.PhaseOutputs["plan"] != "done" {
-		t.Fatalf("expected PhaseOutputs[plan]=done, got %q", got.PhaseOutputs["plan"])
+	if got.PhaseOutputs != nil {
+		t.Fatalf("expected PhaseOutputs reset, got %v", got.PhaseOutputs)
 	}
 	if got.WorktreePath != "" {
 		t.Fatalf("expected WorktreePath cleared, got %q", got.WorktreePath)
