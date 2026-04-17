@@ -127,3 +127,15 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `implement-feature` work with phase `analyze` still failing due to `exit status stderr error no authentication information found copilot can be authenticated with g`. <!-- xylem-lesson:lesson-50a6902f8ac4 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `implement-feature` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+stderr: Error: No authentication information found.
+
+Copilot can be authenticated with GitHub using an OAuth Token or a Fine-Grained Personal Access Token.
+
+To authen
+- Evidence:
+  - `issue-59` (2026-04-11T20:47:44Z) — `phases/issue-59/analyze.output`
+  - `issue-57` (2026-04-11T20:48:15Z) — `phases/issue-57/analyze.output`
