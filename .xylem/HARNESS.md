@@ -127,3 +127,10 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not rerun `release-cadence` without addressing the recurring failure `failed` first. <!-- xylem-lesson:lesson-60846128042a -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `release-cadence` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: failed
+- Evidence:
+  - `scheduled-release-cadence-label-mature-release-pr-123355` (2026-04-16T04:01:20Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123355/summary.json`
+  - `scheduled-release-cadence-label-mature-release-pr-123356` (2026-04-16T08:08:02Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123356/summary.json`
