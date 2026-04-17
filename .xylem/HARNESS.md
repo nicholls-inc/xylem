@@ -127,3 +127,10 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `continuous-improvement` work with phase `analyze` still failing due to `exit status`. <!-- xylem-lesson:lesson-f8eb6ae026c8 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `continuous-improvement` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `scheduled-continuous-improvement-daily-rotation-20556` (2026-04-13T00:09:24Z) — `phases/scheduled-continuous-improvement-daily-rotation-20556/analyze.output`
+  - `scheduled-continuous-improvement-daily-rotation-20558` (2026-04-15T00:33:21Z) — `phases/scheduled-continuous-improvement-daily-rotation-20558/analyze.output`
