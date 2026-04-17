@@ -44,8 +44,26 @@ jobs:
             --format sarif \
             . > foxguard.sarif
 
+      # foxguard v0.6.3 emits SARIF with malformed `fixes` blocks (missing the
+      # required `artifactChanges` property). GitHub's SARIF validator rejects
+      # the whole file. Strip `fixes` entirely until upstream is fixed; we
+      # don't rely on fix suggestions in Code Scanning.
+      - name: Sanitize SARIF
+        if: always() && hashFiles('foxguard.sarif') != ''
+        run: |
+          python3 -c "
+          import json, pathlib
+          p = pathlib.Path('foxguard.sarif')
+          data = json.loads(p.read_text())
+          for run in data.get('runs', []):
+              for result in run.get('results', []):
+                  result.pop('fixes', None)
+          p.write_text(json.dumps(data))
+          "
+
       - name: Upload SARIF to Code Scanning
         if: always() && hashFiles('foxguard.sarif') != ''
+        continue-on-error: true
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: foxguard.sarif

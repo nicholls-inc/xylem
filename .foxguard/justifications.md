@@ -181,3 +181,31 @@ Fingerprint: `b793025106a3bd9856ef0b72329bf6ead85d6494836eaf636b3ec4b377b3d651`
 
 **Rationale:** `OpReadSecrets Operation = "read_secrets"` — a policy-operation enum label identifying "the act of reading secrets" as a permission class in the intermediary policy engine. The value is an identifier string, not a credential. The scanner matched on the substring `secret` in the constant name.
 **Verified by:** harry.nicholls + Claude (Opus 4.7), 2026-04-16
+
+## `cli/cmd/xylem/daemon_reload.go:491` — `go/taint-path-traversal`
+
+Fingerprint: `90c54d149dfb33fa5165024c65b84a875b8add5427a1a7e8042e74d3a53ecb37`
+
+**Rationale:** `writeDaemonReloadRequest` calls `os.WriteFile(daemonReloadRequestPath(cfg), …)`. `daemonReloadRequestPath` is `config.RuntimePath(cfg.StateDir, "daemon-reload-request.json")` — a join of the trusted config-provided `StateDir` with a fixed literal filename. No HTTP input or untrusted source reaches this sink; v0.6.3's cross-file taint tracer appears to have conflated an unrelated `net/http` import in this package with the write path.
+**Verified by:** harry.nicholls + Claude (Opus 4.7), 2026-04-17
+
+## `cli/internal/cost/aggregate_test.go:17` — `go/taint-path-traversal`
+
+Fingerprint: `d0a022c55f26afb477365e7cafee7827d9dccc52c5fab350e0cfa61467b5e76c`
+
+**Rationale:** Test helper `writeReport` calls `SaveReport(filepath.Join(vesselDir, "cost-report.json"), r)`. `vesselDir` is `filepath.Join(t.TempDir()-derived dir, "phases", vesselID)` where `vesselID` is a test-provided string literal. Not reachable from production code paths; no untrusted input.
+**Verified by:** harry.nicholls + Claude (Opus 4.7), 2026-04-17
+
+## `cli/internal/cost/budgetgate_test.go:23` — `go/taint-path-traversal`
+
+Fingerprint: `5bfa9ace51f62fed06cf680080d01434ac6c61086fdce3c4d1902d48b8b262b1`
+
+**Rationale:** Identical pattern to `aggregate_test.go:17` — test helper using `t.TempDir()`-rooted paths with literal filenames. Not reachable from production code paths.
+**Verified by:** harry.nicholls + Claude (Opus 4.7), 2026-04-17
+
+## `cli/internal/dtu/runtime_clock.go:127` — `go/taint-path-traversal`
+
+Fingerprint: `7e7f68bef6fead654ca711bd4714a574f2073d411a5c52ad40125f880d1dfdcc`
+
+**Rationale:** `runtimeStore` reads `os.Getenv(EnvStatePath)` and passes it to `os.Stat`. Environment variables are part of the operator-controlled process environment, not untrusted external input — any attacker able to set the env var already has code execution in the daemon process. Treating env vars as taint sources is categorically a false positive in this threat model. The DTU runtime store path is a deliberately operator-configured hook for the deterministic-time universe.
+**Verified by:** harry.nicholls + Claude (Opus 4.7), 2026-04-17

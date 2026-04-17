@@ -32,6 +32,12 @@
       "line": 481
     },
     {
+      "fingerprint": "90c54d149dfb33fa5165024c65b84a875b8add5427a1a7e8042e74d3a53ecb37",
+      "rule_id": "go/taint-path-traversal",
+      "file": "./cli/cmd/xylem/daemon_reload.go",
+      "line": 491
+    },
+    {
       "fingerprint": "51096230d3f67bb9b54e1136b13a4f0f7b3ab44a02f18341ff0ac47cf3518222",
       "rule_id": "go/no-command-injection",
       "file": "./cli/cmd/xylem/daemon_supervisor.go",
@@ -84,6 +90,24 @@
       "rule_id": "go/no-command-injection",
       "file": "./cli/cmd/xylem/exec.go",
       "line": 252
+    },
+    {
+      "fingerprint": "d0a022c55f26afb477365e7cafee7827d9dccc52c5fab350e0cfa61467b5e76c",
+      "rule_id": "go/taint-path-traversal",
+      "file": "./cli/internal/cost/aggregate_test.go",
+      "line": 17
+    },
+    {
+      "fingerprint": "5bfa9ace51f62fed06cf680080d01434ac6c61086fdce3c4d1902d48b8b262b1",
+      "rule_id": "go/taint-path-traversal",
+      "file": "./cli/internal/cost/budgetgate_test.go",
+      "line": 23
+    },
+    {
+      "fingerprint": "7e7f68bef6fead654ca711bd4714a574f2073d411a5c52ad40125f880d1dfdcc",
+      "rule_id": "go/taint-path-traversal",
+      "file": "./cli/internal/dtu/runtime_clock.go",
+      "line": 127
     },
     {
       "fingerprint": "bcaa0f9b18ebcd2f2748abd5cc31c398027f29011364473f79d2551e88ca95aa",
