@@ -127,3 +127,29 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `fix-bug` work with phase `implement` still failing due to `gate failed, retries exhausted`. <!-- xylem-lesson:lesson-fefa694f4de4 -->
+- Rationale: This failure pattern recurred in 5 failed vessels for `fix-bug` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: gate failed, retries exhausted
+- Evidence:
+  - `issue-550-retry-1` (2026-04-16T05:03:06Z) — `phases/issue-550-retry-1/implement.output`
+  - `issue-549-retry-1` (2026-04-16T05:03:06Z) — `phases/issue-549-retry-1/implement.output`
+  - `issue-547-retry-1-retry-1` (2026-04-16T10:43:24Z) — `phases/issue-547-retry-1-retry-1/implement.output`
+  - `issue-561-retry-1` (2026-04-16T10:49:53Z) — `phases/issue-561-retry-1/implement.output`
+  - `issue-552-retry-1-retry-1` (2026-04-16T11:34:31Z) — `phases/issue-552-retry-1-retry-1/implement.output`
+
+
+### Do not finish `fix-bug` work with phase `implement` still failing due to `run evaluator loop for phase implement loop run generate iteration exit status`. <!-- xylem-lesson:lesson-97711665a939 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `fix-bug` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: run evaluator loop for phase implement: loop run: generate iteration 1: exit status 1
+- Evidence:
+  - `issue-555` (2026-04-15T11:07:15Z) — `phases/issue-555/implement.output`
+  - `issue-555-retry-1-retry-1` (2026-04-16T02:00:24Z) — `phases/issue-555-retry-1-retry-1/implement.output`
+
+
+### Do not finish `fix-bug` work with phase `implement` still failing due to `gate failed, retries exhausted`. <!-- xylem-lesson:lesson-fefa694f4de4 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `fix-bug` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: gate failed, retries exhausted
+- Evidence:
+  - `issue-552-retry-1` (2026-04-16T04:37:50Z) — `phases/issue-552-retry-1/implement.output`
+  - `issue-547-retry-1` (2026-04-16T05:26:59Z) — `phases/issue-547-retry-1/implement.output`
