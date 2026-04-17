@@ -5,16 +5,18 @@ package queue
 // of the spec). The file is a protected surface: modifications require a
 // human-signed commit (see .claude/rules/protected-surfaces.md).
 //
-// Five tests are t.Skip'd because they would fail against the current code
+// Four tests are t.Skip'd because they would fail against the current code
 // (see the spec's Gap analysis). Removing a skip is a one-line action once
 // the corresponding fix lands:
 //   - I2: UpdateVessel skips validation on same-state mutations.
 //   - I3: resetPendingState does not reset CurrentPhase / PhaseOutputs.
-//   - I5b: writeAllVessels is not atomic; aspirational until tmpfile+rename.
 //   - I9: Enqueue does not reject duplicate IDs.
-// The I5b stub is skipped per the spec's explicit Governance §4 directive;
-// I2, I3, and I9 are skipped by the same principle (keep CI green until the
-// code fixes land) with explicit gap-row references in the skip message.
+// I2, I3, and I9 are skipped by the "keep CI green until the code fix lands"
+// principle with explicit gap-row references in the skip message.
+//
+// I5b (crash durability) was originally the one sanctioned skip per the
+// spec's Governance §4; it now runs against the atomic writeAllVessels fix
+// and the writeInterrupt hook in queue.go.
 
 import (
 	"bytes"
@@ -426,9 +428,166 @@ func TestPropQueueInvariant_I5a_ReopenEquivalence(t *testing.T) {
 	})
 }
 
-// Invariant I5b: Crash durability (aspirational — known violation).
+// Invariant I5b: Crash durability.
+//
+// Simulates a SIGKILL at one of four enumerated stages inside writeAllVessels
+// by panicking from the writeInterrupt hook. After the induced panic, the
+// file on disk must yield either the pre-call vessel set or the post-call
+// vessel set — never a torn/partial state. The four stages collectively
+// cover every crash window the spec requires:
+//
+//   - before-tmp      : crash before any tmpfile exists; the real file must
+//     still be the pre-state.
+//   - after-tmp-write : crash after payload bytes are in the tmpfile but
+//     before fsync/rename; the real file must still be
+//     the pre-state (rename has not happened).
+//   - after-tmp-fsync : crash after the tmpfile is durable on disk but
+//     before the rename; the real file must still be
+//     the pre-state.
+//   - after-rename    : crash after the rename but before the dir fsync;
+//     the real file must be the post-state (rename is
+//     atomic, the dir fsync only guarantees durability
+//     across power loss, not visibility).
+//
+// The assertion compares vessels at the semantic level rather than at the
+// byte level so that wall-clock-derived fields (StartedAt/EndedAt) in the
+// reference run don't produce false positives against the crash run. Any
+// divergence in vessel count, ID, state, ref, workflow, or error is a real
+// torn-write violation; differences in the numeric value of a timestamp
+// are not — only the non-nil/nil shape matters.
 func TestPropQueueInvariant_I5b_CrashDurability(t *testing.T) {
-	t.Skip("aspirational: row I5b in docs/invariants/queue.md gap analysis; writeAllVessels uses os.WriteFile (no fsync, no tmpfile+rename). Harness requires SIGKILL'd subprocess at randomized offsets through a mutating call; out of scope for v1. Remove this Skip when atomic writes land and a crash-harness test is authored.")
+	rapid.Check(t, func(t *rapid.T) {
+		seed, op := drawI5bScenario(t)
+
+		// Reference run: execute op on a sibling queue with no hook, and
+		// capture the resulting vessel set. This is the canonical
+		// "post-state" against which the crash run is compared.
+		refQ, _, refCleanup := newPropQueueWithDir(t, "queue-i5b-ref")
+		defer refCleanup()
+		if _, err := refQ.Enqueue(seed); err != nil {
+			t.Fatalf("ref seed Enqueue: %v", err)
+		}
+		preRefState, err := refQ.List()
+		if err != nil {
+			t.Fatalf("ref List pre-op: %v", err)
+		}
+		applyOp(refQ, op)
+		postRefState, err := refQ.List()
+		if err != nil {
+			t.Fatalf("ref List post-op: %v", err)
+		}
+
+		// Queue under test: seed identically, install crash hook, apply op.
+		q, path, cleanup := newPropQueueWithDir(t, "queue-i5b-prop")
+		defer cleanup()
+		if _, err := q.Enqueue(seed); err != nil {
+			t.Fatalf("seed Enqueue: %v", err)
+		}
+
+		stage := rapid.SampledFrom([]string{
+			"before-tmp", "after-tmp-write", "after-tmp-fsync", "after-rename",
+		}).Draw(t, "stage")
+
+		writeInterrupt = func(s string) {
+			if s == stage {
+				panic("test-kill")
+			}
+		}
+		func() {
+			defer func() {
+				writeInterrupt = nil
+				if r := recover(); r != nil && r != "test-kill" {
+					// A different panic is a real test failure — re-raise.
+					panic(r)
+				}
+			}()
+			applyOp(q, op)
+		}()
+
+		// Durability check (a): re-opening a fresh Queue on the same path
+		// must not error — the file is well-formed.
+		observed, err := New(path).List()
+		if err != nil {
+			t.Fatalf("I5b: fresh List() after crash at %s returned error: %v", stage, err)
+		}
+
+		// Durability check (b): the observed vessel set must equal either
+		// preRefState or postRefState at the semantic level.
+		if vesselSetsEquivalentIgnoringClock(observed, preRefState) ||
+			vesselSetsEquivalentIgnoringClock(observed, postRefState) {
+			return
+		}
+		obsJSON, _ := json.Marshal(observed)
+		preJSON, _ := json.Marshal(preRefState)
+		postJSON, _ := json.Marshal(postRefState)
+		t.Fatalf("I5b: crash at stage %s left file in intermediate state\n  pre:      %s\n  post:     %s\n  observed: %s",
+			stage, preJSON, postJSON, obsJSON)
+	})
+}
+
+// drawI5bScenario draws (seed vessel, mutating op) for an I5b iteration.
+// The op is chosen from a set that is guaranteed to change the queue file
+// relative to the seeded state — Dequeue, Enqueue-of-distinct-vessel, or
+// Cancel — so that pre-state and post-state are distinguishable and the
+// property actually exercises every crash window (rather than collapsing
+// to a trivial same-state check).
+func drawI5bScenario(t *rapid.T) (Vessel, queueOp) {
+	seed := drawFreshVessel(t)
+	seed.Ref = "https://github.com/example/repo/issues/i5b-" +
+		fmt.Sprintf("%d", rapid.IntRange(1, 1_000_000).Draw(t, "i5b_seed_issue"))
+	kind := rapid.SampledFrom([]int{0, 1, 2}).Draw(t, "i5b_op_kind")
+	switch kind {
+	case 0:
+		v := drawFreshVessel(t)
+		if v.ID == seed.ID {
+			v.ID = seed.ID + "-i5b-alt"
+		}
+		v.Ref = "https://github.com/example/repo/issues/i5b-other-" +
+			fmt.Sprintf("%d", rapid.IntRange(1, 1_000_000).Draw(t, "i5b_other_issue"))
+		return seed, queueOp{kind: opEnqueue, vessel: v}
+	case 1:
+		return seed, queueOp{kind: opDequeue}
+	default:
+		return seed, queueOp{kind: opCancel, id: seed.ID}
+	}
+}
+
+// vesselSetsEquivalentIgnoringClock returns true when two vessel slices are
+// equal at the semantic level modulo the numeric value of time-derived
+// fields (CreatedAt/StartedAt/EndedAt/WaitingSince). It still enforces that
+// a time field is nil in one slice iff it is nil in the other — a torn
+// write that drops StartedAt entirely, or adds one where there should be
+// none, is still rejected.
+func vesselSetsEquivalentIgnoringClock(a, b []Vessel) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !vesselEquivalentIgnoringClock(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func vesselEquivalentIgnoringClock(a, b Vessel) bool {
+	a.CreatedAt = time.Time{}
+	b.CreatedAt = time.Time{}
+	a.StartedAt = zeroTimePtrIfNonNil(a.StartedAt)
+	b.StartedAt = zeroTimePtrIfNonNil(b.StartedAt)
+	a.EndedAt = zeroTimePtrIfNonNil(a.EndedAt)
+	b.EndedAt = zeroTimePtrIfNonNil(b.EndedAt)
+	a.WaitingSince = zeroTimePtrIfNonNil(a.WaitingSince)
+	b.WaitingSince = zeroTimePtrIfNonNil(b.WaitingSince)
+	return reflect.DeepEqual(a, b)
+}
+
+func zeroTimePtrIfNonNil(p *time.Time) *time.Time {
+	if p == nil {
+		return nil
+	}
+	z := time.Time{}
+	return &z
 }
 
 // Invariant I6: Linearizability (sanity check via concurrent ops).

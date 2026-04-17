@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,14 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 )
+
+// writeInterrupt is a test-only hook. When non-nil it is invoked at enumerated
+// stages during writeAllVessels so property tests can simulate SIGKILL by
+// panicking. It is always nil in production builds; the production call sites
+// collapse to a single pointer comparison. See invariant I5b in
+// docs/invariants/queue.md and the crash-durability harness in
+// queue_invariants_prop_test.go.
+var writeInterrupt func(stage string)
 
 type VesselState string
 
@@ -694,8 +703,70 @@ func (q *Queue) writeAllVessels(vessels []Vessel) error {
 	if content != "" {
 		content += "\n"
 	}
+	payload := []byte(content)
 
-	return os.WriteFile(q.path, []byte(content), 0o644)
+	if writeInterrupt != nil {
+		writeInterrupt("before-tmp")
+	}
+
+	dir := filepath.Dir(q.path)
+	tmp, err := os.CreateTemp(dir, ".queue-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	// Clean up the tmpfile on any error path OR panic. Once the rename
+	// succeeds we clear tmpPath so this defer becomes a no-op and the real
+	// queue file is preserved.
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if writeInterrupt != nil {
+		writeInterrupt("after-tmp-write")
+	}
+
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if writeInterrupt != nil {
+		writeInterrupt("after-tmp-fsync")
+	}
+
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, q.path); err != nil {
+		return err
+	}
+	// Rename succeeded: the tmpfile is now the real queue file. Clear
+	// tmpPath so the deferred cleanup does not delete it.
+	tmpPath = ""
+
+	if writeInterrupt != nil {
+		writeInterrupt("after-rename")
+	}
+
+	// fsync the containing directory so the rename is durable across power
+	// loss on ext4/xfs. Failure here is not fatal to the logical write
+	// (the rename has already taken effect in the kernel's page cache),
+	// but we surface it so the caller can choose whether to retry.
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func recordRuntimeVesselEvent(operation dtu.VesselOperation, previous, current *Vessel) error {
