@@ -127,3 +127,11 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `ci-watchdog` work with phase `diagnose` still failing due to `signal killed`. <!-- xylem-lesson:lesson-0c58167673e3 -->
+- Rationale: This failure pattern recurred in 3 failed vessels for `ci-watchdog` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: signal: killed
+- Evidence:
+  - `scheduled-ci-watchdog-monitor-main-ci-986862` (2026-04-16T15:54:07Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986862/diagnose.output`
+  - `scheduled-ci-watchdog-monitor-main-ci-986864` (2026-04-16T16:39:20Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986864/diagnose.output`
+  - `scheduled-ci-watchdog-monitor-main-ci-986866` (2026-04-16T18:19:35Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986866/diagnose.output`
