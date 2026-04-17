@@ -1,6 +1,9 @@
 <img width="1934" height="951" alt="xylem" src="https://github.com/user-attachments/assets/89649675-2514-4569-89ed-44d061dc64f9" />
 
+
 # xylem
+
+[![foxguard](https://img.shields.io/badge/foxguard-clean-3fb950?logo=data:image/svg%2bxml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSI+PHBhdGggZD0iTTggOEwyMCAyOEwzMiAyMEw0NCAyOEw1NiA4TDUyIDMyTDQ0IDQ0TDM2IDUySDI4TDIwIDQ0TDEyIDMyTDggOFoiIGZpbGw9IiNGNTlFMEIiIGZpbGwtb3BhY2l0eT0iMC4zIiBzdHJva2U9IiNGNTlFMEIiIHN0cm9rZS13aWR0aD0iMyIgc3Ryb2tlLWxpbmVqb2luPSJyb3VuZCIvPjxjaXJjbGUgY3g9IjI0IiBjeT0iMzIiIHI9IjIuNSIgZmlsbD0iI0Y1OUUwQiIvPjxjaXJjbGUgY3g9IjQwIiBjeT0iMzIiIHI9IjIuNSIgZmlsbD0iI0Y1OUUwQiIvPjwvc3ZnPg==)](https://github.com/PwnKit-Labs/foxguard)
 
 You have 40 GitHub issues labeled `ready-for-work`. They've been sitting there for two weeks. You'd fix them, but fixing one means opening Claude Code, writing the prompt, waiting, reviewing, pushing — and you have 39 more after that.
 
@@ -8,7 +11,7 @@ You have 40 GitHub issues labeled `ready-for-work`. They've been sitting there f
 
 It runs your favourite coding agents autonomously against your backlog: scanning issues, creating isolated worktrees, executing multi-phase workflows, running your test gates, and opening PRs — all without you watching. While you work on what matters, xylem drains the queue.
 
-xylem wrote this README while i was lying in bed eating a popsicle. All I did was draft [this issue](https://github.com/nicholls-inc/xylem/issues/477), and add labels. xylem had a brand new readme before I finished my popsicle. 
+xylem wrote this README while i was lying in bed eating a popsicle. All I did was draft [this issue](https://github.com/nicholls-inc/xylem/issues/477), and add labels. xylem had a brand new readme before I finished my popsicle.
 
 ## What you can achieve
 
