@@ -184,7 +184,7 @@ sources:
   ci-watchdog:
     type: scheduled
     repo: "{{ .Repo }}"
-    schedule: "30m"
+    schedule: "1h"
     timeout: "30m"
     tasks:
       monitor-main-ci:

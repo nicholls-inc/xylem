@@ -928,7 +928,7 @@ func TestSmoke_S11_SelfHostingOverlayContainsCIWatchdogSourceAndWorkflow(t *test
 	var src profileSourceConfig
 	require.NoError(t, yaml.Unmarshal(composed.Sources["ci-watchdog"], &src))
 	assert.Equal(t, "scheduled", src.Type)
-	assert.Equal(t, "30m", src.Schedule)
+	assert.Equal(t, "1h", src.Schedule)
 	assert.Equal(t, "30m", src.Timeout)
 	require.Contains(t, src.Tasks, "monitor-main-ci")
 	assert.Equal(t, "ci-watchdog", src.Tasks["monitor-main-ci"].Workflow)
