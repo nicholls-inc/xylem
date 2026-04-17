@@ -30,8 +30,31 @@ repos:
         pass_filenames: false
         files: ^(cli/.*\.go|cli/go\.(mod|sum))$
 
-  - repo: https://github.com/PwnKit-Labs/foxguard
-    rev: v0.6.0
-    hooks:
+      # foxguard runs with the baseline applied so pre-existing findings are
+      # suppressed. The upstream hook (PwnKit-Labs/foxguard) does not pass
+      # --baseline, so we invoke foxguard directly. Any new findings require
+      # either a fix or a baseline entry with a justification (see the
+      # foxguard-justifications hook below).
       - id: foxguard
+        name: foxguard
+        entry: foxguard --changed --baseline .foxguard/baseline.json
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: foxguard-secrets
+        name: foxguard-secrets
+        entry: foxguard secrets --changed
+        language: system
+        pass_filenames: false
+        always_run: true
+
+      # Enforces 1:1 coverage between .foxguard/baseline.json and
+      # .foxguard/justifications.md. Prevents the baseline from becoming a
+      # silent dumping ground. See CLAUDE.md § Foxguard protocol.
+      - id: foxguard-justifications
+        name: foxguard-justifications
+        entry: python3 scripts/check_foxguard_justifications.py
+        language: system
+        pass_filenames: false
+        files: ^\.foxguard/(baseline\.json|justifications\.md)$

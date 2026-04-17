@@ -1,0 +1,143 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "fingerprint": "2f5d51eacd6165c5037406d0accb1cd803638b5c9181b7df33cb6d95ae6bb398",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/automerge.go",
+      "line": 375
+    },
+    {
+      "fingerprint": "32b99df4945d0eadba48bf5adb73283a3b2a4449464932b75e5a87ae9ded708f",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/automerge.go",
+      "line": 397
+    },
+    {
+      "fingerprint": "3eaf7289d031aacf22e97b39e4c7e6f7e99926cd1a64ae6df96523e2198106fc",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/automerge.go",
+      "line": 432
+    },
+    {
+      "fingerprint": "bba6fc70260608f8739ddb0f2b77eca478a09ee44723fd047346a60ce816222b",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/automerge.go",
+      "line": 464
+    },
+    {
+      "fingerprint": "00d02abcd1bbe569d3d948198dd018753ff2a82d72f38548aa4205a3a17a4c98",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/automerge.go",
+      "line": 481
+    },
+    {
+      "fingerprint": "51096230d3f67bb9b54e1136b13a4f0f7b3ab44a02f18341ff0ac47cf3518222",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/daemon_supervisor.go",
+      "line": 308
+    },
+    {
+      "fingerprint": "b6e90751565375c6e535df224abff6e5f035eb1d76e34a30b5b69493aed61377",
+      "rule_id": "go/no-sql-injection",
+      "file": "./cli/cmd/xylem/dtu.go",
+      "line": 402
+    },
+    {
+      "fingerprint": "1d1b8b71da95fd22cc8aed60b1bab7df8d82b42ca5da9ea9dfbfac1524978f83",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/eval.go",
+      "line": 173
+    },
+    {
+      "fingerprint": "b2f66cef158a64fa67c64b244630048eb39bbc4fbba7ee75828ab0d06082037b",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/eval.go",
+      "line": 264
+    },
+    {
+      "fingerprint": "3b8508218773ef7f044f5cdd2beb92adc6d0962e308f09d1509d8460b2411df9",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/exec.go",
+      "line": 191
+    },
+    {
+      "fingerprint": "0ba1820fffa148fed8fba4ce84032cc4f0b947201f03b36215f33b24f3e2e910",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/exec.go",
+      "line": 197
+    },
+    {
+      "fingerprint": "824df01c9038b74443f9900bd27dfb0e1421962d45721e6e36a2da0ed8364970",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/exec.go",
+      "line": 203
+    },
+    {
+      "fingerprint": "5ff66bc875d6265f668a883ed5ffc8f0548e4ffdcaefb57bc076b7bea9333072",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/exec.go",
+      "line": 212
+    },
+    {
+      "fingerprint": "b150ebac38c3eded8b796277265000676bc0696933a83d3d7c0cd2ae8b7853f2",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem/exec.go",
+      "line": 252
+    },
+    {
+      "fingerprint": "bcaa0f9b18ebcd2f2748abd5cc31c398027f29011364473f79d2551e88ca95aa",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/internal/dtu/scenario_test.go",
+      "line": 186
+    },
+    {
+      "fingerprint": "c17b1eea8e663a095359feb5fa555fff5357d1e9b7f3041deb3aca6d42a97737",
+      "rule_id": "py/no-path-traversal",
+      "file": "./cli/internal/dtu/testdata/manual-smoke/ws5-eval-suite/.xylem/eval/helpers/xylem_verify.py",
+      "line": 36
+    },
+    {
+      "fingerprint": "0bb11ff7e627f38ba98a435e43c50ae5d76e71823ce06194efdcc06755a90ee8",
+      "rule_id": "py/no-path-traversal",
+      "file": "./cli/internal/dtu/testdata/manual-smoke/ws5-eval-suite/.xylem/eval/helpers/xylem_verify.py",
+      "line": 45
+    },
+    {
+      "fingerprint": "12ba92e92181fe4a36e3c85f3e617834702a8c4a1d465fe819f5b4a75cea3d27",
+      "rule_id": "py/no-path-traversal",
+      "file": "./cli/internal/dtu/testdata/manual-smoke/ws5-eval-suite/.xylem/eval/helpers/xylem_verify.py",
+      "line": 54
+    },
+    {
+      "fingerprint": "37d7960342a6d2c60f6f6fc3c3fdd88ee77f11cbed7b3b45d4dda74916832d8a",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/internal/dtu/verification_runner.go",
+      "line": 411
+    },
+    {
+      "fingerprint": "b7618a5ac7373493f6e1a8b28707c2b05c4131afb412334a944e3fc0231b57c2",
+      "rule_id": "go/no-ssrf",
+      "file": "./cli/internal/gate/live.go",
+      "line": 175
+    },
+    {
+      "fingerprint": "fd94c064e4b7c35844bbd0ea83d1a87f14742d80d5e19323894934d23a6330af",
+      "rule_id": "go/no-ssrf",
+      "file": "./cli/internal/notify/telegram.go",
+      "line": 222
+    },
+    {
+      "fingerprint": "c59d99d94caf065a29fecfe3dec79b986e0d1b1e695257b02ea124ec448af0f3",
+      "rule_id": "go/no-ssrf",
+      "file": "./cli/internal/notify/telegram.go",
+      "line": 279
+    },
+    {
+      "fingerprint": "b793025106a3bd9856ef0b72329bf6ead85d6494836eaf636b3ec4b377b3d651",
+      "rule_id": "go/no-hardcoded-secret",
+      "file": "./cli/internal/policy/class.go",
+      "line": 25
+    }
+  ]
+}

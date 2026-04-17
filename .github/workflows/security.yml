@@ -1,0 +1,58 @@
+name: Security
+on: [push, pull_request]
+
+jobs:
+  foxguard:
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      # The official PwnKit-Labs/foxguard action (v0.6.0) does not accept a
+      # baseline input, so we install the binary ourselves and invoke it
+      # directly with --baseline. Version pinned to match the pre-commit hook.
+      - name: Install foxguard
+        run: |
+          set -euo pipefail
+          VERSION="v0.6.0"
+          ARCH="$(uname -m)"
+          case "$ARCH" in
+            x86_64) ARCH_SUFFIX="x86_64" ;;
+            aarch64|arm64) ARCH_SUFFIX="aarch64" ;;
+            *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
+          esac
+          BINARY="foxguard-linux-${ARCH_SUFFIX}"
+          URL="https://github.com/PwnKit-Labs/foxguard/releases/download/${VERSION}/${BINARY}"
+          curl -fsSL "$URL" -o /usr/local/bin/foxguard
+          chmod +x /usr/local/bin/foxguard
+          foxguard --version
+
+      - name: Check foxguard justifications
+        run: python3 scripts/check_foxguard_justifications.py
+
+      - name: Run foxguard scan
+        id: scan
+        continue-on-error: true
+        run: |
+          foxguard \
+            --baseline .foxguard/baseline.json \
+            --severity medium \
+            --format sarif \
+            . > foxguard.sarif
+
+      - name: Upload SARIF to Code Scanning
+        if: always() && hashFiles('foxguard.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: foxguard.sarif
+
+      - name: Fail on new findings
+        if: steps.scan.outcome == 'failure'
+        run: |
+          echo "foxguard found new security issues (not suppressed by baseline)." >&2
+          echo "Either fix the issue, or verify it's a false positive and add it to" >&2
+          echo ".foxguard/baseline.json with a corresponding entry in" >&2
+          echo ".foxguard/justifications.md. See CLAUDE.md § Foxguard protocol." >&2
+          exit 1
