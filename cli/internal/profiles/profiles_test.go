@@ -158,6 +158,12 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 	var mergePR workflowpkg.Workflow
 	require.NoError(t, yaml.Unmarshal(composed.Workflows["merge-pr"], &mergePR))
 	assert.Equal(t, policy.Ops, mergePR.Class)
+	require.GreaterOrEqual(t, len(mergePR.Phases), 1, "merge-pr must have at least 1 phase")
+	assert.Equal(t, "check", mergePR.Phases[0].Name)
+	assert.NotContains(t, mergePR.Phases[0].Run, "--json reviewDecision,reviewThreads",
+		"check phase must not use gh pr view --json reviewThreads (GraphQL-only field)")
+	assert.Contains(t, mergePR.Phases[0].Run, "gh api graphql",
+		"check phase must use gh api graphql for reviewThreads")
 	assert.Equal(t, 2, fixBug.Phases[2].Evaluator.MaxIterations)
 	assert.Equal(t, 40, fixBug.Phases[0].MaxTurns, "fix-bug analyze max_turns")
 	assert.Equal(t, 40, fixBug.Phases[1].MaxTurns, "fix-bug plan max_turns")

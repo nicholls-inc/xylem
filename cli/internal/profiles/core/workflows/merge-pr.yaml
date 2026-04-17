@@ -39,13 +39,24 @@ phases:
       fi
 
       # 3. Review: no CHANGES_REQUESTED decision, all review threads resolved.
-      REVIEW=$(gh pr view "$PR" --repo "$REPO" --json reviewDecision,reviewThreads)
-      DECISION=$(echo "$REVIEW" | jq -r '.reviewDecision')
+      #    reviewThreads is GraphQL-only (not available via gh pr view --json REST).
+      OWNER="${REPO%%/*}"
+      NAME="${REPO##*/}"
+      REVIEW=$(gh api graphql -F owner="$OWNER" -F name="$NAME" -F pr="$PR" -f query='
+        query($owner: String!, $name: String!, $pr: Int!) {
+          repository(owner: $owner, name: $name) {
+            pullRequest(number: $pr) {
+              reviewDecision
+              reviewThreads(first: 100) { nodes { isResolved } }
+            }
+          }
+        }')
+      DECISION=$(echo "$REVIEW" | jq -r '.data.repository.pullRequest.reviewDecision')
       if [ "$DECISION" = "CHANGES_REQUESTED" ]; then
         echo "XYLEM_NOOP: reviewDecision=CHANGES_REQUESTED"
         exit 0
       fi
-      UNRESOLVED=$(echo "$REVIEW" | jq '[.reviewThreads[] | select(.isResolved == false)] | length')
+      UNRESOLVED=$(echo "$REVIEW" | jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
       if [ "$UNRESOLVED" -gt 0 ]; then
         echo "XYLEM_NOOP: $UNRESOLVED unresolved review thread(s)"
         exit 0
