@@ -268,7 +268,6 @@ func TestPropQueueInvariant_I1a_EnqueueActiveRefIsNoop(t *testing.T) {
 
 // Invariant I2: Terminal records are immutable in place (except failed→pending retry).
 func TestPropQueueInvariant_I2_TerminalImmutability(t *testing.T) {
-	t.Skip("known violation: row I2 in docs/invariants/queue.md gap analysis; UpdateVessel skips transition validation when State unchanged, so terminal vessels can have Error/PhaseOutputs/etc. mutated freely. Remove this Skip when the UpdateVessel guard lands.")
 	rapid.Check(t, func(t *rapid.T) {
 		q, _, cleanup := newPropQueueWithDir(t, "queue-i2-prop")
 		defer cleanup()

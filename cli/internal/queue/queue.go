@@ -73,9 +73,71 @@ var ErrInvalidTransition = errors.New("invalid state transition")
 // must supply unique IDs. Distinct from Ref collision, which is a silent no-op.
 var ErrDuplicateID = errors.New("duplicate vessel ID")
 
+// ErrTerminalImmutable is returned when a caller attempts to mutate a protected
+// field on a sealed terminal vessel (completed, cancelled, timed_out). See
+// docs/invariants/queue.md invariant I2.
+var ErrTerminalImmutable = errors.New("terminal vessel is immutable")
+
 // IsTerminal reports whether s is a terminal vessel state.
 func (s VesselState) IsTerminal() bool {
 	return s == StateCompleted || s == StateFailed || s == StateCancelled || s == StateTimedOut
+}
+
+// isSealedTerminal reports whether s is a terminal state with no legal
+// outgoing transitions (i.e. excluding StateFailed, which permits retry via
+// failed→pending; governed by I3).
+func isSealedTerminal(s VesselState) bool {
+	return s == StateCompleted || s == StateCancelled || s == StateTimedOut
+}
+
+// protectedFieldsEqual returns true when the 19 I2-protected fields on a and b
+// are equal. Meta is intentionally excluded — runner recovery-metadata paths
+// legitimately mutate Meta on terminal vessels. Kept as explicit field-by-field
+// comparison (not reflection) so adding a new protected field is a compile-time
+// decision.
+func protectedFieldsEqual(a, b Vessel) bool {
+	if a.State != b.State ||
+		a.Ref != b.Ref ||
+		a.Source != b.Source ||
+		a.Workflow != b.Workflow ||
+		a.WorkflowDigest != b.WorkflowDigest ||
+		a.WorkflowClass != b.WorkflowClass ||
+		a.Tier != b.Tier ||
+		a.RetryOf != b.RetryOf ||
+		a.Error != b.Error ||
+		a.CurrentPhase != b.CurrentPhase ||
+		a.GateRetries != b.GateRetries ||
+		a.WaitingFor != b.WaitingFor ||
+		a.WorktreePath != b.WorktreePath ||
+		a.FailedPhase != b.FailedPhase ||
+		a.GateOutput != b.GateOutput {
+		return false
+	}
+	if !timePtrEqual(a.StartedAt, b.StartedAt) ||
+		!timePtrEqual(a.EndedAt, b.EndedAt) ||
+		!timePtrEqual(a.WaitingSince, b.WaitingSince) {
+		return false
+	}
+	return stringMapEqual(a.PhaseOutputs, b.PhaseOutputs)
+}
+
+func timePtrEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 type Vessel struct {
@@ -407,6 +469,8 @@ func (q *Queue) UpdateVessel(vessel Vessel) error {
 				if !allowed[vessel.State] {
 					return fmt.Errorf("%w: cannot move vessel %s from %s to %s", ErrInvalidTransition, vessel.ID, previous.State, vessel.State)
 				}
+			} else if isSealedTerminal(previous.State) && !protectedFieldsEqual(previous, vessel) {
+				return fmt.Errorf("%w: cannot mutate protected fields on terminal vessel %s", ErrTerminalImmutable, vessel.ID)
 			}
 			vessels[i] = vessel
 			if err := q.writeAllVessels(vessels); err != nil {
