@@ -380,6 +380,7 @@ validation:
   build: "(cd cli && go build ./cmd/xylem)"
   test: "(cd cli && go test ./...)"
 
+concurrency: 3
 max_turns: 100
 timeout: "45m"
 state_dir: ".xylem"
