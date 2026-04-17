@@ -127,3 +127,11 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `continuous-simplicity` work with phase `plan_prs` still failing due to `exit status`. <!-- xylem-lesson:lesson-bbf14729358f -->
+- Rationale: This failure pattern recurred in 3 failed vessels for `continuous-simplicity` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `scheduled-continuous-simplicity-weekly-continuous-simplicity-20555` (2026-04-12T23:56:51Z) — `phases/scheduled-continuous-simplicity-weekly-continuous-simplicity-20555/plan_prs.output`
+  - `scheduled-continuous-simplicity-weekly-continuous-simplicity-20556` (2026-04-13T00:15:11Z) — `phases/scheduled-continuous-simplicity-weekly-continuous-simplicity-20556/plan_prs.output`
+  - `scheduled-continuous-simplicity-weekly-continuous-simplicity-20557` (2026-04-14T00:19:10Z) — `phases/scheduled-continuous-simplicity-weekly-continuous-simplicity-20557/plan_prs.output`
