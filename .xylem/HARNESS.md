@@ -127,3 +127,10 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `ci-watchdog` work with phase `file_issue` still failing due to `exit status`. <!-- xylem-lesson:lesson-7176f2fbfc77 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `ci-watchdog` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `scheduled-ci-watchdog-monitor-main-ci-986845` (2026-04-16T06:35:38Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986845/file_issue.output`
+  - `scheduled-ci-watchdog-monitor-main-ci-986846` (2026-04-16T07:05:49Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986846/file_issue.output`
