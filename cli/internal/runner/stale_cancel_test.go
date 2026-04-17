@@ -342,6 +342,136 @@ func TestCheckPRState_RespectsTimeout(t *testing.T) {
 	}
 }
 
+func TestCancelStalePRVessels_CancelsWaitingMerged(t *testing.T) {
+	dir := t.TempDir()
+	qPath := filepath.Join(dir, "queue.jsonl")
+	q := queue.New(qPath)
+
+	v := queue.Vessel{
+		ID:        "merge-pr-60",
+		Source:    "github-pr",
+		Ref:       "https://github.com/owner/repo/pull/60",
+		Workflow:  "merge-pr",
+		State:     queue.StatePending,
+		CreatedAt: time.Now(),
+		Meta:      map[string]string{"pr_num": "60", "config_source": "prs"},
+	}
+	if _, err := q.Enqueue(v); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Update(v.ID, queue.StateRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Update(v.ID, queue.StateWaiting, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, _ := json.Marshal(map[string]string{"state": "MERGED"})
+	mock := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "gh" && len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
+				return resp, nil, true
+			}
+			return nil, nil, false
+		},
+	}
+
+	cfg := &config.Config{
+		Timeout:  "45m",
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"prs": {Type: "github-pr", Repo: "owner/repo"},
+		},
+	}
+
+	r := &Runner{
+		Config: cfg,
+		Queue:  q,
+		Runner: mock,
+		Sources: map[string]source.Source{
+			"github-pr": &source.GitHubPR{Repo: "owner/repo"},
+		},
+	}
+
+	cancelled := r.CancelStalePRVessels(context.Background())
+	if cancelled != 1 {
+		t.Errorf("expected 1 cancelled, got %d", cancelled)
+	}
+
+	vessel, err := q.FindByID("merge-pr-60")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vessel.State != queue.StateCancelled {
+		t.Errorf("expected cancelled, got %s", vessel.State)
+	}
+}
+
+func TestCancelStalePRVessels_KeepsWaitingOpen(t *testing.T) {
+	dir := t.TempDir()
+	qPath := filepath.Join(dir, "queue.jsonl")
+	q := queue.New(qPath)
+
+	v := queue.Vessel{
+		ID:        "merge-pr-61",
+		Source:    "github-pr",
+		Ref:       "https://github.com/owner/repo/pull/61",
+		Workflow:  "merge-pr",
+		State:     queue.StatePending,
+		CreatedAt: time.Now(),
+		Meta:      map[string]string{"pr_num": "61", "config_source": "prs"},
+	}
+	if _, err := q.Enqueue(v); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Update(v.ID, queue.StateRunning, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Update(v.ID, queue.StateWaiting, ""); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, _ := json.Marshal(map[string]string{"state": "OPEN"})
+	mock := &mockCmdRunner{
+		runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+			if name == "gh" {
+				return resp, nil, true
+			}
+			return nil, nil, false
+		},
+	}
+
+	cfg := &config.Config{
+		Timeout:  "45m",
+		StateDir: dir,
+		Sources: map[string]config.SourceConfig{
+			"prs": {Type: "github-pr", Repo: "owner/repo"},
+		},
+	}
+
+	r := &Runner{
+		Config: cfg,
+		Queue:  q,
+		Runner: mock,
+		Sources: map[string]source.Source{
+			"github-pr": &source.GitHubPR{Repo: "owner/repo"},
+		},
+	}
+
+	cancelled := r.CancelStalePRVessels(context.Background())
+	if cancelled != 0 {
+		t.Errorf("expected 0 cancelled, got %d", cancelled)
+	}
+
+	vessel, err := q.FindByID("merge-pr-61")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if vessel.State != queue.StateWaiting {
+		t.Errorf("expected waiting, got %s", vessel.State)
+	}
+}
+
 func TestExtractPRNumber(t *testing.T) {
 	tests := []struct {
 		name     string

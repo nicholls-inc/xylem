@@ -30,12 +30,13 @@ var prSources = map[string]bool{
 	"github-pr-events": true,
 }
 
-// CancelStalePRVessels checks pending vessels that reference pull requests and
-// cancels those whose PRs are already merged or closed. This prevents wasting
-// concurrency slots on work that can never succeed (e.g., merging an already-
-// merged PR, resolving conflicts on a closed PR). Vessels from the
-// github-merge source are excluded because a merged PR is their trigger, not
-// an obsolescence signal.
+// CancelStalePRVessels checks pending and waiting vessels that reference pull
+// requests and cancels those whose PRs are already merged or closed. This
+// prevents wasting concurrency slots on work that can never succeed (e.g.,
+// merging an already-merged PR, resolving conflicts on a closed PR) and
+// releases waiting vessels that are polling for a label on a PR that will
+// never receive it. Vessels from the github-merge source are excluded because
+// a merged PR is their trigger, not an obsolescence signal.
 //
 // Returns the number of vessels cancelled.
 func (r *Runner) CancelStalePRVessels(ctx context.Context) int {
@@ -44,9 +45,18 @@ func (r *Runner) CancelStalePRVessels(ctx context.Context) int {
 		log.Printf("warn: cancel stale PR vessels: list pending: %v", err)
 		return 0
 	}
+	waiting, err := r.Queue.ListByState(queue.StateWaiting)
+	if err != nil {
+		log.Printf("warn: cancel stale PR vessels: list waiting: %v", err)
+		return 0
+	}
+
+	candidates := make([]queue.Vessel, 0, len(pending)+len(waiting))
+	candidates = append(candidates, pending...)
+	candidates = append(candidates, waiting...)
 
 	cancelled := 0
-	for _, vessel := range pending {
+	for _, vessel := range candidates {
 		if !prSources[vessel.Source] {
 			continue
 		}
