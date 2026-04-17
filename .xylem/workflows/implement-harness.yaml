@@ -29,7 +29,7 @@ phases:
   - name: test_critic
     prompt_file: .xylem/prompts/implement-harness/test_critic.md
     max_turns: 50
-    tier: med
+    tier: high
     gate:
       type: command
       run: "cd cli && go test ./..."
