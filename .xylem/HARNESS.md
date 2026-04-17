@@ -127,3 +127,13 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `backlog-refinement` work with phase `analyze` still failing due to `exit status`. <!-- xylem-lesson:lesson-68700f9470ba -->
+- Rationale: This failure pattern recurred in 5 failed vessels for `backlog-refinement` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `scheduled-backlog-refinement-daily-backlog-refinement-246685` (2026-04-14T02:00:43Z) — `phases/scheduled-backlog-refinement-daily-backlog-refinement-246685/analyze.output`
+  - `scheduled-backlog-refinement-daily-backlog-refinement-246686` (2026-04-14T04:01:09Z) — `phases/scheduled-backlog-refinement-daily-backlog-refinement-246686/analyze.output`
+  - `scheduled-backlog-refinement-daily-backlog-refinement-246687` (2026-04-14T06:01:04Z) — `phases/scheduled-backlog-refinement-daily-backlog-refinement-246687/analyze.output`
+  - `scheduled-backlog-refinement-daily-backlog-refinement-246688` (2026-04-14T08:01:20Z) — `phases/scheduled-backlog-refinement-daily-backlog-refinement-246688/analyze.output`
+  - `scheduled-backlog-refinement-daily-backlog-refinement-246689` (2026-04-14T10:00:26Z) — `phases/scheduled-backlog-refinement-daily-backlog-refinement-246689/analyze.output`
