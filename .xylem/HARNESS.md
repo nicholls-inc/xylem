@@ -127,3 +127,11 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `merge-pr` work with phase `check` still failing due to `exit status`. <!-- xylem-lesson:lesson-f5b46e77caef -->
+- Rationale: This failure pattern recurred in 3 failed vessels for `merge-pr` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `pr-485-merge-pr` (2026-04-14T00:40:22Z) — `phases/pr-485-merge-pr/check.output`
+  - `pr-486-merge-pr` (2026-04-14T00:40:22Z) — `phases/pr-486-merge-pr/check.output`
+  - `pr-567-merge-pr-retry-2` (2026-04-16T19:44:21Z) — `phases/pr-567-merge-pr-retry-2/check.output`
