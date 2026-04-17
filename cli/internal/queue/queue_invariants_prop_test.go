@@ -552,7 +552,6 @@ func TestPropQueueInvariant_I8_FileWellFormedness(t *testing.T) {
 
 // Invariant I9: Unique vessel IDs.
 func TestPropQueueInvariant_I9_UniqueIDs(t *testing.T) {
-	t.Skip("known violation: row I9 in docs/invariants/queue.md gap analysis; Enqueue checks only Ref, not ID, so two vessels can share an ID. Remove this Skip when Enqueue rejects duplicate IDs.")
 	rapid.Check(t, func(t *rapid.T) {
 		q, _, cleanup := newPropQueueWithDir(t, "queue-i9-prop")
 		defer cleanup()
