@@ -127,3 +127,19 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `implement-harness` work with phase `analyze` still failing due to `chdir xylem worktrees feat issue no such file or directory`. <!-- xylem-lesson:lesson-1613f79bc68f -->
+- Rationale: This failure pattern recurred in 3 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: chdir .xylem/worktrees/feat/issue-518-518: no such file or directory
+- Evidence:
+  - `issue-518` (2026-04-15T03:28:13Z) — `phases/issue-518/analyze.output`
+  - `issue-541` (2026-04-15T07:55:15Z) — `phases/issue-541/analyze.output`
+  - `issue-541-retry-1` (2026-04-15T08:23:04Z) — `phases/issue-541-retry-1/analyze.output`
+
+
+### Do not finish `implement-harness` work with phase `analyze` still failing due to `exit status`. <!-- xylem-lesson:lesson-a69b5fb61d9b -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `issue-383-retry-1-retry-1-retry-1-retry-1-retry-1-retry-1` (2026-04-12T17:55:34Z) — `phases/issue-383-retry-1-retry-1-retry-1-retry-1-retry-1-retry-1/analyze.output`
+  - `issue-509` (2026-04-15T04:23:25Z) — `phases/issue-509/analyze.output`
