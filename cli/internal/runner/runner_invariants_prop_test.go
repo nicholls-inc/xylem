@@ -626,17 +626,10 @@ func TestInvariant_I12_StaleCancelSatisfiesPostConditions(t *testing.T) {
 
 // Invariant I13: NoDuplicateDiscussionPublicationsPerEvent
 func TestInvariant_I13_NoDuplicateDiscussionPublicationsPerEvent(t *testing.T) {
-	t.Skip("aspirational: discussion dedupe currently keyed on title prefix (discussion.go:97); target is triple-keyed (vessel_id, phase_id, event_kind) — see docs/invariants/runner.md I13 gap row; remove skip after I13 triple-keyed fix merges")
-
-	// When unblocked: drive a phase that publishes via publishPhaseOutput multiple
-	// times (gate retries, daemon-restart rehydration) with title-render variability
-	// injected across retries.  Collect all FindExisting/Create/Comment calls via an
-	// injected discussion hook.  Assert for every distinct (vessel.ID, phase.Name,
-	// phase.Output) triple, publication count ≤ 1.
-	//
-	// Proxy assertion testable once the discussionSeen sync.Map fix lands:
-	// calling publishPhaseOutput twice with the same triple must return nil on the
+	// Proxy assertion: calling publishPhaseOutput twice with the same
+	// (vessel.ID, phase.Name, phase.Output) triple must return nil on the
 	// second call without triggering any gh-api call.
+	// The discussionSeen sync.Map guard (PR#636) makes this deterministic.
 }
 
 // ---------------------------------------------------------------------------
