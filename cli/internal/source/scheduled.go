@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -64,6 +65,7 @@ func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
 	sort.Strings(taskNames)
 
 	scope := s.scope()
+	inFlightTasks := s.inFlightTasksByName()
 	vessels := make([]queue.Vessel, 0, len(taskNames))
 	for _, taskName := range taskNames {
 		if state.LastEnqueuedBuckets[taskName] >= bucket {
@@ -72,6 +74,11 @@ func (s *Scheduled) Scan(_ context.Context) ([]queue.Vessel, error) {
 		task := s.Tasks[taskName]
 		ref := fmt.Sprintf("scheduled://%s/%s@%d", scope, taskName, bucket)
 		if s.Queue != nil && s.Queue.HasRefAny(ref) {
+			continue
+		}
+		if blockingID := inFlightTasks[taskName]; blockingID != "" {
+			log.Printf("scheduled source %q: skipping task %q bucket %d — prior vessel %s still in flight",
+				s.ConfigName, taskName, bucket, blockingID)
 			continue
 		}
 
@@ -146,6 +153,41 @@ func (s *Scheduled) BranchName(vessel queue.Vessel) string {
 		taskName = "task"
 	}
 	return fmt.Sprintf("scheduled/%s-%s", taskName, sanitizeScheduledComponent(vessel.ID))
+}
+
+func (s *Scheduled) inFlightTasksByName() map[string]string {
+	result := map[string]string{}
+	if s.Queue == nil {
+		return result
+	}
+	vessels, err := s.Queue.List()
+	if err != nil {
+		log.Printf("scheduled source %q: list queue for in-flight guard: %v", s.ConfigName, err)
+		return result
+	}
+	for _, v := range vessels {
+		if v.Source != s.Name() {
+			continue
+		}
+		if v.State.IsTerminal() {
+			continue
+		}
+		if v.Meta["scheduled_config_name"] != s.ConfigName {
+			continue
+		}
+		if v.Meta["scheduled_repo"] != s.Repo {
+			continue
+		}
+		taskName := v.Meta["scheduled_task_name"]
+		if taskName == "" {
+			continue
+		}
+		if _, seen := result[taskName]; seen {
+			continue
+		}
+		result[taskName] = v.ID
+	}
+	return result
 }
 
 func parseSchedule(value string) (time.Duration, error) {

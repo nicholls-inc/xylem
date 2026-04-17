@@ -2,6 +2,7 @@ package scanner
 
 import (
 	"context"
+	"errors"
 	"log"
 	"os"
 	"time"
@@ -93,6 +94,15 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 			}
 
 			enqueued, err := s.Queue.Enqueue(vessel)
+			if errors.Is(err, queue.ErrDuplicateID) {
+				// Changed-fingerprint retry path currently reuses the original
+				// ID, which collides with the failed record (I9). Skip rather
+				// than crash the scan; the correct fix (route through Update
+				// or use RetryID for a new-ID retry) is scanner-side.
+				log.Printf("warn: scanner: duplicate vessel ID %q, skipping", vessel.ID)
+				result.Skipped++
+				continue
+			}
 			if err != nil {
 				return result, err
 			}

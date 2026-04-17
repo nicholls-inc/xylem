@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -14,6 +15,14 @@ import (
 	"github.com/gofrs/flock"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
 )
+
+// writeInterrupt is a test-only hook. When non-nil it is invoked at enumerated
+// stages during writeAllVessels so property tests can simulate SIGKILL by
+// panicking. It is always nil in production builds; the production call sites
+// collapse to a single pointer comparison. See invariant I5b in
+// docs/invariants/queue.md and the crash-durability harness in
+// queue_invariants_prop_test.go.
+var writeInterrupt func(stage string)
 
 type VesselState string
 
@@ -59,9 +68,76 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 // ErrInvalidTransition is returned when a state transition is not allowed.
 var ErrInvalidTransition = errors.New("invalid state transition")
 
+// ErrDuplicateID is returned by Enqueue when the vessel's ID collides with any
+// existing vessel in the queue. ID is the primary key (invariant I9); callers
+// must supply unique IDs. Distinct from Ref collision, which is a silent no-op.
+var ErrDuplicateID = errors.New("duplicate vessel ID")
+
+// ErrTerminalImmutable is returned when a caller attempts to mutate a protected
+// field on a sealed terminal vessel (completed, cancelled, timed_out). See
+// docs/invariants/queue.md invariant I2.
+var ErrTerminalImmutable = errors.New("terminal vessel is immutable")
+
 // IsTerminal reports whether s is a terminal vessel state.
 func (s VesselState) IsTerminal() bool {
 	return s == StateCompleted || s == StateFailed || s == StateCancelled || s == StateTimedOut
+}
+
+// isSealedTerminal reports whether s is a terminal state with no legal
+// outgoing transitions (i.e. excluding StateFailed, which permits retry via
+// failed→pending; governed by I3).
+func isSealedTerminal(s VesselState) bool {
+	return s == StateCompleted || s == StateCancelled || s == StateTimedOut
+}
+
+// protectedFieldsEqual returns true when the 19 I2-protected fields on a and b
+// are equal. Meta is intentionally excluded — runner recovery-metadata paths
+// legitimately mutate Meta on terminal vessels. Kept as explicit field-by-field
+// comparison (not reflection) so adding a new protected field is a compile-time
+// decision.
+func protectedFieldsEqual(a, b Vessel) bool {
+	if a.State != b.State ||
+		a.Ref != b.Ref ||
+		a.Source != b.Source ||
+		a.Workflow != b.Workflow ||
+		a.WorkflowDigest != b.WorkflowDigest ||
+		a.WorkflowClass != b.WorkflowClass ||
+		a.Tier != b.Tier ||
+		a.RetryOf != b.RetryOf ||
+		a.Error != b.Error ||
+		a.CurrentPhase != b.CurrentPhase ||
+		a.GateRetries != b.GateRetries ||
+		a.WaitingFor != b.WaitingFor ||
+		a.WorktreePath != b.WorktreePath ||
+		a.FailedPhase != b.FailedPhase ||
+		a.GateOutput != b.GateOutput {
+		return false
+	}
+	if !timePtrEqual(a.StartedAt, b.StartedAt) ||
+		!timePtrEqual(a.EndedAt, b.EndedAt) ||
+		!timePtrEqual(a.WaitingSince, b.WaitingSince) {
+		return false
+	}
+	return stringMapEqual(a.PhaseOutputs, b.PhaseOutputs)
+}
+
+func timePtrEqual(a, b *time.Time) bool {
+	if a == nil || b == nil {
+		return a == b
+	}
+	return a.Equal(*b)
+}
+
+func stringMapEqual(a, b map[string]string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if bv, ok := b[k]; !ok || bv != v {
+			return false
+		}
+	}
+	return true
 }
 
 type Vessel struct {
@@ -141,6 +217,12 @@ func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 						return nil // already active, skip silently
 					}
 				}
+			}
+		}
+
+		for _, v := range vessels {
+			if v.ID == vessel.ID {
+				return ErrDuplicateID
 			}
 		}
 
@@ -274,8 +356,17 @@ func resetPendingState(vessel *Vessel, previousState VesselState) {
 	vessel.WaitingFor = ""
 	vessel.FailedPhase = ""
 	vessel.GateOutput = ""
-	if previousState == StateRunning {
+	switch previousState {
+	case StateFailed, StateRunning:
+		// Retry (failed→pending) and orphan reconcile (running→pending) must
+		// restart the workflow from phase 0 with no inherited worktree.
+		// Partial resumes caused the loop-202 chdir cascade.
+		vessel.CurrentPhase = 0
+		vessel.PhaseOutputs = nil
 		vessel.WorktreePath = ""
+	case StateWaiting:
+		// Label-gate resume keeps CurrentPhase, PhaseOutputs, WorktreePath —
+		// same workflow instance continues after the label appears.
 	}
 }
 
@@ -378,6 +469,8 @@ func (q *Queue) UpdateVessel(vessel Vessel) error {
 				if !allowed[vessel.State] {
 					return fmt.Errorf("%w: cannot move vessel %s from %s to %s", ErrInvalidTransition, vessel.ID, previous.State, vessel.State)
 				}
+			} else if isSealedTerminal(previous.State) && !protectedFieldsEqual(previous, vessel) {
+				return fmt.Errorf("%w: cannot mutate protected fields on terminal vessel %s", ErrTerminalImmutable, vessel.ID)
 			}
 			vessels[i] = vessel
 			if err := q.writeAllVessels(vessels); err != nil {
@@ -694,8 +787,70 @@ func (q *Queue) writeAllVessels(vessels []Vessel) error {
 	if content != "" {
 		content += "\n"
 	}
+	payload := []byte(content)
 
-	return os.WriteFile(q.path, []byte(content), 0o644)
+	if writeInterrupt != nil {
+		writeInterrupt("before-tmp")
+	}
+
+	dir := filepath.Dir(q.path)
+	tmp, err := os.CreateTemp(dir, ".queue-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	// Clean up the tmpfile on any error path OR panic. Once the rename
+	// succeeds we clear tmpPath so this defer becomes a no-op and the real
+	// queue file is preserved.
+	defer func() {
+		if tmpPath != "" {
+			_ = os.Remove(tmpPath)
+		}
+	}()
+
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if writeInterrupt != nil {
+		writeInterrupt("after-tmp-write")
+	}
+
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+
+	if writeInterrupt != nil {
+		writeInterrupt("after-tmp-fsync")
+	}
+
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	if err := os.Rename(tmpPath, q.path); err != nil {
+		return err
+	}
+	// Rename succeeded: the tmpfile is now the real queue file. Clear
+	// tmpPath so the deferred cleanup does not delete it.
+	tmpPath = ""
+
+	if writeInterrupt != nil {
+		writeInterrupt("after-rename")
+	}
+
+	// fsync the containing directory so the rename is durable across power
+	// loss on ext4/xfs. Failure here is not fatal to the logical write
+	// (the rename has already taken effect in the kernel's page cache),
+	// but we surface it so the caller can choose whether to retry.
+	d, err := os.Open(dir)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	return d.Sync()
 }
 
 func recordRuntimeVesselEvent(operation dtu.VesselOperation, previous, current *Vessel) error {

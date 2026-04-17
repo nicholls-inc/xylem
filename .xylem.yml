@@ -1,7 +1,360 @@
 # xylem configuration
 # Docs: https://github.com/nicholls-inc/claude-code-marketplace/tree/main/xylem
+#
+# EMERGENCY: sources block materialized from profiles to work around #555
+# (profile overlay not expanded to runtime config). Remove this block once
+# #555 lands and the daemon expands profiles at startup.
 
 profiles: [core, self-hosting-xylem]
+
+# --- Sources from core profile ---
+sources:
+  # harness-impl bugs route to implement-harness (correct gates: cd cli && go test)
+  # instead of fix-bug (broken: make test). See #562.
+  harness-impl-bugs:
+    type: github
+    repo: "nicholls-inc/xylem"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      fix:
+        labels: [bug, ready-for-work, harness-impl]
+        workflow: implement-harness
+        tier: med
+  harness-impl-features:
+    type: github
+    repo: "nicholls-inc/xylem"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      implement:
+        labels: [enhancement, ready-for-work, harness-impl]
+        workflow: implement-harness
+        tier: med
+  bugs:
+    type: github
+    repo: "nicholls-inc/xylem"
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
+    tasks:
+      fix:
+        labels: [bug, ready-for-work]
+        workflow: fix-bug
+        tier: med
+  adaptation:
+    type: github
+    repo: "nicholls-inc/xylem"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      adapt:
+        labels: [xylem-adapt-repo]
+        workflow: adapt-repo
+        tier: med
+  features:
+    type: github
+    repo: "nicholls-inc/xylem"
+    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
+    tasks:
+      implement:
+        labels: [enhancement, ready-for-work]
+        workflow: implement-feature
+        tier: med
+  triage:
+    type: github
+    repo: "nicholls-inc/xylem"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      issues:
+        labels: [needs-triage]
+        workflow: triage
+        tier: high
+  refinement:
+    type: github
+    repo: "nicholls-inc/xylem"
+    exclude: [wontfix, duplicate, in-progress, no-bot]
+    tasks:
+      issues:
+        labels: [needs-refinement]
+        workflow: refine-issue
+        tier: high
+  pr-lifecycle:
+    type: github-pr-events
+    repo: "nicholls-inc/xylem"
+    exclude: [no-bot]
+    tasks:
+      review-opened:
+        workflow: review-pr
+        tier: high
+        on:
+          pr_opened: true
+      review-updated:
+        workflow: review-pr
+        tier: high
+        on:
+          pr_head_updated: true
+      respond-to-review:
+        workflow: respond-to-pr-review
+        tier: high
+        on:
+          review_submitted: true
+          author_deny:
+            - "github-actions[bot]"
+      fix-checks:
+        workflow: fix-pr-checks
+        tier: med
+        on:
+          checks_failed: true
+  merges:
+    type: github-pr
+    repo: "nicholls-inc/xylem"
+    exclude: [no-bot]
+    tasks:
+      ready:
+        labels: [ready-to-merge]
+        workflow: merge-pr
+        tier: low
+  conflicts:
+    type: github-pr
+    repo: "nicholls-inc/xylem"
+    exclude: [no-bot]
+    tasks:
+      resolve:
+        labels: [needs-conflict-resolution]
+        workflow: resolve-conflicts
+        tier: med
+  # Core scheduled sources
+  lessons-hygiene:
+    type: schedule
+    cadence: "@daily"
+    workflow: lessons
+  doc-gardener:
+    type: schedule
+    cadence: "@daily"
+    workflow: doc-garden
+  context-audit:
+    type: schedule
+    cadence: "@weekly"
+    workflow: context-weight-audit
+  security-compliance:
+    type: schedule
+    cadence: "@daily"
+    workflow: security-compliance
+  workflow-health:
+    type: schedule
+    cadence: "@weekly"
+    workflow: workflow-health-report
+  field-report:
+    type: schedule
+    cadence: "@weekly"
+    workflow: field-report
+  lean-squad-tick:
+    type: schedule
+    cadence: "8h"
+    workflow: lean-squad
+
+  # --- Sources from self-hosting-xylem overlay ---
+  pr-self-review:
+    type: github-pr
+    repo: "nicholls-inc/xylem"
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      self-review:
+        labels: [ready-to-merge]
+        workflow: pr-self-review
+        tier: high
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+  harness-pr-lifecycle:
+    type: github-pr-events
+    repo: "nicholls-inc/xylem"
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      respond-reviews:
+        workflow: respond-to-pr-review
+        tier: high
+        on:
+          review_submitted: true
+          author_allow:
+            - "copilot-pull-request-reviewer[bot]"
+      fix-checks:
+        workflow: fix-pr-checks
+        tier: med
+        on:
+          checks_failed: true
+  harness-merge:
+    type: github-pr
+    repo: "nicholls-inc/xylem"
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      merge-ready:
+        labels: [ready-to-merge]
+        workflow: merge-pr
+        tier: low
+        status_labels:
+          running: pr-vessel-active
+          completed: pr-vessel-merged
+          failed: xylem-failed
+  conflict-resolution:
+    type: github-pr
+    repo: "nicholls-inc/xylem"
+    exclude: [no-bot, pr-vessel-active]
+    tasks:
+      resolve-conflicts:
+        labels: [needs-conflict-resolution]
+        workflow: resolve-conflicts
+        tier: med
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+  harness-post-merge:
+    type: github-merge
+    repo: "nicholls-inc/xylem"
+    tasks:
+      unblock-deps:
+        workflow: unblock-wave
+        tier: low
+  # Self-hosting scheduled sources
+  sota-gap:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-self-gap-analysis:
+        workflow: sota-gap-analysis
+        ref: sota-gap-analysis
+        tier: high
+  hardening-audit:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@monthly"
+    timeout: "90m"
+    tasks:
+      monthly-hardening-audit:
+        workflow: hardening-audit
+        ref: hardening-audit
+        tier: high
+  continuous-simplicity:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-continuous-simplicity:
+        workflow: continuous-simplicity
+        ref: continuous-simplicity
+        tier: med
+  continuous-improvement:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@daily"
+    timeout: "90m"
+    tasks:
+      daily-rotation:
+        workflow: continuous-improvement
+        ref: continuous-improvement
+        tier: high
+  release-cadence:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "4h"
+    timeout: "15m"
+    tasks:
+      label-mature-release-pr:
+        workflow: release-cadence
+        ref: release-cadence
+        tier: low
+  metrics-collector:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@daily"
+    timeout: "60m"
+    tasks:
+      daily-metrics:
+        workflow: metrics-collector
+        ref: metrics-collector
+        tier: low
+  portfolio-analyst:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@weekly"
+    timeout: "60m"
+    tasks:
+      weekly-portfolio:
+        workflow: portfolio-analyst
+        ref: portfolio-analyst
+        tier: high
+  audit:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@daily"
+    timeout: "60m"
+    tasks:
+      daily-audit:
+        workflow: audit
+        ref: audit
+        tier: high
+  initiative-tracker:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@weekly"
+    timeout: "60m"
+    tasks:
+      weekly-initiative-status:
+        workflow: initiative-tracker
+        ref: initiative-tracker
+        tier: high
+  backlog-refinement:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@daily"
+    timeout: "60m"
+    tasks:
+      daily-backlog-refinement:
+        workflow: backlog-refinement
+        ref: backlog-refinement
+        tier: high
+  ingest-field-reports:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@weekly"
+    timeout: "60m"
+    tasks:
+      weekly-field-ingest:
+        workflow: ingest-field-reports
+        ref: ingest-field-reports
+        tier: low
+  diagnose-failures:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "2h"
+    timeout: "45m"
+    tasks:
+      hourly-diagnose-failures:
+        workflow: diagnose-failures
+        ref: diagnose-failures
+        tier: high
+  autonomy-review:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "@weekly"
+    timeout: "90m"
+    tasks:
+      weekly-autonomy-review:
+        workflow: autonomy-review
+        ref: autonomy-review
+        tier: high
+  ci-watchdog:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "30m"
+    timeout: "30m"
+    tasks:
+      monitor-main-ci:
+        workflow: ci-watchdog
+        ref: ci-watchdog
+        tier: low
+
+daemon:
+  auto_upgrade: true
 
 notifications:
   github_discussion:
@@ -27,28 +380,54 @@ validation:
   build: "(cd cli && go build ./cmd/xylem)"
   test: "(cd cli && go test ./...)"
 
+concurrency: 3
 max_turns: 100
 timeout: "45m"
 state_dir: ".xylem"
 
-# llm selects the global default LLM provider: "claude" (default) or "copilot"
-llm: claude
-model: claude-sonnet-4-6
+# Tiered LLM routing — Opus for analysis/planning, free Copilot for execution.
+#
+# Tiers:
+#   high  → claude-opus-4-6  (Max subscription) — analysis, planning, review, diagnosis
+#   med   → copilot gpt-4.1  (0x premium, free) — implementation, fix-checks, conflict resolution
+#   low   → copilot gpt-5-mini (0x premium, free) — merges, metrics, label tasks, mechanical ops
+#
+# Copilot model multipliers (paid plan): gpt-4o=0x, gpt-4.1=0x, gpt-5-mini=0x, gpt-5.4=1x
+# Source: https://docs.github.com/en/copilot/reference/ai-models/supported-models
+#
+# NOTE: sources using simple 'type: schedule' (no tasks block) inherit default_tier (high)
+# because SourceConfig has no tier field. This is correct — those are all analytical workflows
+# (field-report, doc-garden, context-audit, etc). Convert to 'type: scheduled' with an explicit
+# task block if a schedule source needs a different tier.
+providers:
+  claude:
+    kind: claude
+    command: "claude"
+    flags: "--dangerously-skip-permissions"
+    env:
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
+    tiers:
+      low: "claude-sonnet-4-6"   # unused — low routes to copilot
+      med: "claude-sonnet-4-6"   # unused — med routes to copilot
+      high: "claude-opus-4-6"     # active: analysis, planning, review tasks
 
-claude:
-  command: "claude"
-  flags: "--dangerously-skip-permissions"
-  default_model: "claude-sonnet-4-6"
-  env:
-    ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
-  # allowed_tools:
-  #   - "Bash(gh issue view *)"
-  #   - "Bash(gh pr create *)"
-  #   - "WebFetch"
+  copilot:
+    kind: copilot
+    command: "copilot"
+    flags: "--yolo --autopilot --effort medium"
+    env:
+      COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
+    tiers:
+      low: "gpt-5-mini"   # active: light structured tasks (0x premium)
+      med: "gpt-4.1"      # active: moderate analysis (0x premium, free)
+      high: "gpt-4.1"     # unused — high routes to claude
 
-copilot:
-  command: "copilot"
-  flags: "--yolo --autopilot --effort medium"
-  default_model: "gpt-5.4"
-  env:
-    COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
+llm_routing:
+  default_tier: high
+  tiers:
+    low:
+      providers: [copilot]
+    med:
+      providers: [copilot]
+    high:
+      providers: [claude]

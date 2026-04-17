@@ -1,0 +1,60 @@
+name: lean-squad-focus
+description: "Parse a lean-squad-focus issue body and enqueue the requested Lean Squad task vessels"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-focus/analyze.md
+    max_turns: 40
+    allowed_tools: Read
+    noop:
+      match: XYLEM_NOOP
+  - name: dispatch
+    type: command
+    run: |
+      set -eu
+      OUT=".xylem/phases/{{.Vessel.ID}}/analyze.output"
+      test -s "$OUT"
+
+      TMPDIR_LS="${TMPDIR:-/tmp}"
+      PLANS_FILE="$TMPDIR_LS/lean-squad-focus-plans.$$"
+      UNKNOWNS_FILE="$TMPDIR_LS/lean-squad-focus-unknowns.$$"
+      trap 'rm -f "$PLANS_FILE" "$UNKNOWNS_FILE"' EXIT
+
+      grep -E '^[[:space:]]*PLAN:[[:space:]]+task=' "$OUT" 2>/dev/null | head -n 4 > "$PLANS_FILE" || true
+      grep -E '^[[:space:]]*UNKNOWN:' "$OUT" 2>/dev/null > "$UNKNOWNS_FILE" || true
+
+      TS=$(date +%s)
+      DISPATCHED=0
+      DISPATCHED_LINES=""
+
+      while IFS= read -r line; do
+        [ -z "$line" ] && continue
+        TASK=$(printf '%s' "$line" | sed -n 's/.*task=\([A-Za-z0-9_-]\{1,\}\).*/\1/p')
+        TARGET=$(printf '%s' "$line" | sed -n 's/.*target=\([A-Za-z0-9_./-]\{1,\}\).*/\1/p')
+        [ -z "$TASK" ] && continue
+        [ -z "$TARGET" ] && continue
+        SLUG=$(printf '%s' "$TARGET" | tr '/.' '--')
+        VID="lean-squad-${TASK}-${SLUG}-focus-${TS}-${DISPATCHED}"
+        xylem enqueue \
+          --workflow "lean-squad-${TASK}" \
+          --ref "lean-squad://${TARGET}" \
+          --id "$VID"
+        DISPATCHED=$((DISPATCHED + 1))
+        DISPATCHED_LINES="${DISPATCHED_LINES}- \`${TASK}\` on \`${TARGET}\` (vessel \`${VID}\`)
+      "
+      done < "$PLANS_FILE"
+
+      {
+        printf ':microscope: Lean Squad focus dispatched: %d vessel(s) queued.\n' "$DISPATCHED"
+        if [ -n "$DISPATCHED_LINES" ]; then
+          printf '\n%s' "$DISPATCHED_LINES"
+        fi
+        if [ -s "$UNKNOWNS_FILE" ]; then
+          printf '\nUnrecognised requests (ignored):\n```\n'
+          cat "$UNKNOWNS_FILE"
+          printf '```\n'
+        fi
+      } | gh issue comment {{.Issue.Number}} --body-file -
+
+      gh issue edit {{.Issue.Number}} --remove-label lean-squad-focus
+
+      echo "DISPATCHED: ${DISPATCHED}"

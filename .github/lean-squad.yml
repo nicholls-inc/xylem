@@ -1,0 +1,17 @@
+# Lean Squad opt-in for this repository.
+#
+# This file's presence is the opt-in signal for the 8-hour `lean-squad-tick`
+# workflow (see cli/internal/profiles/core/workflows/lean-squad.yaml gate phase).
+# Once the tick detects this file, `bootstrap_if_missing` will enqueue
+# `lean-squad-bootstrap` to install the Lean 4 toolchain (via elan) and scaffold
+# `formal-verification/` with placeholder RESEARCH/TARGETS/CORRESPONDENCE/CRITIQUE/REPORT
+# markdown files, a mathlib-dep'd `lakefile.toml`, and a `repo-memory.json`.
+#
+# Subsequent ticks pick 2 weighted tasks per run across the 10-task Lean Squad
+# (orient, informal-spec, formal-spec, extract-impl, prove, correspondence,
+# critique, aeneas, ci, report) plus the always-on status dashboard issue.
+#
+# System reference: https://github.com/githubnext/agentics/blob/main/docs/lean-squad.md
+# Local docs:      docs/workflows/lean-squad.md
+
+enabled: true

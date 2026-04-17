@@ -1,0 +1,14 @@
+name: lean-squad-correspondence
+description: "Maintain formal-verification/CORRESPONDENCE.md — source↔Lean mapping table (agentics Lean Squad task 6)"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-correspondence/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-correspondence/implement.md
+    max_turns: 40
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-correspondence/pr.md
+    max_turns: 20

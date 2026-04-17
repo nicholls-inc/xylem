@@ -114,6 +114,34 @@ Key facts for agents operating in this context:
 
 See [docs/multi-repo.md](docs/multi-repo.md) for the full user-facing guide.
 
+## Foxguard protocol
+
+`foxguard` is a fast security scanner that runs in pre-commit and CI. It catches command injection, SSRF, path traversal, hardcoded secrets, and similar patterns. It is **intentionally noisy**: known-safe patterns (argv-style `exec.Command`, hardcoded-host URLs, test fixtures) show up as findings and must be explicitly suppressed.
+
+**Suppression uses a fingerprint-keyed baseline:**
+- `.foxguard/baseline.json` — foxguard-managed, fingerprint-keyed list of suppressed findings
+- `.foxguard/justifications.md` — human-readable rationale for each baseline entry
+- `scripts/check_foxguard_justifications.py` — enforces 1:1 coverage (pre-commit + CI)
+
+### Workflow for a new foxguard finding
+
+1. **Run foxguard locally.** `foxguard --baseline .foxguard/baseline.json .` — or just `git commit`, which triggers the pre-commit hook.
+2. **Verify the finding.** Use the `crosscheck:byfuglien` agent (or the `crosscheck:reason` skill) to reason about whether the finding is genuine in the threat model of this codebase. Do **not** guess. Check:
+   - Does the dangerous sink actually receive untrusted input?
+   - For Go `exec.Command`: is a shell involved, or is it pure argv? (argv = safe)
+   - For URLs: is the host hardcoded, or attacker-controllable?
+   - For path APIs: is the path joined with trusted roots only?
+3. **Resolve:**
+   - **Genuine issue** → fix the code. Do not baseline.
+   - **False positive** → add the fingerprint to `.foxguard/baseline.json` AND write a corresponding entry in `.foxguard/justifications.md` with a non-empty `**Rationale:**` and `**Verified by:**` line. The pre-commit/CI check will fail the build if either is missing.
+4. **Commit both files together.** Never commit a baseline addition without its justification.
+
+### Do not
+
+- **Do not** silently add findings to the baseline "to unblock CI". The justifications check will fail the build. The point of the baseline is to be an auditable list of known-safe patterns, not an escape hatch.
+- **Do not** loosen the severity threshold, remove rules, or disable foxguard as a workaround.
+- **Do not** edit `.foxguard/baseline.json` by hand when suppressing a new finding — run `foxguard baseline .` (or `foxguard --write-baseline …`) to regenerate it with a correct fingerprint, then add the justification entry.
+
 ## Testing patterns
 
 - Tests use interfaces and stubs extensively (e.g., `CommandRunner`, `WorktreeManager`) — no real subprocesses or git operations in tests

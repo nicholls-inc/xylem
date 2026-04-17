@@ -1,0 +1,15 @@
+name: lean-squad-report
+class: ops
+description: "Refresh formal-verification/REPORT.md with architecture diagram, target status, findings, run history, and open PR/issue links"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-report/analyze.md
+    max_turns: 40
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-report/implement.md
+    max_turns: 50
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-report/pr.md
+    max_turns: 20

@@ -52,6 +52,58 @@ func TestScheduledScanEnqueuesOnePerWindow(t *testing.T) {
 	}
 }
 
+func TestScheduledScanSkipsWhenPriorTaskVesselStillInFlight(t *testing.T) {
+	ctx := context.Background()
+	stateDir := t.TempDir()
+	q := queue.New(filepath.Join(t.TempDir(), "queue.jsonl"))
+
+	src := &Scheduled{
+		Repo:       "owner/repo",
+		StateDir:   stateDir,
+		ConfigName: "ci-watchdog",
+		Schedule:   "30m",
+		Queue:      q,
+		Tasks: map[string]ScheduledTask{
+			"monitor-main-ci": {Workflow: "ci-watchdog", Ref: "main"},
+		},
+	}
+
+	interval, err := parseSchedule("30m")
+	require.NoError(t, err)
+
+	now := sourceNow()
+	currentBucket := now.UnixNano() / interval.Nanoseconds()
+	priorBucket := currentBucket - 1
+	priorVessel := queue.Vessel{
+		ID:       fmt.Sprintf("scheduled-ci-watchdog-monitor-main-ci-%d", priorBucket),
+		Source:   "scheduled",
+		Ref:      fmt.Sprintf("scheduled://ci-watchdog/monitor-main-ci@%d", priorBucket),
+		Workflow: "ci-watchdog",
+		State:    queue.StateRunning,
+		Meta: map[string]string{
+			"scheduled_config_name": "ci-watchdog",
+			"scheduled_repo":        "owner/repo",
+			"scheduled_task_name":   "monitor-main-ci",
+			"scheduled_bucket":      fmt.Sprintf("%d", priorBucket),
+		},
+		CreatedAt: now.Add(-interval),
+	}
+	_, err = q.Enqueue(priorVessel)
+	require.NoError(t, err)
+
+	vessels, err := src.Scan(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, vessels, "in-flight guard should block while prior task vessel is still running")
+
+	priorVessel.State = queue.StateCompleted
+	require.NoError(t, q.UpdateVessel(priorVessel))
+
+	vessels, err = src.Scan(ctx)
+	require.NoError(t, err)
+	require.Len(t, vessels, 1, "guard should release once prior vessel reaches a terminal state")
+	assert.Equal(t, fmt.Sprintf("scheduled://ci-watchdog/monitor-main-ci@%d", currentBucket), vessels[0].Ref)
+}
+
 func TestParseSchedule(t *testing.T) {
 	got, err := parseSchedule("@weekly")
 	if err != nil {

@@ -4,25 +4,44 @@ phases:
   - name: analyze
     prompt_file: .xylem/prompts/implement-feature/analyze.md
     max_turns: 20
+    tier: high
     noop:
       match: XYLEM_NOOP
   - name: plan
     prompt_file: .xylem/prompts/implement-feature/plan.md
     max_turns: 20
+    tier: high
   - name: implement
     prompt_file: .xylem/prompts/implement-feature/implement.md
     max_turns: 60
+    tier: med
+    evaluator:
+      prompt_file: .xylem/prompts/implement-feature/implement_evaluator.md
+      max_turns: 20
+      max_iterations: 2
+      pass_threshold: 0.8
+      criteria:
+        - name: correctness
+          description: "The implementation satisfies the requested feature without contradicting the plan."
+          weight: 0.65
+          threshold: 0.8
+        - name: verification
+          description: "The changes include or preserve validation needed to trust the feature."
+          weight: 0.35
+          threshold: 0.7
     gate:
       type: command
-      run: "cd cli && go test ./..."
+      run: "make test"
       retries: 2
   - name: verify
     prompt_file: .xylem/prompts/implement-feature/verify.md
     max_turns: 60
+    tier: med
     gate:
       type: command
-      run: "cd cli && go test ./..."
+      run: "make test"
       retries: 1
   - name: pr
     prompt_file: .xylem/prompts/implement-feature/pr.md
     max_turns: 25
+    tier: med

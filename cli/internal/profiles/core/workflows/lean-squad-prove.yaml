@@ -1,0 +1,60 @@
+name: lean-squad-prove
+description: "Lean Squad: attempt to prove a theorem in formal-verification/FVSquad/<Target>.lean"
+phases:
+  - name: analyze
+    prompt_file: .xylem/prompts/lean-squad-prove/analyze.md
+    max_turns: 40
+    allowed_tools: "Read, Grep, Glob, Bash"
+    noop:
+      match: XYLEM_NOOP
+  - name: implement
+    prompt_file: .xylem/prompts/lean-squad-prove/implement.md
+    max_turns: 60
+    allowed_tools: "Read, Grep, Glob, Bash, Edit, Write"
+  - name: verify
+    type: command
+    noop:
+      match: ISSUE-ONLY
+    run: |
+      set -euo pipefail
+      MARKER="/tmp/lean-squad-prove-{{.Vessel.ID}}.marker"
+      if [ ! -f "$MARKER" ]; then
+        echo "Implement phase did not write marker file at $MARKER"
+        exit 1
+      fi
+      STATE=$(head -1 "$MARKER" | tr -d '[:space:]')
+      if [ "$STATE" = "ISSUE-ONLY" ]; then
+        echo "ISSUE-ONLY"
+        echo "Marker reports ISSUE-ONLY; skipping Lean build"
+        exit 0
+      fi
+      if [ "$STATE" != "PROOF-FOUND" ]; then
+        echo "Unexpected marker content: '$STATE' (expected PROOF-FOUND or ISSUE-ONLY)"
+        exit 1
+      fi
+      if [ ! -d formal-verification ]; then
+        echo "formal-verification/ directory missing"
+        exit 1
+      fi
+      cd formal-verification
+      for attempt in 1 2; do
+        echo "lake build attempt $attempt"
+        if lake build 2>&1 | tee /tmp/lean-build-{{.Vessel.ID}}.log; then
+          if ! grep -q "error:" /tmp/lean-build-{{.Vessel.ID}}.log; then
+            echo "Lean build succeeded (no errors)"
+            exit 0
+          fi
+        fi
+        if [ "$attempt" -lt 2 ]; then
+          echo "lake build failed; sleeping 30s before retry"
+          sleep 30
+        fi
+      done
+      echo "Lean build failed after 2 attempts"
+      exit 1
+  - name: pr
+    prompt_file: .xylem/prompts/lean-squad-prove/pr.md
+    max_turns: 25
+    allowed_tools: "Bash, Read"
+    noop:
+      match: PR-SKIPPED

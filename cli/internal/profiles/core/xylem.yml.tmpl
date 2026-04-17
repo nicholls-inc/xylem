@@ -78,6 +78,14 @@ sources:
       resolve:
         labels: [needs-conflict-resolution]
         workflow: resolve-conflicts
+  lean-squad-focus:
+    type: github
+    repo: "{{ .Repo }}"
+    exclude: [no-bot]
+    tasks:
+      focus:
+        labels: [lean-squad-focus]
+        workflow: lean-squad-focus
   lessons-hygiene:
     type: schedule
     cadence: "@daily"
@@ -102,6 +110,10 @@ sources:
     type: schedule
     cadence: "@weekly"
     workflow: field-report
+  lean-squad-tick:
+    type: schedule
+    cadence: "8h"
+    workflow: lean-squad
 
 concurrency: 2
 max_turns: 50

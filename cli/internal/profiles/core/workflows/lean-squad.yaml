@@ -1,0 +1,139 @@
+name: lean-squad
+class: ops
+description: "Tick coordinator for the Lean Squad formal-verification system. Every 8h, deterministically checks opt-in signals, merges open Lean-Squad PRs, asks an LLM to select the two highest-value next tasks (state-weighted), and dispatches them as vessels. On non-opted-in repos the first phase short-circuits via XYLEM_NOOP — the whole tick costs one tiny shell call."
+phases:
+  # Phase 1: deterministic opt-in gate.
+  # Plain shell test, NOT an LLM call — the only defence against the 8h tick
+  # firing on non-FV repos. Any of three signals wins; absence NOOPs the tick.
+  - name: gate
+    type: command
+    noop:
+      match: XYLEM_NOOP
+    run: |
+      set -euo pipefail
+      if [ -d formal-verification ]; then
+        echo "OPT-IN: formal-verification/ directory present"
+        exit 0
+      fi
+      if [ -f .github/lean-squad.yml ]; then
+        echo "OPT-IN: .github/lean-squad.yml present"
+        exit 0
+      fi
+      if gh issue list --label lean-squad-opt-in --state open --limit 1 --json number \
+           --jq 'length' 2>/dev/null | grep -q '^[1-9]'; then
+        echo "OPT-IN: lean-squad-opt-in issue label"
+        exit 0
+      fi
+      echo "XYLEM_NOOP: no lean-squad opt-in signal detected"
+
+  # Phase 2: bootstrap_if_missing.
+  # Dedup via stable --ref: queue.Enqueue silently no-ops if a vessel with the
+  # same ref is already pending/running/waiting. We cd to the daemon repo root
+  # (owner of --git-common-dir) because xylem enqueue resolves state_dir from
+  # CWD, and phase commands run inside the worktree's .xylem/ scaffold.
+  - name: bootstrap_if_missing
+    type: command
+    run: |
+      set -euo pipefail
+      if [ -d formal-verification ]; then
+        echo "BOOTSTRAP-SKIP: formal-verification/ already exists"
+        exit 0
+      fi
+      REPO_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+      (cd "$REPO_ROOT" && xylem enqueue \
+        --workflow lean-squad-bootstrap \
+        --ref "lean-squad-bootstrap" \
+        --source "lean-squad-tick")
+      echo "BOOTSTRAP-PENDING: enqueued lean-squad-bootstrap; assess_state will skip tasks 3-10"
+
+  # Phase 3: merge ready lean-squad PRs.
+  # MERGEABLE + CLEAN, lean-squad-labelled, not do-not-merge.
+  - name: merge_open_prs
+    type: command
+    run: |
+      set -euo pipefail
+      PRS=$(gh pr list \
+        --label lean-squad \
+        --state open \
+        --json number,mergeable,mergeStateStatus,labels \
+        --jq '.[] | select((.labels | map(.name) | index("do-not-merge") | not) and .mergeable == "MERGEABLE" and .mergeStateStatus == "CLEAN") | .number' 2>/dev/null || true)
+      if [ -z "$PRS" ]; then
+        echo "MERGE-SKIP: no ready lean-squad PRs"
+        exit 0
+      fi
+      for N in $PRS; do
+        echo "MERGE: #$N"
+        gh pr merge "$N" --squash --delete-branch --admin || echo "MERGE-WARN: #$N failed to merge"
+      done
+
+  # Phase 4: state-weighted task selection (LLM).
+  # Reads repo-memory.json + artefact tree, emits exactly two PLAN: lines with
+  # distinct target slugs. Distinct targets prevent parallel vessels racing
+  # on the same lean/FVSquad/<Target>.lean file.
+  - name: assess_state
+    prompt_file: .xylem/prompts/lean-squad/assess_state.md
+    max_turns: 30
+    allowed_tools: "Bash, Read, Grep, Glob"
+    gate:
+      type: command
+      run: |
+        set -eu
+        out=".xylem/phases/{{.Vessel.ID}}/assess_state.output"
+        test -s "$out"
+        # Require at least two PLAN: lines with task+target fields.
+        PLAN_COUNT=$(grep -c '^PLAN: ' "$out" || true)
+        if [ "$PLAN_COUNT" -lt 2 ]; then
+          echo "ERROR: assess_state emitted $PLAN_COUNT PLAN: lines, expected exactly 2" >&2
+          exit 1
+        fi
+
+  # Phase 5: dispatch.
+  # Parses PLAN: lines from assess_state, de-dupes by target slug, enqueues
+  # each task plus the always-on lean-squad-{report,status} pair. Cap of 4
+  # total enqueues so a runaway prompt cannot fan out.
+  - name: dispatch
+    type: command
+    run: |
+      set -euo pipefail
+      REPO_ROOT="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")"
+      OUT=".xylem/phases/{{.Vessel.ID}}/assess_state.output"
+      BUCKET="$(date -u +%Y%m%d-%H)"
+      ENQUEUED=0
+      CAP=4
+      SEEN_TARGETS=""
+      enqueue_once() {
+        local task="$1" target="$2"
+        if [ "$ENQUEUED" -ge "$CAP" ]; then
+          echo "DISPATCH-SKIP: cap $CAP reached, not enqueueing $task for $target"
+          return 0
+        fi
+        (cd "$REPO_ROOT" && xylem enqueue \
+          --workflow "lean-squad-${task}" \
+          --ref "lean-squad://${target}" \
+          --id "lean-squad-${task}-${target}-${BUCKET}" \
+          --source "lean-squad-tick")
+        ENQUEUED=$((ENQUEUED + 1))
+        echo "DISPATCHED: lean-squad-${task} target=${target}"
+      }
+      while read -r marker task target _rest; do
+        [ "$marker" = "PLAN:" ] || continue
+        [ -n "$task" ] && [ -n "$target" ] || continue
+        case "$SEEN_TARGETS" in
+          *"|${target}|"*)
+            echo "DISPATCH-SKIP: duplicate target $target"
+            continue
+            ;;
+        esac
+        SEEN_TARGETS="${SEEN_TARGETS}|${target}|"
+        enqueue_once "$task" "$target"
+      done < "$OUT"
+      enqueue_once "report" "_tick-${BUCKET}"
+      enqueue_once "status" "_tick-${BUCKET}"
+      echo "DISPATCH-DONE: enqueued ${ENQUEUED}/${CAP}"
+
+  # Phase 6: retrospect.
+  # Append a run entry to formal-verification/repo-memory.json, open a PR.
+  - name: retrospect
+    prompt_file: .xylem/prompts/lean-squad/retrospect.md
+    max_turns: 40
+    allowed_tools: "Bash, Read, Write, Edit, Grep, Glob"
