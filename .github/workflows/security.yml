@@ -16,7 +16,9 @@ jobs:
       - name: Install foxguard
         run: |
           set -euo pipefail
-          VERSION="v0.6.0"
+          # Pin to the latest v0.6.x with published release binaries.
+          # v0.6.0 shipped with no assets; v0.6.3 is the current stable.
+          VERSION="v0.6.3"
           ARCH="$(uname -m)"
           case "$ARCH" in
             x86_64) ARCH_SUFFIX="x86_64" ;;
