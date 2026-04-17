@@ -225,6 +225,7 @@ func (s *Scanner) buildSources() []sourceEntry {
 			entries = append(entries, sourceEntry{
 				src: &source.GitHubMerge{
 					Repo:                srcCfg.Repo,
+					Exclude:             srcCfg.Exclude,
 					Tasks:               mergeTasks,
 					DefaultTier:         s.Config.LLMRouting.DefaultTier,
 					Queue:               s.Queue,
@@ -302,6 +303,7 @@ func convertPREventsTasks(cfgTasks map[string]config.Task) map[string]source.PRE
 			task.PRHeadUpdated = t.On.PRHeadUpdated
 			task.AuthorAllow = t.On.AuthorAllow
 			task.AuthorDeny = t.On.AuthorDeny
+			task.RequireLabels = t.On.RequireLabels
 			task.Debounce = source.UnsetPREventsDebounce
 			if t.On.Debounce != "" {
 				task.Debounce, _ = time.ParseDuration(t.On.Debounce)

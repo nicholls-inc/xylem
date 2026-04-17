@@ -34,7 +34,7 @@ func TestMergeScan(t *testing.T) {
 		},
 	}
 	prBytes, _ := json.Marshal(prs)
-	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 
 	g := &GitHubMerge{
 		Repo: "owner/repo",
@@ -88,7 +88,7 @@ func TestMergeScanControlPlaneCallback(t *testing.T) {
 		},
 	}
 	prBytes, _ := json.Marshal(prs)
-	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 	r.set([]byte(`{"files":[{"path":".xylem/workflows/fix-bug.yaml"},{"path":"README.md"}]}`),
 		"gh", "pr", "view", "20", "--repo", "owner/repo", "--json", "files")
 
@@ -134,7 +134,7 @@ func TestMergeScanControlPlaneCallbackIgnoresNonControlPlaneChanges(t *testing.T
 		},
 	}
 	prBytes, _ := json.Marshal(prs)
-	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 	r.set([]byte(`{"files":[{"path":"README.md"},{"path":"docs/guide.md"}]}`),
 		"gh", "pr", "view", "20", "--repo", "owner/repo", "--json", "files")
 
@@ -175,7 +175,7 @@ func TestMergeScanControlPlaneCallbackSkipsDuplicates(t *testing.T) {
 		},
 	}
 	prBytes, _ := json.Marshal(prs)
-	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 
 	_, _ = q.Enqueue(queue.Vessel{
 		ID:     "merge-pr-20-abcdef12",
@@ -215,7 +215,7 @@ func TestMergeScanDedup(t *testing.T) {
 		{Number: 20, Title: "merged PR", URL: "https://github.com/owner/repo/pull/20", MergeCommit: ghMergeCommit{OID: "abcdef1234567890"}, HeadRefName: "feature-x"},
 	}
 	prBytes, _ := json.Marshal(prs)
-	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 
 	// Pre-enqueue the same merge ref
 	_, _ = q.Enqueue(queue.Vessel{
@@ -249,7 +249,7 @@ func TestMergeScanDedupCompleted(t *testing.T) {
 		{Number: 20, Title: "merged PR", URL: "https://github.com/owner/repo/pull/20", MergeCommit: ghMergeCommit{OID: "abcdef1234567890"}, HeadRefName: "feature-x"},
 	}
 	prBytes, _ := json.Marshal(prs)
-	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 
 	// Pre-enqueue and complete the same merge ref
 	_, _ = q.Enqueue(queue.Vessel{
@@ -327,7 +327,7 @@ func TestMergeScanGHError(t *testing.T) {
 	q := queue.New(filepath.Join(dir, "queue.jsonl"))
 	r := newMock()
 
-	r.setErr(fmt.Errorf("network error"), "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.setErr(fmt.Errorf("network error"), "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 
 	g := &GitHubMerge{
 		Repo:      "owner/repo",
@@ -354,7 +354,7 @@ func TestMergeScanEmptyOIDSkipped(t *testing.T) {
 		{Number: 30, Title: "no OID", URL: "https://github.com/owner/repo/pull/30", MergeCommit: ghMergeCommit{OID: ""}, HeadRefName: "branch-30"},
 	}
 	prBytes, _ := json.Marshal(prs)
-	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 
 	g := &GitHubMerge{
 		Repo:      "owner/repo",
@@ -369,5 +369,73 @@ func TestMergeScanEmptyOIDSkipped(t *testing.T) {
 	}
 	if len(vessels) != 0 {
 		t.Fatalf("expected 0 vessels (empty OID), got %d", len(vessels))
+	}
+}
+
+func TestMergeScanExclude(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghMergedPR{
+		{
+			Number:      40,
+			Title:       "autorelease PR",
+			URL:         "https://github.com/owner/repo/pull/40",
+			MergeCommit: ghMergeCommit{OID: "aabbccdd11223344"},
+			HeadRefName: "release-branch",
+			Labels:      []ghMergedPRLabel{{Name: "autorelease: tagged"}},
+		},
+	}
+	prBytes, _ := json.Marshal(prs)
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
+
+	g := &GitHubMerge{
+		Repo:    "owner/repo",
+		Exclude: []string{"autorelease: tagged"},
+		Tasks:   map[string]MergeTask{"unblock": {Workflow: "unblock-wave"}},
+		Queue:   q, CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels (excluded label), got %d", len(vessels))
+	}
+}
+
+func TestMergeScanExcludeNotApplied(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghMergedPR{
+		{
+			Number:      41,
+			Title:       "normal PR",
+			URL:         "https://github.com/owner/repo/pull/41",
+			MergeCommit: ghMergeCommit{OID: "1122334455667788"},
+			HeadRefName: "fix-branch",
+			Labels:      []ghMergedPRLabel{{Name: "bug"}},
+		},
+	}
+	prBytes, _ := json.Marshal(prs)
+	r.set(prBytes, "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
+
+	g := &GitHubMerge{
+		Repo:    "owner/repo",
+		Exclude: []string{"autorelease: tagged"},
+		Tasks:   map[string]MergeTask{"unblock": {Workflow: "unblock-wave"}},
+		Queue:   q, CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel, got %d", len(vessels))
 	}
 }

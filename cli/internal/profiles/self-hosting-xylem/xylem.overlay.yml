@@ -157,6 +157,7 @@ sources:
   harness-post-merge:
     type: github-merge
     repo: "{{ .Repo }}"
+    exclude: ["autorelease: tagged", no-bot]
     tasks:
       unblock-deps:
         workflow: unblock-wave

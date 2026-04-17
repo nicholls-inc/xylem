@@ -276,7 +276,7 @@ func TestSmoke_S5_DaemonReloadPreservesFrozenWorkflowSnapshot(t *testing.T) {
 	require.NoError(t, os.WriteFile(workflowPath, mutatedWorkflow, 0o644))
 
 	cmdRunner.set([]byte(`[{"number":42,"title":"reload control plane","url":"https://github.com/owner/name/pull/42","mergeCommit":{"oid":"abcdef1234567890"},"headRefName":"control-plane"}]`),
-		"gh", "pr", "list", "--repo", "owner/name", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+		"gh", "pr", "list", "--repo", "owner/name", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 	cmdRunner.set([]byte(`{"files":[{"path":".xylem.yml"},{"path":".xylem/workflows/fix-bug.yaml"}]}`),
 		"gh", "pr", "view", "42", "--repo", "owner/name", "--json", "files")
 

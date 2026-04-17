@@ -79,11 +79,13 @@ sources:
         tier: high
         on:
           pr_opened: true
+          require_labels: [ready-to-merge]
       review-updated:
         workflow: review-pr
         tier: high
         on:
           pr_head_updated: true
+          require_labels: [ready-to-merge]
       respond-to-review:
         workflow: respond-to-pr-review
         tier: high
@@ -194,6 +196,7 @@ sources:
   harness-post-merge:
     type: github-merge
     repo: "nicholls-inc/xylem"
+    exclude: ["autorelease: tagged", no-bot]
     tasks:
       unblock-deps:
         workflow: unblock-wave

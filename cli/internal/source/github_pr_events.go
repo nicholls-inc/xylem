@@ -29,6 +29,11 @@ type PREventsTask struct {
 	// AuthorDeny takes precedence over AuthorAllow.
 	AuthorDeny []string
 	Debounce   time.Duration
+	// RequireLabels gates all event-based triggers (PROpened, PRHeadUpdated,
+	// ChecksFailed, ReviewSubmitted, Commented): a vessel is only created if
+	// the PR carries at least one of the listed labels. Label triggers are
+	// not affected.
+	RequireLabels []string
 }
 
 // GitHubPREvents scans GitHub PRs for specific events and produces vessels.
@@ -198,6 +203,24 @@ func (g *GitHubPREvents) Scan(ctx context.Context) ([]queue.Vessel, error) {
 							})
 						}
 					}
+				}
+			}
+
+			// Event-based triggers: skip if PR doesn't carry a required label.
+			if len(task.RequireLabels) > 0 {
+				prLabels := make(map[string]bool, len(pr.Labels))
+				for _, l := range pr.Labels {
+					prLabels[l.Name] = true
+				}
+				hasRequired := false
+				for _, rl := range task.RequireLabels {
+					if prLabels[rl] {
+						hasRequired = true
+						break
+					}
+				}
+				if !hasRequired {
+					continue
 				}
 			}
 
