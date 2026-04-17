@@ -127,3 +127,13 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `unblock-wave` work with phase `check_deps` still failing due to `signal killed`. <!-- xylem-lesson:lesson-20022a02d883 -->
+- Rationale: This failure pattern recurred in 5 failed vessels for `unblock-wave` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: signal: killed
+- Evidence:
+  - `merge-pr-570-73511cc4` (2026-04-16T20:50:10Z) — `phases/merge-pr-570-73511cc4/check_deps.output`
+  - `merge-pr-568-a82cda38` (2026-04-16T21:35:28Z) — `phases/merge-pr-568-a82cda38/check_deps.output`
+  - `merge-pr-576-f5f08dab` (2026-04-17T04:38:07Z) — `phases/merge-pr-576-f5f08dab/check_deps.output`
+  - `merge-pr-588-3e2e9b2e` (2026-04-17T05:23:57Z) — `phases/merge-pr-588-3e2e9b2e/check_deps.output`
+  - `merge-pr-589-d7316670` (2026-04-17T05:23:57Z) — `phases/merge-pr-589-d7316670/check_deps.output`
