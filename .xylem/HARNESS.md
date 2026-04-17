@@ -127,3 +127,10 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `implement-harness` work with phase `test_critic` still failing due to `exit status`. <!-- xylem-lesson:lesson-636a22c51e22 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `issue-402-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:08:13Z) — `phases/issue-402-retry-1-retry-1-retry-1-retry-1/test_critic.output`
+  - `issue-417-retry-1-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:56:36Z) — `phases/issue-417-retry-1-retry-1-retry-1-retry-1-retry-1/test_critic.output`
