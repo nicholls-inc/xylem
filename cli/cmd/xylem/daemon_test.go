@@ -1475,11 +1475,15 @@ func TestReconcileStaleVessels(t *testing.T) {
 		if updated.StartedAt != nil {
 			t.Fatal("expected StartedAt to be cleared")
 		}
-		if updated.CurrentPhase != 2 {
-			t.Fatalf("updated.CurrentPhase = %d, want 2", updated.CurrentPhase)
+		// Spec I3 (docs/invariants/queue.md) extended: running→pending
+		// (orphan reconcile) must reset CurrentPhase/PhaseOutputs/WorktreePath
+		// so the requeued vessel restarts fresh at phase 0 without inheriting
+		// a stale worktree path (loop 202 chdir cascade).
+		if updated.CurrentPhase != 0 {
+			t.Fatalf("updated.CurrentPhase = %d, want 0 (reset on orphan reconcile)", updated.CurrentPhase)
 		}
-		if updated.PhaseOutputs["plan"] != "done" {
-			t.Fatalf("updated.PhaseOutputs[plan] = %q, want done", updated.PhaseOutputs["plan"])
+		if len(updated.PhaseOutputs) != 0 {
+			t.Fatalf("updated.PhaseOutputs = %v, want empty (reset on orphan reconcile)", updated.PhaseOutputs)
 		}
 		if updated.WorktreePath != "" {
 			t.Fatalf("updated.WorktreePath = %q, want empty", updated.WorktreePath)
