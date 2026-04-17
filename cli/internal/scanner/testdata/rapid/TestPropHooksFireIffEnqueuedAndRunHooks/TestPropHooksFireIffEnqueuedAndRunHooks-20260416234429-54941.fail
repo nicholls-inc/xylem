@@ -1,0 +1,11 @@
+# 2026/04/16 23:44:29.436175 [TestPropHooksFireIffEnqueuedAndRunHooks] [rapid] draw issue_count: 1
+# 2026/04/16 23:44:29.436195 [TestPropHooksFireIffEnqueuedAndRunHooks] [rapid] draw budget_allowed: true
+# 2026/04/16 23:44:29.436211 [TestPropHooksFireIffEnqueuedAndRunHooks] [rapid] draw run_hooks: true
+# 2026/04/16 23:44:29.444588 [TestPropHooksFireIffEnqueuedAndRunHooks] S6 violation: OnEnqueue fired 0 times; want 1 (allowed=true, runHooks=true, enqueued=1)
+#
+v0.4.8#1182052406254769476
+0x0
+0x0
+0x1
+0x1
+0x1

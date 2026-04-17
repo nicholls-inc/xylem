@@ -18,14 +18,14 @@ repos:
 
       - id: golangci-lint
         name: golangci-lint
-        entry: bash -c 'cd cli && GOCACHE=${TMPDIR:-/tmp}/golangci-lint-cache golangci-lint run ./...'
+        entry: bash -c 'cd cli && GOCACHE=${TMPDIR:-/tmp}/golangci-lint-cache GOLANGCI_LINT_CACHE=${TMPDIR:-/tmp}/golangci-lint-analysis-cache golangci-lint run ./...'
         language: system
         pass_filenames: false
         files: ^(cli/.*\.go|cli/go\.(mod|sum)|\.golangci\.yml)$
 
       - id: go-build
         name: go build
-        entry: bash -c 'cd cli && go build ./cmd/xylem'
+        entry: bash -c 'cd cli && GOCACHE=${TMPDIR:-/tmp}/go-build-cache go build ./cmd/xylem'
         language: system
         pass_filenames: false
         files: ^(cli/.*\.go|cli/go\.(mod|sum))$
