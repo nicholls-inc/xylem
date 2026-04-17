@@ -182,6 +182,11 @@ type PREventsConfig struct {
 	// never create vessels. AuthorDeny takes precedence over AuthorAllow.
 	AuthorDeny []string `yaml:"author_deny,omitempty"`
 	Debounce   string   `yaml:"debounce,omitempty"`
+	// RequireLabels gates all event-based triggers (pr_opened, pr_head_updated,
+	// checks_failed, review_submitted, commented): a vessel is only created if
+	// the PR carries at least one of the listed labels. Label triggers (the
+	// separate "labels:" field) are not affected by this gate.
+	RequireLabels []string `yaml:"require_labels,omitempty"`
 }
 
 // ActionsConfig filters which GitHub Actions workflow runs trigger a task.

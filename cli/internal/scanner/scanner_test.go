@@ -1381,7 +1381,7 @@ func TestScanMerge(t *testing.T) {
 			HeadRefName: "feature-x",
 		},
 	}
-	r.set(mergedPRJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName", "--limit", "20")
+	r.set(mergedPRJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "merged", "--json", "number,title,url,mergeCommit,headRefName,labels", "--limit", "20")
 
 	s := New(cfg, q, r)
 	result, err := s.Scan(context.Background())

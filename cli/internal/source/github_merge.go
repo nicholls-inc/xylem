@@ -19,6 +19,7 @@ type MergeTask struct {
 // GitHubMerge scans for merged PRs and produces vessels.
 type GitHubMerge struct {
 	Repo                string
+	Exclude             []string
 	Tasks               map[string]MergeTask
 	DefaultTier         string
 	Queue               *queue.Queue
@@ -30,12 +31,17 @@ type ghMergeCommit struct {
 	OID string `json:"oid"`
 }
 
+type ghMergedPRLabel struct {
+	Name string `json:"name"`
+}
+
 type ghMergedPR struct {
-	Number      int           `json:"number"`
-	Title       string        `json:"title"`
-	URL         string        `json:"url"`
-	MergeCommit ghMergeCommit `json:"mergeCommit"`
-	HeadRefName string        `json:"headRefName"`
+	Number      int               `json:"number"`
+	Title       string            `json:"title"`
+	URL         string            `json:"url"`
+	MergeCommit ghMergeCommit     `json:"mergeCommit"`
+	HeadRefName string            `json:"headRefName"`
+	Labels      []ghMergedPRLabel `json:"labels"`
 }
 
 type ControlPlaneMergeEvent struct {
@@ -47,11 +53,16 @@ type ControlPlaneMergeEvent struct {
 func (g *GitHubMerge) Name() string { return "github-merge" }
 
 func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
+	excludeSet := make(map[string]bool, len(g.Exclude))
+	for _, ex := range g.Exclude {
+		excludeSet[ex] = true
+	}
+
 	args := []string{
 		"pr", "list",
 		"--repo", g.Repo,
 		"--state", "merged",
-		"--json", "number,title,url,mergeCommit,headRefName",
+		"--json", "number,title,url,mergeCommit,headRefName,labels",
 		"--limit", "20",
 	}
 	out, err := g.CmdRunner.Run(ctx, "gh", args...)
@@ -67,6 +78,9 @@ func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	var vessels []queue.Vessel
 
 	for _, pr := range prs {
+		if g.hasExcludedLabel(pr, excludeSet) {
+			continue
+		}
 		oid := strings.TrimSpace(pr.MergeCommit.OID)
 		if oid == "" {
 			continue
@@ -108,6 +122,15 @@ func (g *GitHubMerge) Scan(ctx context.Context) ([]queue.Vessel, error) {
 	}
 
 	return vessels, nil
+}
+
+func (g *GitHubMerge) hasExcludedLabel(pr ghMergedPR, excludeSet map[string]bool) bool {
+	for _, l := range pr.Labels {
+		if excludeSet[l.Name] {
+			return true
+		}
+	}
+	return false
 }
 
 func (g *GitHubMerge) listFiles(ctx context.Context, number int) ([]string, error) {

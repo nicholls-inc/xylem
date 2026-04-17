@@ -1287,3 +1287,87 @@ func TestShouldSkipAuthoredEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestPREventsScanRequireLabelsBlocks(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{
+			Number: 50, Title: "PR without required label",
+			URL:         "https://github.com/owner/repo/pull/50",
+			HeadRefName: "branch-50",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "in-progress"}},
+		},
+	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review-opened": {
+				Workflow:      "review-pr",
+				PROpened:      true,
+				RequireLabels: []string{"ready-to-merge"},
+			},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 0 {
+		t.Fatalf("expected 0 vessels (require_labels not met), got %d", len(vessels))
+	}
+}
+
+func TestPREventsScanRequireLabelsAllows(t *testing.T) {
+	dir := t.TempDir()
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	prs := []ghPR{
+		{
+			Number: 51, Title: "PR with required label",
+			URL:         "https://github.com/owner/repo/pull/51",
+			HeadRefName: "branch-51",
+			Labels: []struct {
+				Name string `json:"name"`
+			}{{Name: "ready-to-merge"}},
+		},
+	}
+	r.set(prEventsListJSON(prs), "gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,url,labels,headRefName", "--limit", "50")
+	// scanPROpened reads the PR's creation timestamp
+	r.set([]byte(`[{"createdAt":"2024-01-01T00:00:00Z","headRefOid":"abc123"}]`),
+		"gh", "pr", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,createdAt,headRefOid", "--limit", "50")
+
+	g := &GitHubPREvents{
+		Repo: "owner/repo",
+		Tasks: map[string]PREventsTask{
+			"review-opened": {
+				Workflow:      "review-pr",
+				PROpened:      true,
+				RequireLabels: []string{"ready-to-merge"},
+			},
+		},
+		Queue:     q,
+		CmdRunner: r,
+	}
+
+	vessels, err := g.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("Scan: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Fatalf("expected 1 vessel (require_labels met), got %d", len(vessels))
+	}
+	if vessels[0].Workflow != "review-pr" {
+		t.Errorf("Workflow = %q, want review-pr", vessels[0].Workflow)
+	}
+}

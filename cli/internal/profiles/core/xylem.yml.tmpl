@@ -48,10 +48,12 @@ sources:
         workflow: review-pr
         on:
           pr_opened: true
+          require_labels: [ready-to-merge]
       review-updated:
         workflow: review-pr
         on:
           pr_head_updated: true
+          require_labels: [ready-to-merge]
       respond-to-review:
         workflow: respond-to-pr-review
         on:
