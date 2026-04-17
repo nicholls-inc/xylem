@@ -127,3 +127,13 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `diagnose-failures` work with phase `diagnose` still failing due to `exit status`. <!-- xylem-lesson:lesson-ce2d328e1f22 -->
+- Rationale: This failure pattern recurred in 7 failed vessels for `diagnose-failures` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `scheduled-diagnose-failures-hourly-diagnose-failures-493379` (2026-04-14T11:52:44Z) — `phases/scheduled-diagnose-failures-hourly-diagnose-failures-493379/diagnose.output`
+  - `scheduled-diagnose-failures-hourly-diagnose-failures-493380` (2026-04-14T12:02:14Z) — `phases/scheduled-diagnose-failures-hourly-diagnose-failures-493380/diagnose.output`
+  - `scheduled-diagnose-failures-hourly-diagnose-failures-493381` (2026-04-14T13:01:59Z) — `phases/scheduled-diagnose-failures-hourly-diagnose-failures-493381/diagnose.output`
+  - `scheduled-diagnose-failures-hourly-diagnose-failures-493382` (2026-04-14T14:36:20Z) — `phases/scheduled-diagnose-failures-hourly-diagnose-failures-493382/diagnose.output`
+  - `scheduled-diagnose-failures-hourly-diagnose-failures-493383` (2026-04-14T15:02:27Z) — `phases/scheduled-diagnose-failures-hourly-diagnose-failures-493383/diagnose.output`
