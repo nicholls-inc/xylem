@@ -127,3 +127,39 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `implement-harness` work with phase `analyze` still failing due to `exit status stderr error no authentication information found copilot can be authenticated with g`. <!-- xylem-lesson:lesson-835ec77f897b -->
+- Rationale: This failure pattern recurred in 19 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+stderr: Error: No authentication information found.
+
+Copilot can be authenticated with GitHub using an OAuth Token or a Fine-Grained Personal Access Token.
+
+To authen
+- Evidence:
+  - `issue-396` (2026-04-11T20:48:15Z) — `phases/issue-396/analyze.output`
+  - `issue-397` (2026-04-11T20:48:16Z) — `phases/issue-397/analyze.output`
+  - `issue-393` (2026-04-11T20:48:59Z) — `phases/issue-393/analyze.output`
+  - `issue-394` (2026-04-11T20:49:00Z) — `phases/issue-394/analyze.output`
+  - `issue-391` (2026-04-11T20:49:31Z) — `phases/issue-391/analyze.output`
+
+
+### Do not finish `implement-harness` work with phase `analyze` still failing due to `exit status`. <!-- xylem-lesson:lesson-a69b5fb61d9b -->
+- Rationale: This failure pattern recurred in 7 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `issue-383-retry-1-retry-1-retry-1` (2026-04-12T13:47:36Z) — `phases/issue-383-retry-1-retry-1-retry-1/analyze.output`
+  - `issue-400-retry-1-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:08:17Z) — `phases/issue-400-retry-1-retry-1-retry-1-retry-1-retry-1/analyze.output`
+  - `issue-396-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:12:38Z) — `phases/issue-396-retry-1-retry-1-retry-1-retry-1/analyze.output`
+  - `issue-394-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:15:14Z) — `phases/issue-394-retry-1-retry-1-retry-1-retry-1/analyze.output`
+  - `issue-383-retry-1-retry-1-retry-1-retry-1` (2026-04-12T15:01:35Z) — `phases/issue-383-retry-1-retry-1-retry-1-retry-1/analyze.output`
+
+
+### Do not finish `implement-harness` work with phase `analyze` still failing due to `signal killed`. <!-- xylem-lesson:lesson-9a3578a0f686 -->
+- Rationale: This failure pattern recurred in 4 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: signal: killed
+- Evidence:
+  - `issue-569` (2026-04-16T20:50:10Z) — `phases/issue-569/analyze.output`
+  - `issue-573` (2026-04-16T22:20:55Z) — `phases/issue-573/analyze.output`
+  - `issue-572` (2026-04-16T22:21:48Z) — `phases/issue-572/analyze.output`
+  - `issue-574` (2026-04-16T23:10:16Z) — `phases/issue-574/analyze.output`
