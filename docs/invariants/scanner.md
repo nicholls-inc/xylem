@@ -1,6 +1,6 @@
 # Invariants: `cli/internal/scanner`
 
-Status: **draft v1** (2026-04-16). Ratified by: pending human sign-off.
+Status: **v1** (2026-04-16). Ratified by: Harry Nicholls <harry.m.nicholls@gamil.com>.
 
 This document is the load-bearing specification for the `scanner` package. It
 is protected: changes require human review (see **Governance**). Agent-authored
@@ -182,15 +182,14 @@ fix is merged.
 | S1 | ✓ | `Scan` only calls `Queue.Enqueue`; `BacklogCount` makes no queue calls | Pin via spy test. |
 | S2 | ✓ (delegated) | `scanner.go:96` → queue I1/I1a | Holds via queue's guard; property test exercises both layers. |
 | S3 | ✓ | `scanner.go:65-68` | Pause check fires before `buildSources`. |
-| S4 | ✗ | `scanner.go:75-77` | `return result, err` aborts iteration on first source error. Fix: collect into a multi-error, continue loop, return aggregate. |
-| S5 | ✗ | `scanner.go:106-108`, `scanner.go:111-113` | Both non-`ErrDuplicateID` `Enqueue` errors and `recovery.UpdateRetryOutcome` errors abort mid-tick. Same fix shape as S4. |
+| S4 | ✓ | scanner.go:71,80,144 | var scanErrs []error accumulator replaces early return result, err; source-loop iteration continues via continue; aggregate returned as errors.Join(scanErrs...). |
+| S5 | ✓ | scanner.go:117,124-130,144 | Non-ErrDuplicateID Enqueue error and UpdateRetryOutcome error both append to scanErrs and continue — mirrors the existing ErrDuplicateID pattern. All remaining vessels and sources are still attempted. |
 | S6 | ✓ | `scanner.go:89-94`, `scanner.go:96-105`, `scanner.go:109-120` | Guard correctly binds the hook call to `(Allowed ∧ enqueued ∧ RunHooks)`. |
 | S7 | ✓ | `scanner.go:80-86` | Set unconditionally when `entry.configName != ""`, before the budget check. |
 | S8 | ✓ | `scanner.go:137-151` | No write-path access; only iterates and sums. |
 
-**Summary:** 2 outright violations (S4, S5 — both partial-tick /
-cross-contamination bugs at the error-return sites); 6 holding invariants
-that lock current behavior against drift.
+**Summary:** All 8 invariants hold. S4 and S5 were partial-tick / cross-contamination violations at the error-return sites; fixed by replacing early return result, err with a scanErrs accumulator and continue, returning errors.Join(scanErrs...) at the end of Scan.
+
 
 ---
 
