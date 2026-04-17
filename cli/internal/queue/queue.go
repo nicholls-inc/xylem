@@ -274,8 +274,17 @@ func resetPendingState(vessel *Vessel, previousState VesselState) {
 	vessel.WaitingFor = ""
 	vessel.FailedPhase = ""
 	vessel.GateOutput = ""
-	if previousState == StateRunning {
+	switch previousState {
+	case StateFailed, StateRunning:
+		// Retry (failed→pending) and orphan reconcile (running→pending) must
+		// restart the workflow from phase 0 with no inherited worktree.
+		// Partial resumes caused the loop-202 chdir cascade.
+		vessel.CurrentPhase = 0
+		vessel.PhaseOutputs = nil
 		vessel.WorktreePath = ""
+	case StateWaiting:
+		// Label-gate resume keeps CurrentPhase, PhaseOutputs, WorktreePath —
+		// same workflow instance continues after the label appears.
 	}
 }
 
