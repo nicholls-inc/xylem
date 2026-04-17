@@ -1,0 +1,11 @@
+# 2026/04/17 14:13:01.346938 [TestInvariant_I12_StaleCancelSatisfiesPostConditions] [rapid] draw nMerged: 1
+# 2026/04/17 14:13:01.346950 [TestInvariant_I12_StaleCancelSatisfiesPostConditions] [rapid] draw nOpen: 0
+# 2026/04/17 14:13:01.353912 [TestInvariant_I12_StaleCancelSatisfiesPostConditions] CancelStalePRVessels returned 0, expected 1 (nMerged=1, nOpen=0)
+#
+v0.4.8#4134075156010245063
+0x0
+0x0
+0x0
+0x0
+0x0
+0x0

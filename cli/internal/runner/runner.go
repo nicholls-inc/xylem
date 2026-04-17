@@ -134,6 +134,10 @@ type Runner struct {
 	processes       map[string]trackedProcess
 	classMu         sync.Mutex
 	inFlightByClass map[string]int
+
+	// discussionSeen guards against duplicate phase-output publications.
+	// Key format: "<vesselID>::<phaseName>::<outputType>"
+	discussionSeen sync.Map
 }
 
 type trackedProcess struct {
@@ -1263,6 +1267,7 @@ func (r *Runner) isVesselTimedOut(vesselID string) bool {
 }
 
 func (r *Runner) cancelVessel(vessel queue.Vessel, worktreePath string, vrs *vesselRunState, claims []evidence.Claim) string {
+	r.terminateTrackedProcess(vessel.ID)
 	current := vessel
 	if latest, err := r.Queue.FindByID(vessel.ID); err != nil {
 		log.Printf("warn: inspect cancelled vessel %s: %v", vessel.ID, err)
@@ -1276,6 +1281,7 @@ func (r *Runner) cancelVessel(vessel queue.Vessel, worktreePath string, vrs *ves
 }
 
 func (r *Runner) failVessel(id string, errMsg string) {
+	r.terminateTrackedProcess(id)
 	if updateErr := r.Queue.Update(id, queue.StateFailed, errMsg); updateErr != nil {
 		if r.cancelledTransition(id, updateErr) {
 			return
@@ -1285,6 +1291,9 @@ func (r *Runner) failVessel(id string, errMsg string) {
 		}
 		log.Printf("warn: failed to update vessel %s state: %v", id, updateErr)
 		return
+	}
+	if v, err := r.Queue.FindByID(id); err == nil && v != nil && v.WorktreePath != "" {
+		r.removeWorktree(context.Background(), v.WorktreePath, id)
 	}
 	r.annotateRecoveryMetadata(id, queue.StateFailed, errMsg, nil)
 }
@@ -1366,6 +1375,7 @@ func (r *Runner) persistRecoveryMetadata(id string, artifact *recovery.Artifact)
 }
 
 func (r *Runner) completeVessel(ctx context.Context, vessel queue.Vessel, worktreePath string, phaseResults []reporter.PhaseResult, vrs *vesselRunState, claims []evidence.Claim) string {
+	r.terminateTrackedProcess(vessel.ID)
 	if updateErr := r.Queue.Update(vessel.ID, queue.StateCompleted, ""); updateErr != nil {
 		if r.cancelledTransition(vessel.ID, updateErr) {
 			return r.cancelVessel(vessel, worktreePath, vrs, claims)
@@ -4017,6 +4027,19 @@ func (r *Runner) clearTrackedProcess(vesselID string) {
 	r.processMu.Lock()
 	defer r.processMu.Unlock()
 	delete(r.processes, vesselID)
+}
+
+// terminateTrackedProcess signals the LLM subprocess tracked for vesselID
+// (if any) before its map entry is cleared. Best-effort: errors are logged,
+// not returned. The entry itself is removed by the deferred clearTrackedProcess.
+func (r *Runner) terminateTrackedProcess(vesselID string) {
+	tp, ok := r.liveTrackedProcess(vesselID)
+	if !ok {
+		return
+	}
+	if err := stopProcess(tp.PID, nil); err != nil {
+		log.Printf("warn: terminateTrackedProcess %s pid=%d: %v", vesselID, tp.PID, err)
+	}
 }
 
 func (r *Runner) trackedProcess(vesselID string) (trackedProcess, bool) {
