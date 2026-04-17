@@ -127,3 +127,13 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not rerun `fix-bug` without addressing the recurring failure `failed` first. <!-- xylem-lesson:lesson-765216c627f0 -->
+- Rationale: This failure pattern recurred in 5 failed vessels for `fix-bug` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: failed
+- Evidence:
+  - `issue-553` (2026-04-16T03:12:06Z) — `phases/issue-553/summary.json`
+  - `issue-552` (2026-04-16T03:12:06Z) — `phases/issue-552/summary.json`
+  - `issue-550` (2026-04-16T03:13:41Z) — `phases/issue-550/summary.json`
+  - `issue-549` (2026-04-16T03:13:42Z) — `phases/issue-549/summary.json`
+  - `issue-547` (2026-04-16T03:17:15Z) — `phases/issue-547/summary.json`
