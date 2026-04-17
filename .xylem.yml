@@ -285,12 +285,12 @@ providers:
   copilot:
     kind: copilot
     command: "copilot"
-    flags: "--yolo --autopilot --effort medium"
+    flags: "--yolo --autopilot"
     env:
       COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
     tiers:
       low: "gpt-5-mini"   # active: light structured tasks (0x premium)
-      med: "gpt-5-mini"   # STOPGAP loop238 — gpt-4.1 rejects --effort medium (#569); revert once #569 fix lands
+      med: "gpt-4.1"      # active: implementation, fix-checks, conflict resolution (0x premium, more capable than gpt-5-mini)
       high: "gpt-4.1"     # unused — high routes to claude
 
 llm_routing:
