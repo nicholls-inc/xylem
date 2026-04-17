@@ -134,6 +134,10 @@ type Runner struct {
 	processes       map[string]trackedProcess
 	classMu         sync.Mutex
 	inFlightByClass map[string]int
+
+	// discussionSeen guards against duplicate phase-output publications.
+	// Key format: "<vesselID>::<phaseName>::<outputType>"
+	discussionSeen sync.Map
 }
 
 type trackedProcess struct {
