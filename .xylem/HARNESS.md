@@ -127,3 +127,13 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not rerun `ci-watchdog` without addressing the recurring failure `failed` first. <!-- xylem-lesson:lesson-a913c538f518 -->
+- Rationale: This failure pattern recurred in 8 failed vessels for `ci-watchdog` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: failed
+- Evidence:
+  - `scheduled-ci-watchdog-monitor-main-ci-986838` (2026-04-16T03:32:09Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986838/summary.json`
+  - `scheduled-ci-watchdog-monitor-main-ci-986839` (2026-04-16T03:32:16Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986839/summary.json`
+  - `scheduled-ci-watchdog-monitor-main-ci-986840` (2026-04-16T04:01:20Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986840/summary.json`
+  - `scheduled-ci-watchdog-monitor-main-ci-986848` (2026-04-16T08:08:16Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986848/summary.json`
+  - `scheduled-ci-watchdog-monitor-main-ci-986849` (2026-04-16T08:30:08Z) — `phases/scheduled-ci-watchdog-monitor-main-ci-986849/summary.json`
