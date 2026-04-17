@@ -4,6 +4,10 @@
 # EMERGENCY: sources block materialized from profiles to work around #555
 # (profile overlay not expanded to runtime config). Remove this block once
 # #555 lands and the daemon expands profiles at startup.
+#
+# STABILIZATION 2026-04-17: Reduced to core development loop only.
+# Scheduled analytical/meta workflows disabled. See DISABLED block at bottom.
+# To re-enable a source: move it back up into the sources: block.
 
 profiles: [core, self-hosting-xylem]
 
@@ -37,15 +41,6 @@ sources:
       fix:
         labels: [bug, ready-for-work]
         workflow: fix-bug
-        tier: med
-  adaptation:
-    type: github
-    repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot]
-    tasks:
-      adapt:
-        labels: [xylem-adapt-repo]
-        workflow: adapt-repo
         tier: med
   features:
     type: github
@@ -119,35 +114,27 @@ sources:
         labels: [needs-conflict-resolution]
         workflow: resolve-conflicts
         tier: med
-  # Core scheduled sources
-  lessons-hygiene:
-    type: schedule
-    cadence: "@daily"
-    workflow: lessons
-  doc-gardener:
-    type: schedule
-    cadence: "@daily"
-    workflow: doc-garden
-  context-audit:
-    type: schedule
-    cadence: "@weekly"
-    workflow: context-weight-audit
-  security-compliance:
-    type: schedule
-    cadence: "@daily"
-    workflow: security-compliance
-  workflow-health:
-    type: schedule
-    cadence: "@weekly"
-    workflow: workflow-health-report
-  field-report:
-    type: schedule
-    cadence: "@weekly"
-    workflow: field-report
-  lean-squad-tick:
-    type: schedule
-    cadence: "8h"
-    workflow: lean-squad
+  # Scheduled: core operations only
+  diagnose-failures:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "2h"
+    timeout: "45m"
+    tasks:
+      hourly-diagnose-failures:
+        workflow: diagnose-failures
+        ref: diagnose-failures
+        tier: high
+  release-cadence:
+    type: scheduled
+    repo: "nicholls-inc/xylem"
+    schedule: "4h"
+    timeout: "15m"
+    tasks:
+      label-mature-release-pr:
+        workflow: release-cadence
+        ref: release-cadence
+        tier: low
 
   # --- Sources from self-hosting-xylem overlay ---
   pr-self-review:
@@ -211,147 +198,29 @@ sources:
       unblock-deps:
         workflow: unblock-wave
         tier: low
-  # Self-hosting scheduled sources
-  sota-gap:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@weekly"
-    timeout: "90m"
-    tasks:
-      weekly-self-gap-analysis:
-        workflow: sota-gap-analysis
-        ref: sota-gap-analysis
-        tier: high
-  hardening-audit:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@monthly"
-    timeout: "90m"
-    tasks:
-      monthly-hardening-audit:
-        workflow: hardening-audit
-        ref: hardening-audit
-        tier: high
-  continuous-simplicity:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@weekly"
-    timeout: "90m"
-    tasks:
-      weekly-continuous-simplicity:
-        workflow: continuous-simplicity
-        ref: continuous-simplicity
-        tier: med
-  continuous-improvement:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@daily"
-    timeout: "90m"
-    tasks:
-      daily-rotation:
-        workflow: continuous-improvement
-        ref: continuous-improvement
-        tier: high
-  release-cadence:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "4h"
-    timeout: "15m"
-    tasks:
-      label-mature-release-pr:
-        workflow: release-cadence
-        ref: release-cadence
-        tier: low
-  metrics-collector:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@daily"
-    timeout: "60m"
-    tasks:
-      daily-metrics:
-        workflow: metrics-collector
-        ref: metrics-collector
-        tier: low
-  portfolio-analyst:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@weekly"
-    timeout: "60m"
-    tasks:
-      weekly-portfolio:
-        workflow: portfolio-analyst
-        ref: portfolio-analyst
-        tier: high
-  audit:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@daily"
-    timeout: "60m"
-    tasks:
-      daily-audit:
-        workflow: audit
-        ref: audit
-        tier: high
-  initiative-tracker:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@weekly"
-    timeout: "60m"
-    tasks:
-      weekly-initiative-status:
-        workflow: initiative-tracker
-        ref: initiative-tracker
-        tier: high
-  backlog-refinement:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@daily"
-    timeout: "60m"
-    tasks:
-      daily-backlog-refinement:
-        workflow: backlog-refinement
-        ref: backlog-refinement
-        tier: high
-  ingest-field-reports:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@weekly"
-    timeout: "60m"
-    tasks:
-      weekly-field-ingest:
-        workflow: ingest-field-reports
-        ref: ingest-field-reports
-        tier: low
-  diagnose-failures:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "2h"
-    timeout: "45m"
-    tasks:
-      hourly-diagnose-failures:
-        workflow: diagnose-failures
-        ref: diagnose-failures
-        tier: high
-  autonomy-review:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "@weekly"
-    timeout: "90m"
-    tasks:
-      weekly-autonomy-review:
-        workflow: autonomy-review
-        ref: autonomy-review
-        tier: high
-  ci-watchdog:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "30m"
-    timeout: "30m"
-    tasks:
-      monitor-main-ci:
-        workflow: ci-watchdog
-        ref: ci-watchdog
-        tier: low
+
+# --- DISABLED 2026-04-17 (stabilization phase) ---
+# These sources are not in active use. Move back into sources: to re-enable.
+#
+# adaptation:           adapt-repo (xylem-adapt-repo label trigger)
+# lessons-hygiene:      lessons @daily
+# doc-gardener:         doc-garden @daily
+# context-audit:        context-weight-audit @weekly
+# security-compliance:  security-compliance @daily
+# workflow-health:      workflow-health-report @weekly
+# field-report:         field-report @weekly
+# sota-gap:             sota-gap-analysis @weekly
+# hardening-audit:      hardening-audit @monthly
+# continuous-simplicity: continuous-simplicity @weekly
+# continuous-improvement: continuous-improvement @daily
+# metrics-collector:    metrics-collector @daily
+# portfolio-analyst:    portfolio-analyst @weekly
+# audit:                audit @daily
+# initiative-tracker:   initiative-tracker @weekly
+# backlog-refinement:   backlog-refinement @daily
+# ingest-field-reports: ingest-field-reports @weekly
+# autonomy-review:      autonomy-review @weekly
+# ci-watchdog:          ci-watchdog every 30m (heavy when CI red: diagnose+file_issue phases)
 
 daemon:
   auto_upgrade: true
@@ -380,7 +249,6 @@ validation:
   build: "(cd cli && go build ./cmd/xylem)"
   test: "(cd cli && go test ./...)"
 
-concurrency: 3
 max_turns: 100
 timeout: "45m"
 state_dir: ".xylem"
@@ -419,7 +287,7 @@ providers:
       COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
     tiers:
       low: "gpt-5-mini"   # active: light structured tasks (0x premium)
-      med: "gpt-4.1"      # active: moderate analysis (0x premium, free)
+      med: "gpt-5-mini"   # STOPGAP loop238 — gpt-4.1 rejects --effort medium (#569); revert once #569 fix lands
       high: "gpt-4.1"     # unused — high routes to claude
 
 llm_routing:
