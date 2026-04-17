@@ -18,8 +18,10 @@ import (
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
+	"github.com/nicholls-inc/xylem/cli/internal/phase"
 	"github.com/nicholls-inc/xylem/cli/internal/queue"
 	"github.com/nicholls-inc/xylem/cli/internal/source"
+	"github.com/nicholls-inc/xylem/cli/internal/workflow"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"pgregory.net/rapid"
@@ -630,6 +632,118 @@ func TestInvariant_I13_NoDuplicateDiscussionPublicationsPerEvent(t *testing.T) {
 	// (vessel.ID, phase.Name, phase.Output) triple must return nil on the
 	// second call without triggering any gh-api call.
 	// The discussionSeen sync.Map guard (PR#636) makes this deterministic.
+	//
+	// Property: for any valid (vesselID, phaseName) pair, the triple
+	// (vesselID, phaseName, "discussion") used with publishPhaseOutput
+	// produces exactly one set of gh-api GraphQL calls across two back-to-back
+	// invocations with the same (vessel, phase, body).
+	rapid.Check(t, func(rt *rapid.T) {
+		vesselID := rapid.StringMatching(`[a-z][a-z0-9-]{0,15}`).Draw(rt, "vesselID")
+		phaseName := rapid.SampledFrom([]string{
+			"analyze", "plan", "implement", "report", "review", "verify",
+		}).Draw(rt, "phaseName")
+
+		dir := t.TempDir()
+		cfg := makeTestConfig(dir, 1)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		// Source config so resolveRepo returns a non-empty repo slug.
+		cfg.Sources = map[string]config.SourceConfig{
+			"scheduled": {Type: "scheduled", Repo: "owner/repo"},
+		}
+
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+		// Count every gh-api call observed by the mock. Any GraphQL mutation
+		// or query fired by discussion.Publisher will route through this hook.
+		var ghCalls int32
+		cr := &mockCmdRunner{
+			runOutputHook: func(name string, args ...string) ([]byte, error, bool) {
+				if name != "gh" {
+					return nil, nil, false
+				}
+				atomic.AddInt32(&ghCalls, 1)
+				joined := ""
+				for _, a := range args {
+					joined += a + " "
+				}
+				switch {
+				case contains(joined, discussionResolveQuery):
+					return []byte(`{"data":{"repository":{"id":"R_1","discussionCategories":{"nodes":[{"id":"C_1","name":"General"}]}}}}`), nil, true
+				case contains(joined, discussionSearchQuery):
+					// No existing discussion -> Create path.
+					return []byte(`{"data":{"node":{"discussions":{"nodes":[]}}}}`), nil, true
+				case contains(joined, discussionCreateMutation):
+					return []byte(`{"data":{"createDiscussion":{"discussion":{"id":"D_1","title":"Phase Output","url":"https://github.com/owner/repo/discussions/1"}}}}`), nil, true
+				case contains(joined, discussionCommentMutation):
+					return []byte(`{"data":{"addDiscussionComment":{"comment":{"url":"https://github.com/owner/repo/discussions/1#discussioncomment-1"}}}}`), nil, true
+				default:
+					return nil, nil, false
+				}
+			},
+		}
+
+		r := New(cfg, q, &mockWorktree{path: dir}, cr)
+
+		vessel := queue.Vessel{
+			ID:        vesselID,
+			Source:    "scheduled",
+			Workflow:  "weekly-report",
+			State:     queue.StatePending,
+			CreatedAt: time.Now().UTC(),
+			Meta:      map[string]string{"config_source": "scheduled"},
+		}
+
+		p := workflow.Phase{
+			Name:   phaseName,
+			Output: "discussion",
+			Discussion: &workflow.DiscussionOutput{
+				Category:      "General",
+				TitleTemplate: "Phase Output",
+			},
+		}
+
+		td := phase.TemplateData{}
+		body := "some output body"
+
+		// First invocation: guard inserts the triple, publish proceeds,
+		// gh-api calls must fire.
+		if err := r.publishPhaseOutput(context.Background(), vessel, p, td, body); err != nil {
+			rt.Fatalf("first publishPhaseOutput returned error: %v", err)
+		}
+		afterFirst := atomic.LoadInt32(&ghCalls)
+		if afterFirst < 1 {
+			rt.Fatalf("expected at least 1 gh-api call on first publish, got %d", afterFirst)
+		}
+
+		// Second invocation with the same (vessel.ID, phase.Name, phase.Output)
+		// triple: guard short-circuits, zero additional gh-api calls.
+		if err := r.publishPhaseOutput(context.Background(), vessel, p, td, body); err != nil {
+			rt.Fatalf("second publishPhaseOutput returned error: %v", err)
+		}
+		afterSecond := atomic.LoadInt32(&ghCalls)
+		if afterSecond != afterFirst {
+			rt.Fatalf("I13 violation: second publishPhaseOutput with same triple fired %d additional gh-api call(s) (before=%d, after=%d)",
+				afterSecond-afterFirst, afterFirst, afterSecond)
+		}
+	})
+}
+
+// contains is a local substring helper that avoids pulling in strings only
+// for this test function (the imports block for this file intentionally
+// excludes strings; other tests in the file use fmt/filepath instead).
+func contains(haystack, needle string) bool {
+	if len(needle) == 0 {
+		return true
+	}
+	if len(haystack) < len(needle) {
+		return false
+	}
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if haystack[i:i+len(needle)] == needle {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
