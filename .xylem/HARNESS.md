@@ -127,3 +127,30 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `implement-harness` work with phase `pr_draft` still failing due to `exit status`. <!-- xylem-lesson:lesson-c0d327f1cfd7 -->
+- Rationale: This failure pattern recurred in 7 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `issue-417-retry-1-retry-1-retry-1-retry-1` (2026-04-12T13:59:21Z) — `phases/issue-417-retry-1-retry-1-retry-1-retry-1/pr_draft.output`
+  - `issue-395-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:07:35Z) — `phases/issue-395-retry-1-retry-1-retry-1-retry-1/pr_draft.output`
+  - `issue-401-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:21:53Z) — `phases/issue-401-retry-1-retry-1-retry-1-retry-1/pr_draft.output`
+  - `issue-398-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:22:07Z) — `phases/issue-398-retry-1-retry-1-retry-1-retry-1/pr_draft.output`
+  - `issue-399-retry-1-retry-1-retry-1-retry-1` (2026-04-12T14:40:34Z) — `phases/issue-399-retry-1-retry-1-retry-1-retry-1/pr_draft.output`
+
+
+### Do not finish `implement-harness` work with phase `pr_draft` still failing due to `gate failed, retries exhausted`. <!-- xylem-lesson:lesson-960013f73871 -->
+- Rationale: This failure pattern recurred in 3 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: gate failed, retries exhausted
+- Evidence:
+  - `issue-376` (2026-04-11T17:38:44Z) — `phases/issue-376/pr_draft.output`
+  - `issue-387-retry-1` (2026-04-12T01:04:47Z) — `phases/issue-387-retry-1/pr_draft.output`
+  - `issue-392-retry-1` (2026-04-12T02:27:15Z) — `phases/issue-392-retry-1/pr_draft.output`
+
+
+### Do not finish `implement-harness` work with phase `pr_draft` still failing due to `signal killed`. <!-- xylem-lesson:lesson-eae436032404 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `implement-harness` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: signal: killed
+- Evidence:
+  - `issue-574-retry-1` (2026-04-17T03:51:57Z) — `phases/issue-574-retry-1/pr_draft.output`
+  - `issue-574-retry-1` (2026-04-17T03:51:57Z) — `phases/issue-574-retry-1/pr_draft.output`
