@@ -96,6 +96,12 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
 `harness-impl` pull requests, so self-hosted harness PRs carry both
 `harness-impl` and `ready-to-merge`.
 
+### CI path-filter invariant: keep `ci.yml` and `ci-skip.yml` in sync
+
+`.github/workflows/ci.yml` and `.github/workflows/ci-skip.yml` implement a complementary pair to keep the required `go-checks` status check from blocking PRs that don't touch Go code. `ci.yml` runs the real suite when Go files change; `ci-skip.yml` runs a no-op `go-checks` job otherwise, satisfying the required check.
+
+**Invariant:** the `paths:` list in `ci.yml` and the `paths-ignore:` list in `ci-skip.yml` must be identical at all times. If you add or remove a path in one file, update the other in the same commit. A mismatch silently breaks the invariant: Go changes go unchecked, or non-Go PRs are blocked.
+
 ### Do not finish `merge-pr` work with phase `merge` still failing due to `exit status`. <!-- xylem-lesson:lesson-c1f590566a94 -->
 - Rationale: This failure pattern recurred in 7 failed vessels for `merge-pr` and should be encoded as institutional memory instead of rediscovered in later runs.
 - Example symptom: exit status 1

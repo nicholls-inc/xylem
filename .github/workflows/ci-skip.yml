@@ -1,0 +1,15 @@
+name: CI (skip)
+
+on:
+  pull_request:
+    branches: [main]
+    paths-ignore:
+      - "cli/**"
+      - ".golangci.yml"
+      - ".xylem/workflows/**"
+
+jobs:
+  go-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "No Go changes — skipping"
