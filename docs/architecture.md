@@ -171,7 +171,7 @@ type Source interface {
 | `GitHubPR` | `github-pr` | `review/pr-<N>-<slug>` | Adds status label (default: `in-progress`) |
 | `GitHubPREvents` | `github-pr-events` | `event/pr-<N>-<eventType>-<slug>` | None |
 | `GitHubMerge` | `github-merge` | `merge/pr-<N>-<slug>` | None |
-| `Schedule` | `schedule` | `chore/<source-name>-<tick>` | Persists cadence state in `.xylem/state/schedule-state.json` |
+| `Schedule` | `schedule` | `chore/<source-name>-<tick>` | Persists cadence state in `.xylem/state/schedule.json` |
 | `Scheduled` | `scheduled` | `scheduled/<task>-<vessel>` | Persists per-task schedule buckets in `.xylem/schedules/` |
 | `Manual` | `manual` | `task/<id>-<slug>` | None |
 
@@ -232,7 +232,7 @@ Gates are inter-phase quality checks. They run after a phase completes and must 
 |------|----------|------------|
 | `command` | Runs a shell command in the worktree. Exit 0 = pass. Non-zero = fail, triggering a retry of the same phase with gate output as context. | `run`, `retries`, `retry_delay` |
 | `label` | Polls a GitHub issue for a specific label. Transitions the vessel to `waiting` state until the label appears or the gate times out. | `wait_for`, `timeout`, `poll_interval` |
-| `live` | Runs browser-based verification steps against a live environment. Executes HTTP checks or chromedp scripts and persists an evidence report. | `steps`, `retries` |
+| `live` | Runs browser-based verification steps against a live environment. Executes HTTP checks or chromedp scripts and persists an evidence report. | `live.mode`, `live.http`, `live.browser`, `live.command_assert`, `retries` |
 
 Command gates enable automated quality enforcement (run tests, lint, type-check). Label gates enable human-in-the-loop approval between phases. Live gates enable automated browser-based verification against running services.
 
