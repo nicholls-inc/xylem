@@ -68,6 +68,11 @@ var validTransitions = map[VesselState]map[VesselState]bool{
 // ErrInvalidTransition is returned when a state transition is not allowed.
 var ErrInvalidTransition = errors.New("invalid state transition")
 
+// ErrDuplicateID is returned by Enqueue when the vessel's ID collides with any
+// existing vessel in the queue. ID is the primary key (invariant I9); callers
+// must supply unique IDs. Distinct from Ref collision, which is a silent no-op.
+var ErrDuplicateID = errors.New("duplicate vessel ID")
+
 // IsTerminal reports whether s is a terminal vessel state.
 func (s VesselState) IsTerminal() bool {
 	return s == StateCompleted || s == StateFailed || s == StateCancelled || s == StateTimedOut
@@ -150,6 +155,12 @@ func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 						return nil // already active, skip silently
 					}
 				}
+			}
+		}
+
+		for _, v := range vessels {
+			if v.ID == vessel.ID {
+				return ErrDuplicateID
 			}
 		}
 

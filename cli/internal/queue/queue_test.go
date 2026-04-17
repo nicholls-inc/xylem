@@ -1820,8 +1820,12 @@ func helperFailVessel(t *testing.T, q *Queue, id string) {
 }
 
 // helperEnqueueFailThenReenqueue creates a queue with two records for the
-// same vessel ID: the first failed, the second pending (failed vessels allow
-// re-enqueue; completed vessels do not).
+// same vessel ID: the first failed, the second pending. Since I9 forbids
+// duplicate IDs via Enqueue, the duplicate is installed via ReplaceAll, which
+// is the privileged path where the caller is responsible for preserving
+// queue invariants (spec I7/I9 ⚠). This exercises the last-write-wins
+// semantics of Update/FindByID/Cancel/UpdateVessel when a caller has
+// deliberately produced a duplicate.
 func helperEnqueueFailThenReenqueue(t *testing.T) (*Queue, Vessel) {
 	t.Helper()
 	q, _ := newTestQueue(t)
@@ -1830,8 +1834,12 @@ func helperEnqueueFailThenReenqueue(t *testing.T) (*Queue, Vessel) {
 		t.Fatalf("enqueue: %v", err)
 	}
 	helperFailVessel(t, q, vessel.ID)
-	if _, err := q.Enqueue(testVessel(42)); err != nil {
-		t.Fatalf("re-enqueue: %v", err)
+	existing, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if err := q.ReplaceAll(append(existing, testVessel(42))); err != nil {
+		t.Fatalf("replace-all with duplicate ID: %v", err)
 	}
 	return q, vessel
 }
@@ -1970,21 +1978,23 @@ func TestCompact(t *testing.T) {
 	t.Run("removes stale terminal records", func(t *testing.T) {
 		q, path := newTestQueue(t)
 
-		// Enqueue 3 vessels, fail 2, then re-enqueue them.
+		// Enqueue 3 vessels, fail 2, then install duplicate pending records for
+		// them via ReplaceAll. Direct Enqueue would collide on I9; ReplaceAll is
+		// the privileged path whose caller carries that obligation (spec I7/I9).
 		for _, id := range []int{1, 2, 3} {
 			if _, err := q.Enqueue(testVessel(id)); err != nil {
 				t.Fatalf("enqueue: %v", err)
 			}
 		}
-		// Fail vessel 1 and 2 (failed vessels allow re-enqueue).
 		for _, id := range []int{1, 2} {
 			helperFailVessel(t, q, fmt.Sprintf("issue-%d", id))
 		}
-		// Re-enqueue vessel 1 and 2.
-		for _, id := range []int{1, 2} {
-			if _, err := q.Enqueue(testVessel(id)); err != nil {
-				t.Fatalf("re-enqueue: %v", err)
-			}
+		existing, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
+		}
+		if err := q.ReplaceAll(append(existing, testVessel(1), testVessel(2))); err != nil {
+			t.Fatalf("replace-all: %v", err)
 		}
 
 		// Before compaction: 5 records (failed-1, failed-2, pending-3, pending-1, pending-2).
@@ -2046,15 +2056,19 @@ func TestCompact(t *testing.T) {
 	t.Run("retains latest terminal record per ID", func(t *testing.T) {
 		q, _ := newTestQueue(t)
 
-		// Enqueue a vessel, fail it, re-enqueue, fail again.
+		// Enqueue, fail, then install a second pending record via ReplaceAll
+		// (Enqueue rejects duplicate IDs under I9), then fail it too.
 		if _, err := q.Enqueue(testVessel(20)); err != nil {
 			t.Fatalf("enqueue: %v", err)
 		}
 		helperFailVessel(t, q, "issue-20")
-		if _, err := q.Enqueue(testVessel(20)); err != nil {
-			t.Fatalf("re-enqueue: %v", err)
+		existing, err := q.List()
+		if err != nil {
+			t.Fatalf("list: %v", err)
 		}
-		// Dequeue and fail the re-enqueued vessel.
+		if err := q.ReplaceAll(append(existing, testVessel(20))); err != nil {
+			t.Fatalf("replace-all: %v", err)
+		}
 		if _, err := q.Dequeue(); err != nil {
 			t.Fatalf("dequeue: %v", err)
 		}
@@ -2132,13 +2146,18 @@ func TestCompact(t *testing.T) {
 func TestCompactDryRun(t *testing.T) {
 	q, path := newTestQueue(t)
 
-	// Enqueue, fail, and re-enqueue a vessel (failed vessels allow re-enqueue).
+	// Enqueue, fail, then install a duplicate pending record via ReplaceAll
+	// (Enqueue rejects duplicate IDs under I9).
 	if _, err := q.Enqueue(testVessel(1)); err != nil {
 		t.Fatalf("enqueue: %v", err)
 	}
 	helperFailVessel(t, q, "issue-1")
-	if _, err := q.Enqueue(testVessel(1)); err != nil {
-		t.Fatalf("re-enqueue: %v", err)
+	existing, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if err := q.ReplaceAll(append(existing, testVessel(1))); err != nil {
+		t.Fatalf("replace-all: %v", err)
 	}
 
 	linesBefore := readNonEmptyLines(t, path)
