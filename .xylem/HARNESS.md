@@ -127,3 +127,12 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not rerun `unblock-wave` without addressing the recurring failure `failed` first. <!-- xylem-lesson:lesson-a8088b707e32 -->
+- Rationale: This failure pattern recurred in 4 failed vessels for `unblock-wave` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: failed
+- Evidence:
+  - `merge-pr-556-60eeabab` (2026-04-16T03:19:32Z) — `phases/merge-pr-556-60eeabab/summary.json`
+  - `merge-pr-551-eabfde6b` (2026-04-16T03:21:05Z) — `phases/merge-pr-551-eabfde6b/summary.json`
+  - `merge-pr-548-aa431ad7` (2026-04-16T03:21:05Z) — `phases/merge-pr-548-aa431ad7/summary.json`
+  - `merge-pr-545-f230a45c` (2026-04-16T03:23:47Z) — `phases/merge-pr-545-f230a45c/summary.json`
