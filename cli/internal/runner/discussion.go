@@ -51,6 +51,12 @@ func (r *Runner) publishPhaseOutput(ctx context.Context, vessel queue.Vessel, p 
 		return nil
 	}
 
+	// Idempotency guard (I13): dedupe by (vessel_id, phase_name, output_type).
+	tripleKey := vessel.ID + "::" + p.Name + "::" + p.Output
+	if _, loaded := r.discussionSeen.LoadOrStore(tripleKey, struct{}{}); loaded {
+		return nil
+	}
+
 	switch p.Output {
 	case "discussion":
 		repoSlug := r.resolveRepo(vessel)
