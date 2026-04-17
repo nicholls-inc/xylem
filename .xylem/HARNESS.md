@@ -127,3 +127,19 @@ Separately, the checked-in self-hosting `merge-pr` workflow remains scoped to
   - `scheduled-release-cadence-label-mature-release-pr-123327` (2026-04-11T12:37:39Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123327/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123328` (2026-04-11T16:03:34Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123328/label_ready.output`
   - `scheduled-release-cadence-label-mature-release-pr-123329` (2026-04-11T20:01:05Z) — `phases/scheduled-release-cadence-label-mature-release-pr-123329/label_ready.output`
+
+### Do not finish `fix-bug` work with phase `analyze` still failing due to `exit status`. <!-- xylem-lesson:lesson-b92f91a08b08 -->
+- Rationale: This failure pattern recurred in 3 failed vessels for `fix-bug` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `issue-470` (2026-04-13T12:39:54Z) — `phases/issue-470/analyze.output`
+  - `issue-482` (2026-04-14T00:22:28Z) — `phases/issue-482/analyze.output`
+  - `issue-510-retry-1` (2026-04-15T04:10:45Z) — `phases/issue-510-retry-1/analyze.output`
+
+
+### Do not finish `fix-bug` work with phase `analyze` still failing due to `exit status`. <!-- xylem-lesson:lesson-b92f91a08b08 -->
+- Rationale: This failure pattern recurred in 2 failed vessels for `fix-bug` and should be encoded as institutional memory instead of rediscovered in later runs.
+- Example symptom: exit status 1
+- Evidence:
+  - `issue-240-retry-1-retry-1` (2026-04-12T19:22:33Z) — `phases/issue-240-retry-1-retry-1/analyze.output`
+  - `issue-512` (2026-04-14T19:00:11Z) — `phases/issue-512/analyze.output`
