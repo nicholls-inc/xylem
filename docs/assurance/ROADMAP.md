@@ -77,7 +77,7 @@ Stop and re-plan the entire roadmap if any of the following becomes true:
 
 ## References
 
-- `docs/research/assurance-hierarchy.md` — the 6-layer hierarchy this roadmap operationalizes
+- `docs/research/assurance-hierarchy.md` — the 6-layer hierarchy this roadmap operationalizes (includes "Xylem projection" section mapping layers to current Go-ecosystem reach)
 - `docs/research/literature-review.md` — prior art (GS AI, Kleppmann, Midspiral, Axiom, Harmonic, de Moura, Skomarovsky)
 - `docs/invariants/queue.md`, `scanner.md`, `runner.md` — load-bearing module invariant specs
 - `.claude/rules/protected-surfaces.md` — governance for invariant docs and property tests
