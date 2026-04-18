@@ -147,12 +147,15 @@ error that stops further queue use, or (b) never be produced.
 **I9. Unique vessel IDs.**
 `∀ v1, v2 ∈ List(). v1.ID = v2.ID ⟹ v1 = v2`. `ID` is a primary key across
 the queue.
-- *Why:* `FindByID` currently returns the last match (queue.go:311) and
-  `Enqueue` checks only `Ref` collisions, not `ID`. Two vessels sharing an
-  `ID` is a silent divergence; every downstream state-machine claim implicitly
-  assumes this invariant.
-- *Test:* rapid ops; after every mutation, assert `ID` set has no duplicates.
-- *Status:* **not enforced in code.** `Enqueue` must reject duplicate `ID`.
+- *Why:* `FindByID` returns the last match (queue.go:311); without ID
+  uniqueness, every downstream state-machine claim would silently diverge
+  when two vessels shared an `ID`.
+- *Test:* explicit two-vessel construction — enqueue a vessel, then enqueue
+  a second vessel sharing the first's `ID` but with a distinct `Ref` (to
+  bypass the Ref-dedup short-circuit); assert `ErrDuplicateID` and
+  `len(List()) == 1`.
+- *Status:* **enforced.** `Enqueue` rejects duplicate `ID` with
+  `ErrDuplicateID` (PR #594, queue.go:223–227).
 
 **I10. `RetryOf` forms a DAG rooted at fresh vessels.**
 If `v.RetryOf ≠ ""`, then (a) there exists `w ∈ List() ∪ compacted_history`
@@ -229,17 +232,18 @@ fix is merged.
 | I7 | ✓ | `Update` (queue.go:219), `Cancel` (queue.go:409) | Transition validated before mutation. |
 | I7 | ✓ | `UpdateVessel` (queue.go:373) | Validates only on state-change, which is correct for I7 (but see I2 gap above). |
 | I8 | ✗ | `readAllVessels` (queue.go:629) | Silently skips malformed lines with a `log.Printf` warning. Fix: fail-closed (return error and stop using queue) OR make writes atomic so malformed lines cannot appear. Prerequisite for honest I5b. |
-| I9 | ✗ | `Enqueue` (queue.go:127) | Checks only `Ref`, not `ID`. Two vessels with the same `ID` is a silent bug. Fix: reject duplicate-`ID` enqueue. |
+| I9 | ✓ | `Enqueue` (queue.go:223–227) | Rejects duplicate-`ID` enqueue with `ErrDuplicateID` (PR #594). Ref-dedup at queue.go:212–221 short-circuits before the ID check when both `Ref` and `ID` collide; property test uses a distinct `Ref` to exercise the ID path. |
 | I10 | ⚠ | no enforcement | `RetryOf` is set by callers and never validated. Acceptable if callers are disciplined; property test must assert DAG over all observed queue states. |
 | I11 | ✓ | `compactVessels` (queue.go:467) | Removes only when `IsTerminal()`. Property test pins the current guarantee against future regressions. |
 
-**Summary:** 4 outright violations (I2, I3, I5b, I8, I9), 3 warnings (I1/I4/I10
-partial coverage). Fix order recommended:
+**Summary:** 3 outright violations (I2, I3, I5b, I8), 3 warnings (I1/I4/I10
+partial coverage). I9 landed in PR #594 and is pinned by
+`TestPropQueueInvariant_I9_UniqueIDs`. Fix order recommended for the
+remaining items:
 
-1. **I9** (duplicate `ID`) — one-line `Enqueue` guard; cheapest.
-2. **I2** (terminal-field mutation) — one-branch `UpdateVessel` guard.
-3. **I3** (`CurrentPhase`/`PhaseOutputs` reset) — needs policy sign-off on runner-side consequences before the reset is added.
-4. **I8 + I5b** (atomic writes + fail-closed reads) — paired change; correct order is I8 first (loud), then I5b (quiet, builds on I8).
+1. **I2** (terminal-field mutation) — one-branch `UpdateVessel` guard.
+2. **I3** (`CurrentPhase`/`PhaseOutputs` reset) — needs policy sign-off on runner-side consequences before the reset is added.
+3. **I8 + I5b** (atomic writes + fail-closed reads) — paired change; correct order is I8 first (loud), then I5b (quiet, builds on I8).
 
 ---
 

@@ -5,14 +5,14 @@ package queue
 // of the spec). The file is a protected surface: modifications require a
 // human-signed commit (see .claude/rules/protected-surfaces.md).
 //
-// Four tests are t.Skip'd because they would fail against the current code
+// Two tests are t.Skip'd because they would fail against the current code
 // (see the spec's Gap analysis). Removing a skip is a one-line action once
 // the corresponding fix lands:
 //   - I2: UpdateVessel skips validation on same-state mutations.
 //   - I3: resetPendingState does not reset CurrentPhase / PhaseOutputs.
-//   - I9: Enqueue does not reject duplicate IDs.
-// I2, I3, and I9 are skipped by the "keep CI green until the code fix lands"
+// I2 and I3 are skipped by the "keep CI green until the code fix lands"
 // principle with explicit gap-row references in the skip message.
+// I9 is no longer skipped — the Enqueue duplicate-ID guard landed in PR #594.
 //
 // I5b (crash durability) was originally the one sanctioned skip per the
 // spec's Governance §4; it now runs against the atomic writeAllVessels fix
@@ -21,6 +21,7 @@ package queue
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -709,21 +710,47 @@ func TestPropQueueInvariant_I8_FileWellFormedness(t *testing.T) {
 }
 
 // Invariant I9: Unique vessel IDs.
+//
+// Directly exercises the Enqueue duplicate-ID rejection landed in PR #594.
+// A second Enqueue that shares the first vessel's ID but carries a distinct
+// Ref must fail with ErrDuplicateID and the queue must still contain exactly
+// one vessel. The distinct Ref is required to keep us past the Ref-dedup
+// short-circuit (Enqueue silently no-ops a matching-Ref active vessel before
+// reaching the ID check).
 func TestPropQueueInvariant_I9_UniqueIDs(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		q, _, cleanup := newPropQueueWithDir(t, "queue-i9-prop")
 		defer cleanup()
-		n := rapid.IntRange(1, 20).Draw(t, "n")
-		for i := 0; i < n; i++ {
-			op := drawMutatingOp(t, false)
-			applyOp(q, op)
-			seen := map[string]bool{}
-			for _, v := range mustList(t, q) {
-				if seen[v.ID] {
-					t.Fatalf("I9: duplicate ID %q in queue after op %d (%v)", v.ID, i, op.kind)
-				}
-				seen[v.ID] = true
-			}
+
+		v1 := drawFreshVessel(t)
+		if v1.Ref == "" {
+			v1.Ref = "https://github.com/example/repo/issues/1"
+		}
+		if _, err := q.Enqueue(v1); err != nil {
+			t.Fatalf("I9: initial Enqueue failed: %v", err)
+		}
+
+		v2 := drawFreshVessel(t)
+		v2.ID = v1.ID                                                        // force the ID collision
+		v2.Ref = fmt.Sprintf("https://github.com/example/repo/issues/%d", 9) // distinct from drawRef's pool
+		if v2.Ref == v1.Ref {
+			t.Fatalf("test setup: v2.Ref must differ from v1.Ref, both %q", v1.Ref)
+		}
+
+		_, err := q.Enqueue(v2)
+		if !errors.Is(err, ErrDuplicateID) {
+			t.Fatalf("I9: duplicate-ID Enqueue returned %v, want ErrDuplicateID", err)
+		}
+
+		vessels := mustList(t, q)
+		if len(vessels) != 1 {
+			t.Fatalf("I9: queue has %d vessels after rejected duplicate, want 1", len(vessels))
+		}
+		if vessels[0].ID != v1.ID {
+			t.Fatalf("I9: surviving vessel ID is %q, want %q", vessels[0].ID, v1.ID)
+		}
+		if vessels[0].Ref != v1.Ref {
+			t.Fatalf("I9: surviving vessel Ref is %q, want %q (second Enqueue must be fully rejected)", vessels[0].Ref, v1.Ref)
 		}
 	})
 }
