@@ -554,23 +554,162 @@ func TestScanReenqueuesChangedFailedIssue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	// Spec I9 (docs/invariants/queue.md) forbids duplicate IDs. The
-	// changed-fingerprint path currently reuses the original ID, which the
-	// queue now rejects; the scanner logs the collision and skips. The
-	// scanner-side fix (route changed-fingerprint retries through Update or
-	// a RetryID-style new ID) is tracked as a separate gap.
-	if result.Added != 0 {
-		t.Fatalf("expected duplicate-ID re-enqueue to be skipped, added=%d", result.Added)
+	// Spec I9 (docs/invariants/queue.md) forbids duplicate IDs. Per #658,
+	// when the colliding row is in a recoverable terminal state (failed,
+	// cancelled, timed_out) the scanner now chains a fresh -retry-N vessel
+	// rather than skipping — otherwise the issue is stranded forever.
+	if result.Added != 1 {
+		t.Fatalf("expected changed-fingerprint collision to chain (added=1), got added=%d", result.Added)
 	}
-	if result.Skipped != 1 {
-		t.Fatalf("expected duplicate-ID re-enqueue to be counted as skipped, skipped=%d", result.Skipped)
+	if result.Skipped != 0 {
+		t.Fatalf("expected changed-fingerprint collision to chain (skipped=0), got skipped=%d", result.Skipped)
 	}
 	vessels, err := q.List()
 	if err != nil {
 		t.Fatalf("list queue: %v", err)
 	}
+	if len(vessels) != 2 {
+		t.Fatalf("expected 2 queue entries (original + chained retry), got %d", len(vessels))
+	}
+	retry := vessels[len(vessels)-1]
+	if retry.ID != "issue-1-retry-1" {
+		t.Fatalf("expected chained ID issue-1-retry-1, got %q", retry.ID)
+	}
+	if retry.RetryOf != "issue-1" {
+		t.Fatalf("expected RetryOf=issue-1, got %q", retry.RetryOf)
+	}
+	if retry.State != queue.StatePending {
+		t.Fatalf("expected chained retry StatePending, got %q", retry.State)
+	}
+}
+
+// TestScanChainsCancelledTerminalVessel covers issue #658: when the scanner
+// finds a GitHub issue whose existing queue row is cancelled (operator
+// cancelled a wedged vessel; cf. loop 281 worker-stall rep #12), it must
+// chain a fresh -retry-N vessel rather than skip on ErrDuplicateID.
+func TestScanChainsCancelledTerminalVessel(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 1, Title: "wedged issue", Body: "body", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	for _, prefix := range []string{"fix", "feat"} {
+		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
+	}
+
+	// Seed a cancelled base-ID row (the stranded case).
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:        "issue-1",
+		Source:    "github-issue",
+		Ref:       "https://github.com/owner/repo/issues/1",
+		Workflow:  "fix-bug",
+		Meta:      map[string]string{"issue_num": "1"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("enqueue seed: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update("issue-1", queue.StateCancelled, "operator cancel"); err != nil {
+		t.Fatalf("cancel seed: %v", err)
+	}
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 1 {
+		t.Fatalf("expected cancelled-collision to chain (added=1), got added=%d skipped=%d", result.Added, result.Skipped)
+	}
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 2 {
+		t.Fatalf("expected 2 vessels (cancelled base + chained retry), got %d", len(vessels))
+	}
+	retry := vessels[len(vessels)-1]
+	if retry.ID != "issue-1-retry-1" {
+		t.Fatalf("chain ID: got %q, want issue-1-retry-1", retry.ID)
+	}
+	if retry.RetryOf != "issue-1" {
+		t.Fatalf("chain RetryOf: got %q, want issue-1", retry.RetryOf)
+	}
+	if retry.State != queue.StatePending {
+		t.Fatalf("chain state: got %q, want pending", retry.State)
+	}
+	// The base cancelled row must remain sealed (I2 terminal immutability).
+	base := vessels[0]
+	if base.ID != "issue-1" || base.State != queue.StateCancelled {
+		t.Fatalf("base row mutated: id=%q state=%q", base.ID, base.State)
+	}
+}
+
+// TestScanSkipsCompletedDuplicateID confirms that the chain path does NOT
+// fire for completed vessels — re-enqueueing a completed vessel would
+// silently redo shipped work. Completed collisions must still skip.
+func TestScanSkipsCompletedDuplicateID(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 1, Title: "completed", Body: "body", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	for _, prefix := range []string{"fix", "feat"} {
+		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
+	}
+
+	if _, err := q.Enqueue(queue.Vessel{
+		ID:        "issue-1",
+		Source:    "github-issue",
+		Ref:       "https://github.com/owner/repo/issues/1",
+		Workflow:  "fix-bug",
+		Meta:      map[string]string{"issue_num": "1"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update("issue-1", queue.StateCompleted, ""); err != nil {
+		t.Fatalf("complete: %v", err)
+	}
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 0 {
+		t.Fatalf("expected completed-collision to skip (added=0), got added=%d", result.Added)
+	}
+	if result.Skipped != 1 {
+		t.Fatalf("expected completed-collision to skip (skipped=1), got skipped=%d", result.Skipped)
+	}
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
 	if len(vessels) != 1 {
-		t.Fatalf("expected 1 queue entry (duplicate rejected), got %d", len(vessels))
+		t.Fatalf("expected 1 vessel (no chain on completed), got %d", len(vessels))
 	}
 }
 

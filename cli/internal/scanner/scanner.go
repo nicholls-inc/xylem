@@ -100,10 +100,28 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 
 			enqueued, err := s.Queue.Enqueue(vessel)
 			if errors.Is(err, queue.ErrDuplicateID) {
-				// Changed-fingerprint retry path currently reuses the original
-				// ID, which collides with the failed record (I9). Skip rather
-				// than crash the scan; the correct fix (route through Update
-				// or use RetryID for a new-ID retry) is scanner-side.
+				// ID collision. Inspect the existing row: if it is in a
+				// recoverable terminal state (cancelled, failed, timed_out),
+				// chain the scan result as a new -retry-N vessel so the issue
+				// is not stranded. `completed` and active states fall through
+				// to a skip — active is already live, completed would silently
+				// redo shipped work. See issue #658.
+				chained, newVessel, chainErr := s.chainTerminalRetry(vessel)
+				if chainErr != nil {
+					log.Printf("warn: scanner: duplicate vessel ID %q, chain retry failed: %v", vessel.ID, chainErr)
+					scanErrs = append(scanErrs, chainErr)
+					result.Skipped++
+					continue
+				}
+				if chained {
+					result.Added++
+					if s.RunHooks {
+						if hookErr := entry.src.OnEnqueue(ctx, newVessel); hookErr != nil {
+							log.Printf("warn: OnEnqueue hook for chained vessel %s failed: %v", newVessel.ID, hookErr)
+						}
+					}
+					continue
+				}
 				log.Printf("warn: scanner: duplicate vessel ID %q, skipping", vessel.ID)
 				result.Skipped++
 				continue
@@ -142,6 +160,54 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 		}
 	}
 	return result, errors.Join(scanErrs...)
+}
+
+// chainTerminalRetry handles the ErrDuplicateID case where the colliding queue
+// row is in a recoverable terminal state (cancelled, failed, timed_out). It
+// allocates a fresh -retry-N ID via recovery.RetryID, sets RetryOf to the
+// original ID, and re-enqueues. Returns (true, nil) if a new vessel was
+// enqueued; (false, nil) if the collision should fall through to skip
+// (existing row is active or completed); (false, err) on a hard error.
+//
+// Only one retry attempt is made; a second collision (e.g. race against a
+// concurrent enqueue) falls through to skip rather than looping.
+func (s *Scanner) chainTerminalRetry(vessel queue.Vessel) (bool, queue.Vessel, error) {
+	originalID := vessel.ID
+	existing, err := s.Queue.FindByID(originalID)
+	if err != nil || existing == nil {
+		// No existing row to inspect — ErrDuplicateID must have been spurious
+		// (race, or queue just compacted). Skip this tick; next scan will
+		// re-evaluate.
+		return false, queue.Vessel{}, nil
+	}
+	switch existing.State {
+	case queue.StateCancelled, queue.StateFailed, queue.StateTimedOut:
+		// Recoverable terminal: chain.
+	default:
+		// Active (pending/running/waiting) or completed: do not chain.
+		return false, queue.Vessel{}, nil
+	}
+
+	vessel.ID = recovery.RetryID(originalID, s.Queue)
+	vessel.RetryOf = originalID
+	enqueued, enqErr := s.Queue.Enqueue(vessel)
+	if enqErr != nil {
+		if errors.Is(enqErr, queue.ErrDuplicateID) {
+			// Race: another process allocated the same -retry-N between
+			// RetryID and Enqueue. Skip rather than loop.
+			return false, queue.Vessel{}, nil
+		}
+		return false, queue.Vessel{}, enqErr
+	}
+	if !enqueued {
+		return false, queue.Vessel{}, nil
+	}
+	if err := recovery.UpdateRetryOutcome(s.Config.StateDir, originalID, "enqueued"); err != nil {
+		// Recovery bookkeeping is best-effort; the vessel IS in the queue.
+		log.Printf("warn: scanner: chain retry UpdateRetryOutcome failed for %q: %v", originalID, err)
+	}
+	log.Printf("info: scanner: chained terminal %s vessel %q as %q (retry_of=%s)", existing.State, originalID, vessel.ID, originalID)
+	return true, vessel, nil
 }
 
 func (s *Scanner) budgetGate() budgetGate {
