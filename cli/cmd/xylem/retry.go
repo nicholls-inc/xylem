@@ -35,7 +35,7 @@ func cmdRetry(q *queue.Queue, cfg *config.Config, id string, fromScratch bool) e
 		return fmt.Errorf("retry error: %w", err)
 	}
 
-	if vessel.State != queue.StateFailed && vessel.State != queue.StateTimedOut {
+	if vessel.State != queue.StateFailed && vessel.State != queue.StateTimedOut && vessel.State != queue.StateCancelled {
 		return fmt.Errorf("error: vessel %s is not in a retryable state (current: %s)", id, vessel.State)
 	}
 	if err := recovery.RetryAuthorized(cfg.StateDir, vessel.ID); err != nil {

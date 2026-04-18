@@ -300,6 +300,39 @@ func TestRetryTimedOutVessel(t *testing.T) {
 	}
 }
 
+// TestRetryCancelledVessel exercises the operator-recovery handle for issue #658:
+// a vessel the operator cancelled during a worker-stall rep must be reachable
+// again through `xylem retry`, since the GitHub issue stays `ready-for-work`
+// and the scanner dedups the base ID indefinitely (cli/internal/scanner/scanner.go:101-110).
+func TestRetryCancelledVessel(t *testing.T) {
+	q := newRetryTestQueue(t)
+	cfg := newRetryTestConfig(t)
+	now := time.Now().UTC()
+	v := queue.Vessel{
+		ID: "issue-60", Source: "github-issue", Workflow: "implement-harness",
+		Ref:   "https://github.com/owner/repo/issues/60",
+		State: queue.StatePending, CreatedAt: now,
+	}
+	q.Enqueue(v)                                                  //nolint:errcheck
+	q.Update("issue-60", queue.StateRunning, "")                  //nolint:errcheck
+	q.Update("issue-60", queue.StateCancelled, "operator cancel") //nolint:errcheck
+
+	if err := cmdRetry(q, cfg, "issue-60", true); err != nil {
+		t.Fatalf("unexpected error retrying cancelled vessel: %v", err)
+	}
+
+	retry, err := q.FindByID("issue-60-retry-1")
+	if err != nil {
+		t.Fatalf("retry vessel not found: %v", err)
+	}
+	if retry.State != queue.StatePending {
+		t.Errorf("retry should be pending, got %s", retry.State)
+	}
+	if retry.RetryOf != "issue-60" {
+		t.Errorf("retry_of should be issue-60, got %s", retry.RetryOf)
+	}
+}
+
 func TestRetryNonRetryableVessel(t *testing.T) {
 	tests := []struct {
 		name  string
