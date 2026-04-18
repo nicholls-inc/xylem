@@ -48,9 +48,11 @@ phases:
       fi
       OWNER=$(echo "$REPO" | cut -d/ -f1)
       NAME=$(echo "$REPO" | cut -d/ -f2)
+      # Use -f for owner/repo (GraphQL String!) to avoid `gh api -F` auto-coercing
+      # all-numeric org/repo names to Int and violating the schema (#656).
       UNRESOLVED=$(gh api graphql \
         -f query='query($owner:String!,$repo:String!,$num:Int!){repository(owner:$owner,name:$repo){pullRequest(number:$num){reviewThreads(first:100){nodes{isResolved}}}}}' \
-        -F owner="$OWNER" -F repo="$NAME" -F num="$PR" \
+        -f owner="$OWNER" -f repo="$NAME" -F num="$PR" \
         --jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved == false)] | length')
       if [ "$UNRESOLVED" -gt 0 ]; then
         echo "XYLEM_NOOP: $UNRESOLVED unresolved review thread(s)"
