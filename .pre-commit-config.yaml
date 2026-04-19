@@ -58,3 +58,14 @@ repos:
         language: system
         pass_filenames: false
         files: ^\.foxguard/(baseline\.json|justifications\.md)$
+
+      # Enforces 1:1 coverage between docs/invariants/<module>.md invariant
+      # headers and `// Invariant <ID>:` comments in the module's property
+      # tests. Prevents silent drift between specs and tests. See
+      # docs/invariants/README.md § Coverage enforcement.
+      - id: invariant-coverage
+        name: invariant-coverage
+        entry: python3 scripts/check_invariant_coverage.py
+        language: system
+        pass_filenames: false
+        files: ^(docs/invariants/.+\.md|cli/internal/.+_invariants_prop_test\.go|scripts/check_invariant_coverage\.py)$
