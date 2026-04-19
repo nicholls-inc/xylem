@@ -60,6 +60,41 @@ The hierarchy contains two distinct chains with different failure modes and veri
 
 Residual risk concentrates at the top of the specification chain — Layer 6 — which is where the research opportunity lies.
 
+## Xylem projection
+
+This section states the current concrete reach of each layer within the xylem
+codebase (Go, concurrent daemon, no verified Go compiler available). It is
+maintained alongside `docs/assurance/ROADMAP.md` and should be updated whenever
+a roadmap item changes a layer's reach.
+
+**Layer 1 (formally verified pure code).** Restricted to sequential pure logic
+— queue state machine (I7), retry-DAG acyclicity (I10), budget-gate arithmetic,
+class-slot accounting, dedup-key hashing. Tooling: Dafny via the `crosscheck`
+plugin, compiled to Go via `crosscheck:extract-code`. See `docs/assurance/next/06-queue-dafny-kernel.md` and `09-retry-dag-dafny-kernel.md`.
+
+**Layer 2 (compilation correctness).** No Go equivalent of CompCert exists. The
+Go toolchain is part of the trusted computing base. This layer is **not
+addressable** in the near term.
+
+**Layer 3 (contract graph verification).** Pairwise contracts via Gobra are
+near-term (item #10 — queue only). End-to-end subgraph verification (scanner →
+queue → runner) is aspirational (item #13 — Go-native extension of the existing
+Rust+Lean contract-graph-verifier PoC).
+
+**Layer 4 (implementation-spec alignment).** Delivered by Dafny-verified
+kernels as they land. `verify-kernel` workflow phase (#08) gates merges on
+`dafny_verify` of any touched `.dfy` files.
+
+**Layer 5 (spec-intent alignment).** `intent-check` workflow phase (#07) —
+claimcheck-analog using two-LLM back-translation. Probabilistic; expect
+~96% accuracy on curated benchmarks and unknown real-PR performance until
+item #07 is operating.
+
+**Layer 6 (spec completeness).** Best-effort. `acceptance-oracle` workflow
+phase (#11) gives observable user-behavior assurance; `spec-adversary` phase
+(#14) explores adversarial property discovery. No theorem proves spec
+completeness; these are both iterative practices.
+
 ## Supporting Workflow Elements
 
 Two additional practices sit alongside the hierarchy rather than within it:
