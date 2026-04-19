@@ -33,3 +33,6 @@ field-reports/
 .claude/scheduled_tasks.lock
 .worktrees/
 .claude/worktrees/
+
+# rapid-generated failure replay files are per-machine; ignore by default.
+**/testdata/rapid/**/*.fail
