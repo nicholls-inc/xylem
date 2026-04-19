@@ -285,7 +285,7 @@ providers:
   copilot:
     kind: copilot
     command: "copilot"
-    flags: "--yolo --autopilot"
+    flags: "--yolo"
     env:
       COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
     tiers:
