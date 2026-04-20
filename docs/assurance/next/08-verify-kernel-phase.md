@@ -1,7 +1,7 @@
 # 08: `verify-kernel` Workflow Phase
 
 **Horizon:** Next (4–8 weeks)
-**Status:** Not started
+**Status:** Complete (2026-04-20)
 **Estimated cost:** 2 days
 **Depends on:** #06 (something to verify)
 **Unblocks:** #09 (retry-DAG kernel integrates cleanly into an existing gate)
@@ -62,9 +62,25 @@ This is a thin phase. It only runs when a PR touches `.dfy` files. It invokes th
 
 **Same-LLM review concern:** Gate logic is mechanical. `pr-self-review` is sufficient.
 
+## Progress
+
+**2026-04-20 — Complete.**
+
+- `scripts/verify-kernels.sh` — shell gate: 3-dot diff for changed `.dfy` files, Docker Dafny verify per file, 130s timeout, exits 0 with warning when Docker/image absent.
+- `.xylem/workflows/fix-bug.yaml` — `verify_kernel` command phase inserted after `implement`, before `verify`. Governance amendment 2026-04-20.
+- `.xylem/workflows/implement-feature.yaml` — same.
+- `.xylem/workflows/implement-harness.yaml` — same.
+- `docs/workflows.md` — `verify-kernel` section added to workflow reference.
+
+**Docker image finding:** `crosscheck-dafny:latest` is absent from the daemon environment as of 2026-04-20. The gate soft-falls back to exit 0 with a warning on all current machines. Pre-commit enforcement is the active line of defense until the image is bootstrapped. See kill criterion #1 in this doc for the CI flakiness threshold; the inverse applies here — the image must be built before the gate can actually fire.
+
+**Deliverable delta vs spec:** The spec listed `.xylem/prompts/verify-kernel/verify.md` as a possible deliverable. The implementation is a `type: command` phase backed by `scripts/verify-kernels.sh` instead — a prompt file is unnecessary because the gate is fully deterministic. No LLM session is needed.
+
 ## References
 
+- `scripts/verify-kernels.sh` — the gate script
 - Crosscheck plugin: `~/.claude/plugins/cache/nicholls/crosscheck/2.1.0/`
 - MCP tools: `mcp__plugin_crosscheck_dafny__dafny_verify`, `dafny_compile`, `dafny_cleanup`
 - Dafny Go compilation: https://dafny.org/latest/Compilation/Go
 - `docs/assurance/next/06-queue-dafny-kernel.md` (the dependency)
+- `docs/workflows.md` §verify-kernel — documentation
