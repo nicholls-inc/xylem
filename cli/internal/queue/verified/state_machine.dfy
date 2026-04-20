@@ -1,4 +1,5 @@
 // state_machine.dfy — hand-written Dafny spec for the queue state machine kernel.
+// CI test: verify-691 pass case — trivial comment edit to trigger verify-kernels job.
 // Source of truth for cli/internal/queue/verified/state_machine.go.
 //
 // Verified by: Dafny 4.11.0 (mcp__plugin_crosscheck_dafny__dafny_verify: 2 verified, 0 errors)
