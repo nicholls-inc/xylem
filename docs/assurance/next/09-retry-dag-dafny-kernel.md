@@ -73,6 +73,8 @@ Same as #06:
 
 **Same-LLM review concern:** Same as #06 — first time the pipeline runs on a different module member, so human review for the initial PR, then `pr-self-review` is sufficient for follow-ups.
 
+**CI coverage:** Inherited from #08 at no additional cost. The verify-kernels CI job uses `git diff --name-only origin/main...HEAD | grep '\.dfy$'` to discover changed Dafny files on the PR branch. When #09's PR lands, `retry_dag.dfy` will appear in that diff and be verified by the existing job. Future PRs that touch `retry_dag.dfy` will also be caught automatically. No additional CI wiring is required for this item.
+
 ## References
 
 - `docs/invariants/queue.md` §I10
