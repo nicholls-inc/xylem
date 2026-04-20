@@ -19,6 +19,7 @@ Queue is a narrower surface than WireGuard. Lock order is simple: file lock ⟹ 
   - Lock-order invariant: file lock acquired before mutex; released in reverse.
   - Data-race freedom for all shared mutable fields on the `Queue` struct.
   - Atomicity of every JSONL append operation.
+  - **`protectedFieldsEqual` structural correctness (backing I2 — terminal-record immutability):** Gobra proof that the function correctly compares all 19 I2-protected fields, including `*time.Time` (via `timePtrEqual`) and `map[string]string` (via `stringMapEqual`). Deferred here from #06 because Dafny cannot model these Go-native types without conversion shims that defeat extraction.
 - CI integration — Gobra runs on every PR touching `cli/internal/queue/*`.
 
 **Out of scope:**
@@ -34,6 +35,7 @@ Queue is a narrower surface than WireGuard. Lock order is simple: file lock ⟹ 
 ## Acceptance criteria
 
 - `gobra verify ./cli/internal/queue/...` returns clean in CI.
+- `protectedFieldsEqual` Gobra spec proves all 19 I2-protected fields are compared correctly, with explicit coverage of the `*time.Time` and `map[string]string` delegates.
 - Documented findings: every property Gobra could not prove is written down with a reason (typically "Gobra does not model X"), plus a pointer to the property test that compensates.
 
 ## Files to touch
@@ -41,7 +43,8 @@ Queue is a narrower surface than WireGuard. Lock order is simple: file lock ⟹ 
 - **New/Modified:** `cli/internal/queue/*.gobra` or embedded annotations.
 - **Modified:** `.github/workflows/*.yml` (Gobra step).
 - **New:** `docs/assurance/medium-term/10-gobra-queue-findings.md`.
-- **Read-only:** `docs/invariants/queue.md` (target invariants).
+- **Read-only:** `docs/invariants/queue.md` (target invariants — I2, I7).
+- **Read-only:** `cli/internal/queue/queue.go` (`protectedFieldsEqual` at line 98, `timePtrEqual` at line 124, `stringMapEqual` nearby).
 
 ## Risks
 

@@ -116,7 +116,14 @@ Executed by a human operator (not the xylem daemon — first kernel requires man
 - `cli/internal/queue/queue_invariants_prop_test.go` — file-header comment updated: I2 removed from skip list (no t.Skip in TestPropQueueInvariant_I2_TerminalImmutability)
 
 **Scoping decision — protectedFieldsEqual:**
-`protectedFieldsEqual` is deferred and out of scope for roadmap #06. Reason: the function operates on the 19-field `Vessel` struct which has `*time.Time` and `map[string]string` fields. Modelling these in Dafny requires either abstract ghost types (no extractable code) or a full Vessel datatype whose Go extraction doesn't interoperate with the real `queue.Vessel` without a conversion shim — which defeats the purpose of extraction. The existing Go implementation is already a compile-time-explicit field enumeration (not reflection), providing adequate assurance for I2. Kill criteria were not triggered; this is an intentional rescope per the kill-criteria guidance ("perhaps only `IsTerminal` first").
+`protectedFieldsEqual` is deferred to **#10 (Gobra)**, which handles Go-native `*time.Time` and `map[string]string` without extraction gymnastics. Reason for deferral from #06: the function operates on the 19-field `Vessel` struct which has `*time.Time` and `map[string]string` fields. Modelling these in Dafny requires either abstract ghost types (no extractable code) or a full Vessel datatype whose Go extraction doesn't interoperate with the real `queue.Vessel` without a conversion shim — which defeats the purpose of extraction. The existing Go implementation is already a compile-time-explicit field enumeration (not reflection), providing adequate assurance for I2. Kill criteria were not triggered; this is an intentional rescope per the kill-criteria guidance ("perhaps only `IsTerminal` first").
 
 **Remaining:**
 - Wiring `queue.go` to call `verified.IsTerminal` and `verified.ValidTransition` — deferred follow-up PR (roadmap #06 step 7)
+- Lightweight verification of `protectedFieldsEqual` (`cli/internal/queue/queue.go:98`) via `crosscheck:lightweight-verify` — early assurance for I2 before #10 lands (Phase 3 below)
+
+**Phase 3 — Lightweight verification of `protectedFieldsEqual` (2026-04-20):**
+Target: `protectedFieldsEqual` at `cli/internal/queue/queue.go:98` and its two helpers `timePtrEqual` (line 124) and `stringMapEqual`.
+Method: `crosscheck:lightweight-verify` — structured semi-formal reasoning artifact, not Dafny extraction.
+Rationale: #10 (Gobra) is months away; this provides early documented assurance for I2 at low cost.
+Artifact location: `cli/internal/queue/verified/` alongside the Dafny kernel artifacts.
