@@ -1,3 +1,4 @@
+// CI test: no-.dfy change to exercise verify-kernels skip path (PR #691 test plan item 3).
 // Derived from state_machine.dfy; DO NOT EDIT by hand.
 // Verified by Dafny 4.11.0 — 2 verified, 0 errors.
 // To regenerate: compile state_machine.dfy to Go, then strip _dafny.* boilerplate
