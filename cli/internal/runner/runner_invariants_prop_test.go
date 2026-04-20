@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
@@ -717,6 +718,56 @@ func TestInvariant_I11_PhaseInvocationWallClockBound(t *testing.T) {
 	_ = ready
 }
 
+// Invariant IN: I11
+func TestInvariant_I11_CheckStalledVesselsPath(t *testing.T) {
+	// Tests the CheckStalledVessels enforcement path (complementary to the
+	// context-timeout path tested above). Seeds a vessel in running state with
+	// a stale phase output file (mtime backdated past the stall threshold),
+	// calls CheckStalledVessels, and asserts that the vessel is terminated.
+	rapid.Check(t, func(rt *rapid.T) {
+		stallMS := rapid.IntRange(50, 200).Draw(rt, "stallMS")
+		dir := t.TempDir()
+		cfg := makeTestConfig(dir, 1)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		cfg.Daemon.StallMonitor.PhaseStallThreshold = fmt.Sprintf("%dms", stallMS)
+		cfg.Daemon.StallMonitor.OrphanCheckEnabled = false
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+		v := makePromptVessel(1, "stalled task")
+		_, err := q.Enqueue(v)
+		require.NoError(t, err)
+
+		vessel, err := q.Dequeue()
+		require.NoError(t, err)
+		require.NotNil(t, vessel)
+
+		// Create a stale phase output file: mtime predates the stall threshold.
+		outputPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "implement.output")
+		require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+		require.NoError(t, os.WriteFile(outputPath, []byte("partial output"), 0o644))
+		staleAt := time.Now().Add(-time.Duration(stallMS)*time.Millisecond - time.Second)
+		require.NoError(t, os.Chtimes(outputPath, staleAt, staleAt))
+		require.NoError(t, q.UpdateVessel(*vessel))
+
+		r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+		findings := r.CheckStalledVessels(context.Background())
+
+		if len(findings) == 0 {
+			rt.Fatalf("CheckStalledVessels returned no findings for a vessel with stale output (threshold=%dms)", stallMS)
+		}
+		if findings[0].Code != "phase_stalled" {
+			rt.Fatalf("expected code 'phase_stalled', got %q", findings[0].Code)
+		}
+
+		final, err := q.FindByID(vessel.ID)
+		require.NoError(t, err)
+		require.NotNil(t, final)
+		if !final.State.IsTerminal() {
+			rt.Fatalf("vessel state=%q after CheckStalledVessels; expected terminal (I11 wall-clock bound violated)", final.State)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // I12: StaleCancelSatisfiesPostConditions
 // ---------------------------------------------------------------------------
@@ -994,6 +1045,63 @@ func TestInvariant_I14_SourceLifecycleHooksFireExactlyOnce(t *testing.T) {
 		if completions+failures != total {
 			rt.Fatalf("OnComplete(%d) + OnFail(%d) = %d, expected %d (not mutually exclusive)",
 				completions, failures, completions+failures, total)
+		}
+	})
+}
+
+// Invariant IN: I14
+func TestInvariant_I14_RehydrationDoesNotReFire_OnStart(t *testing.T) {
+	// Verifies that OnStart does NOT fire again when a Runner is created with
+	// a vessel that is already in StateRunning (i.e., was started by a previous
+	// session before a daemon restart). This is the "rehydration" sub-clause of
+	// I14: restart-rehydration must not double-fire OnStart for vessels already
+	// past the OnStart checkpoint.
+	rapid.Check(t, func(rt *rapid.T) {
+		dir := t.TempDir()
+		cfg := makeTestConfig(dir, 1)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		cfg.Timeout = "1s"
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+		v := makePromptVessel(1, "pre-running task")
+		_, err := q.Enqueue(v)
+		require.NoError(t, err)
+
+		// Simulate a previous session: dequeue puts vessel into StateRunning.
+		vessel, err := q.Dequeue()
+		require.NoError(t, err)
+		require.NotNil(t, vessel)
+
+		// Backdate StartedAt so CheckHungVessels will time the vessel out.
+		old := time.Now().Add(-5 * time.Minute)
+		vessel.StartedAt = &old
+		require.NoError(t, q.UpdateVessel(*vessel))
+
+		// New Runner simulates daemon restart. The vessel is already running;
+		// the new runner must NOT call OnStart again.
+		src := &recordingSource{}
+		r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
+		r.Sources = map[string]source.Source{"manual": src}
+
+		// Drain picks up only pending vessels — none here.
+		_, err = r.DrainAndWait(context.Background())
+		require.NoError(t, err)
+
+		// CheckHungVessels reconciles the pre-running vessel.
+		r.CheckHungVessels(context.Background())
+
+		// OnStart must never have fired: it fired in the previous session,
+		// not in this one.
+		if starts := int(src.startCalls.Load()); starts != 0 {
+			rt.Fatalf("OnStart fired %d times after rehydration; must be 0 (must not re-fire for already-running vessel)", starts)
+		}
+
+		// The vessel must now be in a terminal state.
+		final, err := q.FindByID(v.ID)
+		require.NoError(t, err)
+		require.NotNil(t, final)
+		if !final.State.IsTerminal() {
+			rt.Fatalf("vessel state=%q after rehydration + CheckHungVessels; expected terminal", final.State)
 		}
 	})
 }
