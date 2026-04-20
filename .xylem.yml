@@ -29,7 +29,7 @@ sources:
   issues:
     type: github
     repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot]
+    exclude: [wontfix, duplicate, in-progress, no-bot, xylem-failed]
     tasks:
       triage:
         labels: [needs-triage]
@@ -37,12 +37,14 @@ sources:
         tier: high
         status_labels:
           running: in-progress
+          failed: xylem-failed
       refine:
         labels: [needs-refinement]
         workflow: refine-issue
         tier: high
         status_labels:
           running: in-progress
+          failed: xylem-failed
       fix-bug:
         labels: [bug, ready-for-work]
         workflow: fix-bug
