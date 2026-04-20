@@ -79,6 +79,10 @@ var ErrDuplicateID = errors.New("duplicate vessel ID")
 // docs/invariants/queue.md invariant I2.
 var ErrTerminalImmutable = errors.New("terminal vessel is immutable")
 
+// ErrRetryDAGCycle is returned by Enqueue and UpdateVessel when the proposed
+// vessel would introduce a cycle into the retry graph (invariant I10).
+var ErrRetryDAGCycle = errors.New("retry graph would contain a cycle")
+
 // IsTerminal reports whether s is a terminal vessel state.
 // Delegates to the Dafny-verified kernel in the verified sub-package.
 func (s VesselState) IsTerminal() bool {
@@ -140,6 +144,19 @@ func stringMapEqual(a, b map[string]string) bool {
 		}
 	}
 	return true
+}
+
+// buildRetryGraph constructs the retry-edge map (vessel ID → RetryOf target)
+// for all vessels that have a non-empty RetryOf field. Used by the verified
+// IsAcyclic checker at Enqueue and UpdateVessel (invariant I10).
+func buildRetryGraph(vessels []Vessel) map[string]string {
+	edges := make(map[string]string, len(vessels))
+	for _, v := range vessels {
+		if v.RetryOf != "" {
+			edges[v.ID] = v.RetryOf
+		}
+	}
+	return edges
 }
 
 type Vessel struct {
@@ -225,6 +242,12 @@ func (q *Queue) Enqueue(vessel Vessel) (bool, error) {
 		for _, v := range vessels {
 			if v.ID == vessel.ID {
 				return ErrDuplicateID
+			}
+		}
+
+		if vessel.RetryOf != "" {
+			if !verified.IsAcyclic(buildRetryGraph(append(vessels, vessel))) {
+				return fmt.Errorf("%w: vessel %s", ErrRetryDAGCycle, vessel.ID)
 			}
 		}
 
@@ -465,6 +488,14 @@ func (q *Queue) UpdateVessel(vessel Vessel) error {
 				}
 			} else if isSealedTerminal(previous.State) && !protectedFieldsEqual(previous, vessel) {
 				return fmt.Errorf("%w: cannot mutate protected fields on terminal vessel %s", ErrTerminalImmutable, vessel.ID)
+			}
+			if vessel.RetryOf != "" && vessel.RetryOf != previous.RetryOf {
+				proposed := make([]Vessel, len(vessels))
+				copy(proposed, vessels)
+				proposed[i] = vessel
+				if !verified.IsAcyclic(buildRetryGraph(proposed)) {
+					return fmt.Errorf("%w: vessel %s", ErrRetryDAGCycle, vessel.ID)
+				}
 			}
 			vessels[i] = vessel
 			if err := q.writeAllVessels(vessels); err != nil {
