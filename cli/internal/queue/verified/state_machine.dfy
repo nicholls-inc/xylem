@@ -36,7 +36,7 @@ datatype VesselState =
 function IsTerminal(s: VesselState): bool
   ensures IsTerminal(s) <==> (s == Completed || s == Failed || s == Cancelled || s == TimedOut)
 {
-  s == Completed || s == Failed || s == Cancelled || s == TimedOut
+  false  // INTENTIONALLY BROKEN: postcondition unprovable — CI test plan item 2
 }
 
 // ValidTransition returns true iff transitioning from state `from` to state `to`
