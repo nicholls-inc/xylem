@@ -19,6 +19,12 @@ phases:
       type: command
       run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
       retries: 3
+  # verify-kernel: roadmap #08 — governance amendment 2026-04-20
+  - name: verify_kernel
+    type: command
+    run: |
+      set -euo pipefail
+      scripts/verify-kernels.sh
   - name: verify
     prompt_file: .xylem/prompts/implement-harness/verify.md
     max_turns: 80

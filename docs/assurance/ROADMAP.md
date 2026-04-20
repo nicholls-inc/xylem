@@ -39,7 +39,7 @@ xylem's current pragmatic projection of that hierarchy:
 |---|------|------|-----|
 | 6 | Queue state machine Dafny-verified kernel | 1–2 weeks | [next/06-queue-dafny-kernel.md](next/06-queue-dafny-kernel.md) — **Complete**: IsTerminal (PR #685) + ValidTransition + lightweight-verify of protectedFieldsEqual (PR #687); queue.go wired to verified kernel (2026-04-20); Dafny-extract of protectedFieldsEqual deferred to #10 (Gobra) |
 | 7 | `intent-check` workflow phase (claimcheck-analog) | 1 week | [next/07-intent-check-phase.md](next/07-intent-check-phase.md) |
-| 8 | `verify-kernel` workflow phase | 2 days | [next/08-verify-kernel-phase.md](next/08-verify-kernel-phase.md) |
+| 8 | `verify-kernel` workflow phase | 2 days | [next/08-verify-kernel-phase.md](next/08-verify-kernel-phase.md) — **Complete** (2026-04-20): `scripts/verify-kernels.sh` + phase inserted in all 3 delivery workflows; Docker image absent so gate is soft-fallback until image bootstrapped |
 | 9 | Retry-DAG acyclicity Dafny-verified kernel | 3 days | [next/09-retry-dag-dafny-kernel.md](next/09-retry-dag-dafny-kernel.md) |
 
 **Planned execution order (2026-04-20):** #08 → #09 → #07. Item #08 is the fastest (2 days) and gates all future `.dfy` regressions, which unblocks #09. Item #07 has no hard dependencies but is scheduled after #09: it is the highest-risk item (FP kill criterion at 30%) and requires human-authored governance amendments to protected workflow YAMLs regardless.

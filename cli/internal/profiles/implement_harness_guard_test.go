@@ -106,6 +106,69 @@ func TestMergePRReviewThreadsUsesStringFields(t *testing.T) {
 		"merge-pr.yaml must bind repo with `-f` (raw-string) for the GraphQL String! constraint")
 }
 
+// TestVerifyKernelPhaseEmbeddedInAllDeliveryWorkflows guards against the
+// regression pattern from issue #651: a phase added to .xylem/workflows/ but
+// not to the embedded profile copy in cli/internal/profiles/ gets silently
+// reverted to the old content on every daemon restart / auto-upgrade.
+//
+// The verify_kernel phase (roadmap #08) must exist in the embedded versions of
+// the three delivery workflows so that the daemon re-syncs a version that
+// includes it. It must appear after implement and before verify.
+func TestVerifyKernelPhaseEmbeddedInAllDeliveryWorkflows(t *testing.T) {
+	type wfSpec struct {
+		profileName  string
+		workflowFile string
+	}
+	for _, tc := range []wfSpec{
+		{"core", "workflows/fix-bug.yaml"},
+		{"core", "workflows/implement-feature.yaml"},
+		{"self-hosting-xylem", "workflows/implement-harness.yaml"},
+	} {
+		t.Run(tc.workflowFile, func(t *testing.T) {
+			profile, err := Load(tc.profileName)
+			require.NoError(t, err)
+
+			data, err := fs.ReadFile(profile.FS, tc.workflowFile)
+			require.NoError(t, err)
+
+			var wf struct {
+				Phases []struct {
+					Name string `yaml:"name"`
+				} `yaml:"phases"`
+			}
+			require.NoError(t, yaml.Unmarshal(data, &wf))
+
+			names := make([]string, len(wf.Phases))
+			for i, p := range wf.Phases {
+				names[i] = p.Name
+			}
+
+			var (
+				implIdx   = -1
+				kernelIdx = -1
+				verifyIdx = -1
+			)
+			for i, n := range names {
+				switch n {
+				case "implement":
+					implIdx = i
+				case "verify_kernel":
+					kernelIdx = i
+				case "verify":
+					verifyIdx = i
+				}
+			}
+
+			require.GreaterOrEqualf(t, kernelIdx, 0,
+				"%s: verify_kernel phase missing from embedded workflow (roadmap #08 regression)", tc.workflowFile)
+			require.Greaterf(t, kernelIdx, implIdx,
+				"%s: verify_kernel must come after implement (got implement=%d, verify_kernel=%d)", tc.workflowFile, implIdx, kernelIdx)
+			require.Greaterf(t, verifyIdx, kernelIdx,
+				"%s: verify must come after verify_kernel (got verify_kernel=%d, verify=%d)", tc.workflowFile, kernelIdx, verifyIdx)
+		})
+	}
+}
+
 func max0(n int) int {
 	if n < 0 {
 		return 0

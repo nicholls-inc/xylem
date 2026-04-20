@@ -930,6 +930,48 @@ Unlike the scaffolded `pr` prompt phases above, this repo-specific `pr_create` s
 
 **Customization:** The gate command (`cd cli && go vet ./... && go build ./cmd/xylem && go test ./...`) is specific to this repository. If you adapt this workflow for a different project, update the `run` fields in each gate to match that project's build and test commands. The `pr_create` phase reads `pr_draft.json` from the worktree root -- if your PR process requires additional flags (for example, a base branch or reviewer assignment), extend the `gh pr create` call there.
 
+### verify-kernel (repo-specific)
+
+A thin deterministic command phase that re-verifies any Dafny spec (`.dfy` file) touched by the current branch. Inserted between `implement` and `verify` in all three delivery workflows (`fix-bug`, `implement-feature`, `implement-harness`). Part of assurance roadmap item #08.
+
+```yaml
+# verify-kernel: roadmap #08 — governance amendment 2026-04-20
+- name: verify_kernel
+  type: command
+  run: |
+    set -euo pipefail
+    scripts/verify-kernels.sh
+```
+
+**How it works:**
+
+1. Runs `git fetch origin main` to ensure the comparison base is available.
+2. Computes `git diff --name-only origin/main...HEAD` (3-dot diff) and filters for `.dfy` files. The 3-dot form includes only branch-local changes, not commits that landed on `main` after the branch diverged.
+3. If no `.dfy` files changed, exits 0 immediately (typically under 1 second).
+4. If `.dfy` files changed, runs `docker run --rm --network=none --memory=512m --cpus=1 crosscheck-dafny:latest verify` on each file in sequence with a 130-second timeout.
+5. Exits 1 if any file fails verification; exits 0 if all pass.
+
+**Soft fallbacks:**
+
+- If `docker` is not in PATH, the phase exits 0 with a warning. Pre-commit is then the only enforcement path.
+- If the `crosscheck-dafny:latest` image has not been built, the phase exits 0 with a warning and a pointer to `scripts/build-docker.sh` in the crosscheck plugin directory.
+
+These fallbacks mean the gate is a no-op on machines or CI environments where the Dafny image is absent. Until the image is bootstrapped in the daemon environment, pre-commit enforcement is the primary line of defense.
+
+**The gate logic lives in `scripts/verify-kernels.sh`.** The `DAFNY_DOCKER_IMAGE` environment variable overrides the default image name (`crosscheck-dafny:latest`) for testing with a pinned version.
+
+**Evidence metadata:** Command phases have no `gate` block and therefore cannot attach formal `evidence:` metadata in the xylem workflow format. The verification result is implicit in the phase exit code. If a future workflow format supports top-level evidence annotations on command phases, add:
+
+```yaml
+evidence:
+  claim: "All changed .dfy specs verify under Dafny"
+  level: proved
+  checker: "dafny_verify (crosscheck-dafny:latest)"
+  trust_boundary: "formal verification of pure functions"
+```
+
+**When to use:** This phase fires automatically in all three delivery workflows. No configuration required. The phase is a no-op on PRs that do not touch `.dfy` files, so it adds no latency to the common case.
+
 ## Prompt file organization
 
 Prompt files are usually organized in `.xylem/prompts/` under a subdirectory named after the workflow. This repository's checked-in layout looks like:

@@ -32,6 +32,12 @@ phases:
         set -e
         {{ if .Validation.Test }}{{ .Validation.Test }}{{ else }}echo "ERROR: validation.test not configured in .xylem.yml" >&2 && exit 1{{ end }}
       retries: 2
+  # verify-kernel: roadmap #08 — governance amendment 2026-04-20
+  - name: verify_kernel
+    type: command
+    run: |
+      set -euo pipefail
+      scripts/verify-kernels.sh
   - name: verify
     prompt_file: .xylem/prompts/fix-bug/verify.md
     max_turns: 60

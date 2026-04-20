@@ -151,7 +151,7 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 
 	var fixBug workflowpkg.Workflow
 	require.NoError(t, yaml.Unmarshal(composed.Workflows["fix-bug"], &fixBug))
-	require.Len(t, fixBug.Phases, 5)
+	require.Len(t, fixBug.Phases, 6) // verify_kernel added in roadmap #08
 	require.NotNil(t, fixBug.Phases[2].Evaluator)
 	assert.Equal(t, ".xylem/prompts/fix-bug/implement_evaluator.md", fixBug.Phases[2].Evaluator.PromptFile)
 
@@ -164,7 +164,7 @@ func TestSmoke_S2_ComposeCoreIncludesSeededWorkflowsAndTemplates(t *testing.T) {
 
 	var implementFeature workflowpkg.Workflow
 	require.NoError(t, yaml.Unmarshal(composed.Workflows["implement-feature"], &implementFeature))
-	require.Len(t, implementFeature.Phases, 5)
+	require.Len(t, implementFeature.Phases, 6) // verify_kernel added in roadmap #08
 	require.NotNil(t, implementFeature.Phases[2].Evaluator)
 	assert.Equal(t, ".xylem/prompts/implement-feature/implement_evaluator.md", implementFeature.Phases[2].Evaluator.PromptFile)
 	assert.Equal(t, 2, implementFeature.Phases[2].Evaluator.MaxIterations)
