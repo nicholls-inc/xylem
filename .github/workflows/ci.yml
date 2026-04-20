@@ -9,6 +9,7 @@ on:
       - ".xylem/workflows/**"
       - "docs/invariants/**"
       - "scripts/check_invariant_coverage.py"
+      - "**/*.dfy"
   pull_request:
     branches: [main]
     paths:
@@ -17,6 +18,7 @@ on:
       - ".xylem/workflows/**"
       - "docs/invariants/**"
       - "scripts/check_invariant_coverage.py"
+      - "**/*.dfy"
 
 jobs:
   go-checks:
@@ -55,3 +57,44 @@ jobs:
 
       - name: Check invariant↔test coverage mapping
         run: python3 scripts/check_invariant_coverage.py
+
+  verify-kernels:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dafny-lang/setup-dafny-action@v1.9.1
+        with:
+          dafny-version: "4.11.0"
+
+      - name: Verify changed Dafny kernels
+        run: |
+          git fetch origin main 2>/dev/null || true
+          changed=$(git diff --name-only origin/main...HEAD | grep '\.dfy$' || true)
+          if [ -z "$changed" ]; then
+            echo "verify-kernel: no .dfy files changed — skipping"
+            exit 0
+          fi
+          echo "verify-kernel: changed .dfy files:"
+          echo "$changed" | sed 's/^/  /'
+          failed=0
+          while IFS= read -r dfy_file; do
+            if [ ! -f "$dfy_file" ]; then
+              echo "verify-kernel: $dfy_file deleted on branch, skipping"
+              continue
+            fi
+            echo "=== Verifying: $dfy_file ==="
+            if ! dafny verify "$dfy_file"; then
+              echo "FAILED: $dfy_file"
+              failed=1
+            else
+              echo "OK: $dfy_file"
+            fi
+          done <<< "$changed"
+          if [ "$failed" -ne 0 ]; then
+            echo "verify-kernel: one or more specs failed verification"
+            exit 1
+          fi
+          echo "verify-kernel: all changed specs verified"

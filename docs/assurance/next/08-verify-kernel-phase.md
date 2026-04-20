@@ -77,7 +77,9 @@ This is a thin phase. It only runs when a PR touches `.dfy` files. It invokes th
 - `cli/internal/profiles/profiles_test.go` — phase count assertions updated from 5 → 6 for fix-bug and implement-feature smoke tests.
 - `docs/workflows.md` — `verify-kernel` section added to workflow reference.
 
-**Docker image finding:** `crosscheck-dafny:latest` is absent from the daemon environment as of 2026-04-20. The gate soft-falls back to exit 0 with a warning on all current machines. Pre-commit enforcement is the active line of defense until the image is bootstrapped. See kill criterion #1 in this doc for the CI flakiness threshold; the inverse applies here — the image must be built before the gate can actually fire.
+**Docker image finding:** `crosscheck-dafny:latest` is absent from the daemon environment as of 2026-04-20. The xylem workflow gate soft-falls back to exit 0 with a warning on all current machines. There is no pre-commit hook for `verify-kernels.sh` (excluded intentionally — `git fetch` + Docker on every commit is too slow).
+
+**CI enforcement (2026-04-20):** `verify-kernels` job added to `.github/workflows/ci.yml`. Uses `dafny-lang/setup-dafny@v1` at Dafny 4.11.0 (matching the version recorded in `state_machine.dfy`) to install Dafny natively — no Docker required. Hard failure on verification error. Triggered on any PR or push to main that touches `**/*.dfy`. This is the active enforcement gate for code committed outside xylem workflows.
 
 **Deliverable delta vs spec:** The spec listed `.xylem/prompts/verify-kernel/verify.md` as a possible deliverable. The implementation is a `type: command` phase backed by `scripts/verify-kernels.sh` instead — a prompt file is unnecessary because the gate is fully deterministic. No LLM session is needed. The spec did not anticipate the embedded profile sync or regression guard, which were added to prevent the #651 pattern discovered after the spec was written.
 
