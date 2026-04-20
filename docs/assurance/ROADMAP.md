@@ -37,7 +37,7 @@ xylem's current pragmatic projection of that hierarchy:
 
 | # | Item | Cost | Doc |
 |---|------|------|-----|
-| 6 | Queue state machine Dafny-verified kernel | 1–2 weeks | [next/06-queue-dafny-kernel.md](next/06-queue-dafny-kernel.md) — In progress: IsTerminal done (PR #685); validTransitions + protectedFieldsEqual + wiring pending |
+| 6 | Queue state machine Dafny-verified kernel | 1–2 weeks | [next/06-queue-dafny-kernel.md](next/06-queue-dafny-kernel.md) — In progress: IsTerminal (PR #685) + ValidTransition done; protectedFieldsEqual deferred (scoping note in #06 doc); wiring pending |
 | 7 | `intent-check` workflow phase (claimcheck-analog) | 1 week | [next/07-intent-check-phase.md](next/07-intent-check-phase.md) |
 | 8 | `verify-kernel` workflow phase | 2 days | [next/08-verify-kernel-phase.md](next/08-verify-kernel-phase.md) |
 | 9 | Retry-DAG acyclicity Dafny-verified kernel | 3 days | [next/09-retry-dag-dafny-kernel.md](next/09-retry-dag-dafny-kernel.md) |

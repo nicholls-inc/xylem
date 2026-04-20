@@ -107,7 +107,14 @@ Executed by a human operator (not the xylem daemon — first kernel requires man
 - `cli/internal/queue/verified_differential_test.go` — abstraction-gap check vs queue.IsTerminal
 - `.crosscheck/specs.json` — spec registry entry added
 
+**Phase 2 — (2026-04-20):** ValidTransition delivered and verified.
+- `cli/internal/queue/verified/state_machine.dfy` — extended with `ValidTransition`; now 2 verified, 0 errors (Dafny 4.11.0)
+- `cli/internal/queue/verified/state_machine.go` — `ValidTransition(from, to string) bool` added; same hand-extraction pattern
+- `cli/internal/queue/verified_differential_test.go` — `TestValidTransition_DifferentialWithMap` added; covers all 49 canonical pairs + unknown from-state + unknown to-state
+- `.crosscheck/specs.json` — `valid-transition` entry added; `is-terminal` hash updated to reflect .dfy change
+
+**Scoping decision — protectedFieldsEqual:**
+`protectedFieldsEqual` is deferred and out of scope for roadmap #06. Reason: the function operates on the 19-field `Vessel` struct which has `*time.Time` and `map[string]string` fields. Modelling these in Dafny requires either abstract ghost types (no extractable code) or a full Vessel datatype whose Go extraction doesn't interoperate with the real `queue.Vessel` without a conversion shim — which defeats the purpose of extraction. The existing Go implementation is already a compile-time-explicit field enumeration (not reflection), providing adequate assurance for I2. Kill criteria were not triggered; this is an intentional rescope per the kill-criteria guidance ("perhaps only `IsTerminal` first").
+
 **Remaining:**
-- `validTransitions` — not yet specced
-- `protectedFieldsEqual` — not yet specced
-- Wiring `queue.go` to call `verified.IsTerminal` — deferred follow-up PR
+- Wiring `queue.go` to call `verified.IsTerminal` and `verified.ValidTransition` — deferred follow-up PR (roadmap #06 step 7)
