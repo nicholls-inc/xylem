@@ -19,11 +19,13 @@ xylem already has a DTU smoke environment (see `docs/dtu-manual-smoke-tests.md`,
 - External oracle harness — scenarios live in a separate directory or repo that the coding agent does not have write access to.
 - Coverage of the top-10 user-observable flows (CLI commands, daemon behaviors, GitHub-integration flows).
 - Gate failure blocks merge.
+- **CI job** that runs oracle scenarios on every PR touching user-observable source paths — regardless of whether the change came through xylem, a human author, or an emergency patch (per the dual-track enforcement principle). Path filter targets `cli/` and `workflows/`. Emits a human-readable failure message with the exact command to reproduce the scenario locally.
 
 **Out of scope:**
 - Unit-level acceptance tests — those are within-repo and covered by existing property tests.
 - Subjective criteria ("the UX feels good") — oracle scenarios must be **mechanically verifiable**. Anything subjective is quantified or rejected.
 - Writing new DTU fixtures — item reuses existing fixtures plus any gaps identified during scoping.
+- A pre-commit hook — oracle scenarios require a full runtime environment (DTU) and are too slow for pre-commit. CI is the correct enforcement boundary for this check.
 
 ## Deliverables
 
@@ -31,6 +33,7 @@ xylem already has a DTU smoke environment (see `docs/dtu-manual-smoke-tests.md`,
 2. `.xylem/prompts/acceptance-oracle/run.md` — phase prompt (may just be a command gate).
 3. Phase block in `fix-bug`, `implement-feature`, `implement-harness`.
 4. Top-10 flows scoped and documented in `docs/assurance/medium-term/11-acceptance-oracle-scenarios.md`.
+5. CI job in `.github/workflows/ci.yml` — `acceptance-oracle` job, path-filtered to `cli/**` and `workflows/**`. Invokes the oracle runner script. On failure, emits the oracle scenario name(s) that failed and the command to reproduce locally: `scripts/run-oracle.sh <scenario>`.
 
 ## Acceptance criteria
 
@@ -41,8 +44,10 @@ xylem already has a DTU smoke environment (see `docs/dtu-manual-smoke-tests.md`,
 ## Files to touch
 
 - **New:** external oracle directory (location TBD — could be a sibling directory outside the main working tree, or a separate repo).
+- **New:** `scripts/run-oracle.sh` — oracle runner invoked by both the CI job and the xylem phase.
 - **New:** `.xylem/prompts/acceptance-oracle/*.md`
 - **Modified:** three workflow YAMLs (**PROTECTED**).
+- **Modified:** `.github/workflows/ci.yml` (new `acceptance-oracle` job).
 - **New:** `docs/assurance/medium-term/11-acceptance-oracle-scenarios.md`.
 
 ## Risks

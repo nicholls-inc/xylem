@@ -10,6 +10,18 @@ Each numbered item below has its own standalone doc under `immediate/`, `next/`,
 
 The long-term goal is **deterministic AI-driven software development**: formally verified kernels for critical pure logic, contract graphs for integration boundaries, and spec-intent alignment checks for everything else. The full hierarchy lives in `docs/research/assurance-hierarchy.md`.
 
+### Dual-track enforcement principle
+
+Every **deterministic** assurance check added by this roadmap must produce two enforcement points:
+
+1. **Pre-commit hook** — cheap, fast (< 5 s), lightweight. Blocks the commit locally. Must emit a human-readable error that includes the exact command to resolve the failure. LLMs acting as coding agents will see this error and must be able to fix it by following the instruction without human intervention.
+
+2. **CI job** — slower, more comprehensive, runs on every PR regardless of how the code change was authored (xylem, human, emergency patch). Must also emit actionable fix instructions. Can perform work too expensive for pre-commit (full test suites, container-based verification).
+
+xylem workflow phases are **not a substitute** for either enforcement point: the daemon processes only a subset of changes, and protected branches enforce the CI gate on all paths.
+
+Pre-commit hooks are fast attestation checks only — they must never invoke LLMs or run slow test suites. Heavy verification (LLM pipelines, Dafny, Gobra) lives in CI and in dedicated binaries that the pre-commit hook verifies were run.
+
 xylem's current pragmatic projection of that hierarchy:
 
 | Layer | Hierarchy reach | Xylem reach today |
