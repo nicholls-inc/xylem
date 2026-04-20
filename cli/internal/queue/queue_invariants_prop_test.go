@@ -5,13 +5,12 @@ package queue
 // of the spec). The file is a protected surface: modifications require a
 // human-signed commit (see .claude/rules/protected-surfaces.md).
 //
-// Two tests are t.Skip'd because they would fail against the current code
+// One test is t.Skip'd because it would fail against the current code
 // (see the spec's Gap analysis). Removing a skip is a one-line action once
 // the corresponding fix lands:
-//   - I2: UpdateVessel skips validation on same-state mutations.
 //   - I3: resetPendingState does not reset CurrentPhase / PhaseOutputs.
-// I2 and I3 are skipped by the "keep CI green until the code fix lands"
-// principle with explicit gap-row references in the skip message.
+// I2 is no longer skipped — the protectedFieldsEqual guard landed on branch
+// feat/queue-verified-valid-transition (PR #687).
 // I9 is no longer skipped — the Enqueue duplicate-ID guard landed in PR #594.
 //
 // I5b (crash durability) was originally the one sanctioned skip per the

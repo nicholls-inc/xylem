@@ -112,6 +112,8 @@ Executed by a human operator (not the xylem daemon — first kernel requires man
 - `cli/internal/queue/verified/state_machine.go` — `ValidTransition(from, to string) bool` added; same hand-extraction pattern
 - `cli/internal/queue/verified_differential_test.go` — `TestValidTransition_DifferentialWithMap` added; covers all 49 canonical pairs + unknown from-state + unknown to-state
 - `.crosscheck/specs.json` — `valid-transition` entry added; `is-terminal` hash updated to reflect .dfy change
+- `docs/invariants/queue.md` — I2 status row updated ✗→✓ (protectedFieldsEqual guard already present at queue.go:472; stale line reference corrected); summary updated; governance amendment per user direction 2026-04-20
+- `cli/internal/queue/queue_invariants_prop_test.go` — file-header comment updated: I2 removed from skip list (no t.Skip in TestPropQueueInvariant_I2_TerminalImmutability)
 
 **Scoping decision — protectedFieldsEqual:**
 `protectedFieldsEqual` is deferred and out of scope for roadmap #06. Reason: the function operates on the 19-field `Vessel` struct which has `*time.Time` and `map[string]string` fields. Modelling these in Dafny requires either abstract ghost types (no extractable code) or a full Vessel datatype whose Go extraction doesn't interoperate with the real `queue.Vessel` without a conversion shim — which defeats the purpose of extraction. The existing Go implementation is already a compile-time-explicit field enumeration (not reflection), providing adequate assurance for I2. Kill criteria were not triggered; this is an intentional rescope per the kill-criteria guidance ("perhaps only `IsTerminal` first").

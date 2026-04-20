@@ -229,7 +229,7 @@ fix is merged.
 | I1 | ✓ | `Enqueue` (queue.go:127) | Ref check + append under single lock. |
 | I1 | ⚠ | `ReplaceAll` (queue.go:293) | No ref-uniqueness check; property test must assert I1 after `ReplaceAll`. |
 | I1a | ✓ | `Enqueue` (queue.go:137–144) | Returns `(false, nil)` on active-ref collision. |
-| I2 | ✗ | `UpdateVessel` (queue.go:373) | Skips transition validation when `previous.State == vessel.State`, so terminal vessels can have `Error`, `PhaseOutputs`, etc. mutated freely. Fix: reject any `UpdateVessel` where `previous.State.IsTerminal()` and any protected field differs. |
+| I2 | ✓ | `UpdateVessel` (queue.go:472) | `protectedFieldsEqual` guard: rejects any `UpdateVessel` where `isSealedTerminal(previous.State)` and any of the 19 I2-protected fields differ. Explicit field-by-field comparison (not reflection); `TestPropQueueInvariant_I2_TerminalImmutability` pins the guarantee. |
 | I3 | ✗ | `resetPendingState` (queue.go:268) | Does not reset `CurrentPhase` or `PhaseOutputs`. Runner-visible consequence: retries resume mid-workflow. `WorktreePath` reset is conditional on previous state being `running`, which leaks stale paths on `failed → failed` chains that later retry. |
 | I4 | ⚠ | `UpdateVessel`, `ReplaceAll` | Accept arbitrary caller timestamps. Privileged-path exemption is documented in I4 itself; no code fix required, but property test must scope to non-privileged paths. |
 | I4 | ⚠ | `queueNow` (queue.go:674) | Falls back to `time.Now().UTC()` on `dtu.RuntimeNow` error; wall-clock can regress. Documented as "Not covered: clock-source trust." |
@@ -237,20 +237,17 @@ fix is merged.
 | I5b | ✗ | `writeAllVessels` (queue.go:698) | `os.WriteFile` is not atomic: no `fsync`, no tmpfile+rename. Crash mid-write silently truncates or partial-writes. Fix: write to `path + ".tmp"`, `fsync(tmp)`, `rename(tmp, path)`, `fsync(dir)`. |
 | I6 | ✓ | `withLock`/`withRLock` (queue.go:579, 592) | Single-writer flock gives linearizability for each op. Property test must still exercise concurrency to rule out future regressions. |
 | I7 | ✓ | `Update` (queue.go:219), `Cancel` (queue.go:409) | Transition validated before mutation. |
-| I7 | ✓ | `UpdateVessel` (queue.go:373) | Validates only on state-change, which is correct for I7 (but see I2 gap above). |
+| I7 | ✓ | `UpdateVessel` (queue.go:464) | Validates only on state-change, which is correct for I7. |
 | I8 | ✗ | `readAllVessels` (queue.go:629) | Silently skips malformed lines with a `log.Printf` warning. Fix: fail-closed (return error and stop using queue) OR make writes atomic so malformed lines cannot appear. Prerequisite for honest I5b. |
 | I9 | ✓ | `Enqueue` (queue.go:223–227) | Rejects duplicate-`ID` enqueue with `ErrDuplicateID` (PR #594). Ref-dedup at queue.go:212–221 short-circuits before the ID check when both `Ref` and `ID` collide; property test uses a distinct `Ref` to exercise the ID path. |
 | I10 | ⚠ | no enforcement | `RetryOf` is set by callers and never validated. Acceptable if callers are disciplined; property test must assert DAG over all observed queue states. |
 | I11 | ✓ | `compactVessels` (queue.go:467) | Removes only when `IsTerminal()`. Property test pins the current guarantee against future regressions. |
 
-**Summary:** 3 outright violations (I2, I3, I5b, I8), 3 warnings (I1/I4/I10
-partial coverage). I9 landed in PR #594 and is pinned by
-`TestPropQueueInvariant_I9_UniqueIDs`. Fix order recommended for the
-remaining items:
+**Summary:** 3 outright violations (I3, I5b, I8), 3 warnings (I1/I4/I10
+partial coverage). I2 landed on branch `feat/queue-verified-valid-transition` (PR #687) and is pinned by `TestPropQueueInvariant_I2_TerminalImmutability`. I9 landed in PR #594 and is pinned by `TestPropQueueInvariant_I9_UniqueIDs`. Fix order recommended for the remaining items:
 
-1. **I2** (terminal-field mutation) — one-branch `UpdateVessel` guard.
-2. **I3** (`CurrentPhase`/`PhaseOutputs` reset) — needs policy sign-off on runner-side consequences before the reset is added.
-3. **I8 + I5b** (atomic writes + fail-closed reads) — paired change; correct order is I8 first (loud), then I5b (quiet, builds on I8).
+1. **I3** (`CurrentPhase`/`PhaseOutputs` reset) — needs policy sign-off on runner-side consequences before the reset is added.
+2. **I8 + I5b** (atomic writes + fail-closed reads) — paired change; correct order is I8 first (loud), then I5b (quiet, builds on I8).
 
 ---
 
