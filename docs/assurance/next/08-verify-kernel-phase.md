@@ -69,12 +69,17 @@ This is a thin phase. It only runs when a PR touches `.dfy` files. It invokes th
 - `scripts/verify-kernels.sh` — shell gate: 3-dot diff for changed `.dfy` files, Docker Dafny verify per file, 130s timeout, exits 0 with warning when Docker/image absent.
 - `.xylem/workflows/fix-bug.yaml` — `verify_kernel` command phase inserted after `implement`, before `verify`. Governance amendment 2026-04-20.
 - `.xylem/workflows/implement-feature.yaml` — same.
-- `.xylem/workflows/implement-harness.yaml` — same.
+- `.xylem/workflows/implement-harness.yaml` — same (placed after implement gate, before verify and test_critic).
+- `cli/internal/profiles/core/workflows/fix-bug.yaml` — embedded profile source updated to match. Required to prevent the #651 silent-revert pattern: without this, daemon auto-upgrade overwrites `.xylem/workflows/fix-bug.yaml` with the stale embedded copy on restart.
+- `cli/internal/profiles/core/workflows/implement-feature.yaml` — same.
+- `cli/internal/profiles/self-hosting-xylem/workflows/implement-harness.yaml` — same.
+- `TestVerifyKernelPhaseEmbeddedInAllDeliveryWorkflows` in `cli/internal/profiles/implement_harness_guard_test.go` — regression guard: asserts that `verify_kernel` exists in all three embedded workflow copies and that phase order (implement → verify_kernel → verify) is preserved. Prevents future drift between `.xylem/` and `cli/internal/profiles/`.
+- `cli/internal/profiles/profiles_test.go` — phase count assertions updated from 5 → 6 for fix-bug and implement-feature smoke tests.
 - `docs/workflows.md` — `verify-kernel` section added to workflow reference.
 
 **Docker image finding:** `crosscheck-dafny:latest` is absent from the daemon environment as of 2026-04-20. The gate soft-falls back to exit 0 with a warning on all current machines. Pre-commit enforcement is the active line of defense until the image is bootstrapped. See kill criterion #1 in this doc for the CI flakiness threshold; the inverse applies here — the image must be built before the gate can actually fire.
 
-**Deliverable delta vs spec:** The spec listed `.xylem/prompts/verify-kernel/verify.md` as a possible deliverable. The implementation is a `type: command` phase backed by `scripts/verify-kernels.sh` instead — a prompt file is unnecessary because the gate is fully deterministic. No LLM session is needed.
+**Deliverable delta vs spec:** The spec listed `.xylem/prompts/verify-kernel/verify.md` as a possible deliverable. The implementation is a `type: command` phase backed by `scripts/verify-kernels.sh` instead — a prompt file is unnecessary because the gate is fully deterministic. No LLM session is needed. The spec did not anticipate the embedded profile sync or regression guard, which were added to prevent the #651 pattern discovered after the spec was written.
 
 ## References
 
