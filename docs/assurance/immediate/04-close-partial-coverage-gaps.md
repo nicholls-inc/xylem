@@ -1,7 +1,7 @@
 # 04: Close Partial-Coverage Gaps in Runner Property Tests
 
 **Horizon:** Immediate
-**Status:** Not started
+**Status:** In progress (PR #675 merged 2026-04-19 — gaps A+D done; PR #680 open 2026-04-19 — gaps B+C; gaps E+F in current PR; issues #677/#676/#679/#678)
 **Estimated cost:** 1–2 weeks (6 small PRs)
 **Depends on:** #01 (coverage CI helps catch regression after each PR lands)
 **Unblocks:** #10 (Gobra needs a clean invariant-test baseline first)
