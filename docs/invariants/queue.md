@@ -171,7 +171,18 @@ is acyclic.
 - *Why:* prevents dangling retry references and retry cycles. Without this,
   retry chains can become orphaned and `FindLatestByRef` semantics drift.
 - *Test:* rapid retry sequences; assert graph is a DAG whose leaves are
-  terminal and whose roots have `RetryOf = ""`.
+  terminal and whose roots have `RetryOf = ""`; also exercise the verified
+  checker's error path: call `verified.IsAcyclic` directly with a cyclic
+  graph and assert it returns false; assert `Enqueue` rejects a self-loop
+  (`RetryOf == ID`); assert `UpdateVessel` rejects a RetryOf change that
+  would close a cycle.
+- *Verified kernel:* the acyclicity predicate `IsAcyclic` is formally
+  verified in `cli/internal/queue/verified/retry_dag.dfy` (Dafny 4.11.0,
+  2 verified, 0 errors). The Go extraction is
+  `cli/internal/queue/verified/retry_dag.go`. Roadmap #09.
+- *Enforcement scope:* `Enqueue` and `UpdateVessel` enforce the acyclicity
+  check via the verified kernel. `ReplaceAll` is a privileged bulk-write
+  operation; callers carry the I10 obligation for that path (same as I1).
 
 **I11. Compaction preserves the active set.**
 `∀ v ∈ vessels with v.State ∈ {pending, running, waiting}: v ∈ Compact(vessels)`.
@@ -240,11 +251,10 @@ fix is merged.
 | I7 | ✓ | `UpdateVessel` (queue.go:464) | Validates only on state-change, which is correct for I7. |
 | I8 | ✗ | `readAllVessels` (queue.go:629) | Silently skips malformed lines with a `log.Printf` warning. Fix: fail-closed (return error and stop using queue) OR make writes atomic so malformed lines cannot appear. Prerequisite for honest I5b. |
 | I9 | ✓ | `Enqueue` (queue.go:223–227) | Rejects duplicate-`ID` enqueue with `ErrDuplicateID` (PR #594). Ref-dedup at queue.go:212–221 short-circuits before the ID check when both `Ref` and `ID` collide; property test uses a distinct `Ref` to exercise the ID path. |
-| I10 | ⚠ | no enforcement | `RetryOf` is set by callers and never validated. Acceptable if callers are disciplined; property test must assert DAG over all observed queue states. |
+| I10 | ✓ | `Enqueue`, `UpdateVessel` | Acyclicity enforced via `verified.IsAcyclic` (Dafny-verified kernel, retry_dag.dfy). Self-loops and multi-node cycles rejected with `ErrRetryDAGCycle`. `ReplaceAll` remains caller-responsibility (privileged path). Roadmap #09. |
 | I11 | ✓ | `compactVessels` (queue.go:467) | Removes only when `IsTerminal()`. Property test pins the current guarantee against future regressions. |
 
-**Summary:** 3 outright violations (I3, I5b, I8), 3 warnings (I1/I4/I10
-partial coverage). I2 landed on branch `feat/queue-verified-valid-transition` (PR #687) and is pinned by `TestPropQueueInvariant_I2_TerminalImmutability`. I9 landed in PR #594 and is pinned by `TestPropQueueInvariant_I9_UniqueIDs`. Fix order recommended for the remaining items:
+**Summary:** 3 outright violations (I3, I5b, I8), 2 warnings (I1/I4 partial coverage). I2 landed on branch `feat/queue-verified-valid-transition` (PR #687) and is pinned by `TestPropQueueInvariant_I2_TerminalImmutability`. I9 landed in PR #594 and is pinned by `TestPropQueueInvariant_I9_UniqueIDs`. I10 acyclicity enforcement landed in roadmap #09 (verified kernel `retry_dag.dfy`), pinned by `TestPropQueueInvariant_I10_RetryOfDAG`. Fix order recommended for the remaining items:
 
 1. **I3** (`CurrentPhase`/`PhaseOutputs` reset) — needs policy sign-off on runner-side consequences before the reset is added.
 2. **I8 + I5b** (atomic writes + fail-closed reads) — paired change; correct order is I8 first (loud), then I5b (quiet, builds on I8).

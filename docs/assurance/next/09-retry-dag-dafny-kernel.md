@@ -1,7 +1,7 @@
 # 09: Retry-DAG Acyclicity Dafny-Verified Kernel
 
 **Horizon:** Next (4–8 weeks)
-**Status:** Not started
+**Status:** In progress (PR pending)
 **Estimated cost:** 3 days
 **Depends on:** #06 (pipeline pattern established), #08 (verify-kernel gate catches regressions)
 **Unblocks:** nothing — this is a terminal item in the Next phase
