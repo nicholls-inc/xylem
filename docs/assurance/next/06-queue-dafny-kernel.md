@@ -1,7 +1,7 @@
 # 06: Queue State Machine Dafny-Verified Kernel
 
 **Horizon:** Next (4–8 weeks)
-**Status:** Not started
+**Status:** In progress
 **Estimated cost:** 1–2 weeks
 **Depends on:** #01 (coverage CI), #02 (I9 fix), #03 (naive reference — gives a property-test oracle against which the extracted Go can be validated)
 **Unblocks:** #07 (intent-check has a concrete Dafny artifact to reason about), #08 (verify-kernel gate has something to verify), #09 (retry-DAG follows same pipeline)
@@ -97,3 +97,17 @@ Executed by a human operator (not the xylem daemon — first kernel requires man
 - Dafny Go compilation docs: https://dafny.org/latest/Compilation/Go
 - `cli/internal/queue/queue.go` (the code being replaced)
 - `docs/invariants/queue.md` §I2, §I7 (the invariants being verified)
+
+## Progress
+
+**Phase 1 — PR #685 (2026-04-20):** IsTerminal delivered and verified.
+- `cli/internal/queue/verified/state_machine.dfy` — Dafny source, 1 verified 0 errors (Dafny 4.11.0)
+- `cli/internal/queue/verified/state_machine.go` — clean Go extraction, _dafny boilerplate stripped
+- `cli/internal/queue/verified/state_machine_test.go` — exhaustive + rapid property tests
+- `cli/internal/queue/verified_differential_test.go` — abstraction-gap check vs queue.IsTerminal
+- `.crosscheck/specs.json` — spec registry entry added
+
+**Remaining:**
+- `validTransitions` — not yet specced
+- `protectedFieldsEqual` — not yet specced
+- Wiring `queue.go` to call `verified.IsTerminal` — deferred follow-up PR
