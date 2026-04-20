@@ -1,12 +1,15 @@
 package queue
 
-// Differential tests: verified functions must agree with the original Go
-// implementations for all canonical inputs. These are abstraction-gap checks —
-// same result from Dafny-extracted Go as from the original inline logic.
+// Differential tests: verified functions must agree with the hand-enumerated
+// truth tables below and with the validTransitions map (used by property tests).
 //
-// Lives in package queue (internal) so it can reference unexported types and
-// vars (VesselState.IsTerminal, validTransitions map). The wiring PR will flip
-// the dependency direction; until then queue does not import verified.
+// After wiring, VesselState.IsTerminal() delegates to verified.IsTerminal, so a
+// cross-check between the two would be tautological. TestIsTerminal_TruthTable
+// instead checks the verified function (and its delegate) against an independent
+// enumeration so a future regression in either direction is caught. The
+// ValidTransition differential test remains meaningful: production code calls
+// verified.ValidTransition while queue_invariants_prop_test.go checks the
+// validTransitions map — these two sources of truth must stay consistent.
 
 import (
 	"testing"
@@ -14,25 +17,30 @@ import (
 	"github.com/nicholls-inc/xylem/cli/internal/queue/verified"
 )
 
-func TestIsTerminal_DifferentialWithVerified(t *testing.T) {
-	canonical := []string{
-		"pending",
-		"running",
-		"completed",
-		"failed",
-		"cancelled",
-		"waiting",
-		"timed_out",
+func TestIsTerminal_TruthTable(t *testing.T) {
+	want := map[string]bool{
+		"pending":   false,
+		"running":   false,
+		"waiting":   false,
+		"failed":    true,
+		"completed": true,
+		"cancelled": true,
+		"timed_out": true,
 	}
-	for _, s := range canonical {
-		want := VesselState(s).IsTerminal()
-		got := verified.IsTerminal(s)
-		if got != want {
-			t.Errorf("state %q: VesselState.IsTerminal()=%v, verified.IsTerminal()=%v", s, want, got)
+	for s, expected := range want {
+		if got := VesselState(s).IsTerminal(); got != expected {
+			t.Errorf("VesselState(%q).IsTerminal() = %v, want %v", s, got, expected)
+		}
+		if got := verified.IsTerminal(s); got != expected {
+			t.Errorf("verified.IsTerminal(%q) = %v, want %v", s, got, expected)
 		}
 	}
 }
 
+// TestValidTransition_DifferentialWithMap guards that the validTransitions map
+// (the oracle for queue_invariants_prop_test.go) and verified.ValidTransition
+// (the production implementation after wiring) remain in sync. A divergence here
+// means property tests are exercising a different state machine than production.
 func TestValidTransition_DifferentialWithMap(t *testing.T) {
 	canonical := []string{
 		"pending",
@@ -53,7 +61,7 @@ func TestValidTransition_DifferentialWithMap(t *testing.T) {
 			}
 		}
 	}
-	// Test unknown from-state: map returns false (nil inner map), verified returns false.
+	// Unknown from-state: map returns false (nil inner map), verified returns false.
 	for _, to := range canonical {
 		want := validTransitions["unknown"][VesselState(to)]
 		got := verified.ValidTransition("unknown", to)
@@ -61,7 +69,7 @@ func TestValidTransition_DifferentialWithMap(t *testing.T) {
 			t.Errorf("ValidTransition(%q, %q): map=%v, verified=%v", "unknown", to, want, got)
 		}
 	}
-	// Test unknown to-state with each known from-state: map returns false, verified returns false.
+	// Unknown to-state: map returns false, verified returns false.
 	for _, from := range canonical {
 		want := validTransitions[VesselState(from)]["unknown"]
 		got := verified.ValidTransition(from, "unknown")

@@ -1,7 +1,7 @@
 # 06: Queue State Machine Dafny-Verified Kernel
 
 **Horizon:** Next (4–8 weeks)
-**Status:** In progress
+**Status:** Complete (2026-04-20)
 **Estimated cost:** 1–2 weeks
 **Depends on:** #01 (coverage CI), #02 (I9 fix), #03 (naive reference — gives a property-test oracle against which the extracted Go can be validated)
 **Unblocks:** #07 (intent-check has a concrete Dafny artifact to reason about), #08 (verify-kernel gate has something to verify), #09 (retry-DAG follows same pipeline)
@@ -118,10 +118,12 @@ Executed by a human operator (not the xylem daemon — first kernel requires man
 **Scoping decision — protectedFieldsEqual:**
 `protectedFieldsEqual` is deferred to **#10 (Gobra)**, which handles Go-native `*time.Time` and `map[string]string` without extraction gymnastics. Reason for deferral from #06: the function operates on the 19-field `Vessel` struct which has `*time.Time` and `map[string]string` fields. Modelling these in Dafny requires either abstract ghost types (no extractable code) or a full Vessel datatype whose Go extraction doesn't interoperate with the real `queue.Vessel` without a conversion shim — which defeats the purpose of extraction. The existing Go implementation is already a compile-time-explicit field enumeration (not reflection), providing adequate assurance for I2. Kill criteria were not triggered; this is an intentional rescope per the kill-criteria guidance ("perhaps only `IsTerminal` first").
 
-**Remaining:**
-- Wiring `queue.go` to call `verified.IsTerminal` and `verified.ValidTransition` — deferred follow-up PR (roadmap #06 step 7)
-
 **Phase 3 — Lightweight verification of `protectedFieldsEqual` (2026-04-20):** delivered alongside Phase 2 in PR #687.
 - `cli/internal/queue/verified/protectedfields_verify.md` — semi-formal contract analysis: 11 contracts (C1–C11), 19-field coverage table, helper analysis for `timePtrEqual` and `stringMapEqual`, verification gaps, upgrade path to #10 (Gobra)
 - `cli/internal/queue/protectedfields_verify_test.go` — companion tests: per-field mutation coverage (19 fields), exclusion tests (4 excluded fields), reflexivity and symmetry property tests (rapid), unit tests for `timePtrEqual` (6 cases) and `stringMapEqual` (10 cases)
 - `docs/assurance/medium-term/10-gobra-queue.md` — updated: `protectedFieldsEqual` added to Gobra scope with rationale; acceptance criterion added; read-only file list updated with correct line references (queue.go:98, 124)
+
+**Phase 4 — Wiring queue.go (2026-04-20):** Production callers now invoke the verified kernel.
+- `cli/internal/queue/queue.go` — `IsTerminal()` method delegates to `verified.IsTerminal(string(s))`; three `validTransitions` map look-ups replaced with `verified.ValidTransition(string(from), string(to))`. The `validTransitions` map is retained (it is the oracle for `queue_invariants_prop_test.go`, which is a protected surface).
+- `cli/internal/queue/verified_differential_test.go` — `TestIsTerminal_DifferentialWithVerified` repurposed as `TestIsTerminal_TruthTable` (independent ground truth, not tautological after delegation); `TestValidTransition_DifferentialWithMap` retained to guard that the map used by property tests stays in sync with the verified function used by production.
+- All queue tests pass (`go test ./internal/queue/` clean).
