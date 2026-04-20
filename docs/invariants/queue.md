@@ -56,6 +56,10 @@ invariant, and only via transition to `pending` (governed by I3).
 - *Test:* generate an arbitrary terminal vessel; apply any sequence of
   mutating ops that do not transition state; assert serialized record is
   byte-identical pre/post.
+- *Verified kernel:* the predicate "state is terminal" (`IsTerminal`) is
+  formally verified in `cli/internal/queue/verified/state_machine.dfy`
+  (Dafny 4.11.0, 1 verified, 0 errors). The Go extraction is
+  `cli/internal/queue/verified/state_machine.go`. Roadmap #06.
 
 **I3. Retry resets to indistinguishable-from-fresh.**
 A vessel transitioned `failed → pending` must have *exactly* the following
@@ -132,6 +136,9 @@ set, but callers are responsible for preserving I1, I8, I9, I10 when using it.
   a latent cascade.
 - *Test:* rapid ops on arbitrary starting states; after every mutation,
   assert `validTransitions[old][new] == true`.
+- *Verified kernel:* the `IsTerminal` predicate used by terminal-state guards
+  is formally verified in `cli/internal/queue/verified/state_machine.dfy`.
+  Roadmap #06.
 
 **I8. Queue file well-formedness.**
 Every non-blank line in the queue file is a valid JSON `Vessel`. Malformed

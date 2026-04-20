@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "specs": [
+    {
+      "id": "is-terminal",
+      "function": "IsTerminal",
+      "description": "Returns true iff a VesselState string is one of the four terminal states: completed, failed, cancelled, timed_out",
+      "dafnySource": "cli/internal/queue/verified/state_machine.dfy",
+      "dafnySourceHash": "8bbb4dccec9b9da42135e32678f4b199587e3c7f74df01eff08398210fa67081",
+      "extractedCode": {
+        "file": "cli/internal/queue/verified/state_machine.go",
+        "function": "IsTerminal",
+        "language": "go"
+      },
+      "constraint": "hard",
+      "lastVerified": "2026-04-20T00:00:00Z",
+      "difficulty": {
+        "solverTimeMs": null,
+        "resourceCount": null,
+        "proofHintCount": 0,
+        "trivialProof": false
+      },
+      "trustBoundaries": [
+        "Caller must pass one of the seven canonical VesselState string values; unknown strings return false by contract, not proven by the spec"
+      ]
+    }
+  ]
+}
