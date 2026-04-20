@@ -1,3 +1,5 @@
+**Your FIRST action MUST be a concrete tool call (Read, Grep, or Edit). Do not describe, narrate, or restate the plan — act immediately.**
+
 Implement the harness spec step according to the plan.
 
 Issue: {{.Issue.Title}}

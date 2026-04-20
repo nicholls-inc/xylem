@@ -3,10 +3,20 @@ name: CI
 on:
   push:
     branches: [main]
-    paths: ["cli/**", ".golangci.yml", ".xylem/workflows/**"]
+    paths:
+      - "cli/**"
+      - ".golangci.yml"
+      - ".xylem/workflows/**"
+      - "docs/invariants/**"
+      - "scripts/check_invariant_coverage.py"
   pull_request:
     branches: [main]
-    paths: ["cli/**", ".golangci.yml", ".xylem/workflows/**"]
+    paths:
+      - "cli/**"
+      - ".golangci.yml"
+      - ".xylem/workflows/**"
+      - "docs/invariants/**"
+      - "scripts/check_invariant_coverage.py"
 
 jobs:
   go-checks:
@@ -37,3 +47,11 @@ jobs:
 
       - run: go build ./cmd/xylem
       - run: go test ./...
+
+  invariant-coverage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Check invariant↔test coverage mapping
+        run: python3 scripts/check_invariant_coverage.py

@@ -1,7 +1,7 @@
 # 02: Fix Queue I9 Tautology and Enforce ID Uniqueness
 
 **Horizon:** Immediate
-**Status:** Not started
+**Status:** Done (PR #654, merged 2026-04-19, commit ecd84e6)
 **Estimated cost:** 1 hour
 **Depends on:** nothing
 **Unblocks:** nothing, but provides a live example of the adversarial-test pattern for #04

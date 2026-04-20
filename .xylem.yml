@@ -1,78 +1,70 @@
 # xylem configuration
-# Docs: https://github.com/nicholls-inc/claude-code-marketplace/tree/main/xylem
-#
-# EMERGENCY: sources block materialized from profiles to work around #555
-# (profile overlay not expanded to runtime config). Remove this block once
-# #555 lands and the daemon expands profiles at startup.
-#
-# STABILIZATION 2026-04-17: Reduced to core development loop only.
-# Scheduled analytical/meta workflows disabled. See DISABLED block at bottom.
-# To re-enable a source: move it back up into the sources: block.
+# Docs: https://github.com/nicholls-inc/xylem
 
-profiles: [core, self-hosting-xylem]
+# No embedded profiles — workflows and prompts are read from .xylem/ on disk.
+# Dropping profiles: disables the materializer, so local edits survive restart.
 
-# --- Sources from core profile ---
+# --- Label / flag flow ---
+#
+# Issue lifecycle:
+#   needs-triage       → triage         → removes needs-triage, adds needs-refinement
+#   needs-refinement   → refine-issue   → removes needs-refinement, adds ready-for-work
+#   bug + ready-for-work        → fix-bug          → PR opened with ready-to-merge
+#   enhancement + ready-for-work → implement-feature → PR opened with ready-to-merge
+#
+# PR lifecycle:
+#   pr_opened / pr_head_updated (+ ready-to-merge) → review-pr      → posts review
+#   review_submitted                               → respond-to-pr-review → fixes/resolves
+#   checks_failed                                  → fix-pr-checks  → fixes CI
+#   needs-conflict-resolution                      → resolve-conflicts → clean branch
+#   ready-to-merge + green CI + all threads resolved → merge-pr     → merged
+#
+# Status labels prevent double-processing:
+#   in-progress      — added to issues when a vessel starts; removed on complete
+#   pr-vessel-active — added to PRs when a vessel starts; removed on complete
+#   xylem-failed     — added when a vessel fails (requires human triage)
+#   pr-vessel-merged — added by merge-pr on successful merge
+
 sources:
-  # harness-impl bugs route to implement-harness (correct gates: cd cli && go test)
-  # instead of fix-bug (broken: make test). See #562.
-  harness-impl-bugs:
+  issues:
     type: github
     repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot]
+    exclude: [wontfix, duplicate, in-progress, no-bot, xylem-failed]
     tasks:
-      fix:
-        labels: [bug, ready-for-work, harness-impl]
-        workflow: implement-harness
-        tier: med
-  harness-impl-features:
-    type: github
-    repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot]
-    tasks:
-      implement:
-        labels: [enhancement, ready-for-work, harness-impl]
-        workflow: implement-harness
-        tier: med
-  bugs:
-    type: github
-    repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
-    tasks:
-      fix:
-        labels: [bug, ready-for-work]
-        workflow: fix-bug
-        tier: med
-  features:
-    type: github
-    repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot, harness-impl]
-    tasks:
-      implement:
-        labels: [enhancement, ready-for-work]
-        workflow: implement-feature
-        tier: med
-  triage:
-    type: github
-    repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot]
-    tasks:
-      issues:
+      triage:
         labels: [needs-triage]
         workflow: triage
         tier: high
-  refinement:
-    type: github
-    repo: "nicholls-inc/xylem"
-    exclude: [wontfix, duplicate, in-progress, no-bot]
-    tasks:
-      issues:
+        status_labels:
+          running: in-progress
+          failed: xylem-failed
+      refine:
         labels: [needs-refinement]
         workflow: refine-issue
         tier: high
-  pr-lifecycle:
+        status_labels:
+          running: in-progress
+          failed: xylem-failed
+      fix-bug:
+        labels: [bug, ready-for-work]
+        workflow: fix-bug
+        tier: med
+        status_labels:
+          running: in-progress
+          failed: xylem-failed
+      implement-feature:
+        labels: [enhancement, ready-for-work]
+        workflow: implement-feature
+        tier: med
+        status_labels:
+          running: in-progress
+          failed: xylem-failed
+
+  # Event-driven PR work: review on open/update, respond to reviews, fix CI
+  pr-events:
     type: github-pr-events
     repo: "nicholls-inc/xylem"
-    exclude: [no-bot]
+    exclude: [no-bot, pr-vessel-active]
     tasks:
       review-opened:
         workflow: review-pr
@@ -80,100 +72,44 @@ sources:
         on:
           pr_opened: true
           require_labels: [ready-to-merge]
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
       review-updated:
         workflow: review-pr
         tier: high
         on:
           pr_head_updated: true
           require_labels: [ready-to-merge]
-      respond-to-review:
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+      respond:
         workflow: respond-to-pr-review
         tier: high
         on:
           review_submitted: true
           author_deny:
             - "github-actions[bot]"
-      fix-checks:
-        workflow: fix-pr-checks
-        tier: med
-        on:
-          checks_failed: true
-  merges:
-    type: github-pr
-    repo: "nicholls-inc/xylem"
-    exclude: [no-bot]
-    tasks:
-      ready:
-        labels: [ready-to-merge]
-        workflow: merge-pr
-        tier: low
-  conflicts:
-    type: github-pr
-    repo: "nicholls-inc/xylem"
-    exclude: [no-bot]
-    tasks:
-      resolve:
-        labels: [needs-conflict-resolution]
-        workflow: resolve-conflicts
-        tier: med
-  # Scheduled: core operations only
-  diagnose-failures:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "2h"
-    timeout: "45m"
-    tasks:
-      hourly-diagnose-failures:
-        workflow: diagnose-failures
-        ref: diagnose-failures
-        tier: high
-  release-cadence:
-    type: scheduled
-    repo: "nicholls-inc/xylem"
-    schedule: "4h"
-    timeout: "15m"
-    tasks:
-      label-mature-release-pr:
-        workflow: release-cadence
-        ref: release-cadence
-        tier: low
-
-  # --- Sources from self-hosting-xylem overlay ---
-  pr-self-review:
-    type: github-pr
-    repo: "nicholls-inc/xylem"
-    exclude: [no-bot, pr-vessel-active]
-    tasks:
-      self-review:
-        labels: [ready-to-merge]
-        workflow: pr-self-review
-        tier: high
         status_labels:
           running: pr-vessel-active
           failed: xylem-failed
-  harness-pr-lifecycle:
-    type: github-pr-events
-    repo: "nicholls-inc/xylem"
-    exclude: [no-bot, pr-vessel-active]
-    tasks:
-      respond-reviews:
-        workflow: respond-to-pr-review
-        tier: high
-        on:
-          review_submitted: true
-          author_allow:
-            - "copilot-pull-request-reviewer[bot]"
       fix-checks:
         workflow: fix-pr-checks
         tier: med
         on:
           checks_failed: true
-  harness-merge:
+        status_labels:
+          running: pr-vessel-active
+          failed: xylem-failed
+
+  # Label-driven PR work: merge when ready, resolve conflicts
+  pr-ops:
     type: github-pr
     repo: "nicholls-inc/xylem"
     exclude: [no-bot, pr-vessel-active]
     tasks:
-      merge-ready:
+      merge:
         labels: [ready-to-merge]
         workflow: merge-pr
         tier: low
@@ -181,11 +117,6 @@ sources:
           running: pr-vessel-active
           completed: pr-vessel-merged
           failed: xylem-failed
-  conflict-resolution:
-    type: github-pr
-    repo: "nicholls-inc/xylem"
-    exclude: [no-bot, pr-vessel-active]
-    tasks:
       resolve-conflicts:
         labels: [needs-conflict-resolution]
         workflow: resolve-conflicts
@@ -193,44 +124,13 @@ sources:
         status_labels:
           running: pr-vessel-active
           failed: xylem-failed
-  harness-post-merge:
-    type: github-merge
-    repo: "nicholls-inc/xylem"
-    exclude: ["autorelease: tagged", no-bot]
-    tasks:
-      unblock-deps:
-        workflow: unblock-wave
-        tier: low
-
-# --- DISABLED 2026-04-17 (stabilization phase) ---
-# These sources are not in active use. Move back into sources: to re-enable.
-#
-# adaptation:           adapt-repo (xylem-adapt-repo label trigger)
-# lessons-hygiene:      lessons @daily
-# doc-gardener:         doc-garden @daily
-# context-audit:        context-weight-audit @weekly
-# security-compliance:  security-compliance @daily
-# workflow-health:      workflow-health-report @weekly
-# field-report:         field-report @weekly
-# sota-gap:             sota-gap-analysis @weekly
-# hardening-audit:      hardening-audit @monthly
-# continuous-simplicity: continuous-simplicity @weekly
-# continuous-improvement: continuous-improvement @daily
-# metrics-collector:    metrics-collector @daily
-# portfolio-analyst:    portfolio-analyst @weekly
-# audit:                audit @daily
-# initiative-tracker:   initiative-tracker @weekly
-# backlog-refinement:   backlog-refinement @daily
-# ingest-field-reports: ingest-field-reports @weekly
-# autonomy-review:      autonomy-review @weekly
-# ci-watchdog:          ci-watchdog every 30m (heavy when CI red: diagnose+file_issue phases)
 
 daemon:
   auto_upgrade: true
 
 notifications:
   github_discussion:
-    enabled: true
+    enabled: false
     repo: nicholls-inc/xylem
     category: "Status Reports"
     interval: "@daily"
@@ -256,20 +156,10 @@ max_turns: 100
 timeout: "45m"
 state_dir: ".xylem"
 
-# Tiered LLM routing — Opus for analysis/planning, free Copilot for execution.
-#
-# Tiers:
-#   high  → claude-opus-4-6  (Max subscription) — analysis, planning, review, diagnosis
-#   med   → copilot gpt-4.1  (0x premium, free) — implementation, fix-checks, conflict resolution
-#   low   → copilot gpt-5-mini (0x premium, free) — merges, metrics, label tasks, mechanical ops
-#
-# Copilot model multipliers (paid plan): gpt-4o=0x, gpt-4.1=0x, gpt-5-mini=0x, gpt-5.4=1x
-# Source: https://docs.github.com/en/copilot/reference/ai-models/supported-models
-#
-# NOTE: sources using simple 'type: schedule' (no tasks block) inherit default_tier (high)
-# because SourceConfig has no tier field. This is correct — those are all analytical workflows
-# (field-report, doc-garden, context-audit, etc). Convert to 'type: scheduled' with an explicit
-# task block if a schedule source needs a different tier.
+# Tiered LLM routing
+#   high  → claude-opus-4-6  — analysis, planning, review, triage, respond
+#   med   → copilot gpt-4.1  — implementation, fix-checks, conflict resolution
+#   low   → copilot gpt-5-mini — merge (deterministic command, model barely matters)
 providers:
   claude:
     kind: claude
@@ -278,20 +168,20 @@ providers:
     env:
       ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY}"
     tiers:
-      low: "claude-sonnet-4-6"   # unused — low routes to copilot
-      med: "claude-sonnet-4-6"   # unused — med routes to copilot
-      high: "claude-opus-4-6"     # active: analysis, planning, review tasks
+      low: "claude-sonnet-4-6"
+      med: "claude-sonnet-4-6"
+      high: "claude-opus-4-6"
 
   copilot:
     kind: copilot
     command: "copilot"
-    flags: "--yolo --autopilot"
+    flags: "--yolo"
     env:
       COPILOT_GITHUB_TOKEN: "${COPILOT_GITHUB_TOKEN}"
     tiers:
-      low: "gpt-5-mini"   # active: light structured tasks (0x premium)
-      med: "gpt-4.1"      # active: implementation, fix-checks, conflict resolution (0x premium, more capable than gpt-5-mini)
-      high: "gpt-4.1"     # unused — high routes to claude
+      low: "gpt-5-mini"
+      med: "gpt-4.1"
+      high: "gpt-4.1"
 
 llm_routing:
   default_tier: high

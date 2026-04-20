@@ -31,7 +31,9 @@ phases:
           threshold: 0.7
     gate:
       type: command
-      run: "make test"
+      run: |
+        set -e
+        {{ if .Validation.Test }}{{ .Validation.Test }}{{ else }}echo "ERROR: validation.test not configured in .xylem.yml" >&2 && exit 1{{ end }}
       retries: 2
   - name: verify
     prompt_file: .xylem/prompts/implement-feature/verify.md
@@ -39,9 +41,44 @@ phases:
     tier: med
     gate:
       type: command
-      run: "make test"
+      run: |
+        set -e
+        {{ if .Validation.Test }}{{ .Validation.Test }}{{ else }}echo "ERROR: validation.test not configured in .xylem.yml" >&2 && exit 1{{ end }}
       retries: 1
-  - name: pr
-    prompt_file: .xylem/prompts/implement-feature/pr.md
+  - name: pr_draft
+    prompt_file: .xylem/prompts/implement-feature/pr_draft.md
     max_turns: 25
     tier: med
+    gate:
+      type: command
+      run: |
+        set -euo pipefail
+        git fetch origin main
+        if ! git merge-base --is-ancestor origin/main HEAD; then
+          echo "ERROR: branch is behind origin/main; rebase before creating the PR" >&2
+          exit 1
+        fi
+        current_branch=$(git branch --show-current)
+        git fetch origin "$current_branch" 2>/dev/null || true
+        if [ "$(git rev-parse HEAD)" != "$(git rev-parse "origin/$current_branch" 2>/dev/null)" ]; then
+          echo "ERROR: branch not pushed or remote does not match HEAD" >&2
+          exit 1
+        fi
+        test -f pr_draft.json || { echo "ERROR: pr_draft.json missing" >&2; exit 1; }
+      retries: 1
+  - name: pr_create
+    type: command
+    run: |
+      set -euo pipefail
+      TITLE=$(jq -r '.title' pr_draft.json)
+      BODY=$(jq -r '.body' pr_draft.json)
+      if [ -z "$TITLE" ] || [ "$TITLE" = "null" ]; then
+        echo "ERROR: title missing or null in pr_draft.json" >&2
+        exit 1
+      fi
+      BODY=$(printf '%s\n\nFixes #{{.Issue.Number}}' "$BODY")
+      gh pr create \
+        --repo {{.Repo.Slug}} \
+        --title "$TITLE" \
+        --body "$BODY" \
+        --label "ready-to-merge"

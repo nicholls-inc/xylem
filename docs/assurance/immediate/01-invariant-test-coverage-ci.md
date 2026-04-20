@@ -1,7 +1,7 @@
 # 01: Enforce Invariant↔Test Coverage Mapping in CI
 
 **Horizon:** Immediate
-**Status:** Not started
+**Status:** Done (PR #665, merged 2026-04-19, commit 628106a)
 **Estimated cost:** 1 day
 **Depends on:** nothing
 **Unblocks:** #02, #03, #04 (coverage gate catches regressions for all subsequent invariant work)

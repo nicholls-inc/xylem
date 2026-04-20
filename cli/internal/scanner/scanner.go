@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/nicholls-inc/xylem/cli/internal/config"
@@ -106,7 +107,7 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 				// is not stranded. `completed` and active states fall through
 				// to a skip — active is already live, completed would silently
 				// redo shipped work. See issue #658.
-				chained, newVessel, chainErr := s.chainTerminalRetry(vessel)
+				chained, newVessel, chainErr := s.chainTerminalRetry(ctx, vessel)
 				if chainErr != nil {
 					log.Printf("warn: scanner: duplicate vessel ID %q, chain retry failed: %v", vessel.ID, chainErr)
 					scanErrs = append(scanErrs, chainErr)
@@ -171,7 +172,13 @@ func (s *Scanner) Scan(ctx context.Context) (ScanResult, error) {
 //
 // Only one retry attempt is made; a second collision (e.g. race against a
 // concurrent enqueue) falls through to skip rather than looping.
-func (s *Scanner) chainTerminalRetry(vessel queue.Vessel) (bool, queue.Vessel, error) {
+func (s *Scanner) chainTerminalRetry(ctx context.Context, vessel queue.Vessel) (bool, queue.Vessel, error) {
+	// GUARD 1: Chain-depth cap
+	depth := strings.Count(vessel.ID, "-retry-")
+	if depth >= 3 {
+		log.Printf("warn: scanner: vessel %q has reached max chain depth (%d), dropping", vessel.ID, depth)
+		return false, queue.Vessel{}, nil
+	}
 	originalID := vessel.ID
 	existing, err := s.Queue.FindByID(originalID)
 	if err != nil || existing == nil {
@@ -186,6 +193,28 @@ func (s *Scanner) chainTerminalRetry(vessel queue.Vessel) (bool, queue.Vessel, e
 	default:
 		// Active (pending/running/waiting) or completed: do not chain.
 		return false, queue.Vessel{}, nil
+	}
+
+	// Only ID and RetryOf are propagated here; all other metadata fields (MetaRetryCount, MetaFailureFingerprint, MetaUnlockedBy, etc.) are intentionally reset to zero. This retry is deliberately fresh because it is a scanner-detected terminal duplicate, not an operator retry.
+	//
+	// In contrast, recovery.NextRetryVessel (recovery.go:623–693) copies those fields for operator-initiated retries where continuity matters.
+
+	// GUARD 2: GitHub open-state check
+	if strings.HasPrefix(vessel.Source, "github") {
+		if issueNum, ok := vessel.Meta["issue_num"]; ok && issueNum != "" && strings.Contains(vessel.Ref, "github.com/") {
+			ref := strings.TrimPrefix(vessel.Ref, "https://github.com/")
+			parts := strings.SplitN(ref, "/", 4)
+			if len(parts) >= 2 {
+				repo := parts[0] + "/" + parts[1]
+				out, err := s.CmdRunner.Run(ctx, "gh", "issue", "view", issueNum, "--repo", repo, "--json", "state", "-q", ".state")
+				if err != nil {
+					log.Printf("warn: scanner: could not check issue state for vessel %q: %v, proceeding with chain", vessel.ID, err)
+				} else if strings.EqualFold(strings.TrimSpace(string(out)), "closed") {
+					log.Printf("info: scanner: vessel %q issue #%s is closed, dropping chain", vessel.ID, issueNum)
+					return false, queue.Vessel{}, nil
+				}
+			}
+		}
 	}
 
 	vessel.ID = recovery.RetryID(originalID, s.Queue)

@@ -11,6 +11,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"sync/atomic"
@@ -72,6 +73,94 @@ func TestInvariant_I1_ConcurrencyCapsNeverExceeded(t *testing.T) {
 
 		if int(atomic.LoadInt64(&peak)) > cap {
 			rt.Fatalf("peak concurrent executions %d exceeded cap %d", peak, cap)
+		}
+	})
+}
+
+// Invariant IN: I1
+func TestInvariant_I1_PerClassConcurrencyCapNeverExceeded(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		classACap := rapid.IntRange(1, 2).Draw(rt, "classACap")
+		classBCap := rapid.IntRange(1, 2).Draw(rt, "classBCap")
+		nA := rapid.IntRange(classACap, classACap*3).Draw(rt, "nA")
+		nB := rapid.IntRange(classBCap, classBCap*3).Draw(rt, "nB")
+
+		dir := t.TempDir()
+		cfg := makeTestConfig(dir, classACap+classBCap+4)
+		cfg.ConcurrencyPerClass = map[string]int{
+			"classA": classACap,
+			"classB": classBCap,
+		}
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+		// promptToClass is populated before the runner starts; concurrent reads are safe.
+		promptToClass := make(map[string]string)
+		for i := 1; i <= nA; i++ {
+			prompt := fmt.Sprintf("classA-task-%d", i)
+			promptToClass[prompt] = "classA"
+			v := queue.Vessel{
+				ID:            fmt.Sprintf("vessel-A-%d", i),
+				Source:        "manual",
+				Prompt:        prompt,
+				WorkflowClass: "classA",
+				State:         queue.StatePending,
+				CreatedAt:     time.Now().UTC(),
+			}
+			_, err := q.Enqueue(v)
+			require.NoError(t, err)
+		}
+		for i := 1; i <= nB; i++ {
+			prompt := fmt.Sprintf("classB-task-%d", i)
+			promptToClass[prompt] = "classB"
+			v := queue.Vessel{
+				ID:            fmt.Sprintf("vessel-B-%d", i),
+				Source:        "manual",
+				Prompt:        prompt,
+				WorkflowClass: "classB",
+				State:         queue.StatePending,
+				CreatedAt:     time.Now().UTC(),
+			}
+			_, err := q.Enqueue(v)
+			require.NoError(t, err)
+		}
+
+		var currentA, peakA, currentB, peakB int64
+
+		cr := &mockCmdRunner{
+			runPhaseHook: func(_, prompt, _ string, _ ...string) ([]byte, error, bool) {
+				class := promptToClass[prompt]
+				var cur, pk *int64
+				switch class {
+				case "classA":
+					cur, pk = &currentA, &peakA
+				case "classB":
+					cur, pk = &currentB, &peakB
+				default:
+					return []byte("done"), nil, true
+				}
+				c := atomic.AddInt64(cur, 1)
+				for {
+					old := atomic.LoadInt64(pk)
+					if c <= old || atomic.CompareAndSwapInt64(pk, old, c) {
+						break
+					}
+				}
+				time.Sleep(5 * time.Millisecond)
+				atomic.AddInt64(cur, -1)
+				return []byte("done"), nil, true
+			},
+		}
+
+		r := New(cfg, q, &mockWorktree{path: dir}, cr)
+		_, err := r.DrainAndWait(context.Background())
+		require.NoError(t, err)
+
+		if got := int(atomic.LoadInt64(&peakA)); got > classACap {
+			rt.Fatalf("classA peak concurrent executions %d exceeded cap %d", got, classACap)
+		}
+		if got := int(atomic.LoadInt64(&peakB)); got > classBCap {
+			rt.Fatalf("classB peak concurrent executions %d exceeded cap %d", got, classBCap)
 		}
 	})
 }
@@ -156,6 +245,37 @@ func TestInvariant_I3_CancellationPrecedesCompletion(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, final)
 	assert.Equal(t, queue.StateCancelled, final.State, "vessel state must be cancelled")
+}
+
+// Invariant IN: I3
+func TestInvariant_I3_CancellationMidExecution(t *testing.T) {
+	// Mid-execution cancel: vessel cancelled while the phase hook is executing
+	// must end in state=cancelled even when the hook reports phase success.
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	v := makePromptVessel(1, "do work")
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+
+	cr := &mockCmdRunner{
+		runPhaseHook: func(_, _, _ string, _ ...string) ([]byte, error, bool) {
+			_ = q.Cancel(v.ID) // cancel while "executing"
+			return []byte("done"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cr)
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, result.Completed, "mid-execution cancel must not count as completed")
+
+	final, err := q.FindByID(v.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final)
+	assert.Equal(t, queue.StateCancelled, final.State, "vessel must be cancelled despite phase success report")
 }
 
 // ---------------------------------------------------------------------------
@@ -318,6 +438,51 @@ func TestInvariant_I6_GateRetriesFiniteAndLabelSuspends(t *testing.T) {
 	})
 }
 
+// Invariant IN: I6
+func TestInvariant_I6_LabelGateSuspendsVessel(t *testing.T) {
+	// Label gate: after a phase completes with a label gate, the vessel must
+	// enter state=waiting (not fail or complete).
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	wfName := "label-gate-test"
+	writeWorkflowFile(t, dir, wfName, []testPhase{
+		{
+			name:          "implement",
+			promptContent: "do the work",
+			maxTurns:      5,
+			gate:          "      type: label\n      wait_for: \"ready-to-merge\"\n",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	v := makeVessel(1, wfName)
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+
+	cr := &mockCmdRunner{
+		runPhaseHook: func(_, _, _ string, _ ...string) ([]byte, error, bool) {
+			return []byte("phase output"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cr)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, result.Completed, "label-gate vessel must not complete")
+	assert.Equal(t, 0, result.Failed, "label-gate vessel must not fail")
+	assert.Equal(t, 1, result.Waiting, "label-gate vessel must count as waiting")
+
+	final, err := q.FindByID(v.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final)
+	assert.Equal(t, queue.StateWaiting, final.State, "vessel must be in waiting state after label gate")
+}
+
 // ---------------------------------------------------------------------------
 // I7: PhaseOutputPersistenceOrdering  [ASPIRATIONAL — t.Skip until queue I5b]
 // ---------------------------------------------------------------------------
@@ -364,7 +529,30 @@ func TestInvariant_I8_InFlightAccountingExact(t *testing.T) {
 		}
 
 		r := New(cfg, q, &mockWorktree{path: dir}, cr)
+
+		// Mid-run sampling: verify InFlightCount never exceeds cap during execution.
+		stop := make(chan struct{})
+		var sampledPeak int64
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					c := int64(r.InFlightCount())
+					for {
+						old := atomic.LoadInt64(&sampledPeak)
+						if c <= old || atomic.CompareAndSwapInt64(&sampledPeak, old, c) {
+							break
+						}
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}()
+
 		_, err := r.DrainAndWait(context.Background())
+		close(stop)
 		require.NoError(t, err)
 
 		if got := r.InFlightCount(); got != 0 {
@@ -375,6 +563,9 @@ func TestInvariant_I8_InFlightAccountingExact(t *testing.T) {
 		r.processMu.Unlock()
 		if remaining != 0 {
 			rt.Fatalf("r.processes has %d entries after Wait, expected 0", remaining)
+		}
+		if got := int(atomic.LoadInt64(&sampledPeak)); got > cap {
+			rt.Fatalf("sampled InFlightCount peak %d exceeded cap %d during execution", got, cap)
 		}
 	})
 }
@@ -525,6 +716,56 @@ func TestInvariant_I11_PhaseInvocationWallClockBound(t *testing.T) {
 	_ = cr // suppress unused warning
 	_ = drainErr
 	_ = ready
+}
+
+// Invariant IN: I11
+func TestInvariant_I11_CheckStalledVesselsPath(t *testing.T) {
+	// Tests the CheckStalledVessels enforcement path (complementary to the
+	// context-timeout path tested above). Seeds a vessel in running state with
+	// a stale phase output file (mtime backdated past the stall threshold),
+	// calls CheckStalledVessels, and asserts that the vessel is terminated.
+	rapid.Check(t, func(rt *rapid.T) {
+		stallMS := rapid.IntRange(50, 200).Draw(rt, "stallMS")
+		dir := t.TempDir()
+		cfg := makeTestConfig(dir, 1)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		cfg.Daemon.StallMonitor.PhaseStallThreshold = fmt.Sprintf("%dms", stallMS)
+		cfg.Daemon.StallMonitor.OrphanCheckEnabled = false
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+		v := makePromptVessel(1, "stalled task")
+		_, err := q.Enqueue(v)
+		require.NoError(t, err)
+
+		vessel, err := q.Dequeue()
+		require.NoError(t, err)
+		require.NotNil(t, vessel)
+
+		// Create a stale phase output file: mtime predates the stall threshold.
+		outputPath := config.RuntimePath(cfg.StateDir, "phases", vessel.ID, "implement.output")
+		require.NoError(t, os.MkdirAll(filepath.Dir(outputPath), 0o755))
+		require.NoError(t, os.WriteFile(outputPath, []byte("partial output"), 0o644))
+		staleAt := time.Now().Add(-time.Duration(stallMS)*time.Millisecond - time.Second)
+		require.NoError(t, os.Chtimes(outputPath, staleAt, staleAt))
+		require.NoError(t, q.UpdateVessel(*vessel))
+
+		r := New(cfg, q, &mockWorktree{}, &mockCmdRunner{})
+		findings := r.CheckStalledVessels(context.Background())
+
+		if len(findings) == 0 {
+			rt.Fatalf("CheckStalledVessels returned no findings for a vessel with stale output (threshold=%dms)", stallMS)
+		}
+		if findings[0].Code != "phase_stalled" {
+			rt.Fatalf("expected code 'phase_stalled', got %q", findings[0].Code)
+		}
+
+		final, err := q.FindByID(vessel.ID)
+		require.NoError(t, err)
+		require.NotNil(t, final)
+		if !final.State.IsTerminal() {
+			rt.Fatalf("vessel state=%q after CheckStalledVessels; expected terminal (I11 wall-clock bound violated)", final.State)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -804,6 +1045,63 @@ func TestInvariant_I14_SourceLifecycleHooksFireExactlyOnce(t *testing.T) {
 		if completions+failures != total {
 			rt.Fatalf("OnComplete(%d) + OnFail(%d) = %d, expected %d (not mutually exclusive)",
 				completions, failures, completions+failures, total)
+		}
+	})
+}
+
+// Invariant IN: I14
+func TestInvariant_I14_RehydrationDoesNotReFire_OnStart(t *testing.T) {
+	// Verifies that OnStart does NOT fire again when a Runner is created with
+	// a vessel that is already in StateRunning (i.e., was started by a previous
+	// session before a daemon restart). This is the "rehydration" sub-clause of
+	// I14: restart-rehydration must not double-fire OnStart for vessels already
+	// past the OnStart checkpoint.
+	rapid.Check(t, func(rt *rapid.T) {
+		dir := t.TempDir()
+		cfg := makeTestConfig(dir, 1)
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		cfg.Timeout = "1s"
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+		v := makePromptVessel(1, "pre-running task")
+		_, err := q.Enqueue(v)
+		require.NoError(t, err)
+
+		// Simulate a previous session: dequeue puts vessel into StateRunning.
+		vessel, err := q.Dequeue()
+		require.NoError(t, err)
+		require.NotNil(t, vessel)
+
+		// Backdate StartedAt so CheckHungVessels will time the vessel out.
+		old := time.Now().Add(-5 * time.Minute)
+		vessel.StartedAt = &old
+		require.NoError(t, q.UpdateVessel(*vessel))
+
+		// New Runner simulates daemon restart. The vessel is already running;
+		// the new runner must NOT call OnStart again.
+		src := &recordingSource{}
+		r := New(cfg, q, &mockWorktree{path: dir}, &mockCmdRunner{})
+		r.Sources = map[string]source.Source{"manual": src}
+
+		// Drain picks up only pending vessels — none here.
+		_, err = r.DrainAndWait(context.Background())
+		require.NoError(t, err)
+
+		// CheckHungVessels reconciles the pre-running vessel.
+		r.CheckHungVessels(context.Background())
+
+		// OnStart must never have fired: it fired in the previous session,
+		// not in this one.
+		if starts := int(src.startCalls.Load()); starts != 0 {
+			rt.Fatalf("OnStart fired %d times after rehydration; must be 0 (must not re-fire for already-running vessel)", starts)
+		}
+
+		// The vessel must now be in a terminal state.
+		final, err := q.FindByID(v.ID)
+		require.NoError(t, err)
+		require.NotNil(t, final)
+		if !final.State.IsTerminal() {
+			rt.Fatalf("vessel state=%q after rehydration + CheckHungVessels; expected terminal", final.State)
 		}
 	})
 }
