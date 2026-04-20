@@ -76,6 +76,94 @@ func TestInvariant_I1_ConcurrencyCapsNeverExceeded(t *testing.T) {
 	})
 }
 
+// Invariant IN: I1
+func TestInvariant_I1_PerClassConcurrencyCapNeverExceeded(t *testing.T) {
+	rapid.Check(t, func(rt *rapid.T) {
+		classACap := rapid.IntRange(1, 2).Draw(rt, "classACap")
+		classBCap := rapid.IntRange(1, 2).Draw(rt, "classBCap")
+		nA := rapid.IntRange(classACap, classACap*3).Draw(rt, "nA")
+		nB := rapid.IntRange(classBCap, classBCap*3).Draw(rt, "nB")
+
+		dir := t.TempDir()
+		cfg := makeTestConfig(dir, classACap+classBCap+4)
+		cfg.ConcurrencyPerClass = map[string]int{
+			"classA": classACap,
+			"classB": classBCap,
+		}
+		cfg.StateDir = filepath.Join(dir, ".xylem")
+		q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+		// promptToClass is populated before the runner starts; concurrent reads are safe.
+		promptToClass := make(map[string]string)
+		for i := 1; i <= nA; i++ {
+			prompt := fmt.Sprintf("classA-task-%d", i)
+			promptToClass[prompt] = "classA"
+			v := queue.Vessel{
+				ID:            fmt.Sprintf("vessel-A-%d", i),
+				Source:        "manual",
+				Prompt:        prompt,
+				WorkflowClass: "classA",
+				State:         queue.StatePending,
+				CreatedAt:     time.Now().UTC(),
+			}
+			_, err := q.Enqueue(v)
+			require.NoError(t, err)
+		}
+		for i := 1; i <= nB; i++ {
+			prompt := fmt.Sprintf("classB-task-%d", i)
+			promptToClass[prompt] = "classB"
+			v := queue.Vessel{
+				ID:            fmt.Sprintf("vessel-B-%d", i),
+				Source:        "manual",
+				Prompt:        prompt,
+				WorkflowClass: "classB",
+				State:         queue.StatePending,
+				CreatedAt:     time.Now().UTC(),
+			}
+			_, err := q.Enqueue(v)
+			require.NoError(t, err)
+		}
+
+		var currentA, peakA, currentB, peakB int64
+
+		cr := &mockCmdRunner{
+			runPhaseHook: func(_, prompt, _ string, _ ...string) ([]byte, error, bool) {
+				class := promptToClass[prompt]
+				var cur, pk *int64
+				switch class {
+				case "classA":
+					cur, pk = &currentA, &peakA
+				case "classB":
+					cur, pk = &currentB, &peakB
+				default:
+					return []byte("done"), nil, true
+				}
+				c := atomic.AddInt64(cur, 1)
+				for {
+					old := atomic.LoadInt64(pk)
+					if c <= old || atomic.CompareAndSwapInt64(pk, old, c) {
+						break
+					}
+				}
+				time.Sleep(5 * time.Millisecond)
+				atomic.AddInt64(cur, -1)
+				return []byte("done"), nil, true
+			},
+		}
+
+		r := New(cfg, q, &mockWorktree{path: dir}, cr)
+		_, err := r.DrainAndWait(context.Background())
+		require.NoError(t, err)
+
+		if got := int(atomic.LoadInt64(&peakA)); got > classACap {
+			rt.Fatalf("classA peak concurrent executions %d exceeded cap %d", got, classACap)
+		}
+		if got := int(atomic.LoadInt64(&peakB)); got > classBCap {
+			rt.Fatalf("classB peak concurrent executions %d exceeded cap %d", got, classBCap)
+		}
+	})
+}
+
 // ---------------------------------------------------------------------------
 // I2: NoConcurrentPhaseForVesselID
 // ---------------------------------------------------------------------------
@@ -364,7 +452,30 @@ func TestInvariant_I8_InFlightAccountingExact(t *testing.T) {
 		}
 
 		r := New(cfg, q, &mockWorktree{path: dir}, cr)
+
+		// Mid-run sampling: verify InFlightCount never exceeds cap during execution.
+		stop := make(chan struct{})
+		var sampledPeak int64
+		go func() {
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					c := int64(r.InFlightCount())
+					for {
+						old := atomic.LoadInt64(&sampledPeak)
+						if c <= old || atomic.CompareAndSwapInt64(&sampledPeak, old, c) {
+							break
+						}
+					}
+					time.Sleep(time.Millisecond)
+				}
+			}
+		}()
+
 		_, err := r.DrainAndWait(context.Background())
+		close(stop)
 		require.NoError(t, err)
 
 		if got := r.InFlightCount(); got != 0 {
@@ -375,6 +486,9 @@ func TestInvariant_I8_InFlightAccountingExact(t *testing.T) {
 		r.processMu.Unlock()
 		if remaining != 0 {
 			rt.Fatalf("r.processes has %d entries after Wait, expected 0", remaining)
+		}
+		if got := int(atomic.LoadInt64(&sampledPeak)); got > cap {
+			rt.Fatalf("sampled InFlightCount peak %d exceeded cap %d during execution", got, cap)
 		}
 	})
 }
