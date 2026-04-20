@@ -14,7 +14,7 @@ phases:
   - name: implement
     prompt_file: .xylem/prompts/implement-harness/implement.md
     max_turns: 80
-    tier: med
+    tier: high
     gate:
       type: command
       run: "cd cli && go vet ./... && go build ./cmd/xylem && go test ./..."
