@@ -14,3 +14,8 @@ git push
 
 Post a comment on the PR summarizing the conflicts that were resolved and the strategy used for each file:
 gh pr comment {{.Issue.Number}} --body "<summary of resolved conflicts>"
+
+Remove the conflict-resolution trigger label so the scanner does not re-queue this PR:
+```
+gh pr edit {{.Issue.Number}} --remove-label "needs-conflict-resolution"
+```
