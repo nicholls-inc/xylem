@@ -120,10 +120,8 @@ Executed by a human operator (not the xylem daemon — first kernel requires man
 
 **Remaining:**
 - Wiring `queue.go` to call `verified.IsTerminal` and `verified.ValidTransition` — deferred follow-up PR (roadmap #06 step 7)
-- Lightweight verification of `protectedFieldsEqual` (`cli/internal/queue/queue.go:98`) via `crosscheck:lightweight-verify` — early assurance for I2 before #10 lands (Phase 3 below)
 
-**Phase 3 — Lightweight verification of `protectedFieldsEqual` (2026-04-20):**
-Target: `protectedFieldsEqual` at `cli/internal/queue/queue.go:98` and its two helpers `timePtrEqual` (line 124) and `stringMapEqual`.
-Method: `crosscheck:lightweight-verify` — structured semi-formal reasoning artifact, not Dafny extraction.
-Rationale: #10 (Gobra) is months away; this provides early documented assurance for I2 at low cost.
-Artifact location: `cli/internal/queue/verified/` alongside the Dafny kernel artifacts.
+**Phase 3 — Lightweight verification of `protectedFieldsEqual` (2026-04-20):** delivered alongside Phase 2 in PR #687.
+- `cli/internal/queue/verified/protectedfields_verify.md` — semi-formal contract analysis: 11 contracts (C1–C11), 19-field coverage table, helper analysis for `timePtrEqual` and `stringMapEqual`, verification gaps, upgrade path to #10 (Gobra)
+- `cli/internal/queue/protectedfields_verify_test.go` — companion tests: per-field mutation coverage (19 fields), exclusion tests (4 excluded fields), reflexivity and symmetry property tests (rapid), unit tests for `timePtrEqual` (6 cases) and `stringMapEqual` (10 cases)
+- `docs/assurance/medium-term/10-gobra-queue.md` — updated: `protectedFieldsEqual` added to Gobra scope with rationale; acceptance criterion added; read-only file list updated with correct line references (queue.go:98, 124)
