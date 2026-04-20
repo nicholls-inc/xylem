@@ -4,6 +4,7 @@
 **Status:** Not started
 **Estimated cost:** 1 week
 **Depends on:** nothing hard — can run in parallel with #06/#08/#09; benefits from #06 landing first (concrete artifact to reason about)
+**Planned order:** after #09 (2026-04-20 decision — highest-risk item; #08 and #09 are faster and should land first)
 **Unblocks:** #14 (spec-adversary reuses the same two-LLM plumbing)
 
 ## Context

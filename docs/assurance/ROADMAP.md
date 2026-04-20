@@ -42,6 +42,8 @@ xylem's current pragmatic projection of that hierarchy:
 | 8 | `verify-kernel` workflow phase | 2 days | [next/08-verify-kernel-phase.md](next/08-verify-kernel-phase.md) |
 | 9 | Retry-DAG acyclicity Dafny-verified kernel | 3 days | [next/09-retry-dag-dafny-kernel.md](next/09-retry-dag-dafny-kernel.md) |
 
+**Planned execution order (2026-04-20):** #08 → #09 → #07. Item #08 is the fastest (2 days) and gates all future `.dfy` regressions, which unblocks #09. Item #07 has no hard dependencies but is scheduled after #09: it is the highest-risk item (FP kill criterion at 30%) and requires human-authored governance amendments to protected workflow YAMLs regardless.
+
 ### Medium-term (2–3 months)
 
 | # | Item | Cost | Doc |
