@@ -246,6 +246,37 @@ func TestInvariant_I3_CancellationPrecedesCompletion(t *testing.T) {
 	assert.Equal(t, queue.StateCancelled, final.State, "vessel state must be cancelled")
 }
 
+// Invariant IN: I3
+func TestInvariant_I3_CancellationMidExecution(t *testing.T) {
+	// Mid-execution cancel: vessel cancelled while the phase hook is executing
+	// must end in state=cancelled even when the hook reports phase success.
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	v := makePromptVessel(1, "do work")
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+
+	cr := &mockCmdRunner{
+		runPhaseHook: func(_, _, _ string, _ ...string) ([]byte, error, bool) {
+			_ = q.Cancel(v.ID) // cancel while "executing"
+			return []byte("done"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cr)
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, result.Completed, "mid-execution cancel must not count as completed")
+
+	final, err := q.FindByID(v.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final)
+	assert.Equal(t, queue.StateCancelled, final.State, "vessel must be cancelled despite phase success report")
+}
+
 // ---------------------------------------------------------------------------
 // I4: WorktreeRemovedOnTerminalOutcome  [KNOWN VIOLATION — t.Skip until fix]
 // ---------------------------------------------------------------------------
@@ -404,6 +435,51 @@ func TestInvariant_I6_GateRetriesFiniteAndLabelSuspends(t *testing.T) {
 				phaseCnt, retries+1, retries)
 		}
 	})
+}
+
+// Invariant IN: I6
+func TestInvariant_I6_LabelGateSuspendsVessel(t *testing.T) {
+	// Label gate: after a phase completes with a label gate, the vessel must
+	// enter state=waiting (not fail or complete).
+	dir := t.TempDir()
+	cfg := makeTestConfig(dir, 1)
+	cfg.StateDir = filepath.Join(dir, ".xylem")
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+
+	wfName := "label-gate-test"
+	writeWorkflowFile(t, dir, wfName, []testPhase{
+		{
+			name:          "implement",
+			promptContent: "do the work",
+			maxTurns:      5,
+			gate:          "      type: label\n      wait_for: \"ready-to-merge\"\n",
+		},
+	})
+	withTestWorkingDir(t, dir)
+
+	v := makeVessel(1, wfName)
+	_, err := q.Enqueue(v)
+	require.NoError(t, err)
+
+	cr := &mockCmdRunner{
+		runPhaseHook: func(_, _, _ string, _ ...string) ([]byte, error, bool) {
+			return []byte("phase output"), nil, true
+		},
+	}
+	r := New(cfg, q, &mockWorktree{path: dir}, cr)
+	r.Sources = map[string]source.Source{"github-issue": makeGitHubSource()}
+
+	result, err := r.DrainAndWait(context.Background())
+	require.NoError(t, err)
+
+	assert.Equal(t, 0, result.Completed, "label-gate vessel must not complete")
+	assert.Equal(t, 0, result.Failed, "label-gate vessel must not fail")
+	assert.Equal(t, 1, result.Waiting, "label-gate vessel must count as waiting")
+
+	final, err := q.FindByID(v.ID)
+	require.NoError(t, err)
+	require.NotNil(t, final)
+	assert.Equal(t, queue.StateWaiting, final.State, "vessel must be in waiting state after label gate")
 }
 
 // ---------------------------------------------------------------------------
