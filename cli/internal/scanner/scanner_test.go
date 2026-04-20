@@ -655,6 +655,89 @@ func TestScanChainsCancelledTerminalVessel(t *testing.T) {
 	}
 }
 
+// TestChainTerminalRetryDepthCap verifies that chainTerminalRetry refuses to chain a vessel
+// whose ID already has depth >= 3 (three or more "-retry-" segments), preventing the
+// unbounded-runaway pattern observed in issue #662 (e.g. issue-400-retry-1-retry-1-...-retry-1).
+func TestChainTerminalRetryDepthCap(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+	s := New(cfg, q, r)
+
+	deepVessel := queue.Vessel{
+		ID:        "issue-1-retry-1-retry-1-retry-1",
+		Source:    "github-issue",
+		Ref:       "https://github.com/owner/repo/issues/1",
+		Workflow:  "fix-bug",
+		Meta:      map[string]string{"issue_num": "1"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	}
+	chained, _, err := s.chainTerminalRetry(context.Background(), deepVessel)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chained {
+		t.Errorf("depth cap: expected chained=false for depth-3 vessel, got chained=true")
+	}
+}
+
+// TestScanChainSkipsClosedIssue ensures that chaining is skipped if the GitHub issue is closed.
+func TestScanChainSkipsClosedIssue(t *testing.T) {
+	dir := t.TempDir()
+	cfg := makeConfig(dir)
+	q := queue.New(filepath.Join(dir, "queue.jsonl"))
+	r := newMock()
+
+	issues := []ghIssue{
+		{Number: 1, Title: "closed", Body: "body", URL: "https://github.com/owner/repo/issues/1", Labels: []struct {
+			Name string `json:"name"`
+		}{{Name: "bug"}}},
+	}
+	r.set(issueJSON(issues), "gh", "issue", "list", "--repo", "owner/repo", "--state", "open", "--json", "number,title,body,url,labels", "--limit", "20", "--label", "bug")
+	for _, prefix := range []string{"fix", "feat"} {
+		r.set([]byte(""), "git", "ls-remote", "--heads", "origin", fmt.Sprintf("%s/issue-%d-*", prefix, 1))
+		r.set([]byte("[]"), "gh", "pr", "list", "--repo", "owner/repo", "--search", fmt.Sprintf("head:%s/issue-%d-", prefix, 1), "--state", "open", "--json", "number,headRefName", "--limit", "5")
+	}
+	r.set([]byte("CLOSED"), "gh", "issue", "view", "1", "--repo", "owner/repo", "--json", "state", "-q", ".state")
+
+	vessel := queue.Vessel{
+		ID:        "issue-1",
+		Source:    "github-issue",
+		Ref:       "https://github.com/owner/repo/issues/1",
+		Workflow:  "fix-bug",
+		Meta:      map[string]string{"issue_num": "1"},
+		State:     queue.StatePending,
+		CreatedAt: time.Now().UTC(),
+	}
+	if _, err := q.Enqueue(vessel); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	if _, err := q.Dequeue(); err != nil {
+		t.Fatalf("dequeue: %v", err)
+	}
+	if err := q.Update(vessel.ID, queue.StateCancelled, ""); err != nil {
+		t.Fatalf("cancel: %v", err)
+	}
+
+	s := New(cfg, q, r)
+	result, err := s.Scan(context.Background())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Added != 0 {
+		t.Errorf("closed issue: got Added=%d, want 0", result.Added)
+	}
+	vessels, err := q.List()
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(vessels) != 1 {
+		t.Errorf("closed issue: got %d vessels, want 1", len(vessels))
+	}
+}
+
 // TestScanSkipsCompletedDuplicateID confirms that the chain path does NOT
 // fire for completed vessels — re-enqueueing a completed vessel would
 // silently redo shipped work. Completed collisions must still skip.
