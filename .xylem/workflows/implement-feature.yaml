@@ -45,3 +45,19 @@ phases:
     prompt_file: .xylem/prompts/implement-feature/pr.md
     max_turns: 25
     tier: med
+    gate:
+      type: command
+      run: |
+        set -euo pipefail
+        current_branch=$(git branch --show-current)
+        if [ -z "$current_branch" ] || [ "$current_branch" = "main" ]; then
+          echo "ERROR: not on a feature branch (got: '${current_branch:-<empty>}')"
+          exit 1
+        fi
+        pr_num=$(gh pr list --head "$current_branch" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+        if [ -z "$pr_num" ]; then
+          echo "ERROR: no open PR found for branch $current_branch — pr phase failed silently (sandbox 403 or push error)"
+          exit 1
+        fi
+        echo "PR #$pr_num confirmed for branch $current_branch"
+      retries: 1
