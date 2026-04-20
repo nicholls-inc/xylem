@@ -13,11 +13,13 @@ Formally verified implementations of pure queue state-machine functions.
 
 [Dafny](https://dafny.org) is a verification-aware language. You write a function with `ensures` (postcondition) clauses, and the Dafny verifier — backed by the Z3 SMT solver — proves the body satisfies those clauses for every possible input. If verification passes, the spec is machine-checked, not just tested.
 
-## Current scope (roadmap #06, phase 1)
+## Current scope (roadmap #06, phases 1–2)
 
-`IsTerminal(s string) bool` — returns true iff `s` is one of the four terminal vessel states (`"completed"`, `"failed"`, `"cancelled"`, `"timed_out"`). Chosen as the first kernel because it is the smallest pure function in the queue package.
+`IsTerminal(s string) bool` — returns true iff `s` is one of the four terminal vessel states (`"completed"`, `"failed"`, `"cancelled"`, `"timed_out"`). Phase 1 kernel.
 
-**Not yet extracted:** `validTransitions`, `protectedFieldsEqual`. These are planned for subsequent phases after this pipeline is validated.
+`ValidTransition(from, to string) bool` — returns true iff transitioning from `from` to `to` is permitted by the state machine. Encodes the full transition table from `queue.go:validTransitions`. Phase 2 kernel.
+
+**Deferred:** `protectedFieldsEqual` — requires modelling the 19-field `Vessel` struct in Dafny, with abstract types for `*time.Time` and `map[string]string`. The extracted Go would not interoperate with the real `Vessel` type without a conversion shim that defeats the purpose. Scoping decision documented in roadmap #06.
 
 ## How to re-verify
 
@@ -44,10 +46,11 @@ Requires the `crosscheck` plugin with Docker:
 | `datatype VesselState` (discriminated union) | `string` |
 | `VesselState_Completed`, etc. | `"completed"`, etc. |
 | `(s).Equals(Companion_VesselState_.Create_Completed_())` | `s == "completed"` |
+| Dafny `match` on `VesselState` | Go `switch` on `string` |
 
 ## Wiring into queue.go
 
-The rewiring PR (roadmap #06 step 7) replaces the inline expression in `queue.go` with a call to this package:
+The rewiring PR (roadmap #06 step 7) replaces the inline implementations in `queue.go` with calls to this package. Example for `IsTerminal`:
 
 ```go
 import "github.com/nicholls-inc/xylem/cli/internal/queue/verified"
@@ -63,10 +66,10 @@ func (s VesselState) IsTerminal() bool {
 }
 ```
 
-The rewiring is a **separate PR** from this one, so the kernel files are reviewable independently of the wiring change.
+`ValidTransition` replaces the `validTransitions` map look-up in `Update`, `UpdateVessel`, and `Cancel`. The rewiring is a **separate PR** from the kernel files, so verification is reviewable independently of wiring.
 
 ## Governance
 
-- `state_machine.dfy` is the source of truth. The `.go` file is generated from it; never edit the `.go` by hand.
-- The first kernel requires **human review** before merge — see roadmap item #06 governance note.
-- Future kernels (`validTransitions`, `protectedFieldsEqual`) follow the same pipeline.
+- `state_machine.dfy` is the source of truth. The `.go` file is derived from it; never edit the `.go` by hand.
+- Kernels require **human review** before merge — see roadmap item #06 governance note.
+- `protectedFieldsEqual` is deferred — see scoping note in README and roadmap #06.

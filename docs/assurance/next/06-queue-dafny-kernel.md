@@ -107,7 +107,21 @@ Executed by a human operator (not the xylem daemon — first kernel requires man
 - `cli/internal/queue/verified_differential_test.go` — abstraction-gap check vs queue.IsTerminal
 - `.crosscheck/specs.json` — spec registry entry added
 
+**Phase 2 — (2026-04-20):** ValidTransition delivered and verified.
+- `cli/internal/queue/verified/state_machine.dfy` — extended with `ValidTransition`; now 2 verified, 0 errors (Dafny 4.11.0)
+- `cli/internal/queue/verified/state_machine.go` — `ValidTransition(from, to string) bool` added; same hand-extraction pattern
+- `cli/internal/queue/verified_differential_test.go` — `TestValidTransition_DifferentialWithMap` added; covers all 49 canonical pairs + unknown from-state + unknown to-state
+- `.crosscheck/specs.json` — `valid-transition` entry added; `is-terminal` hash updated to reflect .dfy change
+- `docs/invariants/queue.md` — I2 status row updated ✗→✓ (protectedFieldsEqual guard already present at queue.go:472; stale line reference corrected); summary updated; governance amendment per user direction 2026-04-20
+- `cli/internal/queue/queue_invariants_prop_test.go` — file-header comment updated: I2 removed from skip list (no t.Skip in TestPropQueueInvariant_I2_TerminalImmutability)
+
+**Scoping decision — protectedFieldsEqual:**
+`protectedFieldsEqual` is deferred to **#10 (Gobra)**, which handles Go-native `*time.Time` and `map[string]string` without extraction gymnastics. Reason for deferral from #06: the function operates on the 19-field `Vessel` struct which has `*time.Time` and `map[string]string` fields. Modelling these in Dafny requires either abstract ghost types (no extractable code) or a full Vessel datatype whose Go extraction doesn't interoperate with the real `queue.Vessel` without a conversion shim — which defeats the purpose of extraction. The existing Go implementation is already a compile-time-explicit field enumeration (not reflection), providing adequate assurance for I2. Kill criteria were not triggered; this is an intentional rescope per the kill-criteria guidance ("perhaps only `IsTerminal` first").
+
 **Remaining:**
-- `validTransitions` — not yet specced
-- `protectedFieldsEqual` — not yet specced
-- Wiring `queue.go` to call `verified.IsTerminal` — deferred follow-up PR
+- Wiring `queue.go` to call `verified.IsTerminal` and `verified.ValidTransition` — deferred follow-up PR (roadmap #06 step 7)
+
+**Phase 3 — Lightweight verification of `protectedFieldsEqual` (2026-04-20):** delivered alongside Phase 2 in PR #687.
+- `cli/internal/queue/verified/protectedfields_verify.md` — semi-formal contract analysis: 11 contracts (C1–C11), 19-field coverage table, helper analysis for `timePtrEqual` and `stringMapEqual`, verification gaps, upgrade path to #10 (Gobra)
+- `cli/internal/queue/protectedfields_verify_test.go` — companion tests: per-field mutation coverage (19 fields), exclusion tests (4 excluded fields), reflexivity and symmetry property tests (rapid), unit tests for `timePtrEqual` (6 cases) and `stringMapEqual` (10 cases)
+- `docs/assurance/medium-term/10-gobra-queue.md` — updated: `protectedFieldsEqual` added to Gobra scope with rationale; acceptance criterion added; read-only file list updated with correct line references (queue.go:98, 124)

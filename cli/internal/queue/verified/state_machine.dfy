@@ -1,14 +1,14 @@
 // state_machine.dfy — hand-written Dafny spec for the queue state machine kernel.
 // Source of truth for cli/internal/queue/verified/state_machine.go.
 //
-// Verified by: Dafny 4.11.0 (mcp__plugin_crosscheck_dafny__dafny_verify: 1 verified, 0 errors)
+// Verified by: Dafny 4.11.0 (mcp__plugin_crosscheck_dafny__dafny_verify: 2 verified, 0 errors)
 // Extracted to: state_machine.go via crosscheck:extract-code
 //
 // To re-verify: run mcp__plugin_crosscheck_dafny__dafny_verify on this file.
 // To re-extract: run the crosscheck:extract-code skill targeting Go.
 //
-// Scope: IsTerminal only (first kernel — pipeline proof-of-concept).
-// Future targets: validTransitions, protectedFieldsEqual (roadmap #06).
+// Scope: IsTerminal (phase 1) + ValidTransition (phase 2).
+// Future target: protectedFieldsEqual deferred — see roadmap #06 scoping note.
 
 // VesselState mirrors the Go enum in cli/internal/queue/queue.go.
 // Constructor names map to Go string constants:
@@ -37,4 +37,34 @@ function IsTerminal(s: VesselState): bool
   ensures IsTerminal(s) <==> (s == Completed || s == Failed || s == Cancelled || s == TimedOut)
 {
   s == Completed || s == Failed || s == Cancelled || s == TimedOut
+}
+
+// ValidTransition returns true iff transitioning from state `from` to state `to`
+// is permitted by the queue state machine.
+// Mirrors the validTransitions map in queue.go:41-66.
+//
+// Formally verified: for every (from, to) pair of VesselState constructors, the
+// function returns true iff the pair appears in the transition table:
+//   Pending   → {Running, Cancelled}
+//   Running   → {Pending, Completed, Failed, Cancelled, Waiting, TimedOut}
+//   Waiting   → {Pending, TimedOut, Cancelled}
+//   Failed    → {Pending}
+//   Completed, Cancelled, TimedOut → {} (no outgoing transitions)
+function ValidTransition(from: VesselState, to: VesselState): bool
+  ensures ValidTransition(from, to) <==>
+    (from == Pending && (to == Running   || to == Cancelled)) ||
+    (from == Running && (to == Pending   || to == Completed || to == Failed  ||
+                         to == Cancelled || to == Waiting   || to == TimedOut)) ||
+    (from == Waiting && (to == Pending   || to == TimedOut  || to == Cancelled)) ||
+    (from == Failed  &&  to == Pending)
+{
+  match from
+  case Pending   => to == Running || to == Cancelled
+  case Running   => to == Pending || to == Completed || to == Failed ||
+                    to == Cancelled || to == Waiting || to == TimedOut
+  case Waiting   => to == Pending || to == TimedOut || to == Cancelled
+  case Failed    => to == Pending
+  case Completed => false
+  case Cancelled => false
+  case TimedOut  => false
 }

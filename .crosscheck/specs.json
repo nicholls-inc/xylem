@@ -6,7 +6,7 @@
       "function": "IsTerminal",
       "description": "Returns true iff a VesselState string is one of the four terminal states: completed, failed, cancelled, timed_out",
       "dafnySource": "cli/internal/queue/verified/state_machine.dfy",
-      "dafnySourceHash": "8bbb4dccec9b9da42135e32678f4b199587e3c7f74df01eff08398210fa67081",
+      "dafnySourceHash": "084fabde1aee614d7cb5eaeb20fc8853a891bc45f71ea17fd54914163bcf1061",
       "extractedCode": {
         "file": "cli/internal/queue/verified/state_machine.go",
         "function": "IsTerminal",
@@ -22,6 +22,29 @@
       },
       "trustBoundaries": [
         "Caller must pass one of the seven canonical VesselState string values; unknown strings return false by contract, not proven by the spec"
+      ]
+    },
+    {
+      "id": "valid-transition",
+      "function": "ValidTransition",
+      "description": "Returns true iff transitioning from VesselState `from` to `to` is permitted by the queue state machine transition table",
+      "dafnySource": "cli/internal/queue/verified/state_machine.dfy",
+      "dafnySourceHash": "084fabde1aee614d7cb5eaeb20fc8853a891bc45f71ea17fd54914163bcf1061",
+      "extractedCode": {
+        "file": "cli/internal/queue/verified/state_machine.go",
+        "function": "ValidTransition",
+        "language": "go"
+      },
+      "constraint": "hard",
+      "lastVerified": "2026-04-20T00:00:00Z",
+      "difficulty": {
+        "solverTimeMs": null,
+        "resourceCount": null,
+        "proofHintCount": 0,
+        "trivialProof": false
+      },
+      "trustBoundaries": [
+        "Caller must pass canonical VesselState string values; unknown from-state returns false, unknown to-state returns false — these edge cases are tested but not formally proven by the spec (spec covers only the 7 canonical constructors)"
       ]
     }
   ]
