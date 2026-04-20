@@ -14,6 +14,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/nicholls-inc/xylem/cli/internal/dtu"
+	"github.com/nicholls-inc/xylem/cli/internal/queue/verified"
 )
 
 // writeInterrupt is a test-only hook. When non-nil it is invoked at enumerated
@@ -79,8 +80,9 @@ var ErrDuplicateID = errors.New("duplicate vessel ID")
 var ErrTerminalImmutable = errors.New("terminal vessel is immutable")
 
 // IsTerminal reports whether s is a terminal vessel state.
+// Delegates to the Dafny-verified kernel in the verified sub-package.
 func (s VesselState) IsTerminal() bool {
-	return s == StateCompleted || s == StateFailed || s == StateCancelled || s == StateTimedOut
+	return verified.IsTerminal(string(s))
 }
 
 // isSealedTerminal reports whether s is a terminal state with no legal
@@ -298,11 +300,7 @@ func (q *Queue) Update(id string, state VesselState, errMsg string) error {
 			previous := vessels[i]
 
 			// Validate state transition.
-			allowed, knownState := validTransitions[vessels[i].State]
-			if !knownState {
-				return fmt.Errorf("%w: unknown current state %s for vessel %s", ErrInvalidTransition, vessels[i].State, id)
-			}
-			if !allowed[state] {
+			if !verified.ValidTransition(string(vessels[i].State), string(state)) {
 				return fmt.Errorf("%w: cannot move vessel %s from %s to %s", ErrInvalidTransition, id, vessels[i].State, state)
 			}
 
@@ -462,11 +460,7 @@ func (q *Queue) UpdateVessel(vessel Vessel) error {
 			}
 			previous := vessels[i]
 			if previous.State != vessel.State {
-				allowed, knownState := validTransitions[previous.State]
-				if !knownState {
-					return fmt.Errorf("%w: unknown current state %s for vessel %s", ErrInvalidTransition, previous.State, vessel.ID)
-				}
-				if !allowed[vessel.State] {
+				if !verified.ValidTransition(string(previous.State), string(vessel.State)) {
 					return fmt.Errorf("%w: cannot move vessel %s from %s to %s", ErrInvalidTransition, vessel.ID, previous.State, vessel.State)
 				}
 			} else if isSealedTerminal(previous.State) && !protectedFieldsEqual(previous, vessel) {
@@ -499,8 +493,7 @@ func (q *Queue) Cancel(id string) error {
 				continue
 			}
 			previous := vessels[i]
-			allowed, knownState := validTransitions[vessels[i].State]
-			if !knownState || !allowed[StateCancelled] {
+			if !verified.ValidTransition(string(vessels[i].State), string(StateCancelled)) {
 				return fmt.Errorf("cannot cancel vessel %s in state %s", id, vessels[i].State)
 			}
 			now := queueNow()
