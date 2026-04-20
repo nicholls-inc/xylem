@@ -188,6 +188,11 @@ func (s *Scanner) chainTerminalRetry(vessel queue.Vessel) (bool, queue.Vessel, e
 		return false, queue.Vessel{}, nil
 	}
 
+	// Only ID and RetryOf are propagated here; all other metadata fields (MetaRetryCount, MetaFailureFingerprint, MetaUnlockedBy, etc.) are intentionally reset to zero. This retry is deliberately fresh because it is a scanner-detected terminal duplicate, not an operator retry.
+	//
+	// In contrast, recovery.NextRetryVessel (recovery.go:623–693) copies those fields for operator-initiated retries where continuity matters.
+	//
+	// There is no explicit chain-depth cap here: retryCandidate only presents a vessel once per recovery artifact lifecycle, so unbounded chaining would require unbounded new recovery artifacts.
 	vessel.ID = recovery.RetryID(originalID, s.Queue)
 	vessel.RetryOf = originalID
 	enqueued, enqErr := s.Queue.Enqueue(vessel)
