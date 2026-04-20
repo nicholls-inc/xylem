@@ -1,7 +1,7 @@
 # 03: Naive-Reference Differential Test for Queue
 
 **Horizon:** Immediate
-**Status:** In progress (PR #664 open)
+**Status:** Done (PR #664, merged 2026-04-19, commit 75b4c2b)
 **Estimated cost:** 2 days
 **Depends on:** nothing (independent of #01–#02, though benefits from #01 landing first)
 **Unblocks:** #12 (same pattern applied to gate and source)
