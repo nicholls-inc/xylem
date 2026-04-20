@@ -1,7 +1,7 @@
 # 05: Amend Assurance Hierarchy With Xylem Projection Section
 
 **Horizon:** Immediate
-**Status:** Done
+**Status:** Done (PR #663, merged 2026-04-19, commit 4427621)
 **Estimated cost:** 2 hours
 **Depends on:** nothing
 **Unblocks:** everything that cites the hierarchy as its north star
