@@ -203,6 +203,20 @@ Fingerprint: `5bfa9ace51f62fed06cf680080d01434ac6c61086fdce3c4d1902d48b8b262b1`
 **Rationale:** Identical pattern to `aggregate_test.go:17` — test helper using `t.TempDir()`-rooted paths with literal filenames. Not reachable from production code paths.
 **Verified by:** harry.nicholls + Claude (Opus 4.7), 2026-04-17
 
+## `cli/cmd/xylem-intent-check/main.go:33` — `go/no-command-injection`
+
+Fingerprint: `81180299d5544e91f730dbdc42181e72c154718fff8a6a466f5ee49fac479a27`
+
+**Rationale:** `exec.CommandContext(ctx, "claude", "-p", "--model", model, "--max-turns", "1")` in the `runClaude` package variable. The binary name `"claude"` is hardcoded. All flags are hardcoded string literals. The `model` parameter is exclusively passed as a hardcoded literal string at its two call sites (`"claude-opus-4-6"` and `"claude-haiku-4-5-20251001"`). No user input reaches `model`. Argv invocation, no shell.
+**Verified by:** harry.nicholls + Claude Sonnet 4.6, 2026-04-21
+
+## `cli/cmd/xylem-intent-check/main.go:165` — `go/no-command-injection`
+
+Fingerprint: `5f83680c4eb373db651eb75f6fadaec075a14328f7961da76479ff403c75797d`
+
+**Rationale:** `exec.CommandContext(ctx, "git", "diff", "--name-only", "HEAD", "--", ...)` in `discoverChangedFiles`. Every argument is a hardcoded string literal — the binary name `"git"`, the subcommand, and the three path glob patterns for protected-surface files. Nothing dynamic flows into this call. Argv invocation, no shell.
+**Verified by:** harry.nicholls + Claude Sonnet 4.6, 2026-04-21
+
 ## `cli/internal/dtu/runtime_clock.go:127` — `go/taint-path-traversal`
 
 Fingerprint: `7e7f68bef6fead654ca711bd4714a574f2073d411a5c52ad40125f880d1dfdcc`

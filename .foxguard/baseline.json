@@ -162,6 +162,18 @@
       "rule_id": "go/no-hardcoded-secret",
       "file": "./cli/internal/policy/class.go",
       "line": 25
+    },
+    {
+      "fingerprint": "81180299d5544e91f730dbdc42181e72c154718fff8a6a466f5ee49fac479a27",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem-intent-check/main.go",
+      "line": 33
+    },
+    {
+      "fingerprint": "5f83680c4eb373db651eb75f6fadaec075a14328f7961da76479ff403c75797d",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem-intent-check/main.go",
+      "line": 165
     }
   ]
 }

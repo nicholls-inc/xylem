@@ -972,6 +972,29 @@ evidence:
 
 **When to use:** This phase fires automatically in all three delivery workflows. No configuration required. The phase is a no-op on PRs that do not touch `.dfy` files, so it adds no latency to the common case.
 
+### The `intent-check` phase (assurance roadmap #07)
+
+The `intent-check` phase addresses Layer 5 spec-intent alignment (see `docs/research/assurance-hierarchy.md`). It runs automatically after `implement` and before `pr_draft` whenever the change touches a protected-surface file listed in `.claude/rules/protected-surfaces.md`.
+
+The phase uses a two-LLM pipeline modelled on Midspiral's claimcheck technique:
+
+1. **Back-translator** — given the changed code and property test (but *not* the invariant doc), describes what guarantees the implementation actually enforces.
+2. **Diff-checker** — given the original invariant prose and the back-translation, determines whether the back-translation captures the invariant's claimed guarantee.
+
+If the diff-checker reports a mismatch, the phase fails. The PR does not proceed to `pr_draft` until the mismatch is resolved.
+
+#### Attestation enforcement
+
+`intent-check` writes `.xylem/intent-check-attestation.json` on pass. A pre-commit hook (`scripts/check-intent-attestation.sh`) verifies this attestation before accepting any commit that touches protected surfaces. The hook fails if the attestation is absent, the verdict is not `pass`, or the content hash no longer matches the staged files.
+
+To run intent-check manually: `xylem-intent-check`
+
+#### Kill criteria
+
+- False-positive rate > 30% after 2 weeks of live operation (tracked in a CSV of every run)
+- False negative on the seeded mismatch fixture in `cli/cmd/xylem-intent-check/testdata/seeded-mismatch/`
+- Latency > 10 minutes per invocation after tuning
+
 ## Prompt file organization
 
 Prompt files are usually organized in `.xylem/prompts/` under a subdirectory named after the workflow. This repository's checked-in layout looks like:
