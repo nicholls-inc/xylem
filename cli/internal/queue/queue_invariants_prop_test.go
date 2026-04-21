@@ -29,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nicholls-inc/xylem/cli/internal/queue/verified"
 	"pgregory.net/rapid"
 )
 
@@ -124,10 +125,11 @@ func drawMutatingOp(t *rapid.T, privileged bool) queueOp {
 	kind := kinds[rapid.IntRange(0, len(kinds)-1).Draw(t, "op_kind")]
 	switch kind {
 	case opEnqueue:
-		// Note: we deliberately do NOT set RetryOf in the random generator. The
-		// queue does not validate RetryOf (it's caller-set per spec I10 ⚠),
-		// so random assignment quickly introduces caller-side cycles. I10 has
-		// its own disciplined retry-chain scenario below.
+		// Note: we deliberately do NOT set RetryOf in the random generator.
+		// Random RetryOf assignments quickly introduce cycles that Enqueue
+		// rejects via the verified IsAcyclic kernel (I10 ✓), producing
+		// spurious ErrRetryDAGCycle noise in the general op sequence. I10
+		// has its own disciplined retry-chain scenario below.
 		return queueOp{kind: kind, vessel: drawFreshVessel(t)}
 	case opDequeue:
 		return queueOp{kind: kind}
@@ -756,12 +758,15 @@ func TestPropQueueInvariant_I9_UniqueIDs(t *testing.T) {
 
 // Invariant I10: RetryOf forms a DAG rooted at fresh vessels.
 //
-// The queue never validates RetryOf (spec marks I10 as caller-responsibility
-// ⚠), so this test explicitly builds *disciplined* retry chains — each retry
-// points at an existing terminal vessel — and asserts the observable subgraph
-// is acyclic with terminal targets. A random op generator would quickly
-// manufacture caller-side cycles that the queue permits by design, so we
-// don't use one here.
+// Builds disciplined retry chains — each retry points at an existing terminal
+// vessel — and asserts:
+//   - The observable graph is acyclic (DFS white/gray/black coloring).
+//   - Every retry target is terminal.
+//   - The verified IsAcyclic kernel agrees with the DFS result.
+//
+// A random op generator is not used here because RetryOf-less drawFreshVessel
+// is sufficient for the general op tests; the disciplined scenario below gives
+// a clean chain for I10-specific assertions.
 func TestPropQueueInvariant_I10_RetryOfDAG(t *testing.T) {
 	rapid.Check(t, func(t *rapid.T) {
 		q, _, cleanup := newPropQueueWithDir(t, "queue-i10-prop")
@@ -839,7 +844,126 @@ func TestPropQueueInvariant_I10_RetryOfDAG(t *testing.T) {
 					v.ID, target.ID, target.State)
 			}
 		}
+
+		// Verified kernel cross-check: IsAcyclic must agree with the DFS result.
+		if !verified.IsAcyclic(buildRetryGraph(vessels)) {
+			t.Fatalf("I10: verified.IsAcyclic returned false for a DAG that DFS found acyclic; vessels=%+v", vessels)
+		}
 	})
+}
+
+// Invariant I10: verified kernel detects cycles (error path).
+//
+// Directly exercises verified.IsAcyclic with hand-crafted cyclic and acyclic
+// graphs to confirm the extracted Go kernel correctly identifies each case.
+// This is the canonical test of the verified checker's error path.
+func TestPropQueueInvariant_I10_VerifiedKernelDetectsCycle(t *testing.T) {
+	// Self-loop: single node pointing to itself.
+	if verified.IsAcyclic(map[string]string{"a": "a"}) {
+		t.Fatal("I10: IsAcyclic returned true for self-loop {a→a}")
+	}
+	// Two-node cycle: a→b, b→a.
+	if verified.IsAcyclic(map[string]string{"a": "b", "b": "a"}) {
+		t.Fatal("I10: IsAcyclic returned true for two-node cycle {a→b, b→a}")
+	}
+	// Three-node cycle: a→b, b→c, c→a.
+	if verified.IsAcyclic(map[string]string{"a": "b", "b": "c", "c": "a"}) {
+		t.Fatal("I10: IsAcyclic returned true for three-node cycle {a→b, b→c, c→a}")
+	}
+	// Valid linear chain: a→b, b→c. Should be acyclic.
+	if !verified.IsAcyclic(map[string]string{"a": "b", "b": "c"}) {
+		t.Fatal("I10: IsAcyclic returned false for valid chain {a→b, b→c}")
+	}
+	// Empty graph: no edges.
+	if !verified.IsAcyclic(map[string]string{}) {
+		t.Fatal("I10: IsAcyclic returned false for empty graph")
+	}
+}
+
+// Invariant I10: Enqueue rejects self-loops (RetryOf == ID).
+//
+// A vessel whose RetryOf equals its own ID is a degenerate cycle of length 1.
+// Enqueue must return ErrRetryDAGCycle and leave the queue unchanged.
+func TestPropQueueInvariant_I10_EnqueueRejectsSelfLoop(t *testing.T) {
+	dir, err := os.MkdirTemp("", "queue-i10-self-loop-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	q := New(filepath.Join(dir, "queue.jsonl"))
+
+	v := Vessel{
+		ID:        "vessel-a",
+		Source:    "github-issue",
+		Ref:       "https://github.com/example/repo/issues/99",
+		Workflow:  "fix-bug",
+		State:     StatePending,
+		CreatedAt: time.Now().UTC(),
+		RetryOf:   "vessel-a", // self-loop
+	}
+	_, err = q.Enqueue(v)
+	if !errors.Is(err, ErrRetryDAGCycle) {
+		t.Fatalf("I10: Enqueue self-loop returned %v, want ErrRetryDAGCycle", err)
+	}
+	vessels, _ := q.List()
+	if len(vessels) != 0 {
+		t.Fatalf("I10: queue has %d vessels after rejected self-loop Enqueue, want 0", len(vessels))
+	}
+}
+
+// Invariant I10: UpdateVessel rejects RetryOf mutations that would close a cycle.
+//
+// Scenario: enqueue vessel A with no RetryOf, enqueue vessel B with RetryOf=A.
+// Attempt to mutate A's RetryOf to point at B (would close the A↔B cycle).
+// UpdateVessel must return ErrRetryDAGCycle and leave A unchanged.
+func TestPropQueueInvariant_I10_UpdateVesselRejectsCycle(t *testing.T) {
+	dir, err := os.MkdirTemp("", "queue-i10-update-cycle-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp: %v", err)
+	}
+	defer os.RemoveAll(dir)
+	q := New(filepath.Join(dir, "queue.jsonl"))
+
+	now := time.Now().UTC()
+	a := Vessel{
+		ID:        "vessel-a",
+		Source:    "github-issue",
+		Ref:       "https://github.com/example/repo/issues/1",
+		Workflow:  "fix-bug",
+		State:     StatePending,
+		CreatedAt: now,
+	}
+	b := Vessel{
+		ID:        "vessel-b",
+		Source:    "github-issue",
+		Ref:       "https://github.com/example/repo/issues/2",
+		Workflow:  "fix-bug",
+		State:     StatePending,
+		CreatedAt: now,
+		RetryOf:   "vessel-a", // B retries A
+	}
+	if _, err := q.Enqueue(a); err != nil {
+		t.Fatalf("Enqueue a: %v", err)
+	}
+	if _, err := q.Enqueue(b); err != nil {
+		t.Fatalf("Enqueue b: %v", err)
+	}
+
+	// Attempt to make A retry B — would close the cycle A→B, B→A.
+	aCyclic := a
+	aCyclic.RetryOf = "vessel-b"
+	if err := q.UpdateVessel(aCyclic); !errors.Is(err, ErrRetryDAGCycle) {
+		t.Fatalf("I10: UpdateVessel cycle-creating RetryOf returned %v, want ErrRetryDAGCycle", err)
+	}
+
+	// A must be unchanged.
+	found, err := q.FindByID("vessel-a")
+	if err != nil {
+		t.Fatalf("FindByID after rejected UpdateVessel: %v", err)
+	}
+	if found.RetryOf != "" {
+		t.Fatalf("I10: vessel A RetryOf is %q after rejected UpdateVessel, want empty", found.RetryOf)
+	}
 }
 
 // Invariant I11: Compaction preserves the active set.
