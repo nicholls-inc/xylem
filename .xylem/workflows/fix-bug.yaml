@@ -51,6 +51,16 @@ phases:
         set -e
         {{ if .Validation.Test }}{{ .Validation.Test }}{{ else }}echo "ERROR: validation.test not configured in .xylem.yml" >&2 && exit 1{{ end }}
       retries: 1
+  # intent-check: roadmap #07 — governance amendment 2026-04-22
+  - name: intent_check
+    type: command
+    run: |
+      set -euo pipefail
+      if ! command -v xylem-intent-check > /dev/null 2>&1; then
+        echo "intent-check: xylem-intent-check not in PATH — install: cd cli && go install ./cmd/xylem-intent-check" >&2
+        exit 1
+      fi
+      xylem-intent-check
   - name: pr_draft
     prompt_file: .xylem/prompts/fix-bug/pr_draft.md
     max_turns: 25
