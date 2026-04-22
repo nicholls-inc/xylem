@@ -2,6 +2,12 @@
   "version": 1,
   "entries": [
     {
+      "fingerprint": "2f9b7437575b69d878a08ea096279bc2341f0ed57a4e1736ad01f60969dd582d",
+      "rule_id": "go/no-command-injection",
+      "file": "./cli/cmd/xylem-intent-check/main.go",
+      "line": 231
+    },
+    {
       "fingerprint": "2f5d51eacd6165c5037406d0accb1cd803638b5c9181b7df33cb6d95ae6bb398",
       "rule_id": "go/no-command-injection",
       "file": "./cli/cmd/xylem/automerge.go",
@@ -162,18 +168,6 @@
       "rule_id": "go/no-hardcoded-secret",
       "file": "./cli/internal/policy/class.go",
       "line": 25
-    },
-    {
-      "fingerprint": "81180299d5544e91f730dbdc42181e72c154718fff8a6a466f5ee49fac479a27",
-      "rule_id": "go/no-command-injection",
-      "file": "./cli/cmd/xylem-intent-check/main.go",
-      "line": 33
-    },
-    {
-      "fingerprint": "5f83680c4eb373db651eb75f6fadaec075a14328f7961da76479ff403c75797d",
-      "rule_id": "go/no-command-injection",
-      "file": "./cli/cmd/xylem-intent-check/main.go",
-      "line": 165
     }
   ]
 }

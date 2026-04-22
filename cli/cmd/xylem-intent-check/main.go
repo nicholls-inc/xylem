@@ -10,30 +10,56 @@
 // Usage:
 //
 //	xylem-intent-check [--repo-root <dir>] [--attestation-out <path>]
+//	                   [--api-base-url <url>] [--api-key <key>]
+//	                   [--back-translate-model <model>] [--diff-check-model <model>]
 package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"time"
+
+	openai "github.com/sashabaranov/go-openai"
+
+	"github.com/nicholls-inc/xylem/cli/internal/intentcheck"
 )
 
-// runClaude is the function used to invoke the claude binary. It is a
-// package-level variable so tests can substitute a mock without shelling out.
-var runClaude = func(ctx context.Context, model, prompt string) (string, error) {
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--model", model, "--max-turns", "1")
-	cmd.Stdin = strings.NewReader(prompt)
-	out, err := cmd.CombinedOutput()
-	return string(out), err
+// diffResultJSONSchema is the JSON Schema used to request structured output
+// from the diff-check LLM phase. Enforcing the schema at the API level is
+// more robust than relying solely on prompt-level instructions.
+//
+// Note: strict json_schema response_format is an OpenAI-extension. Anthropic's
+// OpenAI-compat endpoint (/v1) supports it via the beta header, but if a
+// provider returns an unsupported-feature error, remove the schema field or
+// fall back to the prompt-only JSON instruction retained at the bottom of
+// runDiffChecker's prompt.
+var diffResultJSONSchema = json.RawMessage(`{
+  "type": "object",
+  "properties": {
+    "match": {"type": "boolean"},
+    "mismatch_reason": {"type": "string"}
+  },
+  "required": ["match", "mismatch_reason"],
+  "additionalProperties": false
+}`)
+
+// runLLM is the function used to invoke the LLM. It is a package-level
+// variable so tests can substitute a mock without making real API calls.
+//
+// schema is optional: if non-nil, structured JSON output is requested via the
+// provider's response_format/json_schema mechanism.
+var runLLM = func(ctx context.Context, model, prompt string, schema json.RawMessage) (string, error) {
+	// Replaced at startup by makeLLMRunner. This stub prevents nil-panic if
+	// somehow called before initialisation (e.g. in unit tests that forget to
+	// set the mock).
+	return "", fmt.Errorf("runLLM not initialised — call makeLLMRunner first")
 }
 
 // attestation is the JSON structure written to --attestation-out.
@@ -45,19 +71,46 @@ type attestation struct {
 	PipelineOutput string   `json:"pipeline_output"`
 }
 
-// diffResult is the JSON structure expected from the diff-checker LLM.
-type diffResult struct {
-	Match          bool   `json:"match"`
-	MismatchReason string `json:"mismatch_reason"`
-}
+// makeLLMRunner builds the real runLLM implementation backed by an
+// OpenAI-compatible API client.
+func makeLLMRunner(client *openai.Client) func(ctx context.Context, model, prompt string, schema json.RawMessage) (string, error) {
+	return func(ctx context.Context, model, prompt string, schema json.RawMessage) (string, error) {
+		req := openai.ChatCompletionRequest{
+			Model: model,
+			Messages: []openai.ChatCompletionMessage{
+				{Role: openai.ChatMessageRoleUser, Content: prompt},
+			},
+		}
 
-// jsonBlockRE matches the first {...} block in LLM output, tolerating markdown
-// fences and preamble text.
-var jsonBlockRE = regexp.MustCompile(`(?s)\{.*\}`)
+		if schema != nil {
+			req.ResponseFormat = &openai.ChatCompletionResponseFormat{
+				Type: openai.ChatCompletionResponseFormatTypeJSONSchema,
+				JSONSchema: &openai.ChatCompletionResponseFormatJSONSchema{
+					Name:   "diff_result",
+					Schema: schema,
+					Strict: true,
+				},
+			}
+		}
+
+		resp, err := client.CreateChatCompletion(ctx, req)
+		if err != nil {
+			return "", fmt.Errorf("chat completion: %w", err)
+		}
+		if len(resp.Choices) == 0 {
+			return "", fmt.Errorf("empty response from LLM")
+		}
+		return resp.Choices[0].Message.Content, nil
+	}
+}
 
 func main() {
 	repoRoot := flag.String("repo-root", ".", "repository root directory")
 	attestOut := flag.String("attestation-out", "", "path to write attestation JSON (default: <repo-root>/.xylem/intent-check-attestation.json)")
+	apiBaseURL := flag.String("api-base-url", envOr("LLM_API_BASE_URL", "https://api.anthropic.com/v1"), "OpenAI-compatible API base URL")
+	apiKey := flag.String("api-key", envOr("LLM_API_KEY", os.Getenv("ANTHROPIC_API_KEY")), "API key for the LLM provider")
+	backTranslateModel := flag.String("back-translate-model", "claude-opus-4-6", "model for Phase 1 back-translation")
+	diffCheckModel := flag.String("diff-check-model", "claude-haiku-4-5-20251001", "model for Phase 2 diff-check")
 	flag.Parse()
 
 	root, err := filepath.Abs(*repoRoot)
@@ -71,14 +124,27 @@ func main() {
 		out = filepath.Join(root, ".xylem", "intent-check-attestation.json")
 	}
 
+	cfg := openai.DefaultConfig(*apiKey)
+	cfg.BaseURL = *apiBaseURL
+	client := openai.NewClientWithConfig(cfg)
+	runLLM = makeLLMRunner(client)
+
 	ctx := context.Background()
-	if err := run(ctx, root, out); err != nil {
+	if err := run(ctx, root, out, *backTranslateModel, *diffCheckModel); err != nil {
 		fmt.Fprintf(os.Stderr, "intent-check: %v\n", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, repoRoot, attestOut string) error {
+// envOr returns the value of the environment variable name, or fallback if unset.
+func envOr(name, fallback string) string {
+	if v := os.Getenv(name); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func run(ctx context.Context, repoRoot, attestOut, backTranslateModel, diffCheckModel string) error {
 	// Discover changed protected files.
 	changed, err := discoverChangedFiles(ctx, repoRoot)
 	if err != nil {
@@ -91,7 +157,7 @@ func run(ctx context.Context, repoRoot, attestOut string) error {
 
 	// Ensure both sides of each invariant doc ↔ property test pair are present,
 	// even when only one side was modified.
-	changed = resolveCounterparts(repoRoot, changed)
+	changed = intentcheck.ResolveCounterparts(repoRoot, changed)
 
 	// Load prompt templates.
 	backTranslatePromptPath := filepath.Join(repoRoot, ".xylem", "prompts", "intent-check", "back_translate.md")
@@ -107,19 +173,19 @@ func run(ctx context.Context, repoRoot, attestOut string) error {
 	}
 
 	// Compute content hash over all changed files (sorted order).
-	contentHash, err := computeContentHash(repoRoot, changed)
+	contentHash, err := intentcheck.ComputeContentHash(repoRoot, changed)
 	if err != nil {
 		return fmt.Errorf("compute content hash: %w", err)
 	}
 
 	// Phase 1 — back-translation: read source/test, describe what it guarantees.
-	backTranslation, err := runBackTranslator(ctx, repoRoot, changed, string(backTranslateTmpl))
+	backTranslation, err := runBackTranslator(ctx, repoRoot, changed, string(backTranslateTmpl), backTranslateModel)
 	if err != nil {
 		return fmt.Errorf("back-translation phase: %w", err)
 	}
 
 	// Phase 2 — diff-check: compare back-translation against invariant docs.
-	verdictResult, rawDiff, err := runDiffChecker(ctx, repoRoot, changed, backTranslation, string(diffTmpl))
+	verdictResult, rawDiff, err := runDiffChecker(ctx, repoRoot, changed, backTranslation, string(diffTmpl), diffCheckModel)
 	if err != nil {
 		return fmt.Errorf("diff-check phase: %w", err)
 	}
@@ -185,83 +251,10 @@ func discoverChangedFiles(ctx context.Context, repoRoot string) ([]string, error
 	return files, nil
 }
 
-// resolveCounterparts augments the changed-file list so that both sides of each
-// invariant doc ↔ property test pair are always present. This handles asymmetric
-// changes (e.g. only the doc was edited, or only the test was edited): the pipeline
-// needs the invariant prose for the diff-checker and the test code for the
-// back-translator regardless of which side triggered the run.
-//
-// Path convention: docs/invariants/<module>.md ↔ cli/internal/<module>/*_invariants_prop_test.go
-func resolveCounterparts(repoRoot string, files []string) []string {
-	seen := make(map[string]bool, len(files))
-	for _, f := range files {
-		seen[f] = true
-	}
-
-	var extra []string
-	for _, f := range files {
-		var candidate string
-		if strings.HasPrefix(f, "docs/invariants/") && strings.HasSuffix(f, ".md") {
-			module := strings.TrimSuffix(strings.TrimPrefix(f, "docs/invariants/"), ".md")
-			candidate = findTestFile(repoRoot, module)
-		} else {
-			// cli/internal/<module>/... — extract module from path segment 2
-			parts := strings.SplitN(f, "/", 4)
-			if len(parts) >= 3 {
-				doc := "docs/invariants/" + parts[2] + ".md"
-				if _, err := os.Stat(filepath.Join(repoRoot, doc)); err == nil {
-					candidate = doc
-				}
-			}
-		}
-		if candidate != "" && !seen[candidate] {
-			seen[candidate] = true
-			extra = append(extra, candidate)
-		}
-	}
-
-	result := make([]string, len(files)+len(extra))
-	copy(result, files)
-	copy(result[len(files):], extra)
-	sort.Strings(result)
-	return result
-}
-
-// findTestFile returns the relative path of the property test file for the given
-// module, or "" if none exists on disk. Checks two naming conventions.
-func findTestFile(repoRoot, module string) string {
-	candidates := []string{
-		filepath.Join("cli", "internal", module, "invariants_prop_test.go"),
-		filepath.Join("cli", "internal", module, module+"_invariants_prop_test.go"),
-	}
-	for _, c := range candidates {
-		if _, err := os.Stat(filepath.Join(repoRoot, c)); err == nil {
-			return c
-		}
-	}
-	return ""
-}
-
-// computeContentHash returns the SHA-256 of the concatenated contents of files
-// (in sorted order, paths relative to repoRoot).
-func computeContentHash(repoRoot string, files []string) (string, error) {
-	h := sha256.New()
-	for _, f := range files {
-		data, err := os.ReadFile(filepath.Join(repoRoot, f))
-		if err != nil {
-			return "", fmt.Errorf("read %s: %w", f, err)
-		}
-		if _, err := h.Write(data); err != nil {
-			return "", err
-		}
-	}
-	return fmt.Sprintf("%x", h.Sum(nil)), nil
-}
-
 // runBackTranslator invokes the back-translation LLM phase.
 // It feeds the source code and property tests (NOT invariant docs) to the LLM
 // and asks it to describe what the code/tests actually guarantee.
-func runBackTranslator(ctx context.Context, repoRoot string, files []string, promptTmpl string) (string, error) {
+func runBackTranslator(ctx context.Context, repoRoot string, files []string, promptTmpl, model string) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(promptTmpl)
 	sb.WriteString("\n\n---\n\n## Changed files\n\n")
@@ -278,13 +271,16 @@ func runBackTranslator(ctx context.Context, repoRoot string, files []string, pro
 		fmt.Fprintf(&sb, "### %s\n\n```go\n%s\n```\n\n", f, string(data))
 	}
 
-	return runClaude(ctx, "claude-opus-4-6", sb.String())
+	return runLLM(ctx, model, sb.String(), nil)
 }
 
 // runDiffChecker invokes the diff-check LLM phase.
 // It receives both the invariant doc prose and the back-translation, and
 // returns the parsed verdict plus the raw LLM output.
-func runDiffChecker(ctx context.Context, repoRoot string, files []string, backTranslation, promptTmpl string) (diffResult, string, error) {
+//
+// Structured output (response_format: json_schema) is used to enforce the
+// response format at the API level, in addition to the prompt-level hint.
+func runDiffChecker(ctx context.Context, repoRoot string, files []string, backTranslation, promptTmpl, model string) (intentcheck.DiffResult, string, error) {
 	var sb strings.Builder
 	sb.WriteString(promptTmpl)
 	sb.WriteString("\n\n---\n\n## Invariant specification\n\n")
@@ -295,7 +291,7 @@ func runDiffChecker(ctx context.Context, repoRoot string, files []string, backTr
 		}
 		data, err := os.ReadFile(filepath.Join(repoRoot, f))
 		if err != nil {
-			return diffResult{}, "", fmt.Errorf("read %s: %w", f, err)
+			return intentcheck.DiffResult{}, "", fmt.Errorf("read %s: %w", f, err)
 		}
 		fmt.Fprintf(&sb, "### %s\n\n%s\n\n", f, string(data))
 	}
@@ -304,31 +300,17 @@ func runDiffChecker(ctx context.Context, repoRoot string, files []string, backTr
 	sb.WriteString(backTranslation)
 	sb.WriteString("\n\n---\n\nRespond with JSON only: {\"match\": <bool>, \"mismatch_reason\": \"<string>\"}\n")
 
-	raw, err := runClaude(ctx, "claude-haiku-4-5-20251001", sb.String())
+	raw, err := runLLM(ctx, model, sb.String(), diffResultJSONSchema)
 	if err != nil {
-		return diffResult{}, raw, fmt.Errorf("claude haiku: %w", err)
+		return intentcheck.DiffResult{}, raw, fmt.Errorf("LLM diff-check: %w", err)
 	}
 
-	dr, parseErr := parseDiffResult(raw)
+	dr, parseErr := intentcheck.ParseDiffResult(raw)
 	if parseErr != nil {
 		// Fail closed: parse error means we cannot confirm match.
-		return diffResult{Match: false, MismatchReason: fmt.Sprintf("parse error: %v; raw output: %s", parseErr, raw)}, raw, nil
+		return intentcheck.DiffResult{Match: false, MismatchReason: fmt.Sprintf("parse error: %v; raw output: %s", parseErr, raw)}, raw, nil
 	}
 	return dr, raw, nil
-}
-
-// parseDiffResult extracts and parses the JSON verdict from LLM output.
-// It tolerates markdown fences and preamble text.
-func parseDiffResult(raw string) (diffResult, error) {
-	match := jsonBlockRE.FindString(raw)
-	if match == "" {
-		return diffResult{}, fmt.Errorf("no JSON block found in output")
-	}
-	var dr diffResult
-	if err := json.Unmarshal([]byte(match), &dr); err != nil {
-		return diffResult{}, fmt.Errorf("unmarshal: %w", err)
-	}
-	return dr, nil
 }
 
 // writeAttestation marshals and writes the attestation to the given path,

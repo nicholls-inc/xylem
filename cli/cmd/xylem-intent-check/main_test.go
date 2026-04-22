@@ -7,13 +7,15 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/nicholls-inc/xylem/cli/internal/intentcheck"
 )
 
 // TestSeededMismatch verifies that the pipeline correctly identifies a mismatch
 // when the back-translation says the test "only checks non-negativity" but the
 // invariant doc requires "monotonically non-decreasing".
 //
-// The test uses mock LLM responses and does not shell out to claude.
+// The test uses mock LLM responses and does not make real API calls.
 func TestSeededMismatch(t *testing.T) {
 	// Load fixture files.
 	fixtureDir := filepath.Join("testdata", "seeded-mismatch")
@@ -46,11 +48,12 @@ func TestSeededMismatch(t *testing.T) {
 	// The mock diff-checker response — identifies the mismatch.
 	mockDiffResponse := `{"match": false, "mismatch_reason": "The invariant requires monotonically non-decreasing tally (I1), but the test only checks non-negativity. The monotonicity property is not verified."}`
 
-	// Override runClaude with a model-dispatching mock.
-	origRunClaude := runClaude
-	defer func() { runClaude = origRunClaude }()
+	// Override runLLM with a model-dispatching mock. The schema parameter is
+	// ignored in the mock — real schema enforcement happens at the API level.
+	origRunLLM := runLLM
+	defer func() { runLLM = origRunLLM }()
 
-	runClaude = func(ctx context.Context, model, prompt string) (string, error) {
+	runLLM = func(ctx context.Context, model, prompt string, schema json.RawMessage) (string, error) {
 		switch model {
 		case "claude-opus-4-6":
 			// Back-translator: returns the canned back-translation.
@@ -105,11 +108,10 @@ func TestSeededMismatch(t *testing.T) {
 		"docs/invariants/tally.md",
 		"cli/internal/tally/tally_invariants_prop_test.go",
 	}
-	// Sort (already sorted).
 
 	// Phase 1.
 	backTranslateTmpl, _ := os.ReadFile(filepath.Join(promptDir, "back_translate.md"))
-	backTranslation, err := runBackTranslator(context.Background(), repoRoot, files, string(backTranslateTmpl))
+	backTranslation, err := runBackTranslator(context.Background(), repoRoot, files, string(backTranslateTmpl), "claude-opus-4-6")
 	if err != nil {
 		t.Fatalf("runBackTranslator: %v", err)
 	}
@@ -119,7 +121,7 @@ func TestSeededMismatch(t *testing.T) {
 
 	// Phase 2.
 	diffTmpl, _ := os.ReadFile(filepath.Join(promptDir, "diff.md"))
-	verdictResult, _, err := runDiffChecker(context.Background(), repoRoot, files, backTranslation, string(diffTmpl))
+	verdictResult, _, err := runDiffChecker(context.Background(), repoRoot, files, backTranslation, string(diffTmpl), "claude-haiku-4-5-20251001")
 	if err != nil {
 		t.Fatalf("runDiffChecker: %v", err)
 	}
@@ -136,7 +138,7 @@ func TestSeededMismatch(t *testing.T) {
 	}
 
 	// Write attestation and verify it has verdict=fail.
-	contentHash, err := computeContentHash(repoRoot, files)
+	contentHash, err := intentcheck.ComputeContentHash(repoRoot, files)
 	if err != nil {
 		t.Fatalf("computeContentHash: %v", err)
 	}
@@ -179,7 +181,8 @@ func TestSeededMismatch(t *testing.T) {
 }
 
 // TestParseDiffResult verifies JSON extraction from LLM output with various
-// formatting patterns (markdown fences, preamble text).
+// formatting patterns (markdown fences, preamble text). Delegates to the
+// intentcheck package's ParseDiffResult.
 func TestParseDiffResult(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -211,7 +214,7 @@ func TestParseDiffResult(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			dr, err := parseDiffResult(tc.input)
+			dr, err := intentcheck.ParseDiffResult(tc.input)
 			if tc.wantErr {
 				if err == nil {
 					t.Errorf("expected error, got nil")
@@ -228,7 +231,7 @@ func TestParseDiffResult(t *testing.T) {
 	}
 }
 
-// TestResolveCounterparts verifies that resolveCounterparts adds the missing side
+// TestResolveCounterparts verifies that ResolveCounterparts adds the missing side
 // of each invariant doc ↔ property test pair.
 func TestResolveCounterparts(t *testing.T) {
 	root := t.TempDir()
@@ -249,7 +252,7 @@ func TestResolveCounterparts(t *testing.T) {
 	}
 
 	t.Run("only_invariant_doc_changed", func(t *testing.T) {
-		got := resolveCounterparts(root, []string{"docs/invariants/queue.md"})
+		got := intentcheck.ResolveCounterparts(root, []string{"docs/invariants/queue.md"})
 		want := []string{
 			"cli/internal/queue/invariants_prop_test.go",
 			"docs/invariants/queue.md",
@@ -260,7 +263,7 @@ func TestResolveCounterparts(t *testing.T) {
 	})
 
 	t.Run("only_test_changed", func(t *testing.T) {
-		got := resolveCounterparts(root, []string{"cli/internal/runner/runner_invariants_prop_test.go"})
+		got := intentcheck.ResolveCounterparts(root, []string{"cli/internal/runner/runner_invariants_prop_test.go"})
 		want := []string{
 			"cli/internal/runner/runner_invariants_prop_test.go",
 			"docs/invariants/runner.md",
@@ -275,7 +278,7 @@ func TestResolveCounterparts(t *testing.T) {
 			"cli/internal/queue/invariants_prop_test.go",
 			"docs/invariants/queue.md",
 		}
-		got := resolveCounterparts(root, in)
+		got := intentcheck.ResolveCounterparts(root, in)
 		if !equalStringSlices(got, in) {
 			t.Errorf("got %v, want %v (no duplicates)", got, in)
 		}
@@ -284,7 +287,7 @@ func TestResolveCounterparts(t *testing.T) {
 	t.Run("no_counterpart_on_disk", func(t *testing.T) {
 		// "ghost" module has no files on disk
 		in := []string{"docs/invariants/ghost.md"}
-		got := resolveCounterparts(root, in)
+		got := intentcheck.ResolveCounterparts(root, in)
 		if !equalStringSlices(got, in) {
 			t.Errorf("got %v, want unchanged %v", got, in)
 		}
@@ -318,11 +321,11 @@ func TestComputeContentHash(t *testing.T) {
 
 	files := []string{"a.md", "b.go"} // already sorted
 
-	h1, err := computeContentHash(dir, files)
+	h1, err := intentcheck.ComputeContentHash(dir, files)
 	if err != nil {
 		t.Fatalf("hash error: %v", err)
 	}
-	h2, err := computeContentHash(dir, files)
+	h2, err := intentcheck.ComputeContentHash(dir, files)
 	if err != nil {
 		t.Fatalf("hash error: %v", err)
 	}
