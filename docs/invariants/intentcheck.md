@@ -1,6 +1,6 @@
 # Invariants: `cli/internal/intentcheck`
 
-Status: **draft v1** (2026-04-22). Ratified by: pending human sign-off.
+Status: **ratified v1** (2026-04-22). Ratified by: Harry Nicholls (PR #698, merged 2026-04-23).
 
 This document is the load-bearing specification for the `intentcheck` package,
 which contains the pure algorithmic core of the `xylem-intent-check` binary.
