@@ -1,5 +1,60 @@
 # Changelog
 
+## [1.4.0](https://github.com/nicholls-inc/xylem/compare/xylem-v1.3.0...xylem-v1.4.0) (2026-04-23)
+
+
+### Features
+
+* **.xylem.yml:** materialize lean-squad-tick source ([#555](https://github.com/nicholls-inc/xylem/issues/555) workaround) ([#592](https://github.com/nicholls-inc/xylem/issues/592)) ([561ff22](https://github.com/nicholls-inc/xylem/commit/561ff2256b183d3db77e1857a32031558e374fd8))
+* **assurance:** retry-DAG acyclicity Dafny-verified kernel ([#09](https://github.com/nicholls-inc/xylem/issues/09)) ([#696](https://github.com/nicholls-inc/xylem/issues/696)) ([1cbc186](https://github.com/nicholls-inc/xylem/commit/1cbc186a94be78fbcbced8595a3d6d7e60022861))
+* **assurance:** verify-kernel workflow phase (roadmap [#08](https://github.com/nicholls-inc/xylem/issues/08)) ([#690](https://github.com/nicholls-inc/xylem/issues/690)) ([8cad6ee](https://github.com/nicholls-inc/xylem/commit/8cad6ee5d589ead92d9dc7573f91891c30e260df))
+* **assurance:** xylem-intent-check binary + prompts + attestation hook ([#07](https://github.com/nicholls-inc/xylem/issues/07), PR 1) ([#698](https://github.com/nicholls-inc/xylem/issues/698)) ([757fc8c](https://github.com/nicholls-inc/xylem/commit/757fc8ce2eb4b3e34ad9399d341fd82f109ab6f8))
+* **config:** set concurrency to 3 for parallel vessel processing ([#593](https://github.com/nicholls-inc/xylem/issues/593)) ([ad09e0e](https://github.com/nicholls-inc/xylem/commit/ad09e0e002911d2fff20ba53e8a712ec8ed289fd))
+* **config:** tiered LLM routing — Claude for high, free Copilot for med/low ([#563](https://github.com/nicholls-inc/xylem/issues/563)) ([348108f](https://github.com/nicholls-inc/xylem/commit/348108fc091e9eada60a64ec61ec14aa489078bc))
+* fix: core profile fix-bug/implement-feature gates use make test but repo has no Makefile — 100% vessel failure ([#565](https://github.com/nicholls-inc/xylem/issues/565)) ([caf22ba](https://github.com/nicholls-inc/xylem/commit/caf22bae1082dd03e9fe4ba085b7e72fdca356a6))
+* **lean-squad:** add aeneas workflow ([#586](https://github.com/nicholls-inc/xylem/issues/586)) ([67b39fa](https://github.com/nicholls-inc/xylem/commit/67b39fa4c7a3be3250d121388581838091f51b18))
+* **lean-squad:** add bootstrap workflow ([#583](https://github.com/nicholls-inc/xylem/issues/583)) ([a17f277](https://github.com/nicholls-inc/xylem/commit/a17f2770b68a01e81849ec1ab75e40ad5227b13a))
+* **lean-squad:** add ci workflow ([#578](https://github.com/nicholls-inc/xylem/issues/578)) ([223144b](https://github.com/nicholls-inc/xylem/commit/223144ba3e96b264b58f5a7da68b8c6ce6d32939))
+* **lean-squad:** add correspondence workflow ([#580](https://github.com/nicholls-inc/xylem/issues/580)) ([abc0eb8](https://github.com/nicholls-inc/xylem/commit/abc0eb81678352f442786b29df7d76680ae9f889))
+* **lean-squad:** add critique workflow ([#588](https://github.com/nicholls-inc/xylem/issues/588)) ([3e2e9b2](https://github.com/nicholls-inc/xylem/commit/3e2e9b2ee0a21b0f33795e8bf5c27e69509e32b2))
+* **lean-squad:** add extract-impl workflow ([#579](https://github.com/nicholls-inc/xylem/issues/579)) ([7eb2dd4](https://github.com/nicholls-inc/xylem/commit/7eb2dd445aac772b3638718a6f6eff838b66d184))
+* **lean-squad:** add focus dispatcher workflow ([#587](https://github.com/nicholls-inc/xylem/issues/587)) ([599f6c7](https://github.com/nicholls-inc/xylem/commit/599f6c754fcbd6ba10b53989e3ee0dc96c04717b))
+* **lean-squad:** add formal-spec workflow ([#581](https://github.com/nicholls-inc/xylem/issues/581)) ([f00a042](https://github.com/nicholls-inc/xylem/commit/f00a042c26e48e09ab8e740f200c51b910b3e8e0))
+* **lean-squad:** add informal-spec workflow ([#576](https://github.com/nicholls-inc/xylem/issues/576)) ([f5f08da](https://github.com/nicholls-inc/xylem/commit/f5f08dab6c14231ae38b3a4165b54d2eba7fae50))
+* **lean-squad:** add prove workflow ([#584](https://github.com/nicholls-inc/xylem/issues/584)) ([d38de94](https://github.com/nicholls-inc/xylem/commit/d38de9470ce79d8043fcf6623911eca6df559ab9))
+* **lean-squad:** add report workflow ([#577](https://github.com/nicholls-inc/xylem/issues/577)) ([57351bf](https://github.com/nicholls-inc/xylem/commit/57351bff89e2c5ce83d52f096fb799633a40b855))
+* **lean-squad:** add status dashboard workflow ([#585](https://github.com/nicholls-inc/xylem/issues/585)) ([0567ba4](https://github.com/nicholls-inc/xylem/commit/0567ba45914792590aef4039a740ddeb72d098b0))
+* **lean-squad:** add tick coordinator + wire sources ([#589](https://github.com/nicholls-inc/xylem/issues/589)) ([d731667](https://github.com/nicholls-inc/xylem/commit/d731667054b5ce21ab1c92d4079d6e3e6e7af23c))
+* **lean-squad:** opt in xylem to Lean Squad formal verification ([#590](https://github.com/nicholls-inc/xylem/issues/590)) ([489facc](https://github.com/nicholls-inc/xylem/commit/489facc8de6da737fe27f3f1049ad11f7fbf00a9))
+* **queue/verified:** Dafny-verified IsTerminal kernel (roadmap [#06](https://github.com/nicholls-inc/xylem/issues/06) phase 1) ([#685](https://github.com/nicholls-inc/xylem/issues/685)) ([d9ad509](https://github.com/nicholls-inc/xylem/commit/d9ad5099ad8360ad6ce52a5170d4abb05bdd326f))
+* **queue/verified:** Dafny-verified ValidTransition kernel (roadmap [#06](https://github.com/nicholls-inc/xylem/issues/06) phase 2) ([#687](https://github.com/nicholls-inc/xylem/issues/687)) ([a5af869](https://github.com/nicholls-inc/xylem/commit/a5af86995f8dac25abe92fbd71b6a6ca003e2275))
+* **queue/verified:** wire queue.go to Dafny-verified kernel ([#06](https://github.com/nicholls-inc/xylem/issues/06) phase 4) ([#688](https://github.com/nicholls-inc/xylem/issues/688)) ([31099d8](https://github.com/nicholls-inc/xylem/commit/31099d8ff5f8be11543fd2598dc6f9395b57f1ac))
+* **security:** add foxguard config pointing to baseline files ([#603](https://github.com/nicholls-inc/xylem/issues/603)) ([f64e928](https://github.com/nicholls-inc/xylem/commit/f64e928ceed455c392e31a97e431001439dd5b68))
+* **security:** enforce justified foxguard baseline suppressions ([#599](https://github.com/nicholls-inc/xylem/issues/599)) ([9969244](https://github.com/nicholls-inc/xylem/commit/9969244be6134ec72857d8333d72f18147217dca))
+* **source:** add require_labels gate and github-merge exclude filtering ([#642](https://github.com/nicholls-inc/xylem/issues/642)) ([89b5d68](https://github.com/nicholls-inc/xylem/commit/89b5d685c5d036357c937d187bca9663204ba4cb))
+
+
+### Bug Fixes
+
+* **ci:** run foxguard once per PR, not twice ([#638](https://github.com/nicholls-inc/xylem/issues/638)) ([cc3e36b](https://github.com/nicholls-inc/xylem/commit/cc3e36b844e73bb90f3966d833fdd54ee3d772ca))
+* **implement-harness:** pin implement phase to tier:high + add prompt anchor (closes [#666](https://github.com/nicholls-inc/xylem/issues/666)) ([#671](https://github.com/nicholls-inc/xylem/issues/671)) ([1e99e90](https://github.com/nicholls-inc/xylem/commit/1e99e90f98c167e515b76243da019d69c47cceb0))
+* **merge-pr:** convert check phase to command gate under safe-outputs ([#570](https://github.com/nicholls-inc/xylem/issues/570)) ([73511cc](https://github.com/nicholls-inc/xylem/commit/73511cc4ef6a51d99f6e75d38b46e3678b62a21e))
+* **merge-pr:** use -f for owner/repo to avoid gh numeric-coercion ([#656](https://github.com/nicholls-inc/xylem/issues/656)) ([#657](https://github.com/nicholls-inc/xylem/issues/657)) ([8bd4aa4](https://github.com/nicholls-inc/xylem/commit/8bd4aa4d182e919633a2351f38ae9b521d5b6740))
+* **merge-pr:** use GraphQL for reviewThreads; gh pr view field is REST-invalid ([#655](https://github.com/nicholls-inc/xylem/issues/655)) ([44a57ff](https://github.com/nicholls-inc/xylem/commit/44a57ff59b90fd954741039295d225ef013e792f))
+* **profiles:** propagate PR[#600](https://github.com/nicholls-inc/xylem/issues/600) and PR[#645](https://github.com/nicholls-inc/xylem/issues/645) into embedded implement-harness ([#652](https://github.com/nicholls-inc/xylem/issues/652)) ([c27ae69](https://github.com/nicholls-inc/xylem/commit/c27ae69064f241634b1b482918a21dec98c2950e))
+* **queue:** atomic writeAllVessels + I5b crash-durability harness ([#597](https://github.com/nicholls-inc/xylem/issues/597)) ([73d30ab](https://github.com/nicholls-inc/xylem/commit/73d30abead17f950754c1f2302901323be618f5d))
+* **queue:** enforce terminal-field immutability in UpdateVessel (I2) ([#595](https://github.com/nicholls-inc/xylem/issues/595)) ([50de24f](https://github.com/nicholls-inc/xylem/commit/50de24fd51828e115739947925859779810d50f2))
+* **queue:** reject duplicate vessel IDs in Enqueue (I9) ([#594](https://github.com/nicholls-inc/xylem/issues/594)) ([33a331a](https://github.com/nicholls-inc/xylem/commit/33a331a5e7dfbe21f62148df57ae982f1a2bd2b9))
+* **queue:** retry resets to indistinguishable-from-fresh (I3) ([#596](https://github.com/nicholls-inc/xylem/issues/596)) ([f5df06f](https://github.com/nicholls-inc/xylem/commit/f5df06ff89d89952bd76176a19bf6e07d2545969))
+* **retry:** accept StateCancelled so operator-cancelled vessels are recoverable ([#659](https://github.com/nicholls-inc/xylem/issues/659)) ([8dd8257](https://github.com/nicholls-inc/xylem/commit/8dd825769dc004f8fdcd3be71f8118c3ac3e653c))
+* **runner:** triple-keyed idempotency guard for discussion publication (I13) ([#636](https://github.com/nicholls-inc/xylem/issues/636)) ([fbe89eb](https://github.com/nicholls-inc/xylem/commit/fbe89ebd2df96939dc9a71874b761519180131e1))
+* **scanner:** add chain-depth cap and GitHub open-state check to chainTerminalRetry (closes [#662](https://github.com/nicholls-inc/xylem/issues/662)) ([#670](https://github.com/nicholls-inc/xylem/issues/670)) ([24e0354](https://github.com/nicholls-inc/xylem/commit/24e03543dd648e5d42c26e99f9a3facf88ca2d06))
+* **scanner:** chain terminal duplicate-ID collisions as -retry-N ([#658](https://github.com/nicholls-inc/xylem/issues/658)) ([#660](https://github.com/nicholls-inc/xylem/issues/660)) ([42347a6](https://github.com/nicholls-inc/xylem/commit/42347a60e2db64223689457368a930e5a871314b))
+* **scanner:** fix scanner invariant violations ([#637](https://github.com/nicholls-inc/xylem/issues/637)) ([c441637](https://github.com/nicholls-inc/xylem/commit/c441637c5be6ec28ee9c276760d206a8f7da74ef))
+* **source:** skip scheduled scan when prior task vessel still in flight ([#568](https://github.com/nicholls-inc/xylem/issues/568)) ([a82cda3](https://github.com/nicholls-inc/xylem/commit/a82cda38977c7c94cd19f949ef19653bb3c5ced7))
+* use validation.test template in core profile gates instead of hardcoded make test ([#567](https://github.com/nicholls-inc/xylem/issues/567)) ([9d641eb](https://github.com/nicholls-inc/xylem/commit/9d641ebb7b1f41a00b7de5e171ce4de27ab590a0)), closes [#562](https://github.com/nicholls-inc/xylem/issues/562)
+* **workflow:** raise implement-harness max_turns to 50 for analyze/plan/test_critic/pr_draft ([#600](https://github.com/nicholls-inc/xylem/issues/600)) ([471d044](https://github.com/nicholls-inc/xylem/commit/471d044fd74b45371c36f22843a4831b3a5b1f98))
+
 ## [1.3.0](https://github.com/nicholls-inc/xylem/compare/xylem-v1.2.1...xylem-v1.3.0) (2026-04-15)
 
 
