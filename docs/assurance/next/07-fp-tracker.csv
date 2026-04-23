@@ -1,1 +1,7 @@
 date,invariant_touched,phase_verdict,human_verdict
+2026-04-23,queue.md I2 (failed-terminal sampling),fail,genuine
+2026-04-23,queue.md I2 (6-of-19 field mutation coverage),fail,genuine
+2026-04-23,queue.md I3 (planted — spec claim vs code violation),fail,genuine-planted
+2026-04-23,queue.md I6 (linearizability depth),fail,genuine
+2026-04-23,queue.md I2 (ReplaceAll privileged-path coverage),fail,partial
+2026-04-23,queue.md I5b (vesselSetsEquivalentIgnoringClock),fail,spurious
