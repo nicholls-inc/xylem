@@ -1,7 +1,7 @@
 # 07: `intent-check` Workflow Phase (claimcheck-analog)
 
 **Horizon:** Next (4–8 weeks)
-**Status:** Not started
+**Status:** In progress — PR #698 (binary + prompts + attestation hook + seeded fixture + docs); PR 2 pending human-authored workflow YAML amendments (see `docs/assurance/next/07-workflow-amendments-draft.md`)
 **Estimated cost:** 1 week
 **Depends on:** nothing hard — can run in parallel with #06/#08/#09; benefits from #06 landing first (concrete artifact to reason about)
 **Planned order:** after #09 (2026-04-20 decision — highest-risk item; #08 and #09 are faster and should land first)
