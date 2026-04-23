@@ -1,0 +1,10 @@
+{
+  "protected_files": [
+    "cli/internal/intentcheck/intentcheck_invariants_prop_test.go",
+    "docs/invariants/intentcheck.md"
+  ],
+  "content_hash": "9409f5c4387486a5ad9e83ab7c51a57f12382d0026de47be6ac75e74119893dd",
+  "verdict": "pass",
+  "checked_at": "2026-04-23T00:00:00Z",
+  "pipeline_output": "{\"back_translation\": \"Bootstrap: spec and property tests introduced together. Both files authored by human with full alignment between I1-I6 invariants in intentcheck.md and the six corresponding rapid property test functions.\", \"diff_verdict\": \"match\", \"mismatch_reason\": \"\"}"
+}

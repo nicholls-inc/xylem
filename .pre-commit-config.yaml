@@ -37,7 +37,7 @@ repos:
       # foxguard-justifications hook below).
       - id: foxguard
         name: foxguard
-        entry: foxguard --changed --baseline .foxguard/baseline.json
+        entry: foxguard --baseline .foxguard/baseline.json
         language: system
         pass_filenames: false
         always_run: true
@@ -69,3 +69,10 @@ repos:
         language: system
         pass_filenames: false
         files: ^(docs/invariants/.+\.md|cli/internal/.+_invariants_prop_test\.go|scripts/check_invariant_coverage\.py)$
+
+      - id: intent-check-attestation
+        name: intent-check attestation
+        entry: bash scripts/check-intent-attestation.sh
+        language: system
+        pass_filenames: false
+        files: ^(docs/invariants/.+\.md|cli/internal/.+_invariants_prop_test\.go)$

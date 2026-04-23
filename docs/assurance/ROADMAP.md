@@ -50,11 +50,12 @@ xylem's current pragmatic projection of that hierarchy:
 | # | Item | Cost | Doc |
 |---|------|------|-----|
 | 6 | Queue state machine Dafny-verified kernel | 1–2 weeks | [next/06-queue-dafny-kernel.md](next/06-queue-dafny-kernel.md) — **Complete**: IsTerminal (PR #685) + ValidTransition + lightweight-verify of protectedFieldsEqual (PR #687); queue.go wired to verified kernel (2026-04-20); Dafny-extract of protectedFieldsEqual deferred to #10 (Gobra) |
-| 7 | `intent-check` workflow phase (claimcheck-analog) | 1 week | [next/07-intent-check-phase.md](next/07-intent-check-phase.md) |
+| 7 | `intent-check` workflow phase (claimcheck-analog) | 1 week | [next/07-intent-check-phase.md](next/07-intent-check-phase.md) — **Complete** (PR #698, 2026-04-23): `xylem-intent-check` binary + prompts + attestation hook + seeded mismatch fixture + workflow YAML integration (fix-bug, implement-feature, implement-harness); FP tracker at `docs/assurance/next/07-fp-tracker.csv` |
 | 8 | `verify-kernel` workflow phase | 2 days | [next/08-verify-kernel-phase.md](next/08-verify-kernel-phase.md) — **Complete** (2026-04-20): `scripts/verify-kernels.sh` + phase inserted in all 3 delivery workflows + CI job (`verify-kernels` in `.github/workflows/ci.yml`) using `dafny-lang/setup-dafny@v1` (hard enforcement, no Docker needed) |
 | 9 | Retry-DAG acyclicity Dafny-verified kernel | 3 days | [next/09-retry-dag-dafny-kernel.md](next/09-retry-dag-dafny-kernel.md) — **Complete** (PR #696, 2026-04-20): `retry_dag.dfy` PathExists + IsAcyclic (Dafny 4.11.0, 2 verified, 0 errors); Go kernel extracted; Enqueue + UpdateVessel enforced; I10 no longer caller-responsibility |
+| 15 | `intent-check` calibration — FP reduction & eval corpus | 1–2 weeks | [next/15-intent-check-calibration.md](next/15-intent-check-calibration.md) — follow-up to #07; first real-invariant run (2026-04-23) showed 17% FP rate (1/6). Phased plan: prompt tuning + confidence field (Phase 1, ~1 day), labelled eval corpus + CI regression gate (Phase 2, ~3 days), judge-the-judge (Phase 3, conditional) |
 
-**Planned execution order (2026-04-20):** #08 → #09 → #07. Item #08 is the fastest (2 days) and gates all future `.dfy` regressions, which unblocks #09. Item #07 has no hard dependencies but is scheduled after #09: it is the highest-risk item (FP kill criterion at 30%) and requires human-authored governance amendments to protected workflow YAMLs regardless.
+**Planned execution order (2026-04-20):** #08 → #09 → #07. Item #08 is the fastest (2 days) and gates all future `.dfy` regressions, which unblocks #09. Item #07 has no hard dependencies but is scheduled after #09: it is the highest-risk item (FP kill criterion at 30%) and requires human-authored governance amendments to protected workflow YAMLs regardless. Item #15 follows #07 now that the binary is live.
 
 ### Medium-term (2–3 months)
 

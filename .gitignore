@@ -7,6 +7,7 @@ cli/claude
 cli/copilot
 cli/gh
 cli/xylem
+cli/xylem-intent-check
 
 # Ignore everything under .xylem/ except tracked control-plane definitions and
 # the checked-in SoTA snapshot state. Fresh worktrees — including
@@ -15,6 +16,7 @@ cli/xylem
 # ignored.
 .xylem/*
 !.xylem/HARNESS.md
+!.xylem/intent-check-attestation.json
 !.xylem/eval/
 !.xylem/eval/**
 !.xylem/prompts/

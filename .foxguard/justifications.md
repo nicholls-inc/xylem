@@ -203,6 +203,13 @@ Fingerprint: `5bfa9ace51f62fed06cf680080d01434ac6c61086fdce3c4d1902d48b8b262b1`
 **Rationale:** Identical pattern to `aggregate_test.go:17` — test helper using `t.TempDir()`-rooted paths with literal filenames. Not reachable from production code paths.
 **Verified by:** harry.nicholls + Claude (Opus 4.7), 2026-04-17
 
+## `cli/cmd/xylem-intent-check/main.go:231` — `go/no-command-injection`
+
+Fingerprint: `2f9b7437575b69d878a08ea096279bc2341f0ed57a4e1736ad01f60969dd582d`
+
+**Rationale:** `exec.CommandContext(ctx, "git", "diff", "--name-only", "HEAD", "--", ...)` in `discoverChangedFiles`. Every argument is a hardcoded string literal — the binary name `"git"`, the subcommand, and the three path glob patterns for protected-surface files. Nothing dynamic flows into this call. Argv invocation, no shell. (Predecessor entries at :33 and :165 removed — `runClaude` was replaced by an HTTP client and the git call moved to line 231.)
+**Verified by:** harry.nicholls + Claude Sonnet 4.6, 2026-04-22
+
 ## `cli/internal/dtu/runtime_clock.go:127` — `go/taint-path-traversal`
 
 Fingerprint: `7e7f68bef6fead654ca711bd4714a574f2073d411a5c52ad40125f880d1dfdcc`

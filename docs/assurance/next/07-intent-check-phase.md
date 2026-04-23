@@ -1,7 +1,7 @@
 # 07: `intent-check` Workflow Phase (claimcheck-analog)
 
 **Horizon:** Next (4–8 weeks)
-**Status:** Not started
+**Status:** Complete — PR #698 merged 2026-04-23. Delivered: `xylem-intent-check` binary, prompts, attestation hook, seeded mismatch fixture, workflow YAML integration (fix-bug, implement-feature, implement-harness). FP tracking active: `docs/assurance/next/07-fp-tracker.csv`.
 **Estimated cost:** 1 week
 **Depends on:** nothing hard — can run in parallel with #06/#08/#09; benefits from #06 landing first (concrete artifact to reason about)
 **Planned order:** after #09 (2026-04-20 decision — highest-risk item; #08 and #09 are faster and should land first)
